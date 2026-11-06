@@ -54,6 +54,9 @@ ENTRIES = [(n, "core", _builtin_handler) for n in sorted(LOCAL_TOOLS)] + [
     ("local_query", "mcp-localsrv", _builtin_handler),
     ("ghost_query", "mcp-ghost", _builtin_handler),          # no config anywhere
     ("both_query", "mcp-both", _builtin_handler),            # url AND command: url wins
+    ("lh_query", "mcp-lh", _builtin_handler),                # http://localhost URL: local
+    ("lan_query", "mcp-lan", _builtin_handler),              # RFC1918 URL: local
+    ("obf_query", "mcp-obf", _builtin_handler),              # obfuscated loopback: off-tier
     ("plug_tool", "someplugin", _plugin_handler_factory()),
     ("named_plug", "other", _builtin_handler),               # plugin by manager name list
 ]
@@ -61,6 +64,9 @@ MCP_CONFIGS = {
     "remote": {"url": "https://mcp.example.com/mcp"},
     "localsrv": {"command": "npx", "args": ["some-server"]},
     "both": {"url": "https://x.example/mcp", "command": "x"},
+    "lh": {"url": "http://localhost:8765/mcp"},
+    "lan": {"url": "http://10.0.0.5:9000/mcp"},
+    "obf": {"url": "http://0x7f000001/mcp"},
 }
 
 
@@ -79,7 +85,7 @@ def test_local_set_is_exactly_the_contract():
         "terminal", "process_manage", "execute_code", "read_file", "write_file", "patch", "search_files",
         "skills_list", "skill_view", "skill_manage", "todo_list", "memory", "clarify", "session_search"}
     al = allowlist()
-    assert set(al.local) == LOCAL_TOOLS
+    assert set(al.local) - {"lh_query", "lan_query", "local_query"} == LOCAL_TOOLS
 
 
 def test_registry_driven_classification():
@@ -91,11 +97,14 @@ def test_registry_driven_classification():
     assert r["remote_query"] is Route.BLOCK_MCP_URL
     assert r["both_query"] is Route.BLOCK_MCP_URL
     assert r["ghost_query"] is Route.BLOCK_MCP_URL          # unknown transport: fail closed
-    assert r["local_query"] is Route.ASK                    # stdio MCP: off-machine, ask
+    assert r["local_query"] is Route.LOCAL                  # stdio MCP: allowed per Amendment 3
     assert al.get("remote_query").origin is Origin.MCP
     assert (al.get("remote_query").mcp_server, al.get("remote_query").mcp_transport) == ("remote", "url")
     assert al.get("local_query").mcp_transport == "stdio"
     assert al.get("ghost_query").mcp_transport == "unknown"
+    assert r["lh_query"] is Route.LOCAL and al.get("lh_query").mcp_host == "localhost"
+    assert r["lan_query"] is Route.LOCAL
+    assert r["obf_query"] is Route.BLOCK_MCP_URL
     assert al.get("plug_tool").origin is Origin.PLUGIN      # hermes_plugins.* handler module
     assert al.get("named_plug").origin is Origin.PLUGIN     # plugin manager's tool-name list
     assert al.get("web_search").origin is Origin.BUILTIN
@@ -105,7 +114,7 @@ def test_registry_driven_classification():
 def test_mcp_server_name_comes_from_hermes_map_when_present():
     # Hermes' raw-name map wins over the toolset suffix (tools/mcp_tool.py:561).
     al = allowlist(entries=[("q", "mcp-remote", _builtin_handler)], mcp_tool_servers={"q": "localsrv"})
-    assert al.get("q").mcp_server == "localsrv" and al.get("q").route is Route.ASK
+    assert al.get("q").mcp_server == "localsrv" and al.get("q").route is Route.LOCAL
 
 
 def test_local_name_overridden_by_plugin_is_not_local():
@@ -116,10 +125,10 @@ def test_local_name_overridden_by_plugin_is_not_local():
 def test_format_allowlist_lists_every_bucket():
     al = allowlist()
     text = format_allowlist(al)
-    assert "local (runs without asking): 14" in text
-    assert "blocked (MCP server reached by URL): 3" in text
+    assert "local (runs without asking): 17" in text
+    assert "blocked (MCP server URL off-tier or unreadable): 4" in text
     assert "blocked (scheduled jobs): 1" in text
-    assert "remote_query  [mcp-remote; mcp; server=remote, transport=url]" in text
+    assert "remote_query  [mcp-remote; mcp; server=remote, transport=url, host=mcp.example.com]" in text
     for name in al.tools:
         assert f"  {name}  [" in text
 
@@ -134,87 +143,180 @@ def test_allowlist_add_only_for_ask_route():
 
 
 # --------------------------------------------------------------------------------------------------
-# pre_tool_call
+# pre_tool_call (first line: blocks refusals, never asks) and tool_execution (enforcement, asks)
 # --------------------------------------------------------------------------------------------------
 
-def gate(sealed=True, bypass=False, delegation=True, al=None, ledger=None):
-    ledger = ledger if ledger is not None else FakeLedger()
-    al = al or allowlist()
-    calls = {"bypass": [], "delegation": []}
+class Rig:
+    """Both enforcement points over one fake world. ``answer`` is the recorded post_approval_response
+    choice (None = no hook fired); ``hermes_approved`` is what Hermes' gate returned."""
 
-    def bypass_active(name):
-        calls["bypass"].append(name)
-        return bypass
+    def __init__(self, sealed=True, bypass=False, delegation=True, remembered=False, answer="once",
+                 hermes_approved=True, al=None, ledger=None, status=None):
+        from confidential_mode.gate_tools import ApprovalDecisions, build_tool_execution
+        self.ledger = ledger if ledger is not None else FakeLedger()
+        self.al = al or allowlist()
+        self.calls = {"bypass": [], "delegation": [], "ask": [], "ran": []}
+        self.decisions = ApprovalDecisions()
+        self.post = build_post_approval_response(lambda: sealed, self.ledger, self.decisions)
 
-    def delegation_ok(args):
-        calls["delegation"].append(args)
-        return delegation
+        def bypass_active(name):
+            self.calls["bypass"].append(name)
+            return bypass
 
-    fn = build_pre_tool_call(lambda: sealed, al, ledger, bypass_active, delegation_ok)
-    return fn, ledger, calls, al
+        def delegation_ok(args):
+            self.calls["delegation"].append(args)
+            return delegation
 
+        def ask(tool_name, message, *, rule_key, approval_id, session_id="", turn_id=""):
+            self.calls["ask"].append((tool_name, message, rule_key))
+            if answer is not None:
+                self.post(pattern_key="plugin_rule:" + rule_key, choice=answer, session_id=session_id,
+                          tool_call_id=approval_id, surface="cli")
+            res = {"approved": hermes_approved, "message": None if hermes_approved else "BLOCKED: denied"}
+            if status:
+                res["status"] = status
+            return res
 
-def test_unsealed_returns_none_and_ledgers_nothing():
-    fn, ledger, calls, _ = gate(sealed=False)
-    for name in ("web_search", "cronjob_manage", "remote_query", "delegate_task", "never_registered"):
-        assert fn(tool_name=name, args={"q": "x"}, session_id="s") is None
-    assert ledger.events == [] and calls == {"bypass": [], "delegation": []}
+        sealed_fn = sealed if callable(sealed) else (lambda: sealed)
+        self.hook = build_pre_tool_call(sealed_fn, self.al, self.ledger, bypass_active, delegation_ok,
+                                        lambda n: remembered, decisions=self.decisions)
+        self.mw = build_tool_execution(sealed_fn, self.al, self.ledger, self.decisions, bypass_active=bypass_active,
+                                       delegation_ok=delegation_ok, remembered=lambda n: remembered, ask=ask)
 
+    def run(self, name, args=None, **kw):
+        args = {} if args is None else args
 
-def test_sealed_local_tools_pass_silently():
-    fn, ledger, calls, _ = gate(bypass=True)
-    for name in LOCAL_TOOLS:
-        assert fn(tool_name=name, args={"path": "/etc/hosts"}, session_id="s") is None
-    assert ledger.events == [] and calls["bypass"] == []
+        def next_call(a):
+            self.calls["ran"].append((name, a))
+            return '{"ok": true}'
+        return self.mw(tool_name=name, args=args, next_call=next_call, session_id="s", tool_call_id="c1", **kw)
 
-
-def test_cronjob_manage_blocked_even_when_everything_else_would_allow():
-    fn, ledger, calls, _ = gate(bypass=False, delegation=True)
-    d = fn(tool_name="cronjob_manage", args={"action": "create"}, session_id="s", tool_call_id="c1")
-    assert d["action"] == "block" and "cronjob_manage" in d["message"]
-    assert ledger.kinds() == ["tool_refused"]
-    e = ledger.events[0]
-    assert e["decision"] == "cron" and e["purpose"] == "tool:cronjob_manage" and e["session_id"] == "s"
-    assert e["detail"]["tool_call_id"] == "c1"
-
-
-def test_mcp_url_tool_blocked_without_asking():
-    fn, ledger, calls, _ = gate(bypass=False)
-    d = fn(tool_name="remote_query", args={}, session_id="s")
-    assert d["action"] == "block" and "remote" in d["message"]
-    assert ledger.kinds() == ["tool_refused"] and ledger.events[0]["decision"] == "mcp_url"
-    assert calls["bypass"] == []
+    def ran(self):
+        return [n for n, _ in self.calls["ran"]]
 
 
-def test_delegate_task_allowed_only_via_delegation_ok():
-    fn, ledger, calls, _ = gate(delegation=True)
+def refused(out):
+    return isinstance(out, str) and "error" in json.loads(out)
+
+
+def test_unsealed_passes_everything_and_ledgers_nothing():
+    for sealed in (False, (False, None)):
+        r = Rig(sealed=sealed)
+        for name in ("web_search", "cronjob_manage", "remote_query", "delegate_task", "never_registered"):
+            assert r.hook(tool_name=name, args={"q": "x"}, session_id="s") is None
+            assert r.run(name, {"q": "x"}) == '{"ok": true}'
+        assert r.ledger.events == [] and r.calls["ask"] == [] and r.calls["bypass"] == []
+
+
+def test_sealed_local_tools_run_silently_even_under_bypass():
+    r = Rig(bypass=True)
+    for name in sorted(LOCAL_TOOLS) + ["lh_query", "lan_query", "local_query"]:
+        assert r.hook(tool_name=name, args={}, session_id="s") is None
+        r.run(name)
+    assert len(r.ran()) == len(LOCAL_TOOLS) + 3 and r.ledger.events == [] and r.calls["bypass"] == []
+
+
+@pytest.mark.parametrize("name,decision", [("cronjob_manage", "cron"), ("remote_query", "mcp_url"),
+                                           ("ghost_query", "mcp_url"), ("registered_after_seal", "unclassified")])
+def test_block_routes_refused_by_both_lines(name, decision):
+    r = Rig(bypass=False, delegation=True, answer="once")
+    d = r.hook(tool_name=name, args={"x": 1}, session_id="s", tool_call_id="c1")
+    assert d["action"] == "block" and r.ledger.events[-1]["decision"] == decision
+    out = r.run(name, {"x": 1})
+    assert refused(out) and r.ran() == [] and r.calls["ask"] == []
+    assert r.ledger.kinds() == ["tool_refused", "tool_refused"]
+    assert r.ledger.events[1]["surface"] == "middleware" and r.ledger.events[1]["decision"] == decision
+    if decision == "unclassified":
+        assert "seal again" in d["message"]
+
+
+def test_delegate_task_only_via_delegation_ok():
+    r = Rig(delegation=True)
     args = {"tasks": [{"goal": "g"}]}
-    assert fn(tool_name="delegate_task", args=args, session_id="s") is None
-    assert calls["delegation"] == [args]
-    assert ledger.kinds() == ["tool_allowed"] and ledger.events[0]["decision"] == "delegation_default"
-    # mutant twin: predicate says no -> block
-    fn, ledger, calls, _ = gate(delegation=False)
-    d = fn(tool_name="delegate_task", args=args, session_id="s")
-    assert d["action"] == "block" and ledger.kinds() == ["tool_refused"]
-    assert ledger.events[0]["decision"] == "delegation_route"
+    assert r.hook(tool_name="delegate_task", args=args, session_id="s") is None
+    r.run("delegate_task", args)
+    assert r.ran() == ["delegate_task"] and r.ledger.kinds() == ["tool_allowed"]
+    assert r.ledger.events[0]["decision"] == "delegation_default"
+    r = Rig(delegation=False)
+    assert r.hook(tool_name="delegate_task", args=args, session_id="s")["action"] == "block"
+    assert refused(r.run("delegate_task", args)) and r.ran() == []
+    assert [e["decision"] for e in r.ledger.events] == ["delegation_route", "delegation_route"]
 
 
-def test_off_machine_tool_returns_approve_directive_with_kb_message():
-    fn, ledger, calls, _ = gate(bypass=False)
-    args = {"query": "x" * 3000}
-    d = fn(tool_name="web_search", args=args, session_id="s")
-    n = -(-len(json.dumps(args)) // 1024)
-    assert n == 3
-    assert d == {"action": "approve", "message": f"web_search wants to send ~{n} KB of this conversation off the machine",
-                 "rule_key": rule_key_for("web_search")}
-    assert calls["bypass"] == ["web_search"]
-    assert ledger.kinds() == ["tool_asked"]
-    assert ledger.events[0]["bytes"] == len(json.dumps(args)) and ledger.events[0]["detail"]["kb"] == 3
+def test_hook_returns_approve_directive_unless_the_middleware_already_asked():
+    from confidential_mode.gate_tools import _call_key
+    r = Rig()
+    d = r.hook(tool_name="web_search", args={"q": "x"}, session_id="s", tool_call_id="c1")
+    assert d["action"] == "approve" and d["rule_key"] == rule_key_for("web_search")
+    assert r.ledger.kinds() == ["tool_asked"] and r.calls["ask"] == []
+    # agent-loop order: the middleware asked and granted this exact call -> the inner hook does not re-ask
+    r.decisions.grant(_call_key("web_search", "c1"))
+    assert r.hook(tool_name="web_search", args={"q": "x"}, session_id="s", tool_call_id="c1") is None
+    # ...once only, and not for another call id
+    assert r.hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c1")["action"] == "approve"
 
 
-def test_stdio_mcp_tool_is_asked_like_other_off_machine_tools():
-    fn, ledger, _, _ = gate(bypass=False)
-    assert fn(tool_name="local_query", args={}, session_id="s")["action"] == "approve"
+def test_model_order_hook_asks_then_middleware_enforces_recorded_answer():
+    from confidential_mode.gate_tools import PATTERN_KEY_PREFIX as P
+    for answer, runs in (("once", True), ("always", True), ("", False), ("d", False), (None, False)):
+        r = Rig(answer=None)
+        assert r.hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c1")["action"] == "approve"
+        r.post(pattern_key=P + "web_search", choice=answer, tool_call_id="c1", session_id="s")   # Hermes' prompt
+        out = r.run("web_search")
+        assert (r.ran() == ["web_search"]) is runs, answer
+        assert r.calls["ask"] == []                       # the middleware did not ask a second time
+        if not runs:
+            assert refused(out) and r.ledger.events[-1]["decision"] == "unexpected_choice"
+
+
+def test_stale_answer_is_forgotten_when_the_hook_asks_again():
+    from confidential_mode.gate_tools import PATTERN_KEY_PREFIX as P
+    r = Rig(answer=None, hermes_approved=False)
+    r.post(pattern_key=P + "web_search", choice="once", tool_call_id="c1")   # left over, never consumed
+    r.hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c1")
+    assert refused(r.run("web_search")) and r.ran() == []      # nobody answered THIS ask
+
+
+def test_off_machine_tool_asks_with_kb_message_and_runs_on_explicit_answer():
+    for answer in ("once", "session", "always"):
+        r = Rig(answer=answer)
+        args = {"query": "x" * 3000}
+        out = r.run("web_search", args)
+        n = -(-len(json.dumps(args)) // 1024)
+        assert n == 3 and out == '{"ok": true}' and r.ran() == ["web_search"]
+        assert r.calls["ask"] == [("web_search", f"web_search wants to send ~{n} KB of this conversation off the machine",
+                                   rule_key_for("web_search"))]
+        assert r.ledger.kinds() == ["tool_asked", "tool_allowed"]
+        assert r.ledger.events[0]["bytes"] == len(json.dumps(args)) and r.ledger.events[0]["detail"]["kb"] == 3
+        assert r.ledger.events[1]["decision"] == answer
+
+
+@pytest.mark.parametrize("answer", [None, "", "d", "yes", "Deny", "ONCE", "approve"])
+def test_hermes_grant_on_an_unexpected_answer_is_refused(answer):
+    # tools/approval.py:1006-1009: anything but the exact "deny" is a grant on the CLI.
+    r = Rig(answer=answer, hermes_approved=True)
+    out = r.run("web_search", {"q": "x"})
+    assert refused(out) and r.ran() == []
+    assert r.ledger.kinds()[-1] == "tool_refused" and r.ledger.events[-1]["decision"] == "unexpected_choice"
+    assert r.ledger.events[-1]["detail"]["choice"] == answer
+
+
+def test_denied_and_no_surface_are_refused():
+    r = Rig(answer="deny", hermes_approved=False)
+    assert refused(r.run("web_search")) and r.ran() == []
+    assert r.ledger.events[-1]["decision"] == "denied"
+    r = Rig(answer=None, hermes_approved=False, status="approval_required")
+    assert refused(r.run("web_search")) and r.ledger.events[-1]["decision"] == "no_surface"
+    # an explicit answer recorded but Hermes said no (e.g. a race): still refused
+    r = Rig(answer="once", hermes_approved=False)
+    assert refused(r.run("web_search")) and r.ran() == []
+
+
+def test_answer_for_another_call_does_not_count():
+    from confidential_mode.gate_tools import ApprovalDecisions
+    r = Rig(answer=None, hermes_approved=True)
+    r.decisions.record("some-other-call", "once")
+    assert refused(r.run("web_search")) and r.ran() == []
 
 
 @pytest.mark.parametrize("size,kb", [(0, 1), (1, 1), (1024, 1), (1025, 2), (2048, 2), (2049, 3), (10 * 1024 + 1, 11)])
@@ -230,18 +332,16 @@ def test_kb_rounding_is_ceiling_of_json_length(size, kb):
 
 
 def test_kb_uses_json_dumps_default_escaping():
-    args = {"q": "é" * 600}   # json.dumps escapes to é: 6 chars each -> 3609 chars
+    args = {"q": "é" * 600}   # json.dumps escapes to \u00e9: 6 chars each -> 3609 chars
     assert len(json.dumps(args)) == 3609 and args_kb(args) == 4
 
 
-def test_yolo_or_any_bypass_blocks_instead_of_approving():
-    fn, ledger, calls, _ = gate(bypass=True)
-    d = fn(tool_name="web_search", args={"q": "x"}, session_id="s")
+def test_bypass_blocks_in_both_lines_and_never_asks():
+    r = Rig(bypass=True, answer="once")
+    d = r.hook(tool_name="web_search", args={"q": "x"}, session_id="s")
     assert d["action"] == "block" and "bypassed" in d["message"]
-    assert ledger.kinds() == ["tool_refused"] and ledger.events[0]["decision"] == "bypass_active"
-    # mutant twin: same tool, no bypass -> approve
-    fn, ledger, _, _ = gate(bypass=False)
-    assert fn(tool_name="web_search", args={"q": "x"}, session_id="s")["action"] == "approve"
+    assert refused(r.run("web_search", {"q": "x"})) and r.ran() == [] and r.calls["ask"] == []
+    assert [e["decision"] for e in r.ledger.events] == ["bypass_active", "bypass_active"]
 
 
 def test_zero_arg_bypass_callable_from_the_contract_is_accepted():
@@ -253,35 +353,89 @@ def test_zero_arg_bypass_callable_from_the_contract_is_accepted():
 
 
 def test_user_added_tool_runs_without_asking_and_is_ledgered():
-    fn, ledger, calls, al = gate(bypass=True)
-    al.add("web_search")
-    assert fn(tool_name="web_search", args={}, session_id="s") is None
-    assert ledger.kinds() == ["tool_allowed"] and ledger.events[0]["decision"] == "allowlist"
+    r = Rig(bypass=True)
+    r.al.add("web_search")
+    assert r.hook(tool_name="web_search", args={}, session_id="s") is None
+    r.run("web_search")
+    assert r.ran() == ["web_search"] and r.calls["ask"] == []
+    assert r.ledger.kinds() == ["tool_allowed"] and r.ledger.events[0]["decision"] == "allowlist"
 
 
-def test_unclassified_tool_is_blocked():
-    fn, ledger, _, _ = gate(bypass=False)
-    d = fn(tool_name="registered_after_seal", args={}, session_id="s")
-    assert d["action"] == "block" and ledger.events[0]["decision"] == "unclassified"
+def test_remembered_grant_is_honoured_and_ledgered():
+    r = Rig(remembered=True, answer=None)
+    r.run("web_search", {"q": "x"})
+    assert r.ran() == ["web_search"] and r.calls["ask"] == []
+    assert r.ledger.kinds() == ["tool_allowed"] and r.ledger.events[0]["decision"] == "remembered"
+    r = Rig(remembered=False, answer=None, hermes_approved=True)   # mutant twin: no grant -> asked
+    assert refused(r.run("web_search")) and len(r.calls["ask"]) == 1
+
+
+def test_bypass_still_blocks_with_a_remembered_grant():
+    r = Rig(bypass=True, remembered=True)
+    assert refused(r.run("web_search")) and r.ran() == []
+    assert r.ledger.events[0]["decision"] == "bypass_active"
+
+
+@pytest.mark.parametrize("sealed", [None, "yes", 1, (True,), ("x", None), (1, None), [True, None, 3]])
+def test_unexpected_seal_shape_blocks_everything_including_local(sealed):
+    r = Rig(sealed=sealed)
+    assert r.hook(tool_name="read_file", args={}, session_id="s")["action"] == "block"
+    out = r.run("read_file")
+    assert refused(out) and "/confidential status" in json.loads(out)["error"] and r.ran() == []
+
+
+def test_unreadable_seal_state_blocks_everything_including_local():
+    def boom():
+        raise RuntimeError("state corrupt")
+    r = Rig(sealed=boom)
+    d = r.hook(tool_name="read_file", args={}, session_id="s")
+    assert d["action"] == "block" and "/confidential status" in d["message"]
+    assert refused(r.run("read_file")) and r.ran() == []
+    assert [e["decision"] for e in r.ledger.events] == ["seal_state_unreadable"] * 2
+
+
+def test_is_sealed_tuple_shape():
+    from confidential_mode.tiers import Tier
+    r = Rig(sealed=(True, Tier.LOCAL))
+    assert r.hook(tool_name="cronjob_manage", args={}, session_id="s")["action"] == "block"
+    assert refused(r.run("cronjob_manage"))
+    r = Rig(sealed=(False, None))
+    assert r.hook(tool_name="cronjob_manage", args={}, session_id="s") is None
+    r.run("cronjob_manage")
+    assert r.ran() == ["cronjob_manage"]
 
 
 def test_errors_fail_closed():
-    # bypass predicate raising -> block
     def boom(name):
         raise RuntimeError("x")
-    fn = build_pre_tool_call(lambda: True, allowlist(), FakeLedger(), boom, lambda a: True)
-    assert fn(tool_name="web_search", args={}, session_id="s")["action"] == "block"
-    # ledger raising -> block (even for the would-be approve)
-    fn = build_pre_tool_call(lambda: True, allowlist(), FakeLedger(fail=True), lambda n: False, lambda a: True)
-    assert fn(tool_name="web_search", args={}, session_id="s")["action"] == "block"
-    # is_sealed raising -> treated as sealed
-    def sealed_boom():
-        raise RuntimeError("state gone")
-    fn = build_pre_tool_call(sealed_boom, allowlist(), FakeLedger(), lambda n: False, lambda a: True)
-    assert fn(tool_name="cronjob_manage", args={}, session_id="s")["action"] == "block"
-    # local still passes when the ledger is broken (nothing to ledger)
-    fn = build_pre_tool_call(lambda: True, allowlist(), FakeLedger(fail=True), lambda n: False, lambda a: True)
-    assert fn(tool_name="read_file", args={}, session_id="s") is None
+    r = Rig()
+    hook = build_pre_tool_call(lambda: True, allowlist(), FakeLedger(), boom, lambda a: True)
+    assert hook(tool_name="web_search", args={}, session_id="s")["action"] == "block"
+    # ledger raising -> hook blocks; middleware refuses (never runs the tool)
+    hook = build_pre_tool_call(lambda: True, allowlist(), FakeLedger(fail=True), lambda n: True, lambda a: True)
+    assert hook(tool_name="web_search", args={}, session_id="s")["action"] == "block"
+    r = Rig(ledger=FakeLedger(fail=True))
+    assert refused(r.run("web_search")) and r.ran() == []
+    # local still runs with a broken ledger (nothing to ledger)
+    r = Rig(ledger=FakeLedger(fail=True))
+    r.run("read_file")
+    assert r.ran() == ["read_file"]
+
+
+def test_middleware_propagates_the_tools_own_exception_untouched():
+    from confidential_mode.gate_tools import ApprovalDecisions, build_tool_execution
+    mw = build_tool_execution(lambda: True, allowlist(), FakeLedger(), ApprovalDecisions(),
+                              bypass_active=lambda n: False, remembered=lambda n: False)
+
+    class ToolBoom(Exception):
+        pass
+
+    def next_call(a):
+        raise ToolBoom("handler failed")
+    with pytest.raises(ToolBoom):
+        mw(tool_name="read_file", args={}, next_call=next_call)
+    with pytest.raises(KeyboardInterrupt):
+        mw(tool_name="read_file", args={}, next_call=lambda a: (_ for _ in ()).throw(KeyboardInterrupt()))
 
 
 def test_allowlist_may_be_a_callable_for_reseal():
@@ -290,6 +444,30 @@ def test_allowlist_may_be_a_callable_for_reseal():
     assert fn(tool_name="new_tool", args={}, session_id="s")["action"] == "block"
     box["al"] = allowlist(entries=ENTRIES + [("new_tool", "x", _builtin_handler)])
     assert fn(tool_name="new_tool", args={}, session_id="s")["action"] == "approve"
+
+
+def test_allowlist_additions_persist_in_yaml(tmp_path):
+    path = tmp_path / "allowlist.yaml"
+    al = build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
+                         plugin_tool_names=set(), added_path=path)
+    al.add("web_search")
+    assert "web_search" in path.read_text()
+    al2 = build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
+                          plugin_tool_names=set(), added_path=path)
+    assert al2.is_added("web_search")
+    # a persisted name that is now a hard block is not honoured
+    path.write_text("version: 1\nallowed: [web_search, cronjob_manage, remote_query, nope]\n")
+    al3 = build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
+                          plugin_tool_names=set(), added_path=path)
+    assert al3.added == {"web_search"}
+    path.write_text("version: 1\nallowed:\n- web_search\n")      # hand-edited YAML (needs hermes_yaml)
+    import importlib.util
+    if importlib.util.find_spec("hermes_yaml") is not None:
+        assert build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
+                               plugin_tool_names=set(), added_path=path).added == {"web_search"}
+    path.write_text(": not yaml [")
+    assert build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
+                           plugin_tool_names=set(), added_path=path).added == set()
 
 
 # --------------------------------------------------------------------------------------------------
@@ -344,6 +522,13 @@ def test_post_approval_response_ignores_other_rules_and_never_raises():
     ({}, {"goal": "g", "profile": "work"}, False),
     ({}, {"tasks": "not a list"}, False),
     ({}, {"tasks": ["not a dict"]}, False),
+    ({}, {"tasks": json.dumps([{"goal": "g"}])}, False),               # JSON-string tasks
+    ({}, {"tasks": [{"goal": "g", "request_overrides": {"x": 1}}]}, False),
+    ({}, {"tasks": [{"goal": "g", "fallback_providers": ["openrouter"]}]}, False),
+    ({}, {"tasks": [{"goal": "g", "base_url": "http://x"}]}, False),
+    ({}, {"tasks": [{"goal": "g", "api_mode": "chat_completions"}]}, False),
+    ({}, {"goal": "g", "provider": "openrouter"}, False),               # top-level legacy
+    ({}, {"goal": "g", "request_overrides": {"x": 1}}, False),
 ])
 def test_default_delegation_ok(cfg, args, ok):
     assert default_delegation_ok(args, load_config=lambda: cfg) is ok
@@ -353,3 +538,97 @@ def test_default_delegation_ok_fails_closed_on_config_error():
     def boom():
         raise RuntimeError("config unreadable")
     assert default_delegation_ok({"goal": "g"}, load_config=boom) is False
+
+
+# --------------------------------------------------------------------------------------------------
+# Amendment 1: MCP URL servers classified by host under the active predicate
+# --------------------------------------------------------------------------------------------------
+
+def _mcp_only(url, predicate=None):
+    al = build_allowlist(FakeRegistry([("q", "mcp-s", _builtin_handler)]), mcp_configs={"s": {"url": url}},
+                         mcp_tool_servers={}, plugin_tool_names=set(), predicate=predicate)
+    return al.get("q")
+
+
+@pytest.mark.parametrize("url,route", [
+    ("http://127.0.0.1:8000/mcp", Route.LOCAL), ("http://[::1]:8000/mcp", Route.LOCAL),
+    ("http://192.168.1.4/mcp", Route.LOCAL), ("https://api.example.com/mcp", Route.BLOCK_MCP_URL),
+    ("http://169.254.169.254/mcp", Route.BLOCK_MCP_URL), ("http://127.1/mcp", Route.BLOCK_MCP_URL),
+    ("http://localhost\\@evil.com/mcp", Route.BLOCK_MCP_URL), ("", Route.BLOCK_MCP_URL),
+])
+def test_mcp_url_host_classification_default_local_predicate(url, route):
+    assert _mcp_only(url).route is route
+
+
+def test_mcp_url_uses_injected_predicate():
+    from confidential_mode.tiers import AttestedPredicate, LocalPredicate, Verdict
+
+    class InTier:
+        def classify(self, dest):
+            assert dest.purpose == "mcp:s" and dest.base_url == "https://enclave.example/mcp"
+            return Verdict(True, "fake in-tier", "enclave.example")
+    info = _mcp_only("https://enclave.example/mcp", InTier())
+    assert info.route is Route.ASK and info.reason == "fake in-tier"   # not blocked, still asked
+    # attested predicate: a remote MCP host is not an attested profile -> blocked; localhost still local
+    att = AttestedPredicate(["attested-tinfoil"], lambda p: Verdict(True, "ok", ""))
+    assert _mcp_only("https://mcp.example.com/mcp", att).route is Route.BLOCK_MCP_URL
+    assert _mcp_only("http://localhost:9/mcp", att).route is Route.LOCAL
+    # LocalPredicate extra_hosts are honoured
+    assert _mcp_only("http://mcpbox.lan/mcp", LocalPredicate(extra_hosts=["mcpbox.lan"])).route is Route.LOCAL
+    assert _mcp_only("http://mcpbox.lan/mcp").route is Route.BLOCK_MCP_URL
+
+    class Raises:
+        def classify(self, dest):
+            raise RuntimeError("x")
+    assert _mcp_only("https://mcp.example.com/mcp", Raises()).route is Route.BLOCK_MCP_URL
+
+
+def test_mode_tools_are_plain_local_today():
+    from confidential_mode.gate_tools import MODE_TOOLS
+    assert MODE_TOOLS == {"terminal", "execute_code"} and MODE_TOOLS <= LOCAL_TOOLS
+    al = allowlist()
+    assert all(al.get(n).mode is None and al.get(n).route is Route.LOCAL for n in MODE_TOOLS)
+
+
+
+
+# --------------------------------------------------------------------------------------------------
+# Amendment 3 addendum: identity pinning, escaping
+# --------------------------------------------------------------------------------------------------
+
+class MutableRegistry(FakeRegistry):
+    def get_entry(self, name):
+        return next((e for e in self._entries if e.name == name), None)
+
+
+def test_handler_or_toolset_swapped_after_seal_is_unclassified():
+    reg = MutableRegistry(ENTRIES)
+    al = build_allowlist(reg, mcp_configs=MCP_CONFIGS, mcp_tool_servers={}, plugin_tool_names=set())
+    r = Rig(al=al)
+    assert r.hook(tool_name="read_file", args={}, session_id="s") is None
+    reg.get_entry("read_file").handler = lambda a, **k: "{}"          # swapped in place
+    assert r.hook(tool_name="read_file", args={}, session_id="s")["action"] == "block"
+    assert refused(r.run("read_file")) and r.ran() == []
+    reg.get_entry("terminal").toolset = "evil"                       # toolset changed
+    assert r.hook(tool_name="terminal", args={}, session_id="s")["action"] == "block"
+    reg._entries = [e for e in reg._entries if e.name != "patch"]    # deregistered
+    assert r.hook(tool_name="patch", args={}, session_id="s")["action"] == "block"
+
+
+def test_mcp_server_repointed_after_seal_is_rejudged():
+    cfgs = {"lh": {"url": "http://localhost:1/mcp"}}
+    reg = MutableRegistry([("q", "mcp-lh", _builtin_handler)])
+    al = build_allowlist(reg, mcp_configs=cfgs, mcp_tool_servers={}, plugin_tool_names=set())
+    r = Rig(al=al)
+    assert r.hook(tool_name="q", args={}, session_id="s") is None
+    cfgs["lh"] = {"url": "https://mcp.example.com/mcp"}
+    assert r.hook(tool_name="q", args={}, session_id="s")["action"] == "block"
+
+
+def test_format_allowlist_escapes_control_characters():
+    forged = "x\nlocal (runs without asking): 99\n  web_search"
+    al = allowlist(entries=ENTRIES + [(forged, "t", _builtin_handler), ("a\x1b[2Kb\u200b", "t", _builtin_handler)])
+    text = format_allowlist(al)
+    assert forged not in text and "\x1b" not in text and "\u200b" not in text
+    assert "x\\nlocal" in text
+    assert len([ln for ln in text.splitlines() if ln.startswith("local (")]) == 1

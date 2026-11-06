@@ -1,6 +1,12 @@
-"""Seam tests: the tool gate on Hermes' REAL model-tool-call path (model_tools.handle_function_call ->
-pre_tool_call hooks -> request_tool_approval -> handler), the real registry, real MCP config loading
-and the real bypass state. Substituted only at the human boundary: the CLI approval callback seat
+"""Seam tests: the tool gate on Hermes' REAL tool-call paths with the REAL ledger (SQLite, path-injected).
+
+* model path: model_tools.handle_function_call -> pre_tool_call hooks -> tool_execution middleware
+  (our ask + enforcement) -> registry handler (model_tools.py:954, :855-859);
+* agent-loop order: run_tool_execution_middleware OUTERMOST, with a next_call that runs the real
+  _dispatch_pre_tool_call_hooks and then the handler, which is what agent/tool_executor.py:775-812 +
+  _dispatch_authorized_once (:677-736) do.
+
+Substituted only at the human boundary: the CLI approval callback seat
 (terminal_tool.set_approval_callback), as tests/spikes/test_approval_gate.py::test_g does."""
 from __future__ import annotations
 
@@ -13,24 +19,17 @@ from hermes_cli.config import get_config_path
 from tools import approval, approval_context
 
 from confidential_mode.gate_tools import (
-    LOCAL_TOOLS, Origin, Route, build_allowlist, build_post_approval_response, build_pre_tool_call, rule_key_for,
+    LOCAL_TOOLS, ApprovalDecisions, Origin, Route, build_allowlist, build_post_approval_response,
+    build_pre_tool_call, build_tool_execution, rule_key_for,
 )
+from confidential_mode.ledger import Ledger
+from confidential_mode.tiers import Tier
 
 SK = "cm:gate:seam"
 OFF = "_cm_probe_web"          # an off-machine built-in-like tool
-MCP_URL = "_cm_probe_mcp_url"  # from an MCP server configured with url:
+MCP_URL = "_cm_probe_mcp_url"  # MCP server whose URL host is off-tier
 MCP_STDIO = "_cm_probe_mcp_stdio"
-
-
-class Ledger:
-    def __init__(self):
-        self.events = []
-
-    def append(self, event):
-        self.events.append(event)
-
-    def kinds(self):
-        return [e["kind"] for e in self.events]
+MCP_LH = "_cm_probe_mcp_localhost"
 
 
 def _reset_permanent_state():
@@ -41,7 +40,7 @@ def _reset_permanent_state():
 
 
 @pytest.fixture
-def hermes(monkeypatch):
+def hermes(monkeypatch, tmp_path):
     import model_tools  # noqa: F401  (imports and registers the built-in tools)
     from hermes_cli.plugins import PluginContext, discover_plugins, get_plugin_manager
     from hermes_cli.plugins_manifest import PluginManifest
@@ -58,7 +57,8 @@ def hermes(monkeypatch):
     cfg.parent.mkdir(parents=True, exist_ok=True)
     base_cfg = ("mcp_servers:\n"
                 "  cm-remote:\n    url: https://mcp.example.com/mcp\n"
-                "  cm-local:\n    command: /bin/echo\n")
+                "  cm-local:\n    command: /bin/echo\n"
+                "  cm-lh:\n    url: http://127.0.0.1:8765/mcp\n")
     cfg.write_text(base_cfg)
     _reset_permanent_state()
     approval.clear_session(SK)
@@ -74,19 +74,20 @@ def hermes(monkeypatch):
 
     registry.register(name=OFF, toolset="web", schema={"name": OFF, "description": "p",
                       "parameters": {"type": "object", "properties": {}}}, handler=recorder(OFF))
-    for name, server in ((MCP_URL, "cm-remote"), (MCP_STDIO, "cm-local")):
+    for name, server in ((MCP_URL, "cm-remote"), (MCP_STDIO, "cm-local"), (MCP_LH, "cm-lh")):
         registry.register(name=name, toolset=f"mcp-{server}", schema={"name": name, "description": "p",
                           "parameters": {"type": "object", "properties": {}}}, handler=recorder(name))
         with mcp_core._lock:
             mcp_core._mcp_tool_server_names[name] = server
-    # Real built-ins whose handlers must never run when blocked: swap the handler on the live entry.
+    # Real built-ins whose handlers must never run when blocked: swap the handler on the live entry
+    # BEFORE sealing (the allowlist pins handler identity at seal).
     for name in ("cronjob_manage", "delegate_task", "read_file"):
         monkeypatch.setattr(registry.get_entry(name), "handler", recorder(name))
 
     discover_plugins()
     ctx = PluginContext(PluginManifest(name="cm-gate-seam", source="user"), get_plugin_manager())
-    ledger = Ledger()
-    state = {"sealed": True}
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    state = {"sealed": (True, Tier.LOCAL)}
     prompts: list[tuple] = []
 
     def human(answer):
@@ -98,19 +99,45 @@ def hermes(monkeypatch):
     handles = []
     try:
         allowlist = build_allowlist(registry)
-        handles.append(ctx.register_hook("pre_tool_call", build_pre_tool_call(lambda: state["sealed"], allowlist, ledger)))
-        handles.append(ctx.register_hook("post_approval_response", build_post_approval_response(lambda: state["sealed"],
-                                                                                            ledger)))
+        decisions = ApprovalDecisions()
+        sealed = lambda: state["sealed"]  # noqa: E731  (the canonical (bool, Tier | None) shape)
+        handles.append(ctx.register_hook("pre_tool_call", build_pre_tool_call(sealed, allowlist, ledger,
+                                                                                   decisions=decisions)))
+        handles.append(ctx.register_hook("post_approval_response",
+                                         build_post_approval_response(sealed, ledger, decisions)))
+        handles.append(ctx.register_middleware("tool_execution",
+                                               build_tool_execution(sealed, allowlist, ledger, decisions)))
 
         def call(name, args=None):
             return model_tools.handle_function_call(name, args or {}, task_id="t1", session_id="sess-1",
                                                     tool_call_id="call-1")
-        yield SimpleNamespace(call=call, ran=ran, prompts=prompts, human=human, ledger=ledger, state=state,
-                              allowlist=allowlist, cfg=cfg, base_cfg=base_cfg, registry=registry)
+
+        def agent_order_call(name, args=None):
+            """Agent-loop order: middleware outermost, hooks + approval inside next_call."""
+            from hermes_cli.middleware import run_tool_execution_middleware
+            from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
+            args = args or {}
+
+            def authorized_dispatch(a):
+                block, _ = _dispatch_pre_tool_call_hooks(name, a, task_id="t1", session_id="sess-1",
+                                                         tool_call_id="call-2")
+                if block:
+                    return json.dumps({"error": block})
+                return registry.dispatch(name, a, task_id="t1")
+            return run_tool_execution_middleware(name, args, authorized_dispatch, task_id="t1",
+                                                 session_id="sess-1", tool_call_id="call-2")
+
+        def events():
+            return [(e.kind, e.decision) for e in ledger.tail(0)]
+
+        yield SimpleNamespace(call=call, agent_order_call=agent_order_call, ran=ran, prompts=prompts, human=human,
+                              ledger=ledger, events=events, state=state, allowlist=allowlist, cfg=cfg,
+                              base_cfg=base_cfg, registry=registry, recorder=recorder)
     finally:
         for h in handles:
-            h.dispose()
-        for name in (OFF, MCP_URL, MCP_STDIO):
+            if h is not None:
+                h.dispose()
+        for name in (OFF, MCP_URL, MCP_STDIO, MCP_LH):
             registry.deregister(name)
             with mcp_core._lock:
                 mcp_core._mcp_tool_server_names.pop(name, None)
@@ -123,68 +150,86 @@ def hermes(monkeypatch):
 
 def test_allowlist_from_the_live_registry(hermes):
     al = hermes.allowlist
-    assert set(al.local) == LOCAL_TOOLS                     # every local tool is registered at 84a0301
+    assert set(al.local) - {MCP_LH, MCP_STDIO} == LOCAL_TOOLS   # every local tool is registered at 84a0301
     assert al.get("cronjob_manage").route is Route.BLOCK_CRON
     assert al.get("delegate_task").route is Route.DELEGATE
     assert al.get("web_search").route is Route.ASK and al.get("web_search").origin is Origin.BUILTIN
-    # MCP identification through the real toolset naming + real mcp_servers config loading.
     url = al.get(MCP_URL)
-    assert (url.origin, url.route, url.mcp_server, url.mcp_transport) == (Origin.MCP, Route.BLOCK_MCP_URL,
-                                                                          "cm-remote", "url")
-    stdio = al.get(MCP_STDIO)
-    assert (stdio.route, stdio.mcp_transport) == (Route.ASK, "stdio")
+    assert (url.origin, url.route, url.mcp_server, url.mcp_transport, url.mcp_host) == (
+        Origin.MCP, Route.BLOCK_MCP_URL, "cm-remote", "url", "mcp.example.com")
+    assert (al.get(MCP_STDIO).route, al.get(MCP_STDIO).mcp_transport) == (Route.LOCAL, "stdio")
+    assert (al.get(MCP_LH).route, al.get(MCP_LH).mcp_host) == (Route.LOCAL, "127.0.0.1")
 
 
-def test_blocked_tools_never_run_their_handler_and_nobody_is_asked(hermes, monkeypatch):
+@pytest.mark.parametrize("path", ["call", "agent_order_call"])
+def test_blocked_tools_never_run_their_handler_and_nobody_is_asked(hermes, monkeypatch, path):
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     hermes.human("once")                                    # would approve if ever asked
-    out = hermes.call("cronjob_manage", {"action": "create", "prompt": "x", "schedule": "1h"})
+    call = getattr(hermes, path)
+    out = call("cronjob_manage", {"action": "create", "prompt": "x", "schedule": "1h"})
     assert "cronjob_manage" in out and "blocked" in out
-    out = hermes.call(MCP_URL, {"q": "secret"})
+    out = call(MCP_URL, {"q": "secret"})
     assert "cm-remote" in out and "blocked" in out
     assert hermes.ran == {} and hermes.prompts == []
-    assert hermes.ledger.kinds() == ["tool_refused", "tool_refused"]
-    # Local tool runs untouched.
-    hermes.call("read_file", {"path": "/dev/null"})
-    assert hermes.ran == {"read_file": [{"path": "/dev/null"}]} and hermes.prompts == []
+    assert [k for k, _ in hermes.events()] == ["tool_refused", "tool_refused"]
+    call("read_file", {"path": "/dev/null"})
+    call(MCP_LH, {"q": "x"})
+    call(MCP_STDIO, {"q": "y"})
+    assert hermes.ran == {"read_file": [{"path": "/dev/null"}], MCP_LH: [{"q": "x"}], MCP_STDIO: [{"q": "y"}]}
+    assert hermes.prompts == []
 
 
-def test_off_machine_tool_prompts_with_our_message_and_runs_only_on_approve(hermes, monkeypatch):
+@pytest.mark.parametrize("path", ["call", "agent_order_call"])
+def test_off_machine_tool_prompts_with_our_message_and_runs_only_on_explicit_approve(hermes, monkeypatch, path):
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+    call = getattr(hermes, path)
     args = {"q": "x" * 1500}
     msg = f"{OFF} wants to send ~2 KB of this conversation off the machine"
 
     hermes.human("deny")
-    out = hermes.call(OFF, args)
+    out = call(OFF, args)
     assert hermes.prompts == [(f"<{OFF}> (plugin approval rule)", msg)]
     assert OFF not in hermes.ran and "BLOCKED" in out
-    assert hermes.ledger.kinds() == ["tool_asked", "tool_refused"]
-    assert hermes.ledger.events[1]["decision"] == "deny"
+    # model order: Hermes' own deny ends the call before the middleware; agent order: the middleware refuses too.
+    assert hermes.events() == [("tool_asked", "ask"), ("tool_refused", "deny")] + (
+        [("tool_refused", "denied")] if path == "agent_order_call" else [])
 
     hermes.human("once")
-    out = hermes.call(OFF, args)
+    out = call(OFF, args)
     assert hermes.ran[OFF] == [args] and json.loads(out) == {"ok": OFF}
-    assert hermes.prompts[-1] == (f"<{OFF}> (plugin approval rule)", msg)
-    assert hermes.ledger.kinds()[-2:] == ["tool_asked", "tool_allowed"]
-    # A stdio MCP tool takes the same ask path.
-    out = hermes.call(MCP_STDIO, {})
-    assert hermes.ran[MCP_STDIO] == [{}] and len(hermes.prompts) == 3
+    assert len(hermes.prompts) == 2                         # exactly one prompt per call, either path
+    assert hermes.events()[-2:] == [("tool_asked", "ask"), ("tool_allowed", "once")]
+
+
+@pytest.mark.parametrize("path", ["call", "agent_order_call"])
+@pytest.mark.parametrize("answer", ["", "d", None, "yes"])
+def test_cli_answer_hermes_treats_as_a_grant_does_not_run_the_tool(hermes, monkeypatch, path, answer):
+    """tools/approval.py:1006-1009: any CLI answer but the exact "deny" grants. Prove the grant first,
+    then that the sealed gate still does not run the handler."""
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+    hermes.human(answer)
+    assert approval.request_tool_approval("probe", "m", rule_key="cm-probe-raw")["approved"] is True  # the gap
+    hermes.prompts.clear()
+    out = getattr(hermes, path)(OFF, {"q": "x"})
+    assert OFF not in hermes.ran and len(hermes.prompts) == 1
+    assert "not once/session/always" in out
+    assert hermes.events()[-1] == ("tool_refused", "unexpected_choice")
 
 
 def test_under_yolo_the_same_tool_is_blocked_and_no_prompt_occurs(hermes, monkeypatch):
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
-    hermes.human("deny")
+    hermes.human("once")
     approval.enable_session_yolo(SK)
     try:
         assert approval._yolo_active()
         out = hermes.call(OFF, {"q": "x"})
+        out2 = hermes.agent_order_call(OFF, {"q": "x"})
     finally:
         approval.disable_session_yolo(SK)
     assert OFF not in hermes.ran and hermes.prompts == []
-    assert "bypassed" in out
-    assert hermes.ledger.kinds() == ["tool_refused"] and hermes.ledger.events[0]["decision"] == "bypass_active"
-    # Mutant twin: yolo off -> the human is asked.
-    hermes.call(OFF, {"q": "x"})
+    assert "bypassed" in out and "bypassed" in out2
+    assert hermes.events() == [("tool_refused", "bypass_active")] * 2
+    hermes.call(OFF, {"q": "x"})                            # mutant twin: yolo off -> asked
     assert len(hermes.prompts) == 1
 
 
@@ -197,7 +242,6 @@ def test_approvals_mode_off_blocks(hermes, monkeypatch):
 
 
 def test_unattended_approve_mode_blocks_where_hermes_would_auto_approve(hermes, monkeypatch):
-    # No CLI/gateway, cron context with cron_mode approve: Hermes would run the tool unasked.
     from gateway.session_context import clear_session_vars, set_session_vars
     hermes.cfg.write_text(hermes.base_cfg + "approvals:\n  cron_mode: approve\n")
     tok = set_session_vars(session_key=SK, cron_session="1")
@@ -209,52 +253,81 @@ def test_unattended_approve_mode_blocks_where_hermes_would_auto_approve(hermes, 
     assert OFF not in hermes.ran and "bypassed" in out
 
 
-def test_remembered_session_grant_counts_as_bypass(hermes, monkeypatch):
+def test_remembered_session_grant_allows_second_call_without_prompt(hermes, monkeypatch):
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     hermes.human("session")
-    hermes.call(OFF, {})
-    assert hermes.ran[OFF] == [{}] and len(hermes.prompts) == 1
+    hermes.call(OFF, {"n": 1})
+    assert hermes.ran[OFF] == [{"n": 1}] and len(hermes.prompts) == 1
     assert approval.is_approved(SK, f"plugin_rule:{rule_key_for(OFF)}")   # prefixed key
     assert not approval.is_approved(SK, rule_key_for(OFF))                # the trap
-    out = hermes.call(OFF, {})
-    assert hermes.ran[OFF] == [{}] and len(hermes.prompts) == 1 and "bypassed" in out
+    hermes.human("deny")                                                   # would refuse if asked
+    out = hermes.call(OFF, {"n": 2})
+    assert hermes.ran[OFF] == [{"n": 1}, {"n": 2}] and json.loads(out) == {"ok": OFF}
+    hermes.agent_order_call(OFF, {"n": 3})
+    assert len(hermes.ran[OFF]) == 3 and len(hermes.prompts) == 1          # no further prompt
+    assert hermes.events() == [("tool_asked", "ask"), ("tool_allowed", "session"),
+                               ("tool_allowed", "remembered"), ("tool_allowed", "remembered")]
+    # A grant under some other key (e.g. a bare tool-name rule) does not count.
+    approval.clear_session(SK)
+    approval.approve_session(SK, f"plugin_rule:{OFF}")
+    hermes.call(OFF, {"n": 4})
+    assert len(hermes.ran[OFF]) == 3 and len(hermes.prompts) == 2
+    # yolo still blocks even with our grant.
+    approval.approve_session(SK, f"plugin_rule:{rule_key_for(OFF)}")
+    approval.enable_session_yolo(SK)
+    try:
+        out = hermes.call(OFF, {"n": 5})
+    finally:
+        approval.disable_session_yolo(SK)
+    assert len(hermes.ran[OFF]) == 3 and "bypassed" in out
+
+
+def test_tool_swapped_after_seal_is_blocked(hermes, monkeypatch):
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+    hermes.human("once")
+    monkeypatch.setattr(hermes.registry.get_entry("read_file"), "handler", hermes.recorder("swapped"))
+    out = hermes.call("read_file", {"path": "/dev/null"})
+    assert "swapped" not in hermes.ran and "seal again" in out
+    assert hermes.events()[-1] == ("tool_refused", "unclassified")
 
 
 def test_delegate_task_default_route_allowed_profile_and_backend_routes_blocked(hermes, monkeypatch):
-    """delegate_task is an agent-loop tool: handle_function_call refuses it outright (model_tools.py:951-952)
-    and the agent executor fires pre_tool_call through _dispatch_pre_tool_call_hooks
-    (agent/tool_executor.py:661-675), then runs agent._dispatch_delegate_task only when the block
-    message is None. Drive that same function, with the real delegation config loader."""
-    from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
+    """delegate_task is an agent-loop tool: handle_function_call refuses it outright (model_tools.py:951-952);
+    the agent executor runs tool_execution middleware and then pre_tool_call around
+    agent._dispatch_delegate_task. Drive that order with the real delegation config loader."""
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     hermes.human("once")
     args = {"tasks": [{"goal": "g"}]}
     assert "must be handled by the agent loop" in hermes.call("delegate_task", args)
-    hermes.ledger.events.clear()
-
-    def gate():
-        return _dispatch_pre_tool_call_hooks("delegate_task", args, task_id="t1", session_id="sess-1",
-                                             tool_call_id="call-1")
-
-    assert gate() == (None, None)                                  # default backend, inherit route
-    hermes.cfg.write_text(hermes.base_cfg + "delegation:\n  profile: work\n")
-    block, _ = gate()
-    assert block and "delegate_task" in block and "blocked" in block
-    hermes.cfg.write_text(hermes.base_cfg + "delegation:\n  backend: someplugin\n")
-    assert gate()[0]
-    hermes.cfg.write_text(hermes.base_cfg + "delegation:\n  provider: copilot-acp\n")
-    assert gate()[0]
+    hermes.agent_order_call("delegate_task", args)
+    assert hermes.ran["delegate_task"] == [args]
+    for extra in ("delegation:\n  profile: work\n", "delegation:\n  backend: someplugin\n",
+                  "delegation:\n  provider: copilot-acp\n", "delegation:\n  base_url: http://10.0.0.2/v1\n"):
+        hermes.cfg.write_text(hermes.base_cfg + extra)
+        out = hermes.agent_order_call("delegate_task", args)
+        assert "delegate_task" in out and "blocked" in out
     hermes.cfg.write_text(hermes.base_cfg)
-    assert gate()[0] is None
-    assert hermes.prompts == []
-    assert hermes.ledger.kinds() == ["tool_allowed", "tool_refused", "tool_refused", "tool_refused", "tool_allowed"]
+    for bad in ({"tasks": json.dumps([{"goal": "g"}])}, {"tasks": [{"goal": "g", "request_overrides": {"a": 1}}]}):
+        assert "blocked" in hermes.agent_order_call("delegate_task", bad)
+    assert len(hermes.ran["delegate_task"]) == 1 and hermes.prompts == []
+    assert [d for _, d in hermes.events()] == ["delegation_default"] + ["delegation_route"] * 6
+
+
+def test_unreadable_seal_state_blocks_even_local_tools(hermes):
+    hermes.state["sealed"] = "corrupt"          # neither bool nor (bool, tier)
+    out = hermes.call("read_file", {"path": "/dev/null"})
+    out2 = hermes.agent_order_call("read_file", {"path": "/dev/null"})
+    assert "read_file" not in hermes.ran
+    assert "/confidential status" in out and "/confidential status" in out2
 
 
 def test_unsealed_observes_only(hermes, monkeypatch):
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     hermes.human("deny")
-    hermes.state["sealed"] = False
+    hermes.state["sealed"] = (False, None)
     hermes.call(OFF, {})
     hermes.call("cronjob_manage", {"action": "list"})
+    hermes.agent_order_call(MCP_URL, {})
     assert hermes.ran[OFF] == [{}] and hermes.ran["cronjob_manage"] == [{"action": "list"}]
-    assert hermes.prompts == [] and hermes.ledger.events == []
+    assert hermes.ran[MCP_URL] == [{}]
+    assert hermes.prompts == [] and hermes.events() == []

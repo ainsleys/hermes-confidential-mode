@@ -17,12 +17,14 @@ the gateway runs it on an executor thread (tests/spikes/test_ask_choice.py::test
 
 Interfaces used (duck-typed, W1/W2 own the real ones):
   ledger.append(event: dict)
-  store.pending() -> PendingPin | None ; store.apply(pending) -> PinRecord
+  store.pending() -> PendingPin | None ; store.apply(pending, *, approved_via=surface) -> PinRecord
+  (approved_via is being added by W2, Amendment 2; older stores without it get apply(pending))
   allowlist.get(name) -> ToolInfo | None ; allowlist.add(name) ; allowlist.is_added(name)
 """
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Any, Optional
 
@@ -36,6 +38,9 @@ TOOL_CHOICES = [
     {"value": "approve", "label": "Allow", "description": "let this tool run while sealed without asking each call"},
     {"value": "deny", "label": "Deny", "description": "keep asking (or blocking) for this tool"},
 ]
+
+
+_APPLY_LOCK = threading.Lock()
 
 
 class ConsentContextError(RuntimeError):
@@ -121,24 +126,44 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
             return "No answer (timed out, cancelled, or not one of the options): pin update denied; current pin kept."
         return "Pin update denied; current pin kept."
 
-    try:
-        current = store.pending()
-    except Exception as exc:
-        current, detail["recheck_error"] = None, f"{type(exc).__name__}: {exc}"
-    if current is None or current != pending:
-        detail["reason"] = "pending pin changed while waiting for the answer"
-        ledger.append(_event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
-                             decision="stale", detail=detail))
-        return ("The pending pin changed while you were deciding, so nothing was applied. "
-                "Run /confidential pins approve again to review the new one.")
-
-    record = store.apply(pending)
+    # Re-check and apply under one lock: two approvals racing for the same pending pin apply once
+    # (the second sees pending cleared or changed). PinStore.apply is additionally idempotent (W2).
+    with _APPLY_LOCK:
+        try:
+            current = store.pending()
+        except Exception as exc:
+            current, detail["recheck_error"] = None, f"{type(exc).__name__}: {exc}"[:200]
+        if current is None or current != pending:
+            detail["reason"] = "pending pin changed while waiting for the answer"
+            ledger.append(_event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
+                                 decision="stale", detail=detail))
+            return ("The pending pin changed while you were deciding, so nothing was applied. "
+                    "Run /confidential pins approve again to review the new one.")
+        try:
+            record = _apply(store, pending, platform or "unknown")
+        except Exception as exc:
+            detail["error"] = type(exc).__name__
+            ledger.append(_event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
+                                 decision="apply_failed", detail=detail))
+            return f"The pin could not be applied ({type(exc).__name__}); the current pin is unchanged."
     detail["approved_at"] = str(_field(record, "approved_at", "") or "")
     ledger.append(_event("pin_applied", session_id=session_id, platform=platform, provider=vendor,
                          decision="approve", detail=detail))
     return (f"Pinned {vendor or 'enclave'} build "
             f"{_field(record, 'release_tag', None) or _field(pending, 'release_tag', None) or ''}".rstrip()
             + f" (code {_short(base['code_fingerprint'])}, enclave {_short(base['enclave_fingerprint'])}).")
+
+
+def _apply(store: Any, pending: Any, surface: str) -> Any:
+    """store.apply(pending, approved_via=surface) when the store takes it, else store.apply(pending).
+    Decided by signature, not by catching TypeError, so an error inside apply is never retried."""
+    import inspect
+    try:
+        params = inspect.signature(store.apply).parameters
+        takes = "approved_via" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        takes = False
+    return store.apply(pending, approved_via=surface) if takes else store.apply(pending)
 
 
 def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key: str = "",
