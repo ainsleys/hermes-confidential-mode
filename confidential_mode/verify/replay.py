@@ -454,13 +454,22 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
         # 3) TLS certificate binding (only if captured)
         pem = ev.get("tls_cert_pem")
         if not pem:
-            checks.na("tls_cert_binding", "TLS certificate not captured on the ehbp path")
+            checks.na("tls_cert_binding", "TLS certificate not captured")
         else:
             try:
-                verify_certificate(pem, ev.get("enclave_host") or "", doc, enclave.hpke_public_key or "")
-                checks.passed("tls_cert_binding")
+                from cryptography import x509 as _x509
+                from cryptography.hazmat.primitives import serialization as _ser
+                cert = _x509.load_pem_x509_certificate(pem.encode())
+                spki = hashlib.sha256(cert.public_key().public_bytes(
+                    _ser.Encoding.DER, _ser.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+                if spki != enclave.public_key_fp:
+                    # Recorded, not failed: EHBP bodies are sealed to H whoever terminates TLS.
+                    checks.na("tls_cert_binding", "TLS terminated by a non-enclave key (SPKI != report TLS key)")
+                else:
+                    verify_certificate(pem, ev.get("enclave_host") or "", doc, enclave.hpke_public_key or "")
+                    checks.passed("tls_cert_binding")
             except Exception as exc:
-                checks.failed("tls_cert_binding", exc)
+                checks.failed("tls_cert_binding", f"{type(exc).__name__}: {exc}")
 
         # 4) code signature from the stored trust root
         try:

@@ -299,12 +299,57 @@ class _Resp:
             raise httpx.HTTPError("status")
 
 
-@pytest.fixture
-def captured(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch):
-    """Run TinfoilAdapter.verify() for real against a faked network leaf; return (adapter, evidence)."""
+class _FakeSSL:
+    def __init__(self, der):
+        self.der = der
+
+    def getpeercert(self, binary_form=False):
+        return self.der
+
+
+class _FakeStream:
+    def __init__(self, der):
+        self.ssl = _FakeSSL(der)
+
+    def get_extra_info(self, name):
+        return self.ssl if name == "ssl_object" else None
+
+
+def _tls_server_cert(key, host, hpke: bytes, attestation_hash: str) -> bytes:
+    """What a Tinfoil router presents if TLS terminates in the enclave: SANs carry the HPKE key and the
+    attestation document hash (dcode-encoded, as tinfoil.attestation.bundle._decode_domains reads)."""
+    def dcode(data, prefix):
+        enc = base64.b32encode(data).decode().rstrip("=").lower()
+        return [f"{i:02d}{enc[j:j + 50]}.{prefix}.{host}" for i, j in enumerate(range(0, len(enc), 50))]
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+    sans = [host] + dcode(hpke, "hpke") + dcode(attestation_hash.encode(), "hatt")
+    return (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(7).not_valid_before(CAPTURED_AT - timedelta(days=1))
+            .not_valid_after(CAPTURED_AT + timedelta(days=90))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(s) for s in sans]), critical=False)
+            .sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER))
+
+
+def _capture(amd_anchor, tmp_path, monkeypatch, *, tls: str | None = None):
+    """Run TinfoilAdapter.verify() for real against a faked network leaf. tls: None (the stub transport
+    shows no certificate), "enclave" (peer cert key == report TLS key, SANs bind H and the report) or
+    "proxy" (a different key terminates TLS)."""
     import requests
-    tls_fp, hpke = _keys()
+    from tinfoil.attestation import Document
+    tls_key = ec.generate_private_key(ec.SECP256R1())
+    spki = tls_key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    _, hpke = _keys()
+    tls_fp = hashlib.sha256(spki).digest()
     body = sev_report(amd_anchor, tls_fp=tls_fp, hpke=hpke)
+    if tls is not None:
+        att_hash = Document(PredicateType.SEV_GUEST_V2, body).hash()
+        key = tls_key if tls == "enclave" else ec.generate_private_key(ec.SECP256R1())
+        der = _tls_server_cert(key, ENCLAVE, hpke, att_hash)
+
+        def fake_inner(self, request):  # the HTTPTransport under ehbp: a stubbed TLS server
+            return httpx.Response(200, json={"format": "x", "body": "y"},
+                                  extensions={"network_stream": _FakeStream(der)})
+        monkeypatch.setattr(httpx.HTTPTransport, "handle_request", fake_inner)
     bundle = signed_bundle(code_statement(), repo=REPO, tag=TAG)
     vcek_der = amd_anchor.vcek.public_bytes(serialization.Encoding.DER)
     urls = []
@@ -323,10 +368,16 @@ def captured(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch):
             return _Resp(vcek_der)
         raise AssertionError(f"unexpected fetch {url}")
     monkeypatch.setattr(requests.Session, "request", fake_request)
-    ad = TinfoilAdapter(data_dir=tmp_path / "plugin-data", enclave=ENCLAVE, hold_until_accepted=False)
+    ad = TinfoilAdapter(data_dir=tmp_path / "plugin-data", enclave=ENCLAVE, hold_until_accepted=False,
+                        tls_probe=tls is not None)
     res = ad.verify()
     return SimpleNamespace(adapter=ad, result=res, evidence=res.evidence, urls=urls, tls_fp=tls_fp, hpke=hpke,
                            data_dir=tmp_path / "plugin-data", vcek_der=vcek_der)
+
+
+@pytest.fixture
+def captured(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch):
+    return _capture(amd_anchor, tmp_path, monkeypatch)
 
 
 def test_capture_records_every_input_under_the_v1_schema(captured, offline):
@@ -404,7 +455,7 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
                         "collateral_fresh_at_capture": "n/a: SEV-SNP has no Intel collateral",
                         "code_signature": True, "policy_check": True, "measurement_match": True,
                         "hardware_platform_match": "n/a: SEV-SNP", "report_data_keys": True,
-                        "tls_cert_binding": "n/a: TLS certificate not captured on the ehbp path"}
+                        "tls_cert_binding": "n/a: TLS certificate not captured"}
     assert set(r.checks) == set(CHECK_KEYS)
     assert r.code_fingerprint == captured.result.code_fingerprint
     assert r.enclave_fingerprint == captured.result.enclave_fingerprint == SNP.hex()
@@ -790,3 +841,45 @@ def test_verify_time_policy_check_detail(captured):
     bad["release"]["tag"] = "v0.0.0"
     assert provider_mod._policy_check_detail(bad)["ok"] is False
     assert provider_mod._policy_check_detail({})["ok"] is False
+
+
+# ── TLS certificate on the EHBP connection (stubbed TLS server) ───────────────────────────────
+
+@pytest.mark.parametrize("mode", ["enclave", "proxy"])
+def test_tls_probe_records_who_terminates_tls(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch, mode):
+    c = _capture(amd_anchor, tmp_path, monkeypatch, tls=mode)
+    obs = c.evidence["tls_observation"]
+    assert obs["captured"] is True and c.evidence["tls_cert_pem"].startswith("-----BEGIN CERTIFICATE-----")
+    assert obs["spki_sha256"] != "" and obs["issuer"] and obs["not_after"]
+    r = replay(c.evidence)
+    if mode == "enclave":
+        assert obs["matches_report_tls_key"] is True and obs["san_binding"] is True
+        assert obs["verdict"].startswith("TLS terminates in the attested enclave")
+        assert r.checks["tls_cert_binding"] is True and r.ok is True, r.checks
+    else:
+        assert obs["matches_report_tls_key"] is False
+        assert obs["verdict"] == "TLS terminated by a non-enclave key"
+        assert r.checks["tls_cert_binding"].startswith("n/a: TLS terminated by a non-enclave key")
+        assert r.ok is True  # recorded, not failed: bodies are still sealed to H
+    assert offline == []
+
+
+def test_tls_probe_without_a_visible_certificate_is_recorded(offline, amd_anchor, fake_sigstore, tmp_path,
+                                                            monkeypatch):
+    def plain(self, request):
+        return httpx.Response(200, json={})
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", plain)
+    c = _capture(amd_anchor, tmp_path, monkeypatch)
+    c.adapter.tls_probe = True
+    ev = c.adapter.verify().evidence
+    assert ev["tls_observation"] == {"captured": False, "reason": "transport exposes no TLS peer certificate"}
+    assert ev["tls_cert_pem"] is None
+
+
+def test_tampered_tls_cert_binding_fails_replay(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch):
+    c = _capture(amd_anchor, tmp_path, monkeypatch, tls="enclave")
+    ev = copy.deepcopy(c.evidence)
+    ev["claims"]["hpke_public_key"] = c.evidence["claims"]["hpke_public_key"]
+    ev["enclave_host"] = "other.tinfoil.invalid"  # SAN binding is to the host the capture named
+    r = replay(ev)
+    assert r.checks["tls_cert_binding"].startswith("fail:"), r.checks

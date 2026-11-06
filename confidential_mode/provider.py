@@ -530,7 +530,9 @@ def register_provider_profile(ctx, *, config: dict | None = None, data_dir: Path
     data_dir = Path(data_dir)
     if adapter is None:
         from .verify.tinfoil import TinfoilAdapter
-        adapter = TinfoilAdapter(data_dir=data_dir, enclave=_cfg_get(config, "confidential", "tinfoil", "enclave"))
+        adapter = TinfoilAdapter(data_dir=data_dir, enclave=_cfg_get(config, "confidential", "tinfoil", "enclave"),
+                                 tls_probe=_cfg_get(config, "confidential", "tinfoil", "tls_probe", default=True)
+                                 is not False)
     if pins is None:
         pins = PinStore(data_dir / "pins.yaml")
     if ledger is None and on_event is None and ctx is not None:

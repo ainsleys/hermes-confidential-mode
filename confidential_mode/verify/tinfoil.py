@@ -43,7 +43,7 @@ fetch points, which call through and record the bytes:
                                                <data_dir>/trust-roots/<sha256>.json
 Layout: schema, vendor, captured_at (SDK verifiedAt), captured_at_unix, sdk_version, repo, enclave_host,
 enclave_source, platform ("sev-snp"|"tdx"), attestation, sev, tdx, release, sigstore_bundle,
-hardware_measurements, trusted_root {sha256, path}, tls_cert_pem (always None on the ehbp path),
+hardware_measurements, trusted_root {sha256, path}, tls_cert_pem + tls_observation (TLS spike, below),
 claims {code_fingerprint, enclave_fingerprint, release_tag, tls_public_key_fp, hpke_public_key},
 verification_document (SDK to_dict), capture_complete, capture_missing[, capture_errors]. Every blob is
 a string, so the dict is JSON-serialisable and passes the ledger's content-key filter.
@@ -61,6 +61,15 @@ Sizes measured from a stubbed SEV capture (tests/unit/test_replay.py, real SDK c
   trusted_root.json     6787 B (real file, sigstore-python 4.5.1 embedded root; stored once, not per verify)
   evidence JSON total   6404 chars for that capture (without the trust root)
 TDX sizes were not measured (no format-faithful quote or Intel collateral can be produced offline).
+
+TLS spike (confidential.tinfoil.tls_probe, default on): after each explicit verify the adapter sends
+one bodyless GET of /.well-known/tinfoil-attestation over the VERIFIED EHBP pool and reads the peer
+certificate from response.extensions["network_stream"].get_extra_info("ssl_object") (httpcore exposes it;
+ehbp passes extensions through). tls_observation = {captured, spki_sha256, matches_report_tls_key,
+san_binding (the SDK's verify_certificate: host, HPKE key, report hash in SANs), issuer, subject, serial,
+not_before, not_after, verdict}. verdict "TLS terminates in the attested enclave ..." vs "TLS terminated
+by a non-enclave key" is what a live run against Tinfoil will tell us; it is recorded, never enforced.
+Per request, the views record the peer SPKI too (send records, below).
 
 SDK on-disk caches: tinfoil 0.14.2 fixes platformdirs paths at import (default macOS
 ~/Library/Caches/tinfoil, Linux ~/.cache/tinfoil: Sigstore bundles, VCEKs, Intel collateral) and
@@ -169,7 +178,7 @@ class TinfoilAdapter:
 
     def __init__(self, *, data_dir: Path | str, enclave: str | None = None, repo: str = ROUTER_REPO,
                  transport: str = "ehbp", router_discovery: Callable[[], str] | None = None,
-                 hold_until_accepted: bool = True):
+                 hold_until_accepted: bool = True, tls_probe: bool = True):
         if not repo:
             raise ValueError("repo is required: pinned-measurement mode is not supported")
         self.data_dir = Path(data_dir)
@@ -194,6 +203,9 @@ class TinfoilAdapter:
         self.async_attestation_count = 0
         self._counter_bucket = threading.local()
         self._capture_local = threading.local()
+        # TLS spike: after each explicit verify, one bodyless GET of the attestation document over the
+        # VERIFIED EHBP pool records the TLS peer certificate (evidence.tls_cert_pem/tls_observation).
+        self.tls_probe = bool(tls_probe)
         self.sdk_cache_paths: dict[str, str] = {}
         # Transport-level hold: while set, every view (sync and async) raises before sending. verify()
         # sets it (when hold_until_accepted) atomically with the pool swap; the provider releases it
@@ -335,11 +347,34 @@ class TinfoilAdapter:
                 self._accepted = result
                 if self._hold_until_accepted:
                     self.held_reason = "verification not yet accepted against pins"
+                if self.tls_probe:
+                    self._probe_tls(http, result)
                 return result
         except VerifyError:
             raise
         except Exception as exc:
             raise VerifyError(f"attestation failed: {type(exc).__name__}: {exc}") from exc
+
+    def _probe_tls(self, http, result) -> None:
+        """Observation only (never fails a verify): which key terminated TLS on the EHBP connection?"""
+        ev = result.evidence if isinstance(result.evidence, dict) else None
+        if ev is None:
+            return
+        url = f"https://{result.enclave_host}/.well-known/tinfoil-attestation"
+        try:
+            with http.stream("GET", url) as resp:
+                der = peer_certificate_der(resp)
+        except Exception as exc:
+            ev["tls_observation"] = {"captured": False, "reason": f"probe failed: {type(exc).__name__}: {exc}"[:300]}
+            return
+        if der is None:
+            ev["tls_observation"] = {"captured": False, "reason": "transport exposes no TLS peer certificate"}
+            return
+        claims = ev.get("claims") or {}
+        obs = tls_observation(der, host=result.enclave_host, attestation=ev.get("attestation") or {},
+                              tls_fp=claims.get("tls_public_key_fp"), hpke=claims.get("hpke_public_key"))
+        ev["tls_cert_pem"] = obs.pop("cert_pem")
+        ev["tls_observation"] = obs
 
     def hold(self, reason: str) -> None:
         self.held_reason = reason or "held"
@@ -497,6 +532,63 @@ def _capture_hooks() -> dict:
     return hooks
 
 
+# ── TLS peer certificate on the EHBP connection ─────────────────────────────────────────────────
+
+def peer_certificate_der(response) -> bytes | None:
+    """The TLS peer certificate of the connection that carried ``response`` (httpcore exposes the
+    stream as response.extensions["network_stream"]; ehbp passes extensions through)."""
+    ns = (getattr(response, "extensions", None) or {}).get("network_stream")
+    if ns is None:
+        return None
+    get = getattr(ns, "get_extra_info", None)
+    ssl_obj = get("ssl_object") if callable(get) else None
+    if ssl_obj is None:
+        return None
+    der = ssl_obj.getpeercert(binary_form=True)
+    return der or None
+
+
+def spki_sha256(der: bytes) -> str:
+    """SHA-256 of the SubjectPublicKeyInfo: the TLS key fingerprint the report carries (T)."""
+    import hashlib
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    cert = x509.load_der_x509_certificate(der)
+    spki = cert.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return hashlib.sha256(spki).hexdigest()
+
+
+def tls_observation(der: bytes, *, host: str, attestation: dict, tls_fp: str | None, hpke: str | None) -> dict:
+    """Compare the peer certificate with the report: SPKI SHA-256 == T, and the SDK's SAN binding
+    (verify_certificate: host, HPKE key and attestation-document hash encoded in SANs)."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    cert = x509.load_der_x509_certificate(der)
+    spki = spki_sha256(der)
+    obs = {"captured": True, "spki_sha256": spki, "matches_report_tls_key": bool(tls_fp) and spki == tls_fp,
+           "issuer": cert.issuer.rfc4514_string(), "subject": cert.subject.rfc4514_string(),
+           "serial": format(cert.serial_number, "x"),
+           "not_before": cert.not_valid_before_utc.isoformat(), "not_after": cert.not_valid_after_utc.isoformat(),
+           "cert_pem": cert.public_bytes(serialization.Encoding.PEM).decode("ascii")}
+    try:
+        from tinfoil.attestation import Document
+        from tinfoil.attestation.bundle import verify_certificate
+        from tinfoil.attestation.types import PredicateType
+        doc = Document(format=PredicateType(attestation["format"]), body=attestation["body"])
+        verify_certificate(obs["cert_pem"], host, doc, hpke or "")
+        obs["san_binding"] = True
+    except Exception as exc:
+        obs["san_binding"] = f"fail: {type(exc).__name__}: {exc}"[:300]
+    if obs["matches_report_tls_key"] and obs["san_binding"] is True:
+        obs["verdict"] = "TLS terminates in the attested enclave (SPKI == report TLS key, SAN binding ok)"
+    elif not obs["matches_report_tls_key"]:
+        obs["verdict"] = "TLS terminated by a non-enclave key"
+    else:
+        obs["verdict"] = "SPKI matches the report but the SAN binding failed"
+    return obs
+
+
 def _release_with_metadata(inner):
     """Run fetch_latest_release with a thread-scoped spy on requests.Session.request that records the
     GitHub release JSON's published_at / html_url (the SDK parses then discards them)."""
@@ -582,7 +674,8 @@ def build_evidence(capture: dict, doc, *, repo: str, enclave_source: str | None,
         "sigstore_bundle": capture.get("sigstore_bundle"),
         "hardware_measurements": hw if hw and hw.get("bundle") else None,
         "trusted_root": trusted_root,
-        "tls_cert_pem": None,  # never fetched on the default ehbp path
+        "tls_cert_pem": None,       # filled by the TLS probe after verify (TinfoilAdapter._probe_tls)
+        "tls_observation": None,
         "claims": {
             "code_fingerprint": doc.code_fingerprint,
             "enclave_fingerprint": doc.enclave_fingerprint,

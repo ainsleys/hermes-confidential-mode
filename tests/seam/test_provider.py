@@ -151,7 +151,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(provider_mod, "verification_cache", provider_mod.VerificationCache())
 
     cfg = {"model": {"provider": PROFILE, "default": "tf-main-model", "base_url": BASE_URL},
-           "confidential": {"tinfoil": {"enclave": ENCLAVE}, "verify_ttl_seconds": 300},
+           "confidential": {"tinfoil": {"enclave": ENCLAVE, "tls_probe": False}, "verify_ttl_seconds": 300},
            "auxiliary": {"compression": {"provider": PROFILE, "model": "tf-aux-model"},
                          "title_generation": {"provider": PROFILE, "model": "tf-aux-model"},
                          "vision": {"provider": PROFILE, "model": "tf-vision-model"}}}
@@ -425,6 +425,7 @@ def test_register_without_network_or_configured_enclave_then_lazy_router_discove
     attempts = _block_network(monkeypatch)
     monkeypatch.setattr(tinfoil_client, "get_router_address", _REAL_GET_ROUTER_ADDRESS)  # the real SDK call
     cfg = {k: v for k, v in env["cfg"].items() if k != "confidential"}  # no confidential.tinfoil.enclave
+    cfg["confidential"] = {"tinfoil": {"tls_probe": False}}
 
     # Fresh import + register: no network, no attestation, placeholder endpoint.
     for name in [m for m in sys.modules if m.startswith("confidential_mode")]:

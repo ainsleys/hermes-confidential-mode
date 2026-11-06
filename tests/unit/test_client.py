@@ -239,6 +239,7 @@ def _stub_sdk(monkeypatch, rec: Recorder, *, code="c1", enclave="e1", fail=None)
 def _adapter(tmp_path, **kw):
     from confidential_mode.verify.tinfoil import TinfoilAdapter
     kw.setdefault("enclave", "router.example")
+    kw.setdefault("tls_probe", False)
     return TinfoilAdapter(data_dir=tmp_path / "data", **kw)
 
 
