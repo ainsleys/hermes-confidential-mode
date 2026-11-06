@@ -1,64 +1,104 @@
 # PLUGIN_NAME: confidential-mode  (working name; the config section below is `confidential:` either way)
 #
-# Example ~/.hermes/config.yaml fragment for the attested tier. Merge it into your own config by
-# hand: the plugin never writes config. `hermes confidential setup --model <id>` prints the
-# auxiliary block for your Hermes version; `hermes confidential check --tier attested` tells you
-# what still fails.
+# This is an example fragment of ~/.hermes/config.yaml for the attested tier. The attested tier
+# allows the model to run only in Tinfoil's verified enclave.
 #
-# Model ids are Tinfoil's (https://docs.tinfoil.sh/models/chat.md, read 2026-11-06). This example
-# uses kimi-k3-1-pro because it takes images, so vision can stay on the same model.
+# Merge this fragment into your own config by hand. The plugin never writes your config.
+#
+# Two commands help with the merge:
+#   - `hermes confidential setup --model <id>` prints the auxiliary block that matches your Hermes
+#     version.
+#   - `hermes confidential check --tier attested` runs the preflight and tells you what still fails.
+#     The preflight is the check the plugin runs over your config before it will seal a profile.
+#
+# The model ids below are Tinfoil's (https://docs.tinfoil.sh/models/chat.md, read 2026-11-06). This
+# example uses kimi-k3-1-pro because that model accepts images. Vision can therefore stay on the same
+# model as everything else.
 
 # ── Plugin keys (every key the code reads) ────────────────────────────────────────────────────
 confidential:
-  # Model id that `hermes confidential setup` writes into the config block it prints. Setup only.
+  # The model id that `hermes confidential setup` writes into the config block it prints.
+  # Only setup reads this key.
   model: kimi-k3-1-pro
 
-  # Seconds a verification vouches before the next send re-attests (monotonic clock). Default 300.
+  # How many seconds one verification of the enclave stays valid. After that, the next send verifies
+  # the enclave again before it goes out. The time is measured on a monotonic clock, which does not
+  # jump when the system time changes. Default 300.
   verify_ttl_seconds: 300
 
-  # Seconds a turn waits for an attestation before refusing ("attestation still in progress; this
-  # turn ended; resend") while it finishes in the background. Default 5.
+  # How many seconds a turn waits for a verification to finish. If the verification is not done in
+  # time, the turn is refused with "attestation still in progress; this turn ended; resend". The
+  # verification keeps running in the background, so the next attempt usually succeeds. Default 5.
   verify_wait_seconds: 5
 
+  pins:
+    # A pin is your recorded approval of one router build. When this is true, the plugin applies a
+    # new pin without asking you, but only when all three of these hold:
+    #   - you already have a pin;
+    #   - the code fingerprint is unchanged, so only the platform (AMD or Intel) changed;
+    #   - the SDK's signed hardware-measurements check passed.
+    # In tinfoil 0.14.2 that check runs only for Intel TDX routers. Only a switch to a TDX router can
+    # therefore be approved this way. Only the exact value true turns this on. Default false.
+    auto_approve_platform_only: false
+
   tinfoil:
-    # One router host to verify and use. Unset (default) = router discovery via atc.tinfoil.sh,
-    # one random router per process; AMD and Intel routers have different enclave fingerprints, so a
-    # restart can ask you to re-approve. Setting this stops that. Example: <router host>.tinfoil.sh
+    # One router host to verify and use. The router is the Tinfoil enclave your requests connect to.
+    #
+    # When this is unset (null, the default), the SDK discovers routers through atc.tinfoil.sh and
+    # picks one at random, once per process.
+    #
+    # AMD and Intel routers have different enclave fingerprints for the same release. After a
+    # restart, discovery may therefore pick a router on the other platform, and the plugin then asks
+    # you to approve the pin again. Setting this key stops that.
+    #
+    # Example value: <router host>.tinfoil.sh
     enclave: null
 
-    # Context window reported to Hermes for the attested provider, so Hermes never probes /models
-    # or /api/show off the attested transport. One value for the profile, not per model: set it for
-    # the model in model.default, at or below Tinfoil's documented window. Default 65536.
-    # Tinfoil documents (rounded, no exact integers published):
-    #   kimi-k3-1-pro        256K  -> 256000   (text + image)
+    # The context window the plugin reports to Hermes for the attested provider. Because the plugin
+    # reports it, Hermes never sends its own /models or /api/show probe, which would go outside the
+    # attested transport.
+    #
+    # This is one value for the whole profile, not one per model. Set it for the model named in
+    # model.default, at or below the window Tinfoil documents for that model. Default 65536.
+    #
+    # Tinfoil documents these windows. They are rounded, because Tinfoil publishes no exact integers.
+    #   kimi-k3-1-pro        256K  -> 256000   (text and image input)
     #   glm-5-3              1M    -> 1000000  (reasoning tokens count toward max_tokens)
     #   deepseek-v4-1-flash  1M    -> 1000000  (image input; marked experimental)
     #   gemma4-31b           256K  -> 256000   (image input)
     #   gpt-oss-120b         131K  -> 131000
     #   llama3-3-70b         128K  -> 128000
-    # Going lower than the documented window is safe (Hermes compresses earlier); higher is not.
+    #
+    # A value lower than the documented window is safe. Hermes then compresses context earlier. A
+    # higher value is not safe.
     context_length: 256000
 
   local:
-    # Extra hostnames or IPs the local-only tier counts as local (in addition to loopback,
-    # RFC 1918, 100.64/10, fe80::/10, fc00::/7 and localhost). Default [].
+    # Extra hostnames or IP addresses that the local-only tier counts as local.
+    #
+    # Without this list, the local-only tier accepts loopback addresses, the RFC 1918 private ranges,
+    # 100.64/10, fe80::/10, fc00::/7 and localhost. The plugin never looks a hostname up in DNS, so
+    # any other hostname is off-tier unless it is listed here. Default [].
     extra_hosts: []
 
 # ── Core keys the attested preflight checks ───────────────────────────────────────────────────
 model:
-  provider: attested-tinfoil       # registered by this plugin
-  default: kimi-k3-1-pro           # alias: model.model
-  # base_url: leave unset; a base_url whose host differs from the attested enclave is off-tier
+  provider: attested-tinfoil       # This provider is registered by the plugin.
+  default: kimi-k3-1-pro           # Hermes also accepts model.model as another name for this key.
+  # base_url: leave it unset. A base_url whose host differs from the attested enclave is off-tier.
 
-fallback_providers: []             # must be empty while sealed
-# fallback_model:                  # legacy key; must be absent or empty
+fallback_providers: []             # Must be empty while sealed.
+# fallback_model:                  # Older key for the same purpose. Must be absent or empty.
 
 auxiliary:
-  # Vision must be explicit and in-tier: Hermes describes gateway images through it even without a
-  # tool call, and "auto" walks openrouter -> nous -> deepinfra when the main model can't take images.
+  # Auxiliary tasks are the side jobs Hermes runs with a model, such as compression and titles.
+  #
+  # Vision must be set explicitly, and to an in-tier route. Hermes describes images that arrive
+  # through the gateway with the vision task, even when no tool is called. Its "auto" route also
+  # tries openrouter, then nous, then deepinfra when the main model cannot take images.
   vision:            {provider: attested-tinfoil, model: kimi-k3-1-pro}
-  # Text tasks set to "auto" (the default) or "main" inherit the main route and pass. Pinning them
-  # explicitly keeps a later change of model.provider from moving them silently.
+  # Text tasks set to "auto" (the default) or "main" inherit the main route, so they pass. Setting
+  # them explicitly, as below, keeps a later change of model.provider from moving them silently.
   compression:          {provider: attested-tinfoil, model: kimi-k3-1-pro}
   approval:             {provider: attested-tinfoil, model: kimi-k3-1-pro}
   review:               {provider: attested-tinfoil, model: kimi-k3-1-pro}
@@ -75,24 +115,35 @@ auxiliary:
   curator:              {provider: attested-tinfoil, model: kimi-k3-1-pro}
   monitor:              {provider: attested-tinfoil, model: kimi-k3-1-pro}
   background_review:    {provider: attested-tinfoil, model: kimi-k3-1-pro}
-  # moa_reference / moa_aggregator: leave unset (they inherit main); moa as a provider is refused.
-  # Any fallback_chain under a task must be empty or in-tier. Plugin-registered tasks are checked too.
+  # moa_reference and moa_aggregator: leave them unset, so they inherit the main route. The preflight
+  # refuses "moa" as a provider.
+  # A fallback_chain under any task must be empty, or must contain only in-tier routes.
+  # Auxiliary tasks registered by other plugins are checked as well.
 
 memory:
-  provider: ""                     # built-in local memory ("", builtin, local, none); hosted is off-tier
+  # Use the built-in local memory. The values "", builtin, local and none all mean that. A hosted
+  # memory provider is off-tier.
+  provider: ""
 
-delegation: {}                     # leave provider/base_url unset so children inherit the sealed route
+delegation: {}                     # Leave provider and base_url unset, so child agents inherit the sealed route.
 
 voice:
-  auto_tts: false                  # with tts.provider unset Hermes uses edge (hosted)
+  # Keep this false. When it is true and tts.provider is unset, Hermes speaks replies through edge,
+  # which is a hosted service.
+  auto_tts: false
 
 # tts:
-#   provider: piper                # local engines pass: piper, kittentts, neutts, or a providers.<name> command
+#   provider: piper                # Local engines pass: piper, kittentts, neutts, or a providers.<name> command.
 
-# mcp_servers:                     # URL servers must point at an in-tier host or set enabled: false;
-#   notes: {command: ...}          # command servers pass (and are not inspected)
+# mcp_servers:
+#   # A server configured with a URL must point at an in-tier host, or set enabled: false.
+#   # A server launched with a command passes. The plugin does not inspect what that command does.
+#   notes: {command: ...}
 
 plugins:
-  isolation: in_process            # Hermes' default; under host the attested provider is invisible
-  # hook_callback_timeout:         # leave unset or >= 5 s; shorter lets Hermes skip the per-turn recheck
-                                   # (every plugins.* key that governs hooks is in the seal fingerprint)
+  # Keep Hermes' default. Under host isolation, the attested provider is invisible to Hermes, and the
+  # preflight refuses to seal.
+  isolation: in_process
+  # hook_callback_timeout: leave it unset, or set it to 5 seconds or more. A shorter timeout lets
+  #   Hermes skip the plugin's per-turn check. Every plugins.* key that governs hooks is part of the
+  #   seal fingerprint, so changing one after sealing blocks every turn until you seal again.
