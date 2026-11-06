@@ -8,7 +8,6 @@ dependencies = [
     "tinfoil==0.14.2",
     # Provided by Hermes' own environment (httpx 0.28.1; hermes_yaml stands in for PyYAML there).
     "httpx",
-    "pyyaml",
 ]
 
 [project.optional-dependencies]

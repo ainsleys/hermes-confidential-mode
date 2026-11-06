@@ -653,7 +653,7 @@ class _Policy:
                                 f"confidential mode: {tool_name} sends data off the machine and needs your "
                                 "approval, but approvals are bypassed here (yolo, approvals.mode off, or an "
                                 "unattended context with no one to ask). Blocked. Turn the bypass off, or add "
-                                "the tool with /confidential allow-tool.")
+                                "the tool with /confidential allow.")
         n = args_kb(args)
         return CallDecision("ask", "remembered" if self.remembered(tool_name) else "ask",
                             f"{tool_name} wants to send ~{n} KB of this conversation off the machine", kb=n)
