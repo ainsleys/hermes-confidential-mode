@@ -48,22 +48,43 @@ VERIFICATION_KINDS = ("verify_ok", "verify_fail", "pin_staged", "pin_applied", "
 REFUSAL_KINDS = ("send_refused", "tool_refused", "preflight_fail")
 ANSWER_KINDS = ("tool_allowed", "tool_refused")
 
+SESSION_MARKERS = frozenset({"session_start", "session_end"})
+
+
+def is_session_marker(row: Any) -> bool:
+    """Session start/end markers are not seals, whatever kind they were written under (Amendment 4 F7:
+    W5 moves them to kinds session_start/session_end; older builds wrote kind "seal" with that decision)."""
+    kind = _get(row, "kind")
+    return kind in SESSION_MARKERS or (kind == "seal" and _get(row, "decision") in SESSION_MARKERS)
+
+
+def _is_seal(row: Any) -> bool:
+    return _get(row, "kind") == "seal" and not is_session_marker(row)
+
+
 _ROW_FIELDS = ("id", "ts", "session_id", "kind", "purpose", "provider", "host", "model", "bytes", "tier",
                "verdict", "decision", "surface", "detail")
 
 CLOSING_PARAGRAPH = (
-    "What this receipt proves and what it only records. EVIDENCE: when the receipt says an enclave build "
-    "was verified, the plugin checked that build's hardware-signed attestation against the vendor's "
-    "published code measurement and bound the session key to it; where the raw verification evidence is "
-    "attached (JSON form), anyone can replay that check offline. RECORD ONLY, not proven by anything in "
-    "this receipt: that this session's requests actually went to that enclave; that request bodies were "
-    "encrypted to that key; that the verified build was the vendor's latest release at the time; whether "
-    "the build or its key was revoked after the evidence was captured; what shell, terminal and "
-    "code-execution tools sent off the machine (they run locally and can reach the network); which model "
-    "backends sit behind the vendor's router; and any other access the vendor's operators have to the "
-    "machines involved. Timestamps come from this machine's clock and are not attested. The hash chain "
-    "shows only that this receipt was not edited after it was rendered; it does not show that the local "
-    "ledger was complete or unedited before that."
+    "What this receipt proves and what it only records. EVIDENCE: a verification row with evidence attached "
+    "says the plugin checked that enclave build's hardware-signed attestation against the vendor's published "
+    "code measurement and bound the session key to it. That claim holds only to the extent the attached "
+    "bytes replay offline (confidential_mode.verify.replay, the hermes confidential replay command); a row "
+    "marked \"unverified entry\" (no evidence, or an incomplete capture) proves nothing. The ledger is a "
+    "local file on this machine and is not protected against code running in the same Hermes process: "
+    "another plugin can write rows that look exactly like this plugin's own. The hash chain covers the "
+    "rows as the ledger held them when this receipt was rendered, so a passing chain shows only that the "
+    "receipt was not edited afterwards, not that the ledger was complete or that its rows are genuine. "
+    "RECORD ONLY, not proven by anything in this receipt: that this session's requests actually went to "
+    "that enclave; that request bodies were encrypted to that key; that the verified build was the "
+    "vendor's latest release at the time; whether the build or its key was revoked after the evidence was "
+    "captured; what shell, terminal and code-execution tools sent off the machine (they run locally and "
+    "can reach the network); which model backends sit behind the vendor's router; any other access the "
+    "vendor's operators have to the machines involved; and Hermes' auxiliary calls (title generation, "
+    "compaction, memory prefetch, vision, and plugin auxiliary tasks), which can leave the sealed tier "
+    "while sealed, for example after a runtime model or provider switch, and are recorded here after the "
+    "fact, not prevented. Sealed mode does not apply when Hermes runs in safe-worker mode, which loads no "
+    "plugins. Timestamps come from this machine's clock and are not attested."
 )
 
 
@@ -97,9 +118,9 @@ def collect_rows(ledger, session_id: str, *, include_profile_rows: bool = True) 
     unseal_before = [r for r in rows if r.kind == "unseal" and r.id < first]
     start = unseal_before[-1].id + 1 if unseal_before else 0
     picked = [r for r in rows if start <= r.id <= last
-              and (r.session_id == session_id or r.kind in PROFILE_KINDS)]
+              and (r.session_id == session_id or (r.kind in PROFILE_KINDS and not is_session_marker(r)))]
     # The unseal that closes the period, if it came after the session's last row.
-    after = [r for r in rows if r.id > last and r.kind in ("seal", "unseal")]
+    after = [r for r in rows if r.id > last and (r.kind == "unseal" or _is_seal(r))]
     if after and after[0].kind == "unseal":
         picked.append(after[0])
     return picked
@@ -193,25 +214,55 @@ _PIN_FIELDS = ("vendor", "router_repo", "code_fingerprint", "enclave_fingerprint
                "previous_enclave_fingerprint")
 
 
-def _trust_roots(tier: str | None, rows: list[dict], pins: Any, local_hosts: Iterable[str]) -> dict:
+_LOCAL_RULE = "loopback, RFC1918, 100.64.0.0/10, fe80::/10, fc00::/7, localhost, plus confidential.local.extra_hosts"
+
+
+def _local_hosts_used(rows: Iterable[dict]) -> list[str]:
+    return sorted({r["host"] for r in rows
+                   if r["kind"] == "send_observed" and r.get("tier") == "local-only" and r["host"]})
+
+
+def _trust_roots(seal: dict, rows: list[dict], pins: Any, local_hosts: Iterable[str]) -> dict:
+    """Trust roots for every sealed period (Amendment 4 F11), plus the union at the top level."""
+    tier = seal["tier"]
+    periods = seal["periods"]
     roots: dict[str, Any] = {"tier": tier}
-    if tier in (None, "local-only"):
-        observed = sorted({r["host"] for r in rows
-                           if r["kind"] == "send_observed" and r.get("tier") == "local-only" and r["host"]})
-        roots["local"] = {
-            "rule": ("loopback, RFC1918, 100.64.0.0/10, fe80::/10, fc00::/7, localhost, plus "
-                     "confidential.local.extra_hosts"),
-            "extra_hosts": sorted({str(h) for h in local_hosts}),
-            "hosts_used": observed,
-        }
-    if tier in (None, "attested") or pins is not None:
+    per_period = []
+    for p in periods:
+        window = [r for r in rows if p["seal_row"] <= r["id"] <= p["end_row"]]
+        entry: dict[str, Any] = {"seal_row": p["seal_row"], "tier": p["tier"], "since": p["since"], "until": p["until"]}
+        if p["tier"] == "local-only":
+            entry["local_hosts_used"] = _local_hosts_used(window)
+        elif p["tier"] == "attested":
+            consents = [r for r in rows if r["kind"] == "pin_applied" and r["id"] <= p["end_row"]]
+            before = [r["id"] for r in consents if r["id"] < p["seal_row"]][-1:]
+            entry["pin_consent_rows"] = before + [r["id"] for r in consents if r["id"] >= p["seal_row"]]
+        per_period.append(entry)
+    tiers = {p["tier"] for p in periods} or {tier}
+    if tiers & {None, "local-only"}:
+        local_rows = rows if not periods else [r for p in periods if p["tier"] == "local-only"
+                                               for r in rows if p["seal_row"] <= r["id"] <= p["end_row"]]
+        roots["local"] = {"rule": _LOCAL_RULE, "extra_hosts": sorted({str(h) for h in local_hosts}),
+                          "hosts_used": _local_hosts_used(local_rows)}
+    if tiers & {None, "attested"} or pins is not None:
         roots["pins"] = [{f: (list(v) if isinstance(v := _get(p, f), tuple) else v) for f in _PIN_FIELDS}
                          for p in _pin_records(pins)]
         roots["pins_note"] = "pins in force when this receipt was rendered; pin_applied rows show when each was set"
+    roots["periods"] = per_period
     return roots
 
 
 # ── sections ────────────────────────────────────────────────────────────────────────────────────
+
+def is_unverified_entry(row: Mapping) -> bool:
+    """A verify_ok row whose evidence is missing or whose capture is not marked complete (Amendment 4 F9).
+    Fail closed: ``capture_complete`` must be exactly True."""
+    if row.get("kind") != "verify_ok":
+        return False
+    detail = row.get("detail")
+    evidence = detail.get("evidence") if isinstance(detail, Mapping) else None
+    return not (isinstance(evidence, Mapping) and evidence and evidence.get("capture_complete") is True)
+
 
 def _sections(rows: list[dict]) -> dict:
     by_kind = lambda kinds: [r["id"] for r in rows if r["kind"] in kinds]  # noqa: E731
@@ -232,8 +283,9 @@ def _sections(rows: list[dict]) -> dict:
         asks.append({"ask": r["id"], "answers": answers})
     unprompted = [r["id"] for r in rows if r["kind"] == "tool_allowed" and r["id"] not in answered]
     return {
-        "seal": by_kind(("seal", "unseal")),
+        "seal": [r["id"] for r in rows if _is_seal(r) or r["kind"] == "unseal"],
         "verification": by_kind(VERIFICATION_KINDS),
+        "unverified_entries": [r["id"] for r in rows if is_unverified_entry(r)],
         "sends": by_kind(("send_observed",)),
         "refusals": by_kind(REFUSAL_KINDS),
         "asks": asks,
@@ -247,13 +299,19 @@ def _seal_info(rows: list[dict]) -> dict:
     """Every seal period the rows show (seal .. next unseal), the last one's tier as the sealed tier."""
     periods: list[dict] = []
     for r in rows:
-        if r["kind"] == "seal":
+        if _is_seal(r):
             if periods and periods[-1]["until"] is None:
                 periods[-1]["until"] = r["ts"]          # resealed without an unseal row
+            if periods and periods[-1]["end_row"] is None:
+                periods[-1]["end_row"] = r["id"] - 1
             periods.append({"tier": r.get("tier") or r["detail"].get("tier"), "since": r["ts"], "until": None,
-                            "seal_row": r["id"]})
+                            "seal_row": r["id"], "end_row": None})
         elif r["kind"] == "unseal" and periods and periods[-1]["until"] is None:
             periods[-1]["until"] = r["ts"]
+            periods[-1]["end_row"] = r["id"]
+    for p in periods:
+        if p["end_row"] is None:
+            p["end_row"] = rows[-1]["id"]
     if periods:
         last = periods[-1]
         return {"tier": last["tier"], "since": last["since"], "until": last["until"], "source": "seal row",
@@ -269,12 +327,13 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Ite
     rows = [_row_dict(e) for e in collect_rows(ledger, session_id, include_profile_rows=include_profile_rows)]
     head = _chain(rows)
     seal = _seal_info(rows)
-    trust = _trust_roots(seal["tier"], rows, pins, local_hosts)
+    trust = _trust_roots(seal, rows, pins, local_hosts)
     sends = [r for r in rows if r["kind"] in ("send_observed", "send_refused")]
     providers = sorted({(r["provider"], r["model"]) for r in sends if r["provider"] or r["model"]})
     enclave_hosts = [{"row_id": r["id"], "host": r["host"]} for r in rows
                      if r["kind"] == "send_observed" and r.get("tier") == "attested" and r["host"]]
-    evidence = [{"row_id": r["id"], "evidence": r["detail"]["evidence"]} for r in rows
+    evidence = [{"row_id": r["id"], "evidence": r["detail"]["evidence"], "unverified_entry": is_unverified_entry(r)}
+                for r in rows
                 if r["kind"] in ("verify_ok", "verify_fail") and isinstance(r["detail"].get("evidence"), Mapping)]
     doc = {
         "format": RECEIPT_FORMAT,
@@ -287,6 +346,7 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Ite
             "clock": "local (timestamps are this machine's clock, not attested)",
             "providers": [{"provider": p, "model": m} for p, m in providers],
             "enclave_hosts": enclave_hosts,
+            "unverified_entries": [r["id"] for r in rows if is_unverified_entry(r)],
             "row_count": len(rows),
             "chain_algorithm": CHAIN_ALGORITHM,
             "chain_genesis": CHAIN_GENESIS,
@@ -385,7 +445,8 @@ def _verify_body(r: Mapping) -> str:
     k = r["kind"]
     fp = lambda key: _p(d.get(key))[:16] or "?"  # noqa: E731
     if k in ("verify_ok", "verify_fail"):
-        bits = [k, f"vendor={_p(d.get('vendor') or r['provider']) or '?'}",
+        bits = ["UNVERIFIED ENTRY (no evidence or incomplete capture; proves nothing)"] if is_unverified_entry(r) else []
+        bits += [k, f"vendor={_p(d.get('vendor') or r['provider']) or '?'}",
                 f"enclave={_p(d.get('enclave_host') or r['host']) or '?'}"]
         if d.get("code_fingerprint"):
             bits.append(f"code={fp('code_fingerprint')}")
@@ -440,6 +501,9 @@ def render_text(doc: Mapping) -> str:
         for e in h["enclave_hosts"]:
             add(f"  #{e['row_id']} {_p(e['host'])}")
     add(f"Rows: {h['row_count']}  chain head: {h['chain_head']}")
+    if h["unverified_entries"]:
+        add("Unverified entries (verify_ok rows without complete evidence): "
+            + ", ".join(f"#{i}" for i in h["unverified_entries"]))
     if not doc["rows"]:
         add("No events were recorded for this session.")
 
@@ -460,6 +524,14 @@ def render_text(doc: Mapping) -> str:
             add(f"    approved by {_p(p['approved_by'])} at {_p(p['approved_at'])} via {_p(p['approved_via'])} "
                 f"(rule {_p(p['approval_rule_key'])}); replaced {_p(p['previous']) or '(nothing)'}")
         add(f"  ({tr.get('pins_note', '')})")
+    for p in tr.get("periods", []):
+        head = f"  Period {_p(p['tier']) or '?'} from {ts_text(p['since'])} (seal row #{p['seal_row']}): "
+        if "local_hosts_used" in p:
+            add(head + "local hosts used: " + (", ".join(_p(x) for x in p["local_hosts_used"]) or "(none)"))
+        elif "pin_consent_rows" in p:
+            add(head + "pin consent rows: " + (", ".join(f"#{i}" for i in p["pin_consent_rows"]) or "(none)"))
+        else:
+            add(head + "no trust roots recorded for this tier")
 
     def section(title: str, ids: list[int], body) -> None:
         add("")

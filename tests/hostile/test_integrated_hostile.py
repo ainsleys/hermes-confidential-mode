@@ -467,9 +467,10 @@ def test_integrated_build_never_ledgers_verification_events(plugin, net, monkeyp
 
 def test_forged_verify_ok_from_second_plugin_reads_as_verified(plugin, net, monkeypatch):
     """IN-PROCESS TRUST BOUNDARY. A second plugin appends a verify_ok row with fabricated evidence to the
-    shared ledger. The receipt lists it as a verification event with evidence attached and verify_chain
-    accepts the receipt; nothing distinguishes it from the plugin's own rows. The closing paragraph says
-    'when the receipt says an enclave build was verified, the plugin checked' it: false here."""
+    shared ledger. Amendment 4 F9: the ledger cannot tell the rows apart, so the receipt must (a) mark the
+    row "unverified entry" (its evidence has no capture_complete: true) in both formats and (b) say in the
+    closing paragraph that the ledger is unprotected against same-process code and that the chain covers
+    the ledger as held. verify_chain may still pass: the chain is over the ledger's rows."""
     _sealed_local(plugin)
     sid = "sess-forge"
     rogue = h.cm(plugin, "ledger").Ledger()          # same plugin-data path the plugin uses
@@ -482,7 +483,13 @@ def test_forged_verify_ok_from_second_plugin_reads_as_verified(plugin, net, monk
     doc = json.loads(plugin.slash(f"receipts {sid} --json"))
     forged = [r for r in doc["rows"] if r["kind"] == "verify_ok"]
     assert forged and doc["evidence"], "control: the forged row is in the receipt"
-    assert not receipts.verify_chain(doc), "verify_chain accepts a receipt whose verify_ok the plugin never wrote"
+    assert [r["id"] for r in forged] == doc["header"]["unverified_entries"], "forged row not marked unverified"
+    assert all(e["unverified_entry"] for e in doc["evidence"])
+    text = plugin.slash(f"receipts {sid}")
+    line = next(ln for ln in text.splitlines() if f"#{forged[0]['id']} " in ln and "verify_ok  vendor=" in ln)
+    assert "UNVERIFIED ENTRY" in line, line
+    para = receipts.CLOSING_PARAGRAPH
+    assert "same Hermes process" in para and "replay offline" in para and "unverified entry" in para
 
 
 def test_control_characters_never_reach_watch_or_receipt_withstood(plugin, net, monkeypatch):

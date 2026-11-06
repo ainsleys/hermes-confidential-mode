@@ -25,7 +25,7 @@ SID = "sess-A"
 SECRET = "the merger closes on friday"   # stands in for prompt text; must never appear
 # Golden digest of the closing paragraph: editing the claims split must be a deliberate change here.
 CLOSING_SHA256 = hashlib.sha256(CLOSING_PARAGRAPH.encode("utf-8")).hexdigest()
-CLOSING_SHA256_PINNED = "ce29b5d33f587e28753d4b0753d3225c589d3767cf7ddb9d20452bf47564363a"
+CLOSING_SHA256_PINNED = "81a9633775f2264460d036f44b7562896901729386fc40ccabd8e36b3f559604"
 
 
 class Clock:
@@ -49,7 +49,7 @@ def _ev(kind, **kw):
 
 
 EVIDENCE = {"format": "tinfoil-attestation", "body": "eyJyZXBvcnQiOiAiZmFrZSJ9",
-            "codeFingerprint": "c1" * 32, "enclaveFingerprint": "e1" * 32}
+            "codeFingerprint": "c1" * 32, "enclaveFingerprint": "e1" * 32, "capture_complete": True}
 
 
 def fill_every_kind(led: Ledger, sid: str = SID) -> None:
@@ -174,7 +174,8 @@ def test_every_timestamp_is_labelled_local_clock(ledger, tmp_path):
 def test_json_carries_evidence_and_sections(ledger, tmp_path):
     fill_every_kind(ledger)
     doc = json.loads(render(ledger, SID, pins=_pins(tmp_path), fmt="json"))
-    assert doc["evidence"] == [{"row_id": 3, "evidence": EVIDENCE}]
+    assert doc["evidence"] == [{"row_id": 3, "evidence": EVIDENCE, "unverified_entry": False}]
+    assert doc["header"]["unverified_entries"] == [] and doc["sections"]["unverified_entries"] == []
     sec = doc["sections"]
     assert sec["asks"][0] == {"ask": 6, "answers": [7]} and sec["asks"][1]["answers"] == [9]
     assert sec["allowed_without_prompt"] == [10]
@@ -347,3 +348,83 @@ def test_every_seal_period_is_listed(ledger):
     assert lines[0].startswith("Sealed period: local-only from ") and "(local clock) to 20" in lines[0]
     assert lines[1].startswith("Sealed period: attested from ") and "still sealed at the last row" in lines[1]
     assert doc["header"]["sealed_tier"] == "attested"
+
+
+# ── Amendment 4: unverified entries (F9), per-period trust roots (F11), session markers (F7) ─────
+
+@pytest.mark.parametrize("detail", [
+    {"vendor": "tinfoil"},                                                        # no evidence
+    {"vendor": "tinfoil", "evidence": {}},                                        # empty evidence
+    {"vendor": "tinfoil", "evidence": {"format": "made-up", "quote": "AAAA"}},    # no capture_complete
+    {"vendor": "tinfoil", "evidence": {"format": "x", "capture_complete": False}},
+    {"vendor": "tinfoil", "evidence": {"format": "x", "capture_complete": "true"}},  # not exactly True
+])
+def test_verify_ok_without_complete_evidence_is_an_unverified_entry(ledger, detail):
+    ledger.append(_ev("seal", tier="local-only"))
+    vid = ledger.append(_ev("verify_ok", session_id="", provider="attested-tinfoil", detail=detail))
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))
+    doc = json.loads(render(ledger, SID, fmt="json"))
+    assert doc["header"]["unverified_entries"] == [vid] and doc["sections"]["unverified_entries"] == [vid]
+    assert all(e["unverified_entry"] is True for e in doc["evidence"])
+    assert verify_chain(doc) is True        # the chain is over the ledger as held; the paragraph says so
+    text = render(ledger, SID)
+    line = next(ln for ln in text.splitlines() if f"#{vid} " in ln and "verify_ok" in ln)
+    assert "UNVERIFIED ENTRY" in line
+    assert f"Unverified entries (verify_ok rows without complete evidence): #{vid}" in text
+
+
+def test_complete_evidence_is_not_flagged(ledger):
+    ledger.append(_ev("seal", tier="attested"))
+    ledger.append(_ev("verify_ok", session_id="", detail={"evidence": EVIDENCE}))
+    ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
+    assert "UNVERIFIED" not in render(ledger, SID)
+    assert build_receipt(ledger, SID)["header"]["unverified_entries"] == []
+
+
+def test_trust_roots_per_period_across_a_reseal(ledger, tmp_path):
+    ledger.append(_ev("seal", tier="local-only"))                                                     # 1
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))          # 2
+    ledger.append(_ev("unseal"))                                                                      # 3
+    ledger.append(_ev("pin_applied", provider="tinfoil", decision="approve", detail={"vendor": "tinfoil"}))  # 4
+    ledger.append(_ev("seal", tier="attested"))                                                       # 5
+    ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))   # 6
+    ledger.append(_ev("pin_applied", provider="tinfoil", decision="approve", detail={"vendor": "tinfoil"}))  # 7
+    doc = build_receipt(ledger, SID, pins=_pins(tmp_path))
+    tr = doc["trust_roots"]
+    assert tr["tier"] == "attested"
+    assert tr["local"]["hosts_used"] == ["127.0.0.1"] and tr["pins"]
+    assert [(p["tier"], p["seal_row"]) for p in tr["periods"]] == [("local-only", 1), ("attested", 5)]
+    assert tr["periods"][0]["local_hosts_used"] == ["127.0.0.1"]
+    assert tr["periods"][1]["pin_consent_rows"] == [4, 7]
+    text = render(ledger, SID, pins=_pins(tmp_path))
+    assert "Period local-only from " in text and "(seal row #1): local hosts used: 127.0.0.1" in text
+    assert "(seal row #5): pin consent rows: #4, #7" in text
+    assert "Local endpoint set:" in text and "Pin tinfoil" in text
+
+
+@pytest.mark.parametrize("marker", [
+    {"kind": "seal", "decision": "session_start"}, {"kind": "seal", "decision": "session_end"},
+])
+def test_session_markers_are_not_seal_periods(ledger, marker):
+    sid_seal = ledger.append(_ev("seal", session_id="cli", tier="local-only", decision="sealed"))
+    ledger.append(_ev(marker["kind"], decision=marker["decision"], tier="local-only"))
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))
+    ledger.append(_ev("seal", decision="session_end", tier="local-only"))
+    doc = build_receipt(ledger, SID)
+    periods = doc["header"]["sealed_periods"]
+    assert [p["seal_row"] for p in periods] == [sid_seal]
+    assert doc["header"]["sealed_period"]["since"] == doc["rows"][0]["ts"]
+    assert doc["sections"]["seal"] == [sid_seal]
+
+
+def test_closing_paragraph_discloses_the_in_process_and_aux_limits():
+    text = CLOSING_PARAGRAPH
+    rec = text.index("RECORD ONLY")
+    assert "local file" in text[:rec] and "same Hermes process" in text[:rec]
+    assert "replay offline" in text[:rec] and "confidential_mode.verify.replay" in text[:rec]
+    assert "hermes confidential replay" in text[:rec] and '"unverified entry"' in text[:rec]
+    assert "not that the ledger was complete" in text[:rec]
+    for aux in ("title generation", "compaction", "memory prefetch", "vision", "plugin auxiliary tasks",
+                "recorded here after the fact, not prevented"):
+        assert aux in text[rec:], aux
+    assert "safe-worker" in text
