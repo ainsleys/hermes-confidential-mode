@@ -25,7 +25,7 @@ SID = "sess-A"
 SECRET = "the merger closes on friday"   # stands in for prompt text; must never appear
 # Golden digest of the closing paragraph: editing the claims split must be a deliberate change here.
 CLOSING_SHA256 = hashlib.sha256(CLOSING_PARAGRAPH.encode("utf-8")).hexdigest()
-CLOSING_SHA256_PINNED = "81a9633775f2264460d036f44b7562896901729386fc40ccabd8e36b3f559604"
+CLOSING_SHA256_PINNED = "c6db56eb5047514888f0e6debfac3a5b9de19e48032dbee2050f396c4ee666a8"
 
 
 class Clock:
@@ -319,7 +319,13 @@ def test_closing_paragraph_states_the_claims_split():
     ev, rec = text.index("EVIDENCE:"), text.index("RECORD ONLY")
     assert ev < rec
     evidence_part, record_part = text[ev:rec], text[rec:]
-    assert "verified" in evidence_part and "bound the session key" in evidence_part and "replay" in evidence_part
+    assert "replay offline" in evidence_part
+    for fact in ("TLS key fingerprint T", "HPKE public key H", "measurement M", "repository R", "release tag G",
+                 "as of the capture time the file claims", "long-lived keys, not a per-session key"):
+        assert fact in evidence_part, fact
+    assert "session key" not in text.replace("per-session key", "")
+    assert "plugin checked" not in evidence_part
+    assert "plugin itself checked that evidence during this session" in record_part
     for claim in ("requests actually went to that enclave", "encrypted to that key", "latest release",
                   "revoked after the evidence was captured", "shell", "code-execution",
                   "model backends sit behind the vendor's router", "vendor's operators"):
@@ -423,11 +429,124 @@ def test_session_markers_are_not_seal_periods(ledger, marker):
 def test_closing_paragraph_discloses_the_in_process_and_aux_limits():
     text = CLOSING_PARAGRAPH
     rec = text.index("RECORD ONLY")
-    assert "local file" in text[:rec] and "same Hermes process" in text[:rec]
+    assert "local file" in text and "same Hermes process" in text
     assert "replay offline" in text[:rec] and "confidential_mode.verify.replay" in text[:rec]
-    assert "hermes confidential replay" in text[:rec] and '"unverified entry"' in text[:rec]
-    assert "not that the ledger was complete" in text[:rec]
+    assert "hermes confidential replay <receipt.json>" in text[:rec] and '"unverified entry"' in text[:rec]
+    assert "self-report" in text[:rec]
+    assert "checksum over this document that anyone holding the file can recompute" in text
+    assert "only when compared with a chain head recorded somewhere else" in text
+    assert "says nothing about whether the ledger was complete" in text
     for aux in ("title generation", "compaction", "memory prefetch", "vision", "plugin auxiliary tasks",
                 "recorded here after the fact, not prevented"):
         assert aux in text[rec:], aux
     assert "safe-worker" in text
+
+
+# ── Miller-frame review: header framing, verification facts, send coverage ───────────────────────
+
+def test_header_frames_a_self_report_with_the_chain_head_first(ledger):
+    fill_every_kind(ledger)
+    text = render(ledger, SID)
+    lines = text.splitlines()
+    head = build_receipt(ledger, SID)["header"]["chain_head"]
+    assert lines[1] == f"CHAIN HEAD: {head}"
+    assert lines[2] == "  " + receipts.CHAIN_HEAD_NOTE and "somewhere other than this machine" in lines[2]
+    assert lines[3] == receipts.SELF_REPORT_NOTE and "self-report" in lines[3]
+    assert lines[4].startswith(f"Plugin: {receipts.PLUGIN_VERSION} (commit {receipts.PLUGIN_COMMIT})")
+    doc = build_receipt(ledger, SID)
+    h = doc["header"]
+    assert h["nature"] == receipts.SELF_REPORT_NOTE and h["chain_head_note"] == receipts.CHAIN_HEAD_NOTE
+    assert h["plugin_commit"] == receipts.PLUGIN_COMMIT
+
+
+def test_plugin_commit_comes_from_version_module(ledger, monkeypatch):
+    from confidential_mode import _version
+    assert receipts.PLUGIN_COMMIT is _version.PLUGIN_COMMIT
+    monkeypatch.setattr(receipts, "PLUGIN_COMMIT", "abc1234")
+    ledger.append(_ev("seal", tier="local-only"))
+    assert "(commit abc1234)" in render(ledger, SID)
+
+
+FULL_EVIDENCE = {"schema": 1, "vendor": "tinfoil", "repo": "tinfoilsh/confidential-model-router",
+                 "platform": "sev-snp", "enclave_host": "r1.tinfoil.invalid", "sdk_version": "0.14.2",
+                 "captured_at": "2026-11-06T00:00:00Z", "capture_complete": True,
+                 "claims": {"code_fingerprint": "c1" * 32, "enclave_fingerprint": "e1" * 32, "release_tag": "v1.0.0",
+                            "tls_public_key_fp": "71" * 32, "hpke_public_key": "48" * 32}}
+
+
+def test_verification_row_shows_repo_platform_host_and_committed_keys(ledger):
+    ledger.append(_ev("seal", tier="attested"))
+    ledger.append(_ev("verify_ok", session_id="", host="r1.tinfoil.invalid", detail={"vendor": "tinfoil",
+                                                                                     "evidence": FULL_EVIDENCE}))
+    ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
+    text = render(ledger, SID)
+    line = next(ln for ln in text.splitlines() if "verify_ok  vendor=" in ln)
+    for part in ("repo=tinfoilsh/confidential-model-router", "platform=sev-snp", "enclave=r1.tinfoil.invalid",
+                 f"code={'c1' * 32}", f"measurement={'e1' * 32}", f"tls_key_fp={'71' * 32}",
+                 f"hpke_key={'48' * 32}", "release=v1.0.0", "capture claims 2026-11-06T00:00:00Z"):
+        assert part in line, part
+    assert "verifier SDK: 0.14.2" in text
+    assert build_receipt(ledger, SID)["header"]["sdk_versions"] == ["0.14.2"]
+
+
+def _attested_sends(ledger, gaps, **verify_detail):
+    clock = ledger._clock
+    ledger.append(_ev("seal", tier="attested"))
+    vid = ledger.append(_ev("verify_ok", session_id="", host="r1.tinfoil.invalid",
+                            detail={"evidence": FULL_EVIDENCE, **verify_detail}))
+    ids = []
+    for gap in gaps:
+        clock.t += gap
+        ids.append(ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested",
+                                     decision="allowed")))
+    return vid, ids
+
+
+def test_each_attested_send_names_its_verify_row_and_ttl_window(ledger):
+    vid, (inside, outside) = _attested_sends(ledger, [10, 400])
+    doc = build_receipt(ledger, SID)
+    cov = {c["send"]: c for c in doc["sections"]["send_coverage"]}
+    assert cov[inside]["verify"] == vid and cov[inside]["covered"] is True
+    assert cov[inside]["ttl_seconds"] == 300.0 and cov[inside]["ttl_source"].startswith("default")
+    vrow = next(r for r in doc["rows"] if r["id"] == vid)
+    assert cov[inside]["window_start"] == vrow["ts"] and cov[inside]["window_end"] == vrow["ts"] + 300.0
+    assert cov[outside]["verify"] == vid and cov[outside]["covered"] is False
+    text = render(ledger, SID)
+    send_lines = [ln for ln in text.splitlines() if "main  host=r1.tinfoil.invalid" in ln]
+    assert f"covered by verify #{vid}, TTL 300 s (default" in send_lines[0] and "(local clock) to " in send_lines[0]
+    assert f"NOT covered: outside the TTL window of verify #{vid}" in send_lines[1]
+    assert doc["header"]["verify_ttl_seconds"] == 300.0
+
+
+def test_ttl_from_argument_and_from_the_verify_row(ledger, tmp_path):
+    vid, (send,) = _attested_sends(ledger, [400])
+    doc = build_receipt(ledger, SID, ttl_seconds=600)
+    c = doc["sections"]["send_coverage"][0]
+    assert (c["covered"], c["ttl_seconds"], c["ttl_source"]) == (True, 600.0, "config")
+    led2 = Ledger(tmp_path / "l2.sqlite", clock=Clock())
+    _attested_sends(led2, [400], ttl_seconds=900)
+    c = build_receipt(led2, SID, ttl_seconds=60)["sections"]["send_coverage"][0]
+    assert (c["covered"], c["ttl_seconds"], c["ttl_source"]) == (True, 900.0, "verify row")
+    led2.close()
+
+
+def test_attested_send_with_no_verify_row_is_not_covered(ledger):
+    ledger.append(_ev("seal", tier="attested"))
+    sid_send = ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
+    c = build_receipt(ledger, SID)["sections"]["send_coverage"]
+    assert c == [{"send": sid_send, "verify": None, "ttl_seconds": 300.0, "ttl_source": c[0]["ttl_source"],
+                  "window_start": None, "window_end": None, "covered": False, "verify_unverified_entry": None}]
+    assert "NOT covered: no verify_ok row before this send" in render(ledger, SID)
+
+
+def test_coverage_by_an_unverified_entry_is_flagged(ledger):
+    ledger.append(_ev("seal", tier="attested"))
+    vid = ledger.append(_ev("verify_ok", session_id="", host="r1.tinfoil.invalid", detail={"vendor": "x"}))
+    ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
+    assert f"covered by verify #{vid} (an unverified entry)" in render(ledger, SID)
+
+
+def test_local_sends_have_no_coverage_entry(ledger):
+    ledger.append(_ev("seal", tier="local-only"))
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))
+    assert build_receipt(ledger, SID)["sections"]["send_coverage"] == []
