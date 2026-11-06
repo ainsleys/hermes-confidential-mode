@@ -4,7 +4,7 @@ description: "Seal a profile to local-only or attested (Tinfoil enclave) inferen
 homepage: https://github.com/ainsleys/hermes-confidential-mode#readme
 author: ainsleys
 kind: standalone
-requires_hermes: ">=0.22.7"
+requires_hermes: ">=0.23.0"
 requires_env:
   - TINFOIL_API_KEY
 provides_tools: []
