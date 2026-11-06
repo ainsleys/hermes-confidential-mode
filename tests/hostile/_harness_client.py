@@ -440,7 +440,7 @@ class FakeClock:
 
 
 def build_profile(cm, adapter, store, ttl: float = 300.0):
-    return cm.make_profile(adapter, store, ttl_seconds=ttl)
+    return cm.make_profile(adapter, store, ttl_seconds=ttl, verify_wait_seconds=5)
 
 
 def create(profile, **extra):
