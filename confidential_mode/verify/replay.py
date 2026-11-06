@@ -84,6 +84,17 @@ class ReplayResult:
     log_index: int | None = None
     integrated_time: int | None = None
     not_established: tuple[str, ...] = field(default=NOT_ESTABLISHED)
+    # Older spellings, kept in sync with the *_asserted fields (same capturer-asserted values).
+    enclave_host: str | None = None
+    captured_at: str | None = None
+
+    def __post_init__(self):
+        for new, old in (("enclave_host_asserted", "enclave_host"), ("captured_at_asserted", "captured_at")):
+            a, b = getattr(self, new), getattr(self, old)
+            if a is None and b is not None:
+                object.__setattr__(self, new, b)
+            elif b is None and a is not None:
+                object.__setattr__(self, old, a)
 
 
 class _Checks:
