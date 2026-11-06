@@ -562,3 +562,208 @@ def test_sealed_off_tier_refused_on_streaming_turn(monkeypatch, manager, tmp_pat
     env = Env(tmp_path, sealed=True, predicate=FakePredicate(Tier.LOCAL, in_tier=False, reason="off"))
     register(manager, env.fn)
     assert_clean_refusal(agent.run_conversation("q"), rec, agent, off_tier_text(Tier.LOCAL, "off"))
+
+
+# ---------------------------------------------------------------------------------------------
+# 10. Ruling 8: only exactly ``True`` permits; truthy non-bools refuse. Each check has a twin
+#     whose mutant uses Python truthiness at that one site.
+# ---------------------------------------------------------------------------------------------
+
+
+class _Truthy:
+    def __bool__(self):
+        return True
+
+
+TRUTHY_NOT_TRUE = ["False", "no", 1, [False], _Truthy()]
+
+
+def _magic():
+    from unittest.mock import MagicMock
+    return MagicMock()
+
+
+class _OddVerdict(Verdict):
+    """A Verdict subclass whose in_tier is whatever the test sets (frozen dataclass bypassed)."""
+    def __init__(self, in_tier, reason="odd", host=""):
+        object.__setattr__(self, "in_tier", in_tier)
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "host", host)
+
+
+class OddPredicate(FakePredicate):
+    def __init__(self, tier, value):
+        super().__init__(tier)
+        self.value = value
+
+    def classify(self, dest):
+        self.calls.append(dest)
+        return _OddVerdict(self.value)
+
+
+def _truthiness_mutant(site):
+    class M(LlmGate):
+        @staticmethod
+        def permits(value, what):
+            return bool(value) if what == site else value is True
+    M.__name__ = f"MutantTruthy_{site}"
+    return M
+
+
+class MutantTruthySealedFalse(LlmGate):
+    @staticmethod
+    def is_false(value):
+        return not value
+
+
+class MutantNoTierMatch(LlmGate):
+    @staticmethod
+    def same_tier(a, b):
+        return True
+
+
+def check_verdict_truthy_refused(monkeypatch, manager, tmp_path, value, gate_cls=LlmGate):
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+                                       tier=Tier.LOCAL, predicate=OddPredicate(Tier.LOCAL, value),
+                                       fallback=True, gate_cls=gate_cls)
+    assert_clean_refusal(result, rec, agent, off_tier_text(Tier.LOCAL, "odd"))
+
+
+@pytest.mark.parametrize("value", TRUTHY_NOT_TRUE + ["magic"], ids=repr)
+def test_verdict_in_tier_not_exactly_true_refuses(monkeypatch, manager, tmp_path, value):
+    check_verdict_truthy_refused(monkeypatch, manager, tmp_path, _magic() if value == "magic" else value)
+
+
+@pytest.mark.parametrize("value", ["no", 1, [False]], ids=repr)
+def test_mutant_truthy_verdict_is_caught(monkeypatch, manager, tmp_path, value):
+    with pytest.raises(AssertionError):
+        check_verdict_truthy_refused(monkeypatch, manager, tmp_path, value, _truthiness_mutant("verdict"))
+
+
+class OddAttested(FakeAttested):
+    def __init__(self, value):
+        super().__init__()
+        self.value = value
+
+    def __call__(self, provider):
+        self.calls.append(provider)
+        return _OddVerdict(self.value, reason="odd attestation")
+
+
+def check_attested_truthy_refused(monkeypatch, manager, tmp_path, value, gate_cls=LlmGate):
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+                                       tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED),
+                                       attested=OddAttested(value), fallback=True, gate_cls=gate_cls)
+    assert_clean_refusal(result, rec, agent, gate_llm.attested_fail_text("odd attestation"))
+
+
+@pytest.mark.parametrize("value", TRUTHY_NOT_TRUE + ["magic"], ids=repr)
+def test_attested_in_tier_not_exactly_true_refuses(monkeypatch, manager, tmp_path, value):
+    check_attested_truthy_refused(monkeypatch, manager, tmp_path, _magic() if value == "magic" else value)
+
+
+@pytest.mark.parametrize("value", ["no", 1], ids=repr)
+def test_mutant_truthy_attested_is_caught(monkeypatch, manager, tmp_path, value):
+    with pytest.raises(AssertionError):
+        check_attested_truthy_refused(monkeypatch, manager, tmp_path, value, _truthiness_mutant("attested"))
+
+
+def check_sealed_flag_non_bool_refused(monkeypatch, manager, tmp_path, flag, gate_cls=LlmGate):
+    """A falsy-but-not-False sealed flag must not read as 'unsealed' (that would skip the gate)."""
+    rec = Rec()
+    agent = build_agent(monkeypatch, "chat_completions", rec)
+    env = Env(tmp_path)
+    fn = build_middleware(ledger=env.ledger, is_sealed=lambda: (flag, Tier.LOCAL),
+                          predicate_for=lambda t: FakePredicate(Tier.LOCAL, in_tier=False, reason="off"),
+                          attested_ok=env.attested, gate_cls=gate_cls)
+    register(manager, fn)
+    assert_clean_refusal(agent.run_conversation("q"), rec, agent, gate_llm.TEXT_STATE_UNREADABLE)
+
+
+@pytest.mark.parametrize("flag", [0, None, "", [], "False", "yes", 1, _Truthy()], ids=repr)
+def test_sealed_flag_not_a_bool_refuses(monkeypatch, manager, tmp_path, flag):
+    check_sealed_flag_non_bool_refused(monkeypatch, manager, tmp_path, flag)
+
+
+@pytest.mark.parametrize("flag", [0, None, ""], ids=repr)
+def test_mutant_truthy_sealed_flag_is_caught(monkeypatch, manager, tmp_path, flag):
+    with pytest.raises(AssertionError):
+        check_sealed_flag_non_bool_refused(monkeypatch, manager, tmp_path, flag, MutantTruthySealedFalse)
+
+
+def check_tier_mismatch_refused(monkeypatch, manager, tmp_path, gate_cls=LlmGate):
+    att = FakeAttested(ok=True)
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+                                       tier=Tier.ATTESTED, predicate=FakePredicate(Tier.LOCAL, in_tier=True),
+                                       attested=att, gate_cls=gate_cls)
+    assert_clean_refusal(result, rec, agent, TEXT_INTERNAL_ERROR)
+
+
+def test_tier_mismatch_refused_even_when_attested_ok(monkeypatch, manager, tmp_path):
+    check_tier_mismatch_refused(monkeypatch, manager, tmp_path)
+
+
+def test_mutant_tier_match_skipped_is_caught(monkeypatch, manager, tmp_path):
+    with pytest.raises(AssertionError):
+        check_tier_mismatch_refused(monkeypatch, manager, tmp_path, MutantNoTierMatch)
+
+
+def check_pin_pending_truthy_not_pin_message(monkeypatch, manager, tmp_path, value, gate_cls=LlmGate):
+    """pin_pending only picks the text (both branches refuse), but a truthy non-True must not claim
+    a staged pin exists."""
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+                                       tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED),
+                                       attested=FakeAttested(ok=False, reason="stale"),
+                                       pin_pending=lambda: value, gate_cls=gate_cls)
+    assert_clean_refusal(result, rec, agent, gate_llm.attested_fail_text("stale"))
+
+
+@pytest.mark.parametrize("value", ["yes", 1, _Truthy()], ids=repr)
+def test_pin_pending_not_exactly_true_is_not_a_staged_pin(monkeypatch, manager, tmp_path, value):
+    check_pin_pending_truthy_not_pin_message(monkeypatch, manager, tmp_path, value)
+
+
+def test_mutant_truthy_pin_pending_is_caught(monkeypatch, manager, tmp_path):
+    with pytest.raises(AssertionError):
+        check_pin_pending_truthy_not_pin_message(monkeypatch, manager, tmp_path, "yes",
+                                                 _truthiness_mutant("pin_pending"))
+
+
+# ---------------------------------------------------------------------------------------------
+# 11. W2 RefusingClient raising ConfidentialRefused inside next_call -> refusal, no fallback
+# ---------------------------------------------------------------------------------------------
+
+
+def check_refusing_client_refused(monkeypatch, manager, tmp_path, gate_cls=LlmGate):
+    from confidential_mode.client import ConfidentialRefused, RefusingClient
+
+    rec = Rec()
+    agent = build_agent(monkeypatch, "chat_completions", rec)
+    arm_fallback_chain(monkeypatch, agent)
+    client = RefusingClient("attested verification is not fresh", base_url="https://enclave.example.test/v1")
+
+    def _terminal(api_kwargs, **_kw):
+        rec.provider_calls.append(api_kwargs)
+        return client.chat.completions.create(**api_kwargs)   # raises ConfidentialRefused
+
+    agent._interruptible_api_call = _terminal
+    env = Env(tmp_path, sealed=True, tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED),
+              attested=FakeAttested(ok=True), gate_cls=gate_cls)
+    register(manager, env.fn)
+    result = agent.run_conversation("q")
+    assert result["final_response"] == TEXT_PROVIDER_ERROR and result["completed"] is True
+    assert len(rec.provider_calls) == 1, "RefusingClient reached once; no retry"
+    assert rec.fallback_calls == [] and agent._fallback_index == 0, "fallback never armed"
+    assert rec.backoff_calls == [] and rec.backoff_sleeps == [] and rec.error_hook_calls == []
+    assert getattr(agent, "_rate_limited_until", 0) in (0, None)
+    rows = env.ledger.tail(0)
+    assert rows[-1].kind == "send_refused" and rows[-1].detail["error_type"] == ConfidentialRefused.__name__
+
+
+def test_refusing_client_inside_next_call_becomes_refusal(monkeypatch, manager, tmp_path):
+    check_refusing_client_refused(monkeypatch, manager, tmp_path)
+
+
+def test_mutant_refusing_client_uncaught_is_caught(monkeypatch, manager, tmp_path):
+    with pytest.raises(AssertionError):
+        check_refusing_client_refused(monkeypatch, manager, tmp_path, MutantUncaughtProviderError)
