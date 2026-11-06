@@ -28,6 +28,9 @@ def dest(base_url="", provider="custom", purpose="main"):
     ("", ""),
     ("http://", ""),
     ("http://[::1", ""),  # unbalanced bracket: unparsable
+    ("http://evil.com\\@127.0.0.1/v1", "evil.com"),  # backslash read as a path separator, as httpx does
+    ("\x00", ""),
+    (None, ""),
 ])
 def test_host_of(url, host):
     assert host_of(url) == host
@@ -59,8 +62,9 @@ def test_extra_hosts_case_and_brackets():
 
 
 @pytest.mark.parametrize("url", [
-    "http://127.0.0.1:8080/v1", "http://[::1]:11434", "localhost:1234", "https://10.0.0.5/v1",
-    "http://100.100.1.1/v1", "http://[fd00::1]/v1", "http://[fe80::1%25en0]:8000/v1", "192.168.1.9",
+    "http://127.0.0.1:8080/v1", "http://[::1]:11434", "http://localhost:1234", "https://10.0.0.5/v1",
+    "http://100.100.1.1/v1", "http://[fd00::1]/v1", "http://[fe80::1%25en0]:8000/v1", "HTTP://192.168.1.9",
+    "http://user:pw@evil.com@127.0.0.1/v1", "http://[::ffff:10.0.0.1]/v1",
 ])
 def test_local_predicate_in_tier(url):
     v = LocalPredicate().classify(dest(url))
@@ -71,7 +75,29 @@ def test_local_predicate_in_tier(url):
     ("https://api.openai.com/v1", "not an IP literal"),
     ("http://8.8.8.8/v1", "not on a local network"),
     ("http://[2001:db8::1]/v1", "not on a local network"),
-    ("http://", "no parsable host"),
+    ("http://", "no host"),
+    ("http://evil.com\\@127.0.0.1/v1", "backslash"),
+    ("http://127.0.0.1\\/v1", "backslash"),
+    ("localhost:11434/v1", "http:// or https://"),
+    ("192.168.1.9", "http:// or https://"),
+    ("//127.0.0.1/v1", "http:// or https://"),
+    ("ftp://127.0.0.1/", "http:// or https://"),
+    ("file:///etc/passwd", "http:// or https://"),
+    ("http://localhost:99999/v1", "malformed"),
+    ("http://localhost:abc/v1", "malformed"),
+    ("http://[::1/v1", "malformed"),
+    ("http://localhost%2eevil.com/v1", "percent-encoded"),
+    ("http://127.0.0.1\n.evil.com/v1", "control"),
+    ("http://127.0.0.1 /v1", "control"),
+    ("\x00", "control"),
+    ("http://l\u043ecalhost/v1", "non-ASCII"),
+    ("http://xn--lcalhost-9vf/v1", "not an IP literal"),
+    ("http://0x7f000001/v1", "not an IP literal"),
+    ("http://2130706433/v1", "not an IP literal"),
+    ("http://127.1/v1", "not an IP literal"),
+    ("http://0.0.0.0/v1", "not on a local network"),
+    ("http://169.254.169.254/latest", "not on a local network"),
+    ("http://[::ffff:8.8.8.8]/v1", "not on a local network"),
 ])
 def test_local_predicate_off_tier(url, reason_part):
     v = LocalPredicate().classify(dest(url))
@@ -154,3 +180,31 @@ def test_zdr_stub_always_off_tier():
     assert p.tier == Tier.ZDR
     v = p.classify(dest("http://127.0.0.1/v1"))
     assert not v.in_tier and v.reason == "zero-retention tier not implemented" and v.host == "127.0.0.1"
+
+
+def test_profile_lookup_may_return_profile_objects():
+    class P:
+        def __init__(self, url):
+            self.base_url = url
+    table = {"ollama": P("http://localhost:11434/v1"), "hosted": P("https://x.example/v1"), "none": P(None)}
+    p = LocalPredicate(profile_base_url=table.get)
+    assert p.classify(dest("", provider="ollama")).in_tier
+    assert not p.classify(dest("", provider="hosted")).in_tier
+    assert not p.classify(dest("", provider="none")).in_tier
+    assert not p.classify(dest("", provider="missing")).in_tier
+
+
+def test_profile_base_url_is_held_to_the_strict_parser():
+    p = LocalPredicate(profile_base_url=lambda _: "localhost:11434/v1")  # schemeless default
+    assert not p.classify(dest("", provider="x")).in_tier
+
+
+def test_attested_provider_match_is_exact():
+    p = AttestedPredicate({"attested-tinfoil"}, lambda _: Verdict(True, "ok", ""))
+    for prov in ("Attested-Tinfoil", " attested-tinfoil", "attested-tinfoil-evil", ""):
+        assert not p.classify(dest("", provider=prov)).in_tier, prov
+
+
+def test_attested_rejects_malformed_base_url():
+    p = AttestedPredicate({"attested-tinfoil"}, lambda _: Verdict(True, "ok", ""))
+    assert not p.classify(dest("https://inference.tinfoil.sh\\@evil/v1", provider="attested-tinfoil")).in_tier

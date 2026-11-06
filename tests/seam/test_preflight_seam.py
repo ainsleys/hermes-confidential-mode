@@ -102,6 +102,9 @@ def test_plugin_registered_aux_task_appears_in_report(hermes_home, plugin_task):
     assert by_key["mcp_servers.fs.command"].verdict == "local"
     assert by_key["mcp_servers.remote.url"].verdict == "off_tier"
     assert by_key["plugins.isolation"].verdict == "local"
+    # Hermes' merged default tts.provider is "edge" (hosted); delegation unset inherits the local main.
+    assert by_key["tts.provider"].value_redacted == "edge" and by_key["tts.provider"].verdict == "off_tier"
+    assert by_key["delegation.provider"].verdict == "local"
     assert "auxiliary.w3seam_task.provider" in text
     assert not report.ok
     for task in pf.builtin_aux_task_names():
