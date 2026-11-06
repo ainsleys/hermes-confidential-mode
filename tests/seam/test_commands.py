@@ -284,7 +284,8 @@ def test_cli_replay_runs_the_real_replay_and_fails_on_scenario_evidence(plugin, 
     replay = _sub(plugin, "verify.replay")
     assert "hash chain intact" in out and "Row #" in out and ": FAIL" in out
     assert f"  hardware_signature: fail: evidence: schema is not {replay.EVIDENCE_SCHEMA}" in out
-    assert "repo: tinfoilsh/confidential-model-router  host: router.tinfoil.invalid" in out
+    assert "repo: tinfoilsh/confidential-model-router" in out
+    assert "enclave_host: router.tinfoil.invalid (asserted by capturer)" in out
     assert "Expected repo: tinfoilsh/confidential-model-router" in out
     assert "not independent" in out                                     # trust root and as_of sources named
     for line in replay.NOT_ESTABLISHED:
@@ -332,7 +333,7 @@ def test_cli_replay_passes_identity_arguments_and_exits_zero_only_when_all_match
     out = io.StringIO()
     wrong = lambda evidence, *, as_of=None, trust_root_dir=None: ok_result(code_fingerprint="0" * 64)  # noqa: E731
     assert commands.cli_replay(args, out=out, replay_fn=wrong) == 1
-    assert "do not match the receipt row's claimed fingerprints" in out.getvalue()
+    assert "do not match the expected ones (taken from the receipt itself (not independent))" in out.getvalue()
     # A replay that is not ok fails, and an unreadable receipt is exit 2.
     assert commands.cli_replay(args, out=io.StringIO(), replay_fn=lambda e, **k: ok_result(ok=False)) == 1
     args.receipt = str(tmp_path / "missing.json")
@@ -384,3 +385,84 @@ def test_stamp_version_script_round_trips(tmp_path):
     assert f'PLUGIN_COMMIT = "{sha}-dirty"' in (work / "confidential_mode" / "_version.py").read_text()
     run("--reset")
     assert 'PLUGIN_COMMIT = "unpackaged"' in (work / "confidential_mode" / "_version.py").read_text()
+
+
+def test_cli_replay_expected_fingerprints_come_from_the_pin_or_the_flag_not_the_receipt(plugin, tmp_path):
+    import io
+    path, r = _receipt_with_scenario_evidence(plugin, tmp_path)
+    commands, replay = _sub(plugin, "commands"), _sub(plugin, "verify.replay")
+    calls = []
+
+    def result(**over):
+        base = dict(ok=True, checks={k: True for k in replay.CHECK_KEYS}, code_fingerprint=r.code_fingerprint,
+                    enclave_fingerprint=r.enclave_fingerprint, release_tag=r.release_tag, tls_key_fp=None,
+                    hpke_public_key=None, as_of="2026-11-06T00:00:00Z", sdk_version="0.14.2",
+                    enclave_host="router.tinfoil.invalid", captured_at="2026-11-06T00:00:00Z",
+                    repo="tinfoilsh/confidential-model-router")
+        base.update(over)
+        return replay.ReplayResult(**base)
+
+    def ids_replay(evidence, *, expected_repo=None, expected_fingerprints=None, trusted_root=None, as_of=None,
+                   expected_repo_id=None, expected_owner_id=None):
+        calls.append((expected_fingerprints, expected_repo_id, expected_owner_id))
+        ok = expected_fingerprints == (r.code_fingerprint, r.enclave_fingerprint)
+        return result(ok=ok)
+
+    def args(**kw):
+        base = dict(receipt=str(path), expected_repo="tinfoilsh/confidential-model-router", trusted_root=None,
+                    as_of=None, pins=None, expected_fingerprints=None, expected_repo_id=None, expected_owner_id=None)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    # 1. No pin yet: the receipt's own values, labelled as not independent.
+    out = io.StringIO()
+    assert commands.cli_replay(args(), out=out, replay_fn=ids_replay, rt=plugin.rt) == 0
+    text = out.getvalue()
+    assert "expected fingerprints: taken from the receipt itself (not independent)" in text
+    assert "enclave_host: router.tinfoil.invalid (asserted by capturer)" in text
+    assert "captured_at: 2026-11-06T00:00:00Z (asserted by capturer)" in text
+
+    # 2. The human-approved pin (a different build) supplies the expectation: the self-report no longer passes.
+    pins = plugin.rt.pins
+    pins.apply(pins.stage(_result(plugin, code="ab" * 32, enclave="cd" * 32)), approved_via="test")
+    out = io.StringIO()
+    assert commands.cli_replay(args(), out=out, replay_fn=ids_replay, rt=plugin.rt) == 1
+    assert calls[-1][0] == ("ab" * 32, "cd" * 32)
+    assert f"the pin in {pins.path} (approved by human" in out.getvalue()
+    # ... and an older replay without expected_fingerprints is checked here against the pin.
+    old = lambda evidence, *, as_of=None, trust_root_dir=None: result()  # noqa: E731
+    out = io.StringIO()
+    assert commands.cli_replay(args(), out=out, replay_fn=old, rt=plugin.rt) == 1
+    assert "do not match the expected ones (the pin in" in out.getvalue()
+    # --pins PATH picks another pins file; an unreadable one is exit 2.
+    other = _sub(plugin, "pins").PinStore(tmp_path / "other-pins.yaml")
+    other.apply(other.stage(_result(plugin, code=r.code_fingerprint, enclave=r.enclave_fingerprint)),
+                approved_via="test")
+    assert commands.cli_replay(args(pins=str(other.path)), out=io.StringIO(), replay_fn=ids_replay, rt=plugin.rt) == 0
+    assert commands.cli_replay(args(pins=str(tmp_path / "nope.yaml")), out=io.StringIO(), replay_fn=ids_replay,
+                               rt=plugin.rt) == 2
+
+    # 3. --expected-fingerprints overrides the pin; malformed is exit 2.
+    flag = f"{r.code_fingerprint}:{r.enclave_fingerprint}"
+    out = io.StringIO()
+    assert commands.cli_replay(args(expected_fingerprints=flag), out=out, replay_fn=ids_replay, rt=plugin.rt) == 0
+    assert "expected fingerprints: --expected-fingerprints" in out.getvalue()
+    assert commands.cli_replay(args(expected_fingerprints="nothex"), out=io.StringIO(), replay_fn=ids_replay,
+                               rt=plugin.rt) == 2
+
+    # 4. Numeric repo / owner ids pass through when replay accepts them; otherwise the row fails.
+    assert commands.cli_replay(args(expected_fingerprints=flag, expected_repo_id="123", expected_owner_id="456"),
+                               out=io.StringIO(), replay_fn=ids_replay, rt=plugin.rt) == 0
+    assert calls[-1][1:] == ("123", "456")
+    out = io.StringIO()
+    assert commands.cli_replay(args(expected_fingerprints=flag, expected_repo_id="123"), out=out,
+                               replay_fn=lambda e, *, expected_repo=None, expected_fingerprints=None, as_of=None,
+                               trusted_root=None: result(), rt=plugin.rt) == 1
+    assert "cannot check --expected-repo-id" in out.getvalue()
+
+
+def test_cli_replay_flags_parse(plugin):
+    parser, _ = _replay_parser(plugin)
+    a = parser.parse_args(["replay", "r.json", "--pins", "p.yaml", "--expected-fingerprints", "aa:bb",
+                           "--expected-repo-id", "1", "--expected-owner-id", "2"])
+    assert (a.pins, a.expected_fingerprints, a.expected_repo_id, a.expected_owner_id) == ("p.yaml", "aa:bb", "1", "2")

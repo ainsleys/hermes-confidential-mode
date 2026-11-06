@@ -504,7 +504,8 @@ def _replay_module():
 
 
 def _call_replay(replay_fn: Callable[..., Any], evidence: dict, *, expected_repo: str,
-                 expected_fingerprints: Optional[tuple], trusted_root: Optional[str], as_of: Optional[str]):
+                 expected_fingerprints: Optional[tuple], trusted_root: Optional[str], as_of: Optional[str],
+                 expected_repo_id: Optional[str] = None, expected_owner_id: Optional[str] = None):
     """Call replay with the keyword arguments it accepts. Returns (result, notes) where notes lists the
     identity checks this replay version cannot do (they are then done here, on the result fields)."""
     import inspect
@@ -530,6 +531,14 @@ def _call_replay(replay_fn: Callable[..., Any], evidence: dict, *, expected_repo
             kwargs["expected_fingerprints"] = expected_fingerprints
         else:
             notes.append("expected_fingerprints")
+    # Numeric Fulcio Source Repository / Owner IDs (OIDs 1.3.6.1.4.1.57264.1.15 / .17): passed only when the
+    # installed replay accepts them; otherwise the row fails (names can be renamed or transferred).
+    for name, value in (("expected_repo_id", expected_repo_id), ("expected_owner_id", expected_owner_id)):
+        if value:
+            if takes(name):
+                kwargs[name] = value
+            else:
+                notes.append(name)
     if trusted_root:
         if takes("trusted_root"):
             kwargs["trusted_root"] = trusted_root
@@ -541,6 +550,14 @@ def _call_replay(replay_fn: Callable[..., Any], evidence: dict, *, expected_repo
     return replay_fn(evidence, **kwargs), notes
 
 
+def _row_vendor(doc: dict, row_id: Any) -> Optional[str]:
+    for row in doc.get("rows") or []:
+        if isinstance(row, dict) and row.get("id") == row_id:
+            d = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+            return d.get("vendor")
+    return None
+
+
 def _row_claims(doc: dict, row_id: Any) -> tuple[Optional[str], Optional[str]]:
     for row in doc.get("rows") or []:
         if isinstance(row, dict) and row.get("id") == row_id:
@@ -549,10 +566,64 @@ def _row_claims(doc: dict, row_id: Any) -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
-def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None) -> int:
+def _parse_fingerprints(value: Optional[str]) -> Optional[tuple[str, str]]:
+    if not value:
+        return None
+    code, sep, enclave = value.partition(":")
+    code, enclave = code.strip().lower(), enclave.strip().lower()
+    if not sep or not code or not enclave or any(c not in "0123456789abcdef" for c in code + enclave):
+        raise ValueError("expected CODE:ENCLAVE (hex fingerprints)")
+    return code, enclave
+
+
+def _default_pins_path(rt: Any) -> Optional[str]:
+    pins = getattr(rt, "pins", None) if rt is not None else None
+    path = getattr(pins, "path", None)
+    return str(path) if path else None
+
+
+def _expected_for_row(*, flag: Optional[tuple], pin_records: Optional[dict], pins_path: Optional[str],
+                      vendor: str, expected_repo: str, claimed: tuple) -> tuple[Optional[tuple], str]:
+    """(expected fingerprints, source text). Order: --expected-fingerprints, the human-approved pin for
+    (vendor, expected repo), and only then the receipt's own claim (which checks the self-report against
+    itself and is labelled so)."""
+    if flag:
+        return flag, "--expected-fingerprints"
+    rec = (pin_records or {}).get((vendor, expected_repo))
+    if rec is not None:
+        return ((rec.code_fingerprint, rec.enclave_fingerprint),
+                f"the pin in {pins_path} (approved by {rec.approved_by} at {rec.approved_at} via {rec.approved_via})")
+    if all(claimed):
+        return tuple(claimed), "taken from the receipt itself (not independent)"
+    return None, "none available (no flag, no pin for this vendor/repo, no claim in the receipt)"
+
+
+def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None, rt: Any = None) -> int:
     """`hermes confidential replay <receipt.json>`: re-run every evidence blob in a receipt offline.
-    Exit 0 only when every row replays ok AND matches the expected repo and the row's fingerprints."""
+    Exit 0 only when every row replays ok AND matches the expected repo and the expected fingerprints
+    (from --expected-fingerprints, else the approved pin in --pins / the profile's pins.yaml, else, labelled
+    as not independent, the receipt's own row)."""
     out = out or sys.stdout
+    try:
+        flag_fps = _parse_fingerprints(getattr(args, "expected_fingerprints", None))
+    except ValueError as exc:
+        out.write(f"--expected-fingerprints: {exc}\n")
+        return 2
+    pins_arg = getattr(args, "pins", None)
+    pins_path = pins_arg or _default_pins_path(rt)
+    pin_records: Optional[dict] = None
+    pins_note = ""
+    if pins_path and not flag_fps:
+        try:
+            from .pins import PinStore
+            if pins_arg and not os.path.exists(pins_arg):
+                raise FileNotFoundError(pins_arg)
+            pin_records = PinStore(pins_path).load()[0]
+        except Exception as exc:  # noqa: BLE001
+            if pins_arg:
+                out.write(f"Cannot read pins {pins_arg!r}: {type(exc).__name__}: {exc}\n")
+                return 2
+            pins_note = f" (could not read {pins_path}: {type(exc).__name__})"
     path = getattr(args, "receipt", None)
     try:
         with open(path, encoding="utf-8") as fh:
@@ -577,6 +648,12 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None)
     items = [i for i in (doc.get("evidence") or []) if isinstance(i, dict) and isinstance(i.get("evidence"), dict)]
     out.write(f"Receipt: {path}  session {(doc.get('header') or {}).get('session_id', '?')}  hash chain {chain}\n")
     out.write(f"Expected repo: {expected_repo}\n")
+    for flag_name, label in (("expected_repo_id", "Expected repo id"), ("expected_owner_id", "Expected owner id")):
+        if getattr(args, flag_name, None):
+            out.write(f"{label}: {getattr(args, flag_name)}\n")
+    out.write("Expected fingerprints: " + ("--expected-fingerprints" if flag_fps else
+                                           f"pins {pins_path}{pins_note}" if pins_path else "no pins file")
+              + " (per row below)\n")
     out.write("Trust root: " + (f"{trusted_root} (supplied with --trusted-root)" if trusted_root else
                                 "the copy recorded in the evidence (chosen by whoever captured it, not independent)")
               + "\n")
@@ -590,10 +667,14 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None)
         ev = item["evidence"]
         row_id = item.get("row_id")
         claimed = _row_claims(doc, row_id)
-        fps = claimed if all(claimed) else None
+        vendor = str(_row_vendor(doc, row_id) or ev.get("vendor") or "tinfoil")
+        fps, fps_source = _expected_for_row(flag=flag_fps, pin_records=pin_records, pins_path=pins_path,
+                                            vendor=vendor, expected_repo=expected_repo, claimed=claimed)
         try:
             result, notes = _call_replay(replay_fn, ev, expected_repo=expected_repo, expected_fingerprints=fps,
-                                         trusted_root=trusted_root, as_of=as_of)
+                                         trusted_root=trusted_root, as_of=as_of,
+                                         expected_repo_id=getattr(args, "expected_repo_id", None),
+                                         expected_owner_id=getattr(args, "expected_owner_id", None))
         except Exception as exc:  # noqa: BLE001
             failed += 1
             out.write(f"\nRow #{row_id}: FAIL (replay raised {type(exc).__name__}: {exc})\n")
@@ -607,7 +688,12 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None)
         if fps and "expected_fingerprints" in notes:
             got = (getattr(result, "code_fingerprint", None), getattr(result, "enclave_fingerprint", None))
             if got != tuple(fps):
-                problems.append("replayed fingerprints do not match the receipt row's claimed fingerprints")
+                problems.append(f"replayed fingerprints do not match the expected ones ({fps_source})")
+        for name in ("expected_repo_id", "expected_owner_id"):
+            if name in notes:
+                problems.append(f"this replay version cannot check --{name.replace('_', '-')}")
+        if fps is None:
+            problems.append("no expected fingerprints: identity not checked")
         if "trusted_root" in notes:
             problems.append("this replay version cannot take --trusted-root; the evidence's own trust root was used")
         if item.get("unverified_entry"):
@@ -615,7 +701,11 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None)
         ok = getattr(result, "ok", False) is True and not problems
         failed += 0 if ok else 1
         out.write(f"\nRow #{row_id}: {'OK' if ok else 'FAIL'}\n")
-        out.write(f"  repo: {repo or '(none)'}  host: {host or '(none)'}  platform: {platform or '(unknown)'}\n")
+        captured = getattr(result, "captured_at", None) or ev.get("captured_at") or ev.get("captured_at_unix") or ""
+        out.write(f"  repo: {repo or '(none)'}  platform: {platform or '(unknown)'}\n")
+        out.write(f"  enclave_host: {host or '(none)'} (asserted by capturer)\n")
+        out.write(f"  captured_at: {captured or '(none)'} (asserted by capturer)\n")
+        out.write(f"  expected fingerprints: {fps_source}\n")
         out.write(f"  as_of: {getattr(result, 'as_of', '?')}  sdk: {getattr(result, 'sdk_version', '?')}  "
                   f"release: {getattr(result, 'release_tag', None) or '(untagged)'}\n")
         out.write(f"  code {_short(getattr(result, 'code_fingerprint', None), 16)}  "
@@ -653,6 +743,15 @@ def register_cli(ctx: Any, rt: Any) -> None:
         p.add_argument("--trusted-root", default=None,
                        help="Sigstore trusted_root.json obtained independently (default: the evidence's copy)")
         p.add_argument("--as-of", default=None, help="ISO time to check certificates at (default: captured_at)")
+        p.add_argument("--pins", default=None,
+                       help="pins.yaml whose human-approved pin supplies the expected fingerprints "
+                            "(default: this profile's pins.yaml)")
+        p.add_argument("--expected-fingerprints", default=None, metavar="CODE:ENCLAVE",
+                       help="expected code and enclave fingerprints (overrides --pins)")
+        p.add_argument("--expected-repo-id", default=None,
+                       help="numeric Fulcio Source Repository ID (OID 1.3.6.1.4.1.57264.1.15)")
+        p.add_argument("--expected-owner-id", default=None,
+                       help="numeric Fulcio Source Repository Owner ID (OID 1.3.6.1.4.1.57264.1.17)")
 
     def handler(args: Any) -> int:
         action = getattr(args, "confidential_action", None)
@@ -660,7 +759,7 @@ def register_cli(ctx: Any, rt: Any) -> None:
             if action == "setup":
                 return cli_setup(rt, args)
             if action == "replay":
-                return cli_replay(args)
+                return cli_replay(args, rt=rt)
             if action == "check":
                 print(check_text(rt, getattr(args, "tier", None)))
                 return 0
