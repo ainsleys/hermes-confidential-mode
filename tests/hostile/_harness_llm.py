@@ -10,7 +10,7 @@ tests/spikes/test_refusal_shape.py, extended to record WHERE each provider call 
 
 The gate is built through the public W1 name only:
 
-    confidential_mode.gate_llm.build_middleware(predicate=..., attested_ok=..., is_sealed=..., ledger=...)
+    confidential_mode.gate_llm.build_middleware(ledger=..., is_sealed=..., predicate_for=..., attested_ok=...)
 
 ``HOSTILE_GATE_MODULE`` overrides the module path (used to run this suite against a reference
 gate and its mutants while W1 does not exist yet).
@@ -205,10 +205,12 @@ def ledger_text(ledger: FakeLedger) -> str:
 
 
 class Seal:
-    """is_sealed fake: ``values`` is either a bool or a list consumed per invocation (last repeats)."""
+    """is_sealed fake returning W1's ``(sealed: bool, tier: Tier | None)``. ``values`` is a bool or a
+    list of bools consumed per invocation (last repeats); ``tier`` is reported while sealed."""
 
-    def __init__(self, values):
+    def __init__(self, values, tier: Tier = Tier.LOCAL):
         self._values = values if isinstance(values, list) else [values]
+        self.tier = tier
         self.calls = 0
         self.lock = threading.Lock()
 
@@ -216,7 +218,8 @@ class Seal:
         with self.lock:
             i = min(self.calls, len(self._values) - 1)
             self.calls += 1
-            return self._values[i]
+            sealed = self._values[i]
+            return (sealed, self.tier if sealed else None)
 
 
 class AttestedOk:
@@ -418,10 +421,12 @@ def gate_module():
 
 
 def build_gate(*, predicate, ledger, is_sealed, attested_ok=None):
+    """W1 signature: build_middleware(*, ledger, is_sealed, predicate_for, attested_ok, pin_pending=None, ...)."""
     mod = gate_module()
     if attested_ok is None:
         attested_ok = AttestedOk(lambda p: Verdict(in_tier=True, reason="fresh", host=""))
-    return mod.build_middleware(predicate=predicate, attested_ok=attested_ok, is_sealed=is_sealed, ledger=ledger)
+    return mod.build_middleware(ledger=ledger, is_sealed=is_sealed, predicate_for=lambda tier: predicate,
+                                attested_ok=attested_ok)
 
 
 def install_gate(manager, rec: Rec, *, predicate, ledger, is_sealed, attested_ok=None):
