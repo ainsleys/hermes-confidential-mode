@@ -1,17 +1,18 @@
 """Hostile tests for confidential_mode.preflight (W3 contract, docs/INTERFACES.md).
 
-Written blind. Every negative test first proves the in-tier baseline passes (otherwise "not ok"
-would be vacuous) and then requires a bad item (off_tier/missing) whose key names the mutated
-YAML path. Report/item attribute names are not frozen, so `_items/_verdict/_ok` probe a few
-spellings; if none fit, tests fail with a message saying so (a contract gap, not a W3 bug).
+Written blind, then adapted to W3's public signatures and INTERFACES.md Amendments 1 and 2:
+    run_preflight(tier, predicate, config, *, plugin_aux_tasks, isolation, provider_lookup,
+                  attested_profile, builtin_aux_tasks=None) -> PreflightReport
+    config_fingerprint(config, *, plugin_aux_tasks=(), builtin_aux_tasks=None) -> str
+The harness derives `isolation` with the public helper `preflight.plugin_isolation(config)`, the
+way the seal command does.
 
-Ambiguities where the literal contract and the safe answer may differ are xfail(strict=False)
-with "ADJUDICATE" in the reason.
+Every negative test first proves the in-tier baseline passes (otherwise "not ok" would be
+vacuous) and then requires a bad item (off_tier/missing) whose key names the mutated YAML path.
 """
 from __future__ import annotations
 
 import copy
-import inspect
 import os
 import re
 
@@ -20,7 +21,7 @@ import pytest
 from confidential_mode import preflight  # ImportError until W3 merges is expected
 from confidential_mode.preflight import (config_fingerprint, format_report, load_core_config,
                                          plugin_aux_task_names, run_preflight)
-from confidential_mode.tiers import Tier
+from confidential_mode.tiers import AttestedPredicate, LocalPredicate, Tier, Verdict, ZdrPredicate
 
 LOCAL_URL = "http://127.0.0.1:11434/v1"
 HOSTED_URL = "https://api.evil.example/v1"
@@ -108,31 +109,34 @@ class FakeProfile:
         self.name, self.base_url = name, base_url
 
 
-def run(tier, cfg, monkeypatch, *, plugin_tasks=(), profiles=None):
+def _profile_url(profiles):
+    def f(name):
+        prof = (profiles or {}).get(name)
+        return getattr(prof, "base_url", "") if prof is not None else ""
+    return f
+
+
+class _AttestOk:
+    def __call__(self, provider):
+        return Verdict(True, "fresh+pinned (fake)", "inference.tinfoil.sh")
+
+
+def predicate_for(tier, profiles):
+    if tier == Tier.LOCAL:
+        return LocalPredicate(extra_hosts=(), profile_base_url=_profile_url(profiles))
+    if tier == Tier.ATTESTED:
+        return AttestedPredicate(attested_profiles={ATTESTED}, attested_ok=_AttestOk(),
+                                 profile_base_url=_profile_url(profiles))
+    return ZdrPredicate()
+
+
+def run(tier, cfg, monkeypatch=None, *, plugin_tasks=(), profiles=None):
     tasks = list(plugin_tasks)
     lookup = (lambda name, *a, **k: (profiles or {}).get(name))
-    monkeypatch.setattr(preflight, "plugin_aux_task_names", lambda *a, **k: list(tasks))
-    monkeypatch.setattr(preflight, "get_plugin_auxiliary_tasks",
-                        lambda *a, **k: [{"key": t} for t in tasks], raising=False)
-    monkeypatch.setattr(preflight, "get_provider_profile", lookup, raising=False)
-    try:
-        import hermes_cli.plugins as hp
-        monkeypatch.setattr(hp, "get_plugin_auxiliary_tasks",
-                            lambda *a, **k: [{"key": t, "plugin": "p"} for t in tasks])
-        import providers
-        monkeypatch.setattr(providers, "get_provider_profile", lookup)
-    except Exception:
-        pass
-    kwargs = {}
-    params = inspect.signature(run_preflight).parameters
-    for name in ("provider_lookup", "profile_lookup", "get_provider_profile"):
-        if name in params:
-            kwargs[name] = lookup
-    for name in ("plugin_tasks", "plugin_aux_tasks", "aux_tasks", "extra_tasks"):
-        if name in params:
-            kwargs[name] = tasks
+    kwargs = dict(plugin_aux_tasks=tasks, isolation=preflight.plugin_isolation(cfg),
+                  provider_lookup=lookup, attested_profile=ATTESTED if tier == Tier.ATTESTED else None)
     snapshot = copy.deepcopy(cfg)
-    report = run_preflight(tier, cfg, **kwargs)
+    report = run_preflight(tier, predicate_for(tier, profiles), cfg, **kwargs)
     assert cfg == snapshot, "run_preflight mutated its input (load_config_readonly cache corruption)"
     for i in _items(report):
         assert _verdict(i) in ALL_VERDICTS, f"verdict outside contract set: {_key(i)} {_verdict(i)}"
@@ -214,17 +218,25 @@ def test_one_hosted_entry_deep_in_aux_fallback_chain(monkeypatch, base):
 def test_aux_fallback_chain_bad_entries(monkeypatch, base, entry):
     base["auxiliary"]["compression"]["fallback_chain"] = [local_route(), entry]
     report = run(Tier.LOCAL, base, monkeypatch)
-    if entry in (None, 42):
-        format_report(report)  # junk must not crash; verdict on junk is ADJUDICATE
-        return
+    format_report(report)
     assert_flagged(report, "auxiliary.compression")
 
 
 def test_aux_fallback_chain_not_a_list(monkeypatch, base):
+    # Hermes ignores a non-list fallback_chain (agent/auxiliary_client.py:4301-4303, 3830-3831), so
+    # no verdict is required; it must not crash and must not hide the task's own item.
     for junk in ({"provider": "openrouter", "model": "x"}, "openrouter"):
         cfg = copy.deepcopy(base)
         cfg["auxiliary"]["approval"]["fallback_chain"] = junk
-        assert_flagged(run(Tier.LOCAL, cfg, monkeypatch), "auxiliary.approval")
+        r = run(Tier.LOCAL, cfg, monkeypatch)
+        format_report(r)
+        assert any(_key(i).startswith("auxiliary.approval") for i in _items(r))
+
+
+def test_fallback_providers_string_is_ignored_by_hermes(monkeypatch, base):
+    # hermes_cli/fallback_config._iter_fallback_entries drops a non-list, non-dict value.
+    base["fallback_providers"] = "openrouter"
+    format_report(run(Tier.LOCAL, base, monkeypatch))
 
 
 @pytest.mark.parametrize("fp", [
@@ -233,8 +245,7 @@ def test_aux_fallback_chain_not_a_list(monkeypatch, base):
     [{"provider": "openrouter"}],
     [local_route()],                     # in-tier entry still violates "must be empty"
     [None],
-    {"provider": "openrouter", "model": "x"},   # dict instead of list
-    "openrouter",
+    {"provider": "openrouter", "model": "x"},   # dict: Hermes reads it as one entry
 ])
 def test_fallback_providers_must_be_empty(monkeypatch, base, fp):
     base["fallback_providers"] = fp
@@ -262,6 +273,25 @@ def test_plugin_task_without_config_block_is_still_enumerated(monkeypatch, base)
     assert any("zz_plugin_noblock" in _key(i) for i in _items(report)), _desc(report)
 
 
+def test_plugin_task_hosted_defaults_are_flagged(monkeypatch, base):
+    entry = {"key": "zz_plugin_dflt", "defaults": {"provider": "openrouter", "model": "x"},
+             "inherit_from": None}
+    assert_flagged(run(Tier.LOCAL, base, monkeypatch, plugin_tasks=[entry]), "zz_plugin_dflt")
+
+
+def test_plugin_task_inheriting_hosted_base_is_flagged(monkeypatch, base):
+    base["auxiliary"]["compression"] = {"provider": "openrouter", "model": "x", "base_url": ""}
+    entry = {"key": "zz_plugin_inh", "defaults": {}, "inherit_from": "compression"}
+    assert_flagged(run(Tier.LOCAL, base, monkeypatch, plugin_tasks=[entry]), "zz_plugin_inh")
+
+
+def test_plugin_task_user_pin_overrides_hosted_defaults(monkeypatch, base):
+    # Control: Hermes layers user config over plugin defaults; a local user pin wins.
+    entry = {"key": "zz_plugin_pin", "defaults": {"provider": "openrouter", "model": "x"}}
+    base["auxiliary"]["zz_plugin_pin"] = local_route()
+    assert_ok(run(Tier.LOCAL, base, monkeypatch, plugin_tasks=[entry]))
+
+
 def test_real_plugin_aux_task_names_shape():
     # Unpatched: with an empty HERMES_HOME there are no user plugins; must not raise, must return
     # strings, and must not duplicate built-ins.
@@ -279,6 +309,10 @@ def test_real_plugin_aux_task_names_shape():
     {"provider": ""},
     {},
     None,
+    "openrouter",
+    ["custom"],
+    {"provider": "none"},       # Amendment 1: no "disabled" convention for vision
+    {"provider": "off"},
 ])
 def test_vision_auto_or_implicit_is_flagged_even_with_local_main(monkeypatch, base, vision):
     if vision is None:
@@ -286,8 +320,8 @@ def test_vision_auto_or_implicit_is_flagged_even_with_local_main(monkeypatch, ba
     else:
         base["auxiliary"]["vision"] = vision
     hit = assert_flagged(run(Tier.LOCAL, base, monkeypatch), "auxiliary.vision")
-    # Literal contract: "must be explicit". Task brief says off_tier; missing is also acceptable.
-    assert {_verdict(i) for i in hit} <= BAD
+    # Amendment 1 (A6): off_tier.
+    assert {_verdict(i) for i in hit} == {"off_tier"}, _desc(run(Tier.LOCAL, base, monkeypatch))
 
 
 # --------------------------------------------------------------------------- memory
@@ -304,8 +338,8 @@ def test_memory_block_junk_does_not_crash(monkeypatch, base, mem):
     base["memory"] = mem
     report = run(Tier.LOCAL, base, monkeypatch)
     format_report(report)
-    if mem in ("honcho", ["honcho"]):
-        assert _bad(report), "a memory block naming a hosted provider in odd shape passed silently"
+    # No verdict asserted: Hermes reads only memory.provider from a mapping, so a non-mapping
+    # memory block selects the built-in store.
 
 
 # --------------------------------------------------------------------------- mcp_servers
@@ -321,12 +355,25 @@ def test_mcp_hosted_url_is_flagged(monkeypatch, base):
     assert_flagged(run(Tier.LOCAL, base, monkeypatch), "mcp_servers", "remote")
 
 
-def test_mcp_localhost_url_is_flagged_per_literal_contract(monkeypatch, base):
-    # Contract: preflight lists "mcp_servers.* with a URL"; W4 blocks "MCP tool from a URL server"
-    # regardless of host. Read literally, a localhost URL server is still off_tier.
-    # ADJUDICATE: if W3 classifies URL servers by host instead, W3 and W4 disagree.
+def test_mcp_localhost_url_is_local(monkeypatch, base):
+    # Amendment 1 (A5): URL servers classify by host_of(url) with the active predicate.
     base["mcp_servers"]["localhttp"] = {"url": "http://localhost:8000/mcp"}
-    assert_flagged(run(Tier.LOCAL, base, monkeypatch), "mcp_servers", "localhttp")
+    base["mcp_servers"]["lanhttp"] = {"url": "http://192.168.1.20:8000/mcp", "command": "x"}
+    assert_ok(run(Tier.LOCAL, base, monkeypatch))
+
+
+@pytest.mark.parametrize("url", ["http://localhost.evil.example/mcp", "http://evil.com\\@127.0.0.1/mcp",
+                                 "http://10.0.0.1@evil.example/mcp", "localhost:8000/mcp"])
+def test_mcp_lookalike_url_is_flagged(monkeypatch, base, url):
+    base["mcp_servers"]["sneaky"] = {"url": url}
+    assert_flagged(run(Tier.LOCAL, base, monkeypatch), "mcp_servers", "sneaky")
+
+
+def test_mcp_disabled_url_server_is_disabled(monkeypatch, base):
+    base["mcp_servers"]["off"] = {"url": "https://mcp.evil.example/mcp", "enabled": False}
+    r = run(Tier.LOCAL, base, monkeypatch)
+    assert_ok(r)
+    assert any("mcp_servers.off" in _key(i) and _verdict(i) == "disabled" for i in _items(r))
 
 
 def test_stdio_only_mcp_is_not_flagged(monkeypatch, base):
@@ -340,21 +387,22 @@ def test_mcp_servers_junk_does_not_crash(monkeypatch, base, mcp):
     base["mcp_servers"] = mcp
     report = run(Tier.LOCAL, base, monkeypatch)
     format_report(report)
-    if isinstance(mcp, (list, str)) or mcp == {"x": "https://mcp.evil.example"}:
+    # Hermes ignores a non-mapping mcp_servers (tools/mcp_tool_config.py:719-727); only a
+    # malformed server entry inside a mapping must be flagged.
+    if mcp == {"x": "https://mcp.evil.example"}:
         assert _bad(report), f"mcp_servers={mcp!r} containing a URL passed silently"
 
 
 # --------------------------------------------------------------------------- plugins.isolation
 
-@pytest.mark.parametrize("iso", ["host", "garbage", "", "IN-PROCESS", 1, ["in_process"], None])
+@pytest.mark.parametrize("iso", ["host", "garbage", "", "IN-PROCESS", 1, ["in_process"]])
 def test_isolation_not_in_process_is_flagged(monkeypatch, base, iso):
     base["plugins"]["isolation"] = iso
     assert_flagged(run(Tier.LOCAL, base, monkeypatch), "isolation")
 
 
-def test_isolation_absent(monkeypatch, base):
-    # Hermes default is in_process (config_defaults.py:1719). Absent may mean default (ok) or
-    # "missing" (fail closed). ADJUDICATE; assert only consistency and no crash.
+def test_isolation_absent_passes(monkeypatch, base):
+    # Amendment 1 (A7): absent resolves to Hermes' default in_process (config_defaults.py:1719).
     del base["plugins"]["isolation"]
     r1 = run(Tier.LOCAL, base, monkeypatch)
     del base["plugins"]
@@ -362,9 +410,16 @@ def test_isolation_absent(monkeypatch, base):
     for r in (r1, r2):
         iso = [i for i in _items(r) if "isolation" in _key(i)]
         assert iso, "plugins.isolation must always be reported"
-        assert _verdict(iso[0]) in {"in_tier", "local", "missing"}
-    base["plugins"] = "in_process"   # wrong shape
+        assert _verdict(iso[0]) in GOOD, _desc(r)
+        assert_ok(r)
+    base["plugins"] = "in_process"   # wrong shape: must not crash
     run(Tier.LOCAL, base, monkeypatch)
+
+
+def test_isolation_explicit_empty_is_missing(monkeypatch, base):
+    base["plugins"]["isolation"] = ""
+    hit = assert_flagged(run(Tier.LOCAL, base, monkeypatch), "isolation")
+    assert {_verdict(i) for i in hit} == {"missing"}
 
 
 # --------------------------------------------------------------------------- moa / codex / main
@@ -443,12 +498,38 @@ def test_attested_tier_rejects_local_main(monkeypatch):
     assert_flagged(run(Tier.ATTESTED, cfg, monkeypatch, profiles=prof), "model")
 
 
-@pytest.mark.xfail(strict=False, reason="ADJUDICATE: contract omits delegation.{provider,base_url}; "
-                   "a sealed delegate_task on the default backend would route subagents there")
-def test_delegation_provider_is_checked(monkeypatch, base):
-    base["delegation"] = {"backend": "default", "provider": "openrouter", "model": "x",
-                          "base_url": ""}
+@pytest.mark.parametrize("deleg", [
+    {"backend": "default", "provider": "openrouter", "model": "x", "base_url": ""},
+    {"backend": "default", "provider": "", "model": "", "base_url": HOSTED_URL},
+    {"provider": "custom", "base_url": "http://localhost.evil.example/v1"},
+    {"provider": "moa"},
+])
+def test_delegation_route_is_checked(monkeypatch, base, deleg):
+    # Amendment 1 (A11): delegation.* is enumerated.
+    base["delegation"] = deleg
     assert_flagged(run(Tier.LOCAL, base, monkeypatch), "delegation")
+
+
+def test_delegation_unset_inherits_main(monkeypatch, base):
+    base["delegation"] = {"backend": "default", "provider": "", "model": "", "base_url": ""}
+    assert_ok(run(Tier.LOCAL, base, monkeypatch))
+
+
+@pytest.mark.parametrize("prov", ["edge", "elevenlabs", "openai", "xai", "minimax", "mistral",
+                                  "gemini", "deepinfra", "ElevenLabs"])
+def test_hosted_tts_provider_is_flagged(monkeypatch, base, prov):
+    # Amendment 1 (A11): tts.provider is enumerated; assistant text is conversation content.
+    # Hosted engines per hermes_cli/config_defaults.py tts comment.
+    base["tts"] = {"provider": prov, "enabled": True}
+    assert_flagged(run(Tier.LOCAL, base, monkeypatch), "tts")
+
+
+@pytest.mark.parametrize("tts", [None, {}, {"provider": ""}, {"provider": "none"},
+                                 {"provider": "piper"}, {"provider": "kittentts"}, {"provider": "neutts"}])
+def test_local_or_unset_tts_passes(monkeypatch, base, tts):
+    if tts is not None:
+        base["tts"] = tts
+    assert_ok(run(Tier.LOCAL, base, monkeypatch))
 
 
 # --------------------------------------------------------------------------- redaction
@@ -480,7 +561,7 @@ def test_format_report_redacts_secrets(monkeypatch):
     leaked = [s for s in SECRETS if s in text]
     assert not leaked, f"format_report leaked {leaked}:\n{text}"
     # Also the report object itself (it may be ledgered as preflight_fail detail).
-    blob = repr(report) + "".join(str(_get(i, "value", default="")) + _fix(i) for i in _items(report))
+    blob = repr(report) + "".join(str(_get(i, "value_redacted", "value", default="")) + _fix(i) for i in _items(report))
     leaked = [s for s in SECRETS if s in blob]
     assert not leaked, f"report object carries plaintext secrets {leaked}"
 
@@ -499,14 +580,14 @@ def test_format_report_never_says_ok_when_bad(monkeypatch, base):
     cfg["auxiliary"]["curator"]["fallback_chain"] = [{"provider": "openrouter", "model": "x"}]
     text = format_report(run(Tier.LOCAL, cfg, monkeypatch))
     assert not re.search(r"\b(all (checks )?pass(ed)?|ready to seal|ok to seal)\b", text, re.I), text
+    assert not re.search(r"\bPASS\b", text), text
 
 
 # --------------------------------------------------------------------------- fingerprint
 
-def fp(cfg, monkeypatch, plugin_tasks=()):
-    monkeypatch.setattr(preflight, "plugin_aux_task_names", lambda *a, **k: list(plugin_tasks))
+def fp(cfg, monkeypatch=None, plugin_tasks=()):
     snapshot = copy.deepcopy(cfg)
-    out = config_fingerprint(cfg)
+    out = config_fingerprint(cfg, plugin_aux_tasks=list(plugin_tasks))
     assert cfg == snapshot, "config_fingerprint mutated its input"
     assert isinstance(out, str) and re.fullmatch(r"[0-9a-f]{64}", out), f"not sha256 hex: {out!r}"
     return out
@@ -523,6 +604,10 @@ def _set(cfg, path, value):
 ENUMERATED_MUTATIONS = [
     ("model.provider", "openrouter"),
     ("model.base_url", HOSTED_URL),
+    ("model.api_mode", "codex_responses"),
+    ("delegation.provider", "openrouter"),
+    ("delegation.base_url", HOSTED_URL),
+    ("tts.provider", "elevenlabs"),
     ("fallback_providers", [{"provider": "openrouter", "model": "x"}]),
     ("fallback_model", {"provider": "openrouter", "model": "x"}),
     ("auxiliary.compression.provider", "openrouter"),
