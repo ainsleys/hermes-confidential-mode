@@ -11,5 +11,6 @@ HERMES_ROOT = Path(os.environ.get("HERMES_AGENT_ROOT", Path.home() / "hermes-age
 if str(HERMES_ROOT) not in sys.path:
     sys.path.insert(0, str(HERMES_ROOT))
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-if str(PLUGIN_ROOT.parent) not in sys.path:
-    sys.path.insert(0, str(PLUGIN_ROOT.parent))
+for _p in (str(PLUGIN_ROOT), str(PLUGIN_ROOT.parent)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
