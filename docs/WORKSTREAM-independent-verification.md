@@ -109,7 +109,14 @@ transport in four statements.
 
 The review found statement 1 wrong for this plugin (finding 11). The enclave-URL header is added only
 when the base URL differs from the enclave. The plugin talks to `https://{enclave}/v1` directly.
-Where TLS terminates is therefore not established.
+Where TLS terminates was therefore not established at review time.
+
+Settled on 2026-11-06 by the live run. The adapter now fetches the attestation document over the
+same EHBP connection pool and records the TLS peer certificate. Against `router-0.tinfoil.sh`
+(release v0.0.170, SEV-SNP) the certificate, issued by Google Trust Services for
+`router-0.tinfoil.sh`, carried the TLS public key the attestation report commits to, and its subject
+alternative names bound the HPKE key and the attestation hash. TLS ends inside the attested router.
+The replay's `tls_cert_binding` check repeats this comparison offline from the captured certificate.
 
 ## Planned changes (client side)
 
@@ -191,8 +198,10 @@ These items need the vendor. Each is stated in the receipt.
   it, and no per-worker attestation is exposed to clients.
 - **Signed responses.** Without them, a third party cannot check that a reply came from the attested
   key. NEAR AI offers this, and an adapter for it is planned.
-- **TLS termination and proxy metadata.** The vendor decides where TLS terminates and what metadata
-  its proxy keeps. That metadata includes the API key header, sizes, timing and IP address.
+- **Connection metadata.** TLS ends inside the attested router (established 2026-11-06, above),
+  so the API key header is decrypted by measured code. Sizes, timing and the client IP address are
+  still visible to the vendor's network and hosting, and nothing in the attestation limits what is
+  kept about them.
 
 ## Acceptance
 

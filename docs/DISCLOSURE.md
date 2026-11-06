@@ -85,9 +85,11 @@ The plugin itself calls no other host. It sends no telemetry and no usage data a
 
 ### What those hosts can see even when everything works
 
-- **Tinfoil's router host** terminates TLS, the encryption HTTPS uses. It therefore sees your API key
-  header, the request and response sizes, their timing, and your IP address. EHBP encrypts the body.
-  It does not hide this metadata.
+- **Tinfoil's router host** is where TLS, the encryption HTTPS uses, ends. The live run of
+  2026-11-06 established that it ends inside the attested router enclave, not at a separate front
+  proxy (see LIMITATIONS, "Where TLS ends"). The router therefore decrypts your API key header.
+  Tinfoil's network and hosting still see the request and response sizes, their timing, and your
+  IP address. EHBP encrypts the body. It does not hide this metadata.
 - **The three `*.tinfoil.sh` proxies** are run by the vendor. They see each verification, from your
   IP address.
 - **Your DNS resolver** sees every lookup.
@@ -295,8 +297,8 @@ whole profile. While sealed, the plugin blocks the following.
   switched to a hosted provider, Hermes sends that provider an API-key request for its model list.
   The request carries no conversation text.
 
-- **Network metadata.** This covers the metadata at Tinfoil's TLS termination, the vendor-run
-  collateral proxies, DNS, and the host operator if Hermes runs on someone else's machine.
+- **Network metadata.** This covers the sizes, timing and addresses visible on the connection to
+  Tinfoil's router, the vendor-run collateral proxies, DNS, and the host operator if Hermes runs on someone else's machine.
 
 - **Local tools.** These are `terminal`, `process_manage`, `execute_code`, `read_file`, `write_file`,
   `patch`, `search_files`, `skills_list`, `skill_view`, `skill_manage`, `todo_list`, `memory`,

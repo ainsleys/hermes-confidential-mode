@@ -198,9 +198,11 @@ access blocked. It shows whether the stored bytes still check out.
 > - **Tinfoil's own infrastructure.** This covers the vendor's control plane, meaning the systems
 >   Tinfoil uses to run and manage its service. It also covers the model backends that sit behind
 >   the router. The attestation covers the router only.
-> - **Metadata seen where Tinfoil terminates TLS.** Tinfoil receives your API key header, the size of
->   each request and response, their timing, and your IP address. EHBP encrypts the request body. It
->   does not hide any of these.
+> - **Connection metadata.** Tinfoil's network and hosting see the size of each request and
+>   response, their timing, and your IP address. EHBP encrypts the request body. It does not hide
+>   any of these. The TLS connection itself ends inside the attested router (the plugin checks the
+>   presented certificate against the key in the attestation report), so your API key header is
+>   decrypted by the measured router code rather than by a separate front proxy.
 > - **The vendor's collateral proxies.** These are `github-proxy.tinfoil.sh`, `kds-proxy.tinfoil.sh`
 >   and `tdx-proxy.tinfoil.sh`. The SDK fetches verification material through them. They therefore
 >   see that you verify, and when.

@@ -280,14 +280,19 @@ and signed responses.
 
 **The gap.** Suppose every road above is closed. The following remain.
 
-- **Tinfoil's TLS termination.** TLS is the encryption HTTPS uses. Tinfoil terminates your TLS
-  connection at its router host. It sees your API key header, the request and response sizes, their
-  timing, and your IP address. EHBP, Tinfoil's transport, encrypts the request body to the enclave's
-  key. It does not encrypt this metadata.
+- **Where TLS ends, and what is visible anyway.** TLS is the encryption HTTPS uses. After each
+  verification the plugin records the TLS certificate the router presents. On 2026-11-06, against
+  `router-0.tinfoil.sh` release v0.0.170, that certificate carried exactly the TLS public key the
+  attestation report commits to. A proxy in front of the enclave could only terminate TLS if it held
+  the matching private key, and that key lives in the attested router. So the TLS connection ends
+  inside the attested enclave. The replay's `tls_cert_binding` check confirms this from the captured
+  certificate alone.
 
-  The plugin does not capture the TLS certificate on this connection. The replay's
-  `tls_cert_binding` check is therefore always n/a. This build does not establish whether the TLS
-  connection ends inside the enclave.
+  That settles where the connection ends. It does not hide the metadata of the connection. Any
+  network hop, and the vendor's hosting, still see your IP address, the sizes of requests and
+  responses, and their timing. Your API key header is decrypted inside the router. What the router
+  does with it, such as checking it against your account, is part of the measured router code. EHBP,
+  Tinfoil's transport, additionally encrypts the request body to the enclave's HPKE key.
 - **The collateral proxies.** Collateral is the certificates and signed documents a client needs from
   the CPU vendor to check a hardware report. The SDK fetches collateral and release data through three
   proxies that Tinfoil runs: `github-proxy.tinfoil.sh`, `kds-proxy.tinfoil.sh` and
