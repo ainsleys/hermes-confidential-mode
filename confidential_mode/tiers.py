@@ -37,7 +37,7 @@ class TierPredicate(Protocol):
 # --- W3 adds predicates below this line -------------------------------------
 
 import ipaddress
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlsplit
 
 #: Names that are local without an IP literal. No DNS is ever consulted: any other hostname is off-tier
@@ -51,48 +51,97 @@ _LOCAL_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "fe80::/10",                                                # IPv6 link-local
     "fc00::/7",                                                 # IPv6 unique local
 ))
+# Deliberately absent: 169.254.0.0/16 (cloud metadata), 0.0.0.0/::, and any non-dotted-quad IPv4
+# spelling (0x7f000001, 2130706433, 127.1): ipaddress rejects those, so they are unknown hostnames.
+
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 
-def host_of(base_url: str) -> str:
+def host_of(base_url: Any) -> str:
     """Lower-cased host of ``base_url`` without brackets, port, userinfo or trailing dot; "" if none.
 
-    Accepts a missing scheme ("10.0.0.2:8080/v1", "localhost") and bracketed IPv6 ("[::1]:11434").
-    A bare unbracketed IPv6 literal ("::1", "fe80::1") is returned as-is.
+    Display/ledger helper; lenient by design (accepts a missing scheme). Backslashes are read as path
+    separators, as WHATWG/httpx do, so the reported host is the one an HTTP client would connect to.
+    Never raises. The strict check used for tier decisions is :func:`strict_host`.
     """
-    raw = (base_url or "").strip()
+    if not isinstance(base_url, str):
+        return ""
+    raw = base_url.strip().replace("\\", "/")
     if not raw:
         return ""
-    candidate = raw
+    bare = raw.strip("[]")
+    if _ip_of(bare) is not None and "/" not in raw:
+        return bare.lower()
+    candidate = raw if "://" in raw else "//" + raw.lstrip("/")
     try:
-        ipaddress.ip_address(candidate.strip("[]").split("%", 1)[0])
-        return candidate.strip("[]").lower()
-    except ValueError:
-        pass
-    if "://" not in candidate:
-        candidate = "//" + candidate.lstrip("/")
-    try:
-        parts = urlsplit(candidate)
-        host = parts.hostname or ""
+        host = urlsplit(candidate).hostname or ""
     except ValueError:
         return ""
     host = host.strip().rstrip(".").lower()
-    return host
+    return host if host.isprintable() else ""
+
+
+def strict_host(base_url: Any) -> tuple[str, str]:
+    """(host, problem) for a tier decision. ``problem`` is "" only for a clean http(s) URL.
+
+    Fails closed on anything two URL parsers could read differently: backslashes, whitespace or
+    control characters, non-ASCII, a missing or non-http(s) scheme, a malformed port, or a
+    percent sign in the host other than an IPv6 zone id.
+    """
+    if not isinstance(base_url, str):
+        return "", "base_url is not a string"
+    raw = base_url.strip()
+    shown = host_of(raw)
+    if not raw:
+        return "", "empty base_url"
+    if "\\" in raw:
+        return shown, "base_url contains a backslash"
+    if any(ord(c) < 0x21 or ord(c) == 0x7F for c in raw):
+        return shown, "base_url contains whitespace or control characters"
+    if not raw.isascii():
+        return shown, "base_url contains non-ASCII characters"
+    try:
+        parts = urlsplit(raw)
+        scheme = parts.scheme.lower()
+        host = parts.hostname or ""
+        _ = parts.port  # raises ValueError for non-numeric or out-of-range ports
+    except ValueError:
+        return shown, "base_url is malformed (host or port)"
+    if scheme not in _ALLOWED_SCHEMES or "://" not in raw:
+        return shown, "base_url must start with http:// or https://"
+    host = host.strip().rstrip(".").lower()
+    if not host:
+        return "", "base_url has no host"
+    if "%" in host and _ip_of(host) is None:
+        return host, "base_url host is percent-encoded"
+    return host, ""
 
 
 def _ip_of(host: str) -> Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    if not isinstance(host, str) or not host:
+        return None
     try:
         return ipaddress.ip_address(host.split("%", 1)[0])  # drop an IPv6 zone id (fe80::1%en0)
     except ValueError:
         return None
 
 
+def _norm_hosts(hosts: Iterable[str]) -> set[str]:
+    out = set()
+    for h in hosts or ():
+        if isinstance(h, str):
+            h = h.strip().strip("[]").rstrip(".").lower()
+            if h:
+                out.add(h)
+    return out
+
+
 def is_local_host(host: str, extra_hosts: Iterable[str] = ()) -> bool:
     """True for loopback / RFC1918 / 100.64/10 / fe80::/10 / fc00::/7 literals, local names, or extra hosts."""
-    if not host:
+    if not isinstance(host, str) or not host:
         return False
     host = host.lower()
-    extras = {h.strip().lower().strip("[]") for h in extra_hosts if isinstance(h, str) and h.strip()}
-    if host in LOCAL_NAMES or host in extras:
+    if host in LOCAL_NAMES or host in _norm_hosts(extra_hosts):
         return True
     ip = _ip_of(host)
     if ip is None:
@@ -103,41 +152,51 @@ def is_local_host(host: str, extra_hosts: Iterable[str] = ()) -> bool:
     return any(ip.version == net.version and ip in net for net in _LOCAL_NETWORKS)
 
 
-def _no_profile_url(_provider: str) -> str:
-    return ""
+def _profile_url(lookup: Callable[[str], Any] | None, provider: str) -> str:
+    """Call an injected profile lookup; accepts a URL string or an object with ``base_url``."""
+    if lookup is None:
+        return ""
+    try:
+        result = lookup(provider)
+    except Exception:
+        return ""
+    if isinstance(result, str):
+        return result.strip()
+    url = getattr(result, "base_url", None)
+    return url.strip() if isinstance(url, str) else ""
 
 
 class LocalPredicate:
     """``local-only`` tier: the destination host must be on this machine or its private network.
 
-    An empty ``base_url`` is resolved through ``profile_base_url(provider)`` (the provider profile's
-    default endpoint); if that is empty or remote the destination is off-tier.
+    An empty ``base_url`` is resolved through ``profile_base_url(provider)`` (a URL string, or a
+    profile object with ``base_url``); a local result is in-tier, anything else off-tier. Real Hermes
+    local profiles (ollama, lmstudio, llama-cpp) have ``base_url ""`` at 84a0301, so in practice the
+    user sets ``model.base_url`` / ``auxiliary.<task>.base_url`` explicitly.
     """
 
     tier = Tier.LOCAL
 
-    def __init__(self, extra_hosts: Iterable[str] = (), profile_base_url: Callable[[str], str] | None = None):
-        self.extra_hosts = {h.strip().lower().strip("[]") for h in extra_hosts if isinstance(h, str) and h.strip()}
-        self.profile_base_url = profile_base_url or _no_profile_url
+    def __init__(self, extra_hosts: Iterable[str] = (), profile_base_url: Callable[[str], Any] | None = None):
+        self.extra_hosts = _norm_hosts(extra_hosts)
+        self.profile_base_url = profile_base_url
 
     def classify(self, dest: Destination) -> Verdict:
-        base_url = (dest.base_url or "").strip()
+        base_url = dest.base_url.strip() if isinstance(dest.base_url, str) else dest.base_url
         via_profile = False
-        if not base_url:
-            try:
-                base_url = (self.profile_base_url(dest.provider) or "").strip()
-            except Exception:
-                base_url = ""
+        if base_url == "" or base_url is None:
+            base_url = _profile_url(self.profile_base_url, dest.provider)
             via_profile = True
             if not base_url:
-                return Verdict(False, f"no base_url and provider {dest.provider or '(none)'!s} has no known local endpoint", "")
-        host = host_of(base_url)
-        if not host:
-            return Verdict(False, "base_url has no parsable host", "")
+                return Verdict(False, f"no base_url and provider {dest.provider or '(none)'} has no known "
+                                      "local endpoint; set base_url explicitly", "")
+        host, problem = strict_host(base_url)
+        if problem:
+            return Verdict(False, problem, host)
         if is_local_host(host, self.extra_hosts):
             src = " (provider default)" if via_profile else ""
             return Verdict(True, f"local host {host}{src}", host)
-        if _ip_of(host) is None and host not in LOCAL_NAMES:
+        if _ip_of(host) is None:
             return Verdict(False, f"host {host} is not an IP literal or a listed local host", host)
         return Verdict(False, f"host {host} is not on a local network", host)
 
@@ -145,38 +204,41 @@ class LocalPredicate:
 class AttestedPredicate:
     """``attested`` tier: the provider must be a registered attested profile and ``attested_ok`` must pass.
 
-    ``attested_ok(provider)`` is W2's freshness + pin check. When ``profile_base_url`` is given, a
-    non-empty ``base_url`` whose host differs from the profile's endpoint is off-tier (a base_url
-    override would send the request somewhere the attestation does not cover).
+    ``attested_profiles`` match exactly (Hermes passes canonical lower-case names). ``attested_ok(provider)``
+    is W2's freshness + pin check. When ``profile_base_url`` is given, a non-empty ``base_url`` whose
+    host differs from the profile's endpoint is off-tier (the attestation does not cover it).
     """
 
     tier = Tier.ATTESTED
 
     def __init__(self, attested_profiles: Iterable[str], attested_ok: Callable[[str], Verdict],
-                 profile_base_url: Callable[[str], str] | None = None):
-        self.attested_profiles = {p.strip().lower() for p in attested_profiles if isinstance(p, str) and p.strip()}
+                 profile_base_url: Callable[[str], Any] | None = None):
+        self.attested_profiles = {p for p in attested_profiles if isinstance(p, str) and p}
         self.attested_ok = attested_ok
         self.profile_base_url = profile_base_url
 
     def classify(self, dest: Destination) -> Verdict:
-        provider = (dest.provider or "").strip().lower()
-        host = host_of(dest.base_url)
+        provider = dest.provider if isinstance(dest.provider, str) else ""
+        base_url = dest.base_url.strip() if isinstance(dest.base_url, str) else ""
+        host = host_of(base_url)
         if provider not in self.attested_profiles:
             return Verdict(False, f"provider {provider or '(none)'} is not an attested profile", host)
-        if self.profile_base_url is not None and host:
-            try:
-                expected = host_of(self.profile_base_url(provider) or "")
-            except Exception:
-                expected = ""
-            if host != expected:
-                return Verdict(False, f"base_url host {host} is not the attested endpoint", host)
+        if base_url:
+            host, problem = strict_host(base_url)
+            if problem:
+                return Verdict(False, problem, host)
+            if self.profile_base_url is not None:
+                expected, _ = strict_host(_profile_url(self.profile_base_url, provider))
+                if host != expected:
+                    return Verdict(False, f"base_url host {host} is not the attested endpoint", host)
         try:
             verdict = self.attested_ok(provider)
         except Exception:
             return Verdict(False, "attestation check failed", host)
-        if not isinstance(verdict, Verdict):
+        if not isinstance(verdict, Verdict) or not isinstance(verdict.in_tier, bool):
             return Verdict(False, "attestation check returned no verdict", host)
-        return Verdict(bool(verdict.in_tier), verdict.reason, verdict.host or host)
+        return Verdict(verdict.in_tier, verdict.reason or ("attested" if verdict.in_tier else "not attested"),
+                       verdict.host or host)
 
 
 class ZdrPredicate:
