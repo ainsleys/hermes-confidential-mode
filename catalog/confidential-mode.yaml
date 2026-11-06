@@ -36,7 +36,7 @@ description: >-
 maintainer: ainsleys
 tier: community
 category: models
-requires_hermes: ">=0.23.0"
+requires_hermes: ">=0.22.7"
 docs_url: https://github.com/ainsleys/hermes-confidential-mode#readme   # placeholder: confirm at submission
 version: "0.1.0"
 known_issues:
