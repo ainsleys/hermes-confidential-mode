@@ -153,7 +153,7 @@ class FakeVendorAdapter:
             verified_at_local=time.time(),
             evidence={"format": "fake-attestation", "enclaveHost": ENCLAVE, "codeFingerprint": self.code,
                       "enclaveFingerprint": self.enclave, "releaseTag": self.release,
-                      "attestationNumber": self.attestation_count})
+                      "attestationNumber": self.attestation_count, "capture_complete": True})
 
     def hold(self, reason: str) -> None:
         self.held = reason
