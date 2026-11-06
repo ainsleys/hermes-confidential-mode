@@ -116,3 +116,48 @@ State (ctx.state, per profile): sealed (bool), sealed_tier (str), sealed_since (
 - Middleware never waits on a human; mismatch -> refuse + stage.
 - Profile-wide seal in MVP; hooks carry session_id so per-session is possible later.
 - Middleware bypasses (codex_app_server, max-iterations summary) are covered by the preflight requirement that the main provider is in-tier; refuse openai-codex outright.
+
+## Amendment 1 (2026-11-06, after W3/T3): adjudications
+
+Rule for all workstreams: behaviour assertions in hostile tests stand; parameter and fixture NAMES follow the implementation's public signatures (testers adapt, implementers do not rename to match guesses).
+
+Tiers (W3 corrections accepted, plus):
+- Main model key is `model.default` (alias `model.model`); bare-string `model:` is legal; empty or "auto" main provider is off_tier (it enables the aux discovery chain). Legacy `fallback_model` is part of the fallback chain and must be empty too.
+- Any URL containing a backslash is off_tier (urllib and httpx disagree on the host). Schemeless base_url is off_tier. Malformed ports (non-numeric, >65535) are off_tier and must not raise. Obfuscated loopback forms (0x7f000001, 2130706433, 127.1, 0.0.0.0) are off_tier. 169.254.0.0/16 is off_tier (cloud metadata). IPv4-mapped private/loopback IPv6 is local.
+- Empty base_url: resolve via the injected `profile_base_url(provider)`; a local result is in-tier, anything else off_tier. Real Hermes local profiles (ollama, lmstudio, llama-cpp) return "" at 84a0301, so the fix text tells the user to set `model.base_url` / `auxiliary.<task>.base_url` explicitly.
+- Attested predicate: a base_url whose host differs from the attested profile's endpoint is off_tier (W3's profile_base_url parameter stays). T3's xfail for this becomes a normal test.
+- MCP servers with a `url`: classify by `host_of(url)` with the active predicate (a localhost URL server is local). `enabled: false` is `disabled`. W4 blocks MCP tools only from servers whose URL host is off-tier.
+- Vision: no "disabled" convention. `auxiliary.vision.provider` must be explicit and in-tier; unset, "", "auto", or a non-dict block is off_tier, with a fix that explains Hermes describes gateway inbound images through vision even without a tool call.
+- `plugins.isolation` absent resolves to Hermes' default in_process (passing verdict); explicit "" or unknown values are `missing`/off_tier.
+- Memory: "", builtin, built-in, local, none => local; else off_tier.
+- Add to enumeration: `delegation.provider`, `delegation.model`, `delegation.base_url` (unset inherits the main verdict; set and off-tier => off_tier); `tts.provider` (assistant text is conversation content: unset/none/local => local, hosted => off_tier; read the real key names in config_defaults). `cron.model_provider` and moa presets are NOT enumerated; moa anywhere is refused and cron pins are a documented gap.
+- Plugin aux tasks are registration dicts (defaults, inherit_from), layered as Hermes does; `plugin_aux_tasks: list[str | dict]`.
+- Fingerprint covers model provider/default/base_url/api_mode, fallback_providers and fallback_model, every aux task's provider/base_url/fallback_chain, delegation.*, tts.provider, memory.provider, mcp_servers url/command/enabled, plugins.isolation; sorted keys; no secrets. Junk entries in any chain are off_tier.
+- Pending (awaiting a product decision): a `terminal.backend` / `terminal.docker_network` item classifying commands as contained (docker, network off) or uncontained, and a three-mode rule for terminal/execute_code in the tool gate (ask on network-looking commands / allow all / block).
+
+Tool gate (W4/T4): MCP tools are blocked when their server has a URL whose host is off-tier under the active predicate, not merely because a URL exists. delegate_task: a child on the default in-process backend inherits the sealed profile and is allowed; any route selecting another profile, an ACP command, or a non-default backend is blocked; W4 reads the real field names from tools/delegate_tool.py and lists them in its report.
+
+## Amendment 2 (2026-11-06, after W1/W4): adjudications
+
+- Backslash URLs: T3 corrected its claim; httpx reads `http://evil.com\@127.0.0.1/v1` as 127.0.0.1 (urllib3 reads evil.com). The ruling stands as fail-closed on parser disagreement: any backslash, tab, CR, LF or NUL in a URL is off_tier. Encoded `%5C` userinfo is a control case and stays local when all parsers agree.
+- Fallback purpose: the middleware context carries no fallback indicator at 84a0301; purpose is "main" and classification is by the destination fields, which already describe the fallback provider. Accepted.
+- Corrupt seal state: the gate refuses every send until `/confidential status` or `off` repairs it. Fail closed, accepted; the refusal text must name the command.
+- Bedrock refusal is a dict by design; the "never a dict" rule applies to the other three modes.
+- `pin_pending` callable and `predicate_for(tier)` are accepted W1 interfaces. `is_sealed() -> (bool, Tier | None)` is canonical.
+- Ledger: `Ledger.append` must accept both `LedgerEvent` and a plain dict with the column names (W4 emits dicts). W1 adds the adapter.
+- Remembered grants on the plugin's own tool rule keys (`plugin_rule:confidential-mode:tool:<name>`) are NOT bypass states: a human chose once/session/always on the allow-once prompt, so the gate honours Hermes' remembered answer and ledgers the call as tool_allowed with decision "remembered". Yolo, approvals off, and unattended approve modes remain bypass => block. `/confidential pins` lists remembered tool grants alongside pins, revocable there.
+- Tools absent from the registry at seal (memory-provider tools, context-engine tools, lazily connected MCP servers) are blocked as unclassified with a message that names a reseal. Accepted.
+- The hook-thread versus agent-thread timing window for a yolo toggle is accepted and disclosed.
+- `allow_tool(ctx, allowlist, ledger, name, *, session_key, session_id, platform)` is the canonical signature.
+- `PendingPin` must be a frozen dataclass with value equality (W2). `apply(pending, *, approved_via: str)` gains the surface argument (W2) and consent passes it.
+
+## Amendment 3 (2026-11-06, after T4): tool gate enforcement moves to execution middleware
+
+- HERMES GAP (T4, tools/approval.py:1006-1009): on the CLI the pre_tool_call approve directive grants on any answer except the exact string "deny"; None, "", "d", "Deny", "yes" all run the tool. The hook cannot veto after the prompt. Therefore the hook only ASKS; enforcement is a `tool_execution` middleware (W4 adds `build_tool_execution(...)`), catch-all wrapped like the llm gate: when sealed and the tool is on the ask route, it calls `next_call` only if `post_approval_response` recorded an explicit once/session/always for this tool_call_id (or a remembered grant under our own rule key); anything else, including an unexpected choice value, is refused with a tool-result string and ledgered tool_refused with decision "unexpected_choice". Block-route tools are refused there too, as a second line behind the hook. The middleware never raises.
+- Unknown names and tools registered after seal: block (hook) and refuse (middleware).
+- Bypass states that turn ask into block: yolo (all forms), approvals.mode off, cron/unattended/single-query approve modes. Remembered grants under `plugin_rule:confidential-mode:tool:<name>` are honoured and ledgered "remembered"; grants under any other key (e.g. a bare "web_search" always) do not apply because our rule key differs.
+- MCP command servers are allowed per contract and disclosed as the same class of gap as terminal (a command can be a network proxy). Safe-worker mode disables all hooks and is disclosed; the tool_execution middleware is also disabled there (middleware runs through the same manager), so the disclosure must say sealed mode does not apply under safe-worker.
+- delegate_task: per-task provider/base_url/api_mode/fallback_providers/request_overrides, top-level legacy fields, and tasks passed as a JSON string all count as non-default routes => block. delegation.provider/base_url set in config => block even on the default backend (second line behind preflight). The agent's pinned backend is invisible to the hook; accepted.
+- Unreadable seal state blocks every tool, including local ones.
+- Consent: answers must match the choice value exactly; `approve_pending_pin` returns a string and raises ConsentContextError only on an event loop; a re-staged pin with the same fingerprints but a different release tag is a swap; apply-exactly-once is enforced in BOTH places (PinStore.apply is atomic and idempotent per pending; consent re-checks equality).
+- allow_tool refuses unregistered names without asking; additions persist in allowlist.yaml through Allowlist.add; hard blocks (cronjob_manage, delegate_task routes, MCP off-tier URL) cannot be lifted.
