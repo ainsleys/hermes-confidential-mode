@@ -1,0 +1,68 @@
+# Catalog entry to copy into NousResearch/hermes-agent as plugin-catalog/<name>.yaml.
+# The plugin name appears once, on the next line; keep it equal to plugin.yaml `name:`.
+name: confidential-mode
+repo: https://github.com/ainsleys/hermes-confidential-mode
+sha: "<40-char sha at submission>"
+description: >-
+  Seal a Hermes profile to local-only or attested (Tinfoil enclave) inference. Sealed, it refuses
+  main-loop model calls and fallbacks to any off-tier host before a byte is sent, asks on Hermes'
+  approval prompt before every off-machine tool call (blocks under yolo, approvals off, cron and other
+  unattended runs), blocks cronjob_manage, off-tier MCP URL servers and routed delegate_task, refuses
+  to seal while any auxiliary task, vision, delegation, TTS, memory provider or MCP URL server would
+  leave the tier, pins the enclave build you approved (/confidential pins approve), and ledgers every
+  send locally (hermes confidential watch, /confidential receipts). Disclosure — network, attested
+  tier only, nothing at load: atc.tinfoil.sh (router discovery, skipped when
+  confidential.tinfoil.enclave is set), the enclave router host (attestation report and your
+  inference requests, body encrypted to the attested key), github-proxy.tinfoil.sh (release digest
+  and Sigstore bundles), kds-proxy.tinfoil.sh (AMD VCEK) and tdx-proxy.tinfoil.sh (Intel PCS
+  collateral) for hardware collateral, tuf-repo-cdn.sigstore.dev (Sigstore TUF); no telemetry.
+  Files: ledger.sqlite (hosts, byte counts, verdicts; never prompt or response text) and state,
+  pins.yaml, allowlist.yaml, a generated Tinfoil user_cache_secret (0600, in the plugin data dir,
+  never ~/.tinfoil) and Sigstore trust roots, all under <HERMES_HOME>/plugin-data/; the tinfoil
+  SDK's and sigstore-python's platformdirs caches (~/Library/Caches/tinfoil, ~/.cache/tinfoil,
+  sigstore-python TUF dirs) are redirected under the plugin data dir by assigning SDK module
+  attributes before the first verification. Reads Hermes config read-only and never writes it.
+  Credentials: TINFOIL_API_KEY via the provider profile's env_vars (falls back to the environment
+  variable). No shell, no subprocess, no background process (one short-lived thread per
+  attestation, bounded wait 5 s). Core imports (rule 9, lazy): tools.approval.* (request_tool_approval,
+  is_approved, _yolo_active, _presence, _lock, _session_approved, _permanent_set),
+  tools.approval_context, tools.registry, tools.mcp_tool / mcp_tool_config / mcp_tool_scope
+  (MCP config readers), tools.delegate_tool_config, providers / providers.base (provider profile
+  registered via providers.register_provider), hermes_cli.config, hermes_cli.config_defaults,
+  hermes_cli.plugins, plugins.plugin_storage, hermes_yaml. Does not block: auxiliary calls at
+  runtime (observed and flagged as a breach only), terminal / execute_code / process_manage and
+  other local tools, MCP command servers, anything in safe-worker mode, the messaging platform,
+  other in-process plugins. Isolation: in_process only.
+maintainer: ainsleys
+tier: community
+category: models
+requires_hermes: ">=0.23.0"
+docs_url: https://github.com/ainsleys/hermes-confidential-mode#readme   # placeholder: confirm at submission
+version: "0.1.0"
+known_issues:
+  - "Hermes does not run auxiliary calls (compression, titles, vision, approval classifier, MCP helpers and the rest) through llm_execution, so sealed mode cannot stop one at runtime: it refuses to seal while any is configured off-tier and records a breach if one goes anyway."
+  - "On the CLI, Hermes' approve directive grants on any answer except the exact string 'deny'; the plugin enforces the exact once/session/always answer in its tool_execution middleware instead."
+  - "terminal, execute_code and process_manage run while sealed and are not inspected; they can reach the network. MCP servers launched as a local command are allowed and not inspected."
+  - "Sealed mode does not apply in safe-worker mode: Hermes loads no plugins there."
+  - "Any other in-process plugin shares the trust boundary. Under plugins.isolation: host the attested provider is invisible to Hermes, so the preflight refuses to seal."
+  - "Tinfoil's attestation covers its model router, not the model backend behind it. Reports carry no client nonce and every timestamp is the local clock."
+  - "AMD and Intel routers have different enclave fingerprints for the same release; router discovery can land on the other platform after a restart and ask for re-approval. Set confidential.tinfoil.enclave to one router host."
+  - "Remembered 'always' tool grants live in Hermes' command_allowlist as plugin_rule:confidential-mode:tool:<name>; there is no revoke command yet."
+  - "BUILD NOTE (remove when fixed): runtime verifications are not yet written to the ledger, so receipts carry no attestation evidence to replay offline."
+capabilities:
+  provides_tools: []
+  provides_hooks:
+    - pre_tool_call
+    - post_approval_response
+    - pre_llm_call
+    - pre_api_request
+    - pre_auxiliary_call
+    - post_auxiliary_call
+    - on_session_start
+    - on_session_end
+    - post_compaction
+  provides_middleware:
+    - llm_execution
+    - tool_execution
+  requires_env:
+    - TINFOIL_API_KEY

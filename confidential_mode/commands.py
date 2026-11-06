@@ -311,6 +311,11 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
         result = _sealing.unseal(state=rt.state, ledger=rt.ledger, session_id=sid, surface=surface,
                                  clear_cache=lambda: _provider_module(rt).verification_cache.invalidate(PROFILE_NAME))
         rt.set_allowlist(None)
+        try:   # Amendment 4 F6 (W4): allow grants are scoped to the seal
+            from .gate_tools import clear_persisted
+            clear_persisted(rt.allowlist_path)
+        except Exception:  # noqa: BLE001
+            pass
         return result.message
     if cmd == "status":
         return status_text(rt, session_key=skey)
