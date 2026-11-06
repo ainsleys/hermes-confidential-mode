@@ -38,6 +38,7 @@ except ImportError:  # standalone use (unit tests outside Hermes)
 from .verify.base import VerificationResult
 
 SCHEMA_VERSION = 2
+DEFAULT_APPROVAL_RULE_KEY = "confidential-mode:pin"
 
 
 class PinStoreError(Exception):
@@ -192,12 +193,15 @@ class PinStore:
             self.save(pins, new)
             return new
 
-    def apply(self, pending: PendingPin, *, approved_via: str, approval_rule_key: str,
-              approved_by: str = "human", approved_at: str | None = None) -> PinRecord:
+    def apply(self, pending: PendingPin, *, approved_via: str,
+              approval_rule_key: str = DEFAULT_APPROVAL_RULE_KEY, approved_by: str = "human",
+              approved_at: str | None = None) -> PinRecord:
         """Promote ``pending`` to the pin for its key. Raises PinStoreError if ``pending`` is no longer
         the stored pending pin. Keeps the replaced pin's fingerprints in ``previous*``."""
         with self._lock:
             pins, stored = self.load()
+            if not approved_via:
+                raise ValueError("approved_via (the approval surface) is required")
             if stored != pending:
                 raise PinStoreError("pending pin changed since it was shown; not applied")
             current = pins.get(pending.key)

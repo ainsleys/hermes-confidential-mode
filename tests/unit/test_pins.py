@@ -152,3 +152,24 @@ def test_note_model_labels_without_affecting_match(tmp_path):
     store.note_model("tinfoil", REPO, "deepseek")
     assert store.get("tinfoil", REPO).models_seen == ("deepseek",)
     assert store.match(_result())
+
+
+def test_pending_pin_is_frozen_with_value_equality(tmp_path):
+    import dataclasses
+    store = PinStore(tmp_path / "pins.yaml")
+    shown = store.stage(_result())
+    reread = PinStore(tmp_path / "pins.yaml").pending()
+    assert reread == shown and reread is not shown  # value equality across a disk round-trip
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        shown.code_fingerprint = "x"
+
+
+def test_apply_requires_surface_and_defaults_rule_key(tmp_path):
+    store = PinStore(tmp_path / "pins.yaml")
+    pending = store.stage(_result())
+    with pytest.raises(TypeError):
+        store.apply(pending)  # approved_via is a required keyword
+    with pytest.raises(ValueError):
+        store.apply(pending, approved_via="")
+    rec = store.apply(pending, approved_via="slack")
+    assert rec.approved_via == "slack" and rec.approval_rule_key == pins_mod.DEFAULT_APPROVAL_RULE_KEY
