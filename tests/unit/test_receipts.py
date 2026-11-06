@@ -87,6 +87,9 @@ def fill_every_kind(led: Ledger, sid: str = SID) -> None:
     led.append(_ev("compaction", purpose="compaction", provider="attested-tinfoil", host="r1.tinfoil.invalid",
                    model="tf-model"))
     led.append(_ev("unseal", session_id="", decision="unsealed"))
+    # Session markers (W5): never open or close a sealed period; appended last so earlier row ids hold.
+    led.append(_ev("session_start", decision="session_start", detail={"platform": "cli"}))
+    led.append(_ev("session_end", decision="session_end", detail={"platform": "cli"}))
 
 
 def _pins(tmp_path) -> PinStore:

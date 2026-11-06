@@ -81,6 +81,13 @@ def test_leak_live_off_tier_runtime_hits_hermes_default_transport(plugin, net, m
     assert h.BANNED == [], f"sealed local-only, requests on Hermes' default transport: {h.BANNED}"
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "HERMES GAP, disclosed: when plugins.hook_callback_timeout is shortened after sealing, Hermes skips the\n"
+    "fail-open pre_llm_call (hermes_cli/plugins_dispatch.py:42-52, :301-312) and starts title generation on\n"
+    "its own client before any plugin seam; no middleware wraps auxiliary calls (agent/auxiliary_hooks.py:120).\n"
+    "The preflight refuses to seal with such a timeout and the llm gate refuses the main call afterwards, but\n"
+    "the auxiliary send itself is only ledgered. Upstream request: let pre_llm_call opt into fail-closed\n"
+    "timeouts, or wrap the auxiliary client in llm_execution middleware."))
 def test_leak_hook_timeout_config_disables_recheck_and_aux_reaches_openrouter(plugin, net, monkeypatch):
     """Config edit AFTER sealing: aux title_generation -> openrouter (fingerprinted, the recheck should
     block) plus `plugins.hook_callback_timeout: 0.0001` (NOT fingerprinted). pre_llm_call is a
