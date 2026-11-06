@@ -59,7 +59,8 @@ class _Entry:
     verify_lock: Any = field(default_factory=threading.Lock)
     inflight: threading.Event | None = None
     consent_ledger: Any = None      # Ledger-like (.tail); when set, a pin needs a matching pin_applied row
-    consented: set = field(default_factory=set)  # (vendor, code_fp, enclave_fp) already seen in the ledger
+    consented: set = field(default_factory=set)
+    auto_approve_platform_only: bool = False  # (vendor, code_fp, enclave_fp) already seen in the ledger
 
 
 class VerificationCache:
@@ -142,7 +143,8 @@ class VerificationCache:
                       "detail": {"vendor": result.vendor, "code_fingerprint": result.code_fingerprint,
                                  "enclave_fingerprint": result.enclave_fingerprint,
                                  "release_tag": result.release_tag, "enclave_host": result.enclave_host,
-                                 "verifier": result.verifier, "evidence": result.evidence}})
+                                 "verifier": result.verifier, "ttl_seconds": e.ttl_seconds,
+                                 "evidence": result.evidence}})
             return result
 
     def _start_refresh(self, provider: str, e: _Entry) -> threading.Event:
@@ -211,6 +213,11 @@ class VerificationCache:
                     logger.warning("attested: not staging a pending pin: %s", exc)
                     return False, (REASON_BAD_RESULT if not (result.code_fingerprint and result.enclave_fingerprint)
                                    else reason), result
+                if had_pin and e.auto_approve_platform_only and _auto_platform_only_ok(staged):
+                    if _auto_apply(provider, e, staged):
+                        if e.pins.match(result) is True and _consent_recorded(e, result):
+                            _release(e.adapter)
+                            return True, "attested enclave verified; platform-only pin applied by policy", result
                 if staged != before:  # a new pending pin, not an idempotent re-stage
                     _emit(e, {"kind": "pin_staged", "provider": provider, "purpose": "verify",
                               "host": result.enclave_host,
@@ -243,6 +250,37 @@ def _sync_profile_base_url(e: _Entry) -> None:
         logger.debug("could not sync attested profile base_url", exc_info=True)
 
 
+AUTO_PLATFORM_ONLY = "auto_platform_only"
+
+
+def _auto_platform_only_ok(pending) -> bool:
+    """confidential.pins.auto_approve_platform_only: the code fingerprint is unchanged, only the
+    enclave (platform) fingerprint differs, and the SDK's SIGNED hardware-measurements check passed
+    (tinfoil 0.14.2 runs one only for TDX: verify_tdx_hardware against tinfoilsh/hardware-measurements)."""
+    return bool(getattr(pending, "platform_only", False)
+                and getattr(pending, "hardware_measurements_verified", False))
+
+
+def _auto_apply(provider: str, e: _Entry, pending) -> bool:
+    try:
+        e.pins.apply(pending, approved_via=AUTO_PLATFORM_ONLY, approval_rule_key="confidential-mode:pin:auto-platform-only",
+                     approved_by="policy")
+    except Exception as exc:
+        logger.warning("attested: platform-only auto-approval failed: %s", exc)
+        return False
+    ok = _emit(e, {"kind": "pin_applied", "provider": provider, "purpose": "verify", "host": pending.enclave_host,
+                   "decision": AUTO_PLATFORM_ONLY,
+                   "detail": {"vendor": pending.vendor, "router_repo": pending.router_repo,
+                              "code_fingerprint": pending.code_fingerprint,
+                              "enclave_fingerprint": pending.enclave_fingerprint,
+                              "previous_enclave_fingerprint": pending.previous_enclave_fingerprint,
+                              "platform": pending.platform, "previous_platform": pending.previous_platform,
+                              "release_tag": pending.release_tag, "policy": "auto_approve_platform_only"}})
+    # Without a consent ledger nothing will look for the row; with one, a failed write means the next
+    # check refuses ("pin has no consent record"), which is the fail-closed outcome.
+    return ok or e.consent_ledger is None
+
+
 def _consent_recorded(e: _Entry, result: VerificationResult) -> bool:
     """F8: the pin in force must have a ``pin_applied`` (decision approve) ledger row with the same
     fingerprints, i.e. it went through consent.py's ask_choice flow, not a direct PinStore.apply by other
@@ -261,7 +299,8 @@ def _consent_recorded(e: _Entry, result: VerificationResult) -> bool:
                 return False
             for row in rows:
                 since = max(since, int(getattr(row, "id", since) or since))
-                if getattr(row, "kind", None) != "pin_applied" or getattr(row, "decision", None) != "approve":
+                if getattr(row, "kind", None) != "pin_applied" or \
+                        getattr(row, "decision", None) not in ("approve", AUTO_PLATFORM_ONLY):
                     continue
                 d = getattr(row, "detail", None)
                 if isinstance(d, str):
@@ -287,14 +326,16 @@ def _adapter_host(adapter) -> str:
         return ""
 
 
-def _emit(e: _Entry, event: dict) -> None:
-    """Best effort: a failing ledger never changes a verification decision."""
+def _emit(e: _Entry, event: dict) -> bool:
+    """Best effort: a failing ledger never changes a verification decision. True iff written."""
     if e.on_event is None:
-        return
+        return False
     try:
         e.on_event(event)
+        return True
     except Exception:
         logger.warning("confidential-mode: ledger write for %s failed", event.get("kind"), exc_info=True)
+        return False
 
 
 def _fail_reason(err: str | None) -> str:
@@ -346,7 +387,7 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
                  on_event: Callable[[dict], None] | None = None, ledger=None,
                  context_length: int = DEFAULT_CONTEXT_LENGTH,
                  verify_wait_seconds: float = DEFAULT_VERIFY_WAIT_SECONDS,
-                 consent_ledger=None):
+                 consent_ledger=None, auto_approve_platform_only: bool = False):
     """Build the 'attested-tinfoil' ProviderProfile and register its cache entry. Never touches the
     network: base_url is the configured enclave URL, or the adapter's .invalid placeholder until the
     first verify() resolves the host by router discovery (then it is updated in place)."""
@@ -381,6 +422,7 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
     if consent_ledger is None and ledger is not None and callable(getattr(ledger, "tail", None)):
         consent_ledger = ledger
     cache.entry(PROFILE_NAME).consent_ledger = consent_ledger
+    cache.entry(PROFILE_NAME).auto_approve_platform_only = bool(auto_approve_platform_only)
     cache.entry(PROFILE_NAME).profile = profile
     return profile
 
@@ -471,6 +513,8 @@ def register_provider_profile(ctx, *, config: dict | None = None, data_dir: Path
         context_length=int(_cfg_get(config, "confidential", "tinfoil", "context_length",
                                     default=DEFAULT_CONTEXT_LENGTH)),
         verify_wait_seconds=float(_cfg_get(config, "confidential", "verify_wait_seconds",
-                                           default=DEFAULT_VERIFY_WAIT_SECONDS)))
+                                           default=DEFAULT_VERIFY_WAIT_SECONDS)),
+        auto_approve_platform_only=_cfg_get(config, "confidential", "pins", "auto_approve_platform_only",
+                                            default=False) is True)
     providers.register_provider(profile)
     return profile

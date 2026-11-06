@@ -29,8 +29,11 @@ from . import _sdkpatch
 
 EVIDENCE_SCHEMA = "confidential-mode/tinfoil-evidence/v1"
 HARDWARE_MEASUREMENTS_REPO = "tinfoilsh/hardware-measurements"
+TINFOIL_ROUTER_REPO = "tinfoilsh/confidential-model-router"
 
 CHECK_KEYS = (
+    "repo_match",                   # evidence repo == expected_repo (identity, not just validity)
+    "trust_root_source",            # INFORMATIONAL: "supplied" or "from_evidence" (not independent)
     "hardware_signature",           # report / quote signature by the CPU vendor key
     "cert_chain",                   # VCEK -> AMD ARK/ASK, or PCK -> Intel root, collateral signatures, revocation
     "tcb_policy",                   # SDK policy: guest policy, minimum TCB/firmware, TDX module / QE identity
@@ -46,10 +49,13 @@ NOT_ESTABLISHED = (
     "that any request was sent to or answered by this enclave (the report commits to keys, not to "
     "requests, and carries no client nonce)",
     "that requests were encrypted to this HPKE key (only the plugin's own log says so)",
-    "that this release was the latest release when verified (release metadata is unsigned; only the "
-    "digest is bound by Sigstore)",
+    "that this release was the latest release when verified (tinfoil 0.14.2 binds the release tag "
+    "and digest through the Sigstore workflow-ref policy, but which release is 'latest' comes from an "
+    "unsigned GitHub API answer)",
     "revocation or TCB changes after captured_at",
+    "that captured_at is when the capture happened (it is taken from the evidence itself)",
 )
+INFORMATIONAL_CHECKS = ("trust_root_source",)
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,10 @@ class ReplayResult:
     hpke_public_key: str | None
     as_of: str
     sdk_version: str
+    repo: str | None = None
+    enclave_host: str | None = None
+    platform: str | None = None
+    captured_at: str | None = None
     not_established: tuple[str, ...] = field(default=NOT_ESTABLISHED)
 
 
@@ -255,7 +265,12 @@ def _stored_collateral(checks: _Checks, evidence: dict):
 
 # ── Sigstore from the stored trust root ──────────────────────────────────────────────────────
 
-def _load_trusted_root(evidence: dict, trust_root_dir: Path | None) -> bytes:
+def _load_trusted_root(evidence: dict, trust_root_dir: Path | None, supplied=None) -> tuple[bytes, str]:
+    """(bytes, source). A supplied root (bytes or a path) is independent of the evidence; otherwise the
+    evidence's own content-addressed root is used and reported as "from_evidence"."""
+    if supplied is not None:
+        return (bytes(supplied) if isinstance(supplied, (bytes, bytearray)) else Path(supplied).read_bytes()), \
+            "supplied"
     tr = evidence.get("trusted_root") or {}
     digest = tr.get("sha256")
     if not digest:
@@ -264,7 +279,7 @@ def _load_trusted_root(evidence: dict, trust_root_dir: Path | None) -> bytes:
     data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != digest:
         raise ValueError("stored trusted root does not match its recorded sha256")
-    return data
+    return data, "from_evidence"
 
 
 def _sigstore_verifier_override(trusted_root_bytes: bytes) -> dict:
@@ -279,11 +294,22 @@ def _sigstore_verifier_override(trusted_root_bytes: bytes) -> dict:
 
 # ── replay ───────────────────────────────────────────────────────────────────────────────────
 
-def replay(evidence: dict, *, as_of=None, trust_root_dir: Path | str | None = None) -> ReplayResult:
-    """Re-run the captured verification offline. Never raises; problems surface as failed checks."""
+def replay(evidence: dict, *, expected_repo: str | None = TINFOIL_ROUTER_REPO,
+           expected_fingerprints: tuple[str, str] | None = None, trusted_root: Path | str | bytes | None = None,
+           as_of=None, trust_root_dir: Path | str | None = None) -> ReplayResult:
+    """Re-run the captured verification offline, checking IDENTITY as well as validity: the Sigstore
+    policy is evaluated against ``expected_repo`` (not the evidence's own repo), ``expected_fingerprints``
+    = (code, enclave) must match the recomputed ones, and ``trusted_root`` (bytes or path) is used
+    instead of the evidence's own root when given. Never raises; problems surface as failed checks.
+    ``captured_at`` and the default ``as_of`` come from the evidence (see NOT_ESTABLISHED)."""
     checks = _Checks()
+    ev = evidence if isinstance(evidence, dict) else {}
     out: dict[str, Any] = {"code_fingerprint": None, "enclave_fingerprint": None, "release_tag": None,
-                           "tls_key_fp": None, "hpke_public_key": None}
+                           "tls_key_fp": None, "hpke_public_key": None, "repo": ev.get("repo"),
+                           "enclave_host": ev.get("enclave_host"), "platform": ev.get("platform"),
+                           "captured_at": ev.get("captured_at")}
+    opts = {"expected_repo": expected_repo, "expected_fingerprints": expected_fingerprints,
+            "trusted_root": trusted_root}
     try:
         when = _as_datetime(as_of if as_of is not None else (evidence.get("captured_at")
                                                              or evidence.get("captured_at_unix")))
@@ -292,7 +318,7 @@ def replay(evidence: dict, *, as_of=None, trust_root_dir: Path | str | None = No
         checks.failed("hardware_signature", "evidence: no usable captured_at / as_of")
         return _result(checks, out, when)
     try:
-        _replay(evidence, checks, out, when, Path(trust_root_dir) if trust_root_dir else None)
+        _replay(evidence, checks, out, when, Path(trust_root_dir) if trust_root_dir else None, opts)
     except Exception as exc:  # defensive: anything unattributed fails the first unrun check
         for key in CHECK_KEYS:
             if not checks.touched(key):
@@ -303,12 +329,22 @@ def replay(evidence: dict, *, as_of=None, trust_root_dir: Path | str | None = No
 
 def _result(checks: _Checks, out: dict, when: datetime) -> ReplayResult:
     vals = dict(checks.values)
-    ok = all(v is True or (isinstance(v, str) and v.startswith("n/a:")) for v in vals.values())
+    ok = all(v is True or (isinstance(v, str) and v.startswith("n/a:"))
+             for k, v in vals.items() if k not in INFORMATIONAL_CHECKS)
     return ReplayResult(ok=ok, checks=vals, as_of=when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
                         sdk_version=_sdk_version(), **out)
 
 
-def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir: Path | None) -> None:
+def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir: Path | None,
+            opts: dict) -> None:
+    expected_repo = opts.get("expected_repo")
+    repo = (ev.get("repo") if isinstance(ev, dict) else None) or ""
+    if expected_repo is None:
+        checks.na("repo_match", "no expected_repo given")
+    elif repo == expected_repo:
+        checks.passed("repo_match")
+    else:
+        checks.failed("repo_match", f"repo {repo or '(none)'} is not the expected {expected_repo}")
     if not isinstance(ev, dict) or ev.get("schema") != EVIDENCE_SCHEMA:
         checks.failed("hardware_signature", f"evidence: schema is not {EVIDENCE_SCHEMA}")
         return
@@ -324,8 +360,8 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
     claims = ev.get("claims") or {}
     att = ev.get("attestation") or {}
     release = ev.get("release") or {}
-    repo = ev.get("repo") or ""
     out["release_tag"] = release.get("tag")
+    policy_repo = expected_repo or repo  # Sigstore identity policy uses the EXPECTED repo
 
     try:
         doc = Document(format=PredicateType(att["format"]), body=att["body"])
@@ -381,14 +417,17 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
 
         # 4) code signature from the stored trust root
         try:
-            root = _load_trusted_root(ev, trust_root_dir)
+            root, source = _load_trusted_root(ev, trust_root_dir, opts.get("trusted_root"))
         except Exception as exc:
             checks.failed("code_signature", f"trusted root: {exc}")
             return
+        checks.values["trust_root_source"] = source
+        checks._touched.add("trust_root_source")
         with _sdkpatch.overrides(_sigstore_verifier_override(root)):
             try:
                 bundle = (ev.get("sigstore_bundle") or "").encode("utf-8")
-                code = tf_sigstore.verify_attestation(bundle, release.get("digest") or "", repo, release.get("tag"))
+                code = tf_sigstore.verify_attestation(bundle, release.get("digest") or "", policy_repo,
+                                                    release.get("tag"))
                 checks.passed("code_signature")
             except Exception as exc:
                 checks.failed("code_signature", exc)
@@ -401,6 +440,9 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
                 if claims.get("code_fingerprint") != out["code_fingerprint"] or \
                         claims.get("enclave_fingerprint") != out["enclave_fingerprint"]:
                     raise ValueError("recomputed fingerprints differ from those recorded at capture")
+                exp = opts.get("expected_fingerprints")
+                if exp is not None and tuple(exp) != (out["code_fingerprint"], out["enclave_fingerprint"]):
+                    raise ValueError("recomputed fingerprints differ from expected_fingerprints")
                 checks.passed("measurement_match")
             except Exception as exc:
                 checks.failed("measurement_match", f"{type(exc).__name__}: {exc}")
@@ -411,7 +453,7 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
                 try:
                     hms = tf_sigstore.verify_hardware_measurements(
                         (hw.get("bundle") or "").encode("utf-8"), hw.get("digest") or "",
-                        hw.get("repo") or HARDWARE_MEASUREMENTS_REPO)
+                        HARDWARE_MEASUREMENTS_REPO)  # never the evidence's own repo field
                     verify_tdx_hardware(hms, enclave.measurement)
                     checks.passed("hardware_platform_match")
                 except Exception as exc:

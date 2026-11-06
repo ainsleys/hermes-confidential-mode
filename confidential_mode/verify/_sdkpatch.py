@@ -31,6 +31,23 @@ def _key(owner, attr: str) -> tuple[int, str]:
     return (id(owner), attr)
 
 
+def _dispatch(k, call_raw, *a, **kw):
+    """Run this thread's override for k, at most once per call chain: if the attribute got wrapped twice
+    (e.g. a second copy of this module, or a re-wrap over a test's monkeypatch), the inner wrapper sees
+    the override already active and calls through instead of applying it again."""
+    ov = _overrides().get(k)
+    active = getattr(_local, "active", None)
+    if active is None:
+        active = _local.active = set()
+    if ov is None or k in active:
+        return call_raw(*a, **kw)
+    active.add(k)
+    try:
+        return ov(call_raw, *a, **kw)
+    finally:
+        active.discard(k)
+
+
 def install(owner, attr: str) -> None:
     """Install the dispatching wrapper on ``owner.attr`` (a module function, or a class's function,
     classmethod or staticmethod). Idempotent; re-wraps if something (e.g. a test's monkeypatch)
@@ -44,30 +61,24 @@ def install(owner, attr: str) -> None:
             func = raw.__func__
 
             def cm(cls, *a, **kw):
-                ov = _overrides().get(k)
-                bound = func.__get__(cls, cls)
-                return ov(bound, *a, **kw) if ov else bound(*a, **kw)
+                return _dispatch(k, func.__get__(cls, cls), *a, **kw)
             setattr(owner, attr, classmethod(cm))
             _installed[k] = owner.__dict__[attr]
         elif isinstance(owner, type) and isinstance(raw, staticmethod):
             func = raw.__func__
 
             def sm(*a, **kw):
-                ov = _overrides().get(k)
-                return ov(func, *a, **kw) if ov else func(*a, **kw)
+                return _dispatch(k, func, *a, **kw)
             setattr(owner, attr, staticmethod(sm))
             _installed[k] = owner.__dict__[attr]
         elif isinstance(owner, type):
             def im(self, *a, **kw):
-                ov = _overrides().get(k)
-                bound = raw.__get__(self, type(self))
-                return ov(bound, *a, **kw) if ov else bound(*a, **kw)
+                return _dispatch(k, raw.__get__(self, type(self)), *a, **kw)
             setattr(owner, attr, im)
             _installed[k] = im
         else:
             def fn(*a, **kw):
-                ov = _overrides().get(k)
-                return ov(raw, *a, **kw) if ov else raw(*a, **kw)
+                return _dispatch(k, raw, *a, **kw)
             fn.__name__ = getattr(raw, "__name__", attr)
             fn.__wrapped__ = raw
             setattr(owner, attr, fn)

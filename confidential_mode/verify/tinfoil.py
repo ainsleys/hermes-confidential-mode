@@ -47,7 +47,10 @@ hardware_measurements, trusted_root {sha256, path}, tls_cert_pem (always None on
 claims {code_fingerprint, enclave_fingerprint, release_tag, tls_public_key_fp, hpke_public_key},
 verification_document (SDK to_dict), capture_complete, capture_missing[, capture_errors]. Every blob is
 a string, so the dict is JSON-serialisable and passes the ledger's content-key filter.
-verify/replay.py re-verifies it offline.
+verify/replay.py re-verifies it offline. Release binding: tinfoil 0.14.2 binds the release TAG (and
+digest) through the Sigstore workflow-ref policy (SDK sigstore.py:164-172, refs/tags/<tag>); what is
+unsigned is which release is "latest" (github.py:50, GitHub's releases/latest answer). The capture also
+records that answer's published_at / html_url (release.published_at, release.html_url) for the pin prompt.
 
 Sizes measured from a stubbed SEV capture (tests/unit/test_replay.py, real SDK code, test AMD anchor):
   attestation.body      404 chars (gzip+base64 of the fixed 1184-byte report; the synthetic report is
@@ -478,7 +481,7 @@ def _capture_hooks() -> dict:
 
     hooks = {
         (tf_client, "fetch_attestation"): rec("attestation", attestation),
-        (tf_client, "fetch_latest_release"): rec("release", release),
+        (tf_client, "fetch_latest_release"): _release_with_metadata(rec("release", release)),
         (tf_client, "fetch_attestation_bundle"): rec("sigstore_bundle", code_bundle),
         (tf_sigstore, "fetch_latest_digest"): rec("hardware_measurements.digest", hw_digest),
         (tf_sigstore, "fetch_attestation_bundle"): rec("hardware_measurements.bundle", hw_bundle),
@@ -492,6 +495,34 @@ def _capture_hooks() -> dict:
     except Exception:  # pragma: no cover - sigstore internals moved
         pass
     return hooks
+
+
+def _release_with_metadata(inner):
+    """Run fetch_latest_release with a thread-scoped spy on requests.Session.request that records the
+    GitHub release JSON's published_at / html_url (the SDK parses then discards them)."""
+    import requests
+
+    def override(orig, *a, **kw):
+        seen: dict = {}
+
+        def spy(orig_request, *ra, **rkw):
+            resp = orig_request(*ra, **rkw)
+            try:
+                url = str(ra[1] if len(ra) > 1 else rkw.get("url", ""))
+                if url.endswith("/releases/latest") and resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        seen.update(published_at=data.get("published_at"), html_url=data.get("html_url"))
+            except Exception:
+                pass
+            return resp
+        with _sdkpatch.overrides({(requests.Session, "request"): spy}):
+            out = inner(orig, *a, **kw)
+        sink = _sdkpatch.current_sink()
+        if sink is not None and isinstance(sink.get("release"), dict):
+            sink["release"].update({k: v for k, v in seen.items() if isinstance(v, str)})
+        return out
+    return override
 
 
 def store_trust_root(trust_root_dir: Path, data: bytes) -> tuple[str, Path]:
