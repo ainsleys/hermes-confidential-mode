@@ -180,3 +180,4 @@ Ownership is relaxed: the named owner may edit any file needed, with a note in t
 - F10 LOW, model-list probe with the API key on a live off-tier runtime: disclosed; F1(a) also refuses the turn.
 - F11 LOW, receipts across a reseal (W6): trust roots per period, not from the last period only.
 - F12 LOW, safe-worker disclosure (W5 for status/seal message; W7 for README/catalog): sealed mode does not apply under safe-worker mode, stated in user-facing text.
+- (Amendment 4 ruling 1, revised 2026-11-07) create_client returns a RefusingClient within `verify_wait_seconds` (default 20 s; interactive commands may pass 60 s) when verification is pending; the hostile harness passes a 5 s wait to keep its 10 s bound. The reason text starts "verification pending" and the preflight reports it as pending, not off-tier.
