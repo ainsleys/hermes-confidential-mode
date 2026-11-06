@@ -179,8 +179,8 @@ def env(tmp_path, monkeypatch):
 
     approve_current()
 
-    def register():
-        profile = provider_mod.register_provider_profile(None, config=cfg, data_dir=data_dir)
+    def register(**kw):
+        profile = provider_mod.register_provider_profile(None, config=cfg, data_dir=data_dir, **kw)
         assert _providers.get_provider_profile(PROFILE) is profile
         return profile
 
@@ -472,3 +472,74 @@ def test_register_without_network_or_configured_enclave_then_lazy_router_discove
     assert other.in_tier is False
     client.chat.completions.create(model="m", messages=MSG)
     assert [r[:2] for r in env["rec"].requests] == [("secure-sync", "r9.tinfoil.invalid")]
+
+
+# ── ledger events (verify_ok / verify_fail / pin_staged) ─────────────────────────────────────
+
+def test_verify_ok_is_emitted_once_with_evidence_and_lands_in_the_ledger(env, tmp_path):
+    from confidential_mode.ledger import Ledger
+    led = Ledger(tmp_path / "ledger.sqlite")
+    events = []
+
+    def sink(ev):
+        events.append(ev)
+        led.append(ev)
+    profile = env["register"](on_event=sink)
+    for _ in range(4):
+        assert isinstance(profile.create_client(api_key="tf-key", base_url=BASE_URL), ConfidentialClient)
+    assert [e["kind"] for e in events] == ["verify_ok"]
+    ev = events[0]
+    assert ev["provider"] == PROFILE and ev["host"] == ENCLAVE
+    d = ev["detail"]
+    assert (d["code_fingerprint"], d["enclave_fingerprint"], d["release_tag"], d["enclave_host"]) == (
+        "c1", "e1", "v1.0.0", ENCLAVE)
+    assert d["verifier"] == "tinfoil/0.14.2" and d["evidence"]["schema"] == "confidential-mode/tinfoil-evidence/v1"
+    json.dumps(d)
+    (row,) = led.tail()
+    assert row.kind == "verify_ok" and row.host == ENCLAVE
+
+
+def test_verify_fail_is_emitted_once_per_attempt(env):
+    env["sdk"]["fail"] = "quote signature invalid (simulated)"
+    events = []
+    profile = env["register"](on_event=events.append)
+    for _ in range(4):  # failure backoff: one attempt
+        assert isinstance(profile.create_client(api_key="tf-key", base_url=BASE_URL), RefusingClient)
+    assert [e["kind"] for e in events] == ["verify_fail"]
+    d = events[0]["detail"]
+    assert d["error_type"] == "VerifyError" and "quote signature invalid" in d["error"]
+    assert d["enclave_host"] == ENCLAVE and events[0]["host"] == ENCLAVE and len(d["error"]) <= 300
+
+
+def test_pin_staged_is_emitted_once_per_new_pending(env):
+    events = []
+    profile = env["register"](on_event=events.append)
+    env["sdk"]["code"] = "c-new"
+    for _ in range(3):
+        profile.create_client(api_key="tf-key", base_url=BASE_URL)
+        provider_mod.attested_ok(PROFILE)
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["verify_ok", "pin_staged"], kinds
+    d = events[1]["detail"]
+    assert d["code_fingerprint"] == "c-new" and d["previous"] == "c1" and d["enclave_fingerprint"] == "e1"
+    assert d["reason"] == provider_mod.REASON_PIN_MISMATCH
+
+
+@pytest.mark.parametrize("fail", [None, "boom"])
+def test_a_raising_on_event_never_changes_the_decision(env, fail):
+    env["sdk"]["fail"] = fail
+
+    def broken(ev):
+        raise RuntimeError("ledger disk full")
+    profile = env["register"](on_event=broken)
+    client = profile.create_client(api_key="tf-key", base_url=BASE_URL)
+    assert isinstance(client, RefusingClient if fail else ConfidentialClient)
+    assert provider_mod.attested_ok(PROFILE).in_tier is (not fail)
+
+
+def test_ledger_kwarg_is_a_shortcut_for_on_event(env, tmp_path):
+    from confidential_mode.ledger import Ledger
+    led = Ledger(tmp_path / "l.sqlite")
+    profile = env["register"](ledger=led)
+    profile.create_client(api_key="tf-key", base_url=BASE_URL)
+    assert [r.kind for r in led.tail()] == ["verify_ok"]
