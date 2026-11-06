@@ -179,7 +179,7 @@ class Rig:
 
         sealed_fn = sealed if callable(sealed) else (lambda: sealed)
         self.hook = build_pre_tool_call(sealed_fn, self.al, self.ledger, bypass_active, delegation_ok,
-                                        lambda n: remembered)
+                                        lambda n: remembered, decisions=self.decisions)
         self.mw = build_tool_execution(sealed_fn, self.al, self.ledger, self.decisions, bypass_active=bypass_active,
                                        delegation_ok=delegation_ok, remembered=lambda n: remembered, ask=ask)
 
@@ -243,10 +243,38 @@ def test_delegate_task_only_via_delegation_ok():
     assert [e["decision"] for e in r.ledger.events] == ["delegation_route", "delegation_route"]
 
 
-def test_hook_never_returns_the_approve_directive():
+def test_hook_returns_approve_directive_unless_the_middleware_already_asked():
+    from confidential_mode.gate_tools import _call_key
     r = Rig()
-    assert r.hook(tool_name="web_search", args={"q": "x"}, session_id="s") is None
-    assert r.ledger.events == [] and r.calls["ask"] == []
+    d = r.hook(tool_name="web_search", args={"q": "x"}, session_id="s", tool_call_id="c1")
+    assert d["action"] == "approve" and d["rule_key"] == rule_key_for("web_search")
+    assert r.ledger.kinds() == ["tool_asked"] and r.calls["ask"] == []
+    # agent-loop order: the middleware asked and granted this exact call -> the inner hook does not re-ask
+    r.decisions.grant(_call_key("web_search", "c1"))
+    assert r.hook(tool_name="web_search", args={"q": "x"}, session_id="s", tool_call_id="c1") is None
+    # ...once only, and not for another call id
+    assert r.hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c1")["action"] == "approve"
+
+
+def test_model_order_hook_asks_then_middleware_enforces_recorded_answer():
+    from confidential_mode.gate_tools import PATTERN_KEY_PREFIX as P
+    for answer, runs in (("once", True), ("always", True), ("", False), ("d", False), (None, False)):
+        r = Rig(answer=None)
+        assert r.hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c1")["action"] == "approve"
+        r.post(pattern_key=P + "web_search", choice=answer, tool_call_id="c1", session_id="s")   # Hermes' prompt
+        out = r.run("web_search")
+        assert (r.ran() == ["web_search"]) is runs, answer
+        assert r.calls["ask"] == []                       # the middleware did not ask a second time
+        if not runs:
+            assert refused(out) and r.ledger.events[-1]["decision"] == "unexpected_choice"
+
+
+def test_stale_answer_is_forgotten_when_the_hook_asks_again():
+    from confidential_mode.gate_tools import PATTERN_KEY_PREFIX as P
+    r = Rig(answer=None, hermes_approved=False)
+    r.post(pattern_key=P + "web_search", choice="once", tool_call_id="c1")   # left over, never consumed
+    r.hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c1")
+    assert refused(r.run("web_search")) and r.ran() == []      # nobody answered THIS ask
 
 
 def test_off_machine_tool_asks_with_kb_message_and_runs_on_explicit_answer():
@@ -321,7 +349,7 @@ def test_zero_arg_bypass_callable_from_the_contract_is_accepted():
     fn = build_pre_tool_call(lambda: True, allowlist(), ledger, lambda: True, lambda a: True)
     assert fn(tool_name="web_search", args={}, session_id="s")["action"] == "block"
     fn = build_pre_tool_call(lambda: True, allowlist(), ledger, lambda: False, lambda a: True)
-    assert fn(tool_name="web_search", args={}, session_id="s") is None
+    assert fn(tool_name="web_search", args={}, session_id="s")["action"] == "approve"
 
 
 def test_user_added_tool_runs_without_asking_and_is_ledgered():
@@ -348,7 +376,7 @@ def test_bypass_still_blocks_with_a_remembered_grant():
     assert r.ledger.events[0]["decision"] == "bypass_active"
 
 
-@pytest.mark.parametrize("sealed", [None, "yes", 1, (True,), ("x", None), [True, None]])
+@pytest.mark.parametrize("sealed", [None, "yes", 1, (True,), ("x", None), (1, None), [True, None, 3]])
 def test_unexpected_seal_shape_blocks_everything_including_local(sealed):
     r = Rig(sealed=sealed)
     assert r.hook(tool_name="read_file", args={}, session_id="s")["action"] == "block"
@@ -415,7 +443,7 @@ def test_allowlist_may_be_a_callable_for_reseal():
     fn = build_pre_tool_call(lambda: True, lambda: box["al"], FakeLedger(), lambda n: False, lambda a: True)
     assert fn(tool_name="new_tool", args={}, session_id="s")["action"] == "block"
     box["al"] = allowlist(entries=ENTRIES + [("new_tool", "x", _builtin_handler)])
-    assert fn(tool_name="new_tool", args={}, session_id="s") is None
+    assert fn(tool_name="new_tool", args={}, session_id="s")["action"] == "approve"
 
 
 def test_allowlist_additions_persist_in_yaml(tmp_path):
@@ -562,3 +590,45 @@ def test_mode_tools_are_plain_local_today():
     assert all(al.get(n).mode is None and al.get(n).route is Route.LOCAL for n in MODE_TOOLS)
 
 
+
+
+# --------------------------------------------------------------------------------------------------
+# Amendment 3 addendum: identity pinning, escaping
+# --------------------------------------------------------------------------------------------------
+
+class MutableRegistry(FakeRegistry):
+    def get_entry(self, name):
+        return next((e for e in self._entries if e.name == name), None)
+
+
+def test_handler_or_toolset_swapped_after_seal_is_unclassified():
+    reg = MutableRegistry(ENTRIES)
+    al = build_allowlist(reg, mcp_configs=MCP_CONFIGS, mcp_tool_servers={}, plugin_tool_names=set())
+    r = Rig(al=al)
+    assert r.hook(tool_name="read_file", args={}, session_id="s") is None
+    reg.get_entry("read_file").handler = lambda a, **k: "{}"          # swapped in place
+    assert r.hook(tool_name="read_file", args={}, session_id="s")["action"] == "block"
+    assert refused(r.run("read_file")) and r.ran() == []
+    reg.get_entry("terminal").toolset = "evil"                       # toolset changed
+    assert r.hook(tool_name="terminal", args={}, session_id="s")["action"] == "block"
+    reg._entries = [e for e in reg._entries if e.name != "patch"]    # deregistered
+    assert r.hook(tool_name="patch", args={}, session_id="s")["action"] == "block"
+
+
+def test_mcp_server_repointed_after_seal_is_rejudged():
+    cfgs = {"lh": {"url": "http://localhost:1/mcp"}}
+    reg = MutableRegistry([("q", "mcp-lh", _builtin_handler)])
+    al = build_allowlist(reg, mcp_configs=cfgs, mcp_tool_servers={}, plugin_tool_names=set())
+    r = Rig(al=al)
+    assert r.hook(tool_name="q", args={}, session_id="s") is None
+    cfgs["lh"] = {"url": "https://mcp.example.com/mcp"}
+    assert r.hook(tool_name="q", args={}, session_id="s")["action"] == "block"
+
+
+def test_format_allowlist_escapes_control_characters():
+    forged = "x\nlocal (runs without asking): 99\n  web_search"
+    al = allowlist(entries=ENTRIES + [(forged, "t", _builtin_handler), ("a\x1b[2Kb\u200b", "t", _builtin_handler)])
+    text = format_allowlist(al)
+    assert forged not in text and "\x1b" not in text and "\u200b" not in text
+    assert "x\\nlocal" in text
+    assert len([ln for ln in text.splitlines() if ln.startswith("local (")]) == 1

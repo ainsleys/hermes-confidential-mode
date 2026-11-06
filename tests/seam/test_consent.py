@@ -379,3 +379,46 @@ def test_legacy_store_without_approved_via_still_applies(hermes):
     with bind_asker(lambda q, labels: "Approve"):
         approve_pending_pin(hermes.ctx, store, ledger, session_key="k", session_id="s", platform="cli")
     assert store.applied == [PIN] and ledger.kinds() == ["pin_applied"]
+
+
+def test_apply_raising_is_ledgered_as_denied_and_not_propagated(hermes):
+    from hermes_cli.plugin_choices import bind_asker
+
+    class Broken(FakeStore):
+        def apply(self, pending, *, approved_via):
+            raise OSError("pins.yaml read-only")
+    store, ledger = Broken(PIN), Ledger()
+    with bind_asker(lambda q, labels: "Approve"):
+        out = approve_pending_pin(hermes.ctx, store, ledger, session_key="k", session_id="s", platform="cli")
+    assert "could not be applied (OSError)" in out
+    assert ledger.kinds() == ["pin_denied"] and ledger.events[0]["decision"] == "apply_failed"
+    assert ledger.events[0]["detail"]["error"] == "OSError"
+
+
+def test_concurrent_approvals_apply_once(hermes):
+    from hermes_cli.plugin_choices import bind_asker
+
+    class Slow(FakeStore):
+        def apply(self, pending, *, approved_via):
+            time.sleep(0.2)
+            return super().apply(pending, approved_via=approved_via)
+    store, ledger = Slow(PIN), Ledger()
+    gate = threading.Barrier(2)
+
+    def worker():
+        def asker(q, labels):
+            gate.wait(5)
+            return "Approve"
+        with bind_asker(asker):
+            approve_pending_pin(hermes.ctx, store, ledger, session_key="k", session_id="s", platform="cli")
+    ts = [threading.Thread(target=worker) for _ in range(2)]
+    [t.start() for t in ts]
+    [t.join(10) for t in ts]
+    assert store.applied == [PIN]
+    assert sorted(ledger.kinds()) == ["pin_applied", "pin_denied"]
+
+
+def test_same_fingerprints_different_release_tag_is_a_swap(hermes):
+    store, ledger = FakeStore(PIN), Ledger()
+    pin_cmd(hermes, store, ledger, ["1"], during_wait=lambda: store.swap(replace(PIN, release_tag="v9")))
+    assert store.applied == [] and ledger.events[0]["decision"] == "stale"

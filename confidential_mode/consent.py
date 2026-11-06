@@ -24,6 +24,7 @@ Interfaces used (duck-typed, W1/W2 own the real ones):
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Any, Optional
 
@@ -37,6 +38,9 @@ TOOL_CHOICES = [
     {"value": "approve", "label": "Allow", "description": "let this tool run while sealed without asking each call"},
     {"value": "deny", "label": "Deny", "description": "keep asking (or blocking) for this tool"},
 ]
+
+
+_APPLY_LOCK = threading.Lock()
 
 
 class ConsentContextError(RuntimeError):
@@ -122,18 +126,26 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
             return "No answer (timed out, cancelled, or not one of the options): pin update denied; current pin kept."
         return "Pin update denied; current pin kept."
 
-    try:
-        current = store.pending()
-    except Exception as exc:
-        current, detail["recheck_error"] = None, f"{type(exc).__name__}: {exc}"
-    if current is None or current != pending:
-        detail["reason"] = "pending pin changed while waiting for the answer"
-        ledger.append(_event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
-                             decision="stale", detail=detail))
-        return ("The pending pin changed while you were deciding, so nothing was applied. "
-                "Run /confidential pins approve again to review the new one.")
-
-    record = _apply(store, pending, platform or "unknown")
+    # Re-check and apply under one lock: two approvals racing for the same pending pin apply once
+    # (the second sees pending cleared or changed). PinStore.apply is additionally idempotent (W2).
+    with _APPLY_LOCK:
+        try:
+            current = store.pending()
+        except Exception as exc:
+            current, detail["recheck_error"] = None, f"{type(exc).__name__}: {exc}"[:200]
+        if current is None or current != pending:
+            detail["reason"] = "pending pin changed while waiting for the answer"
+            ledger.append(_event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
+                                 decision="stale", detail=detail))
+            return ("The pending pin changed while you were deciding, so nothing was applied. "
+                    "Run /confidential pins approve again to review the new one.")
+        try:
+            record = _apply(store, pending, platform or "unknown")
+        except Exception as exc:
+            detail["error"] = type(exc).__name__
+            ledger.append(_event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
+                                 decision="apply_failed", detail=detail))
+            return f"The pin could not be applied ({type(exc).__name__}); the current pin is unchanged."
     detail["approved_at"] = str(_field(record, "approved_at", "") or "")
     ledger.append(_event("pin_applied", session_id=session_id, platform=platform, provider=vendor,
                          decision="approve", detail=detail))

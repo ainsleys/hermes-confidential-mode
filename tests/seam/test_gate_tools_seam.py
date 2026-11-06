@@ -101,7 +101,8 @@ def hermes(monkeypatch, tmp_path):
         allowlist = build_allowlist(registry)
         decisions = ApprovalDecisions()
         sealed = lambda: state["sealed"]  # noqa: E731  (the canonical (bool, Tier | None) shape)
-        handles.append(ctx.register_hook("pre_tool_call", build_pre_tool_call(sealed, allowlist, ledger)))
+        handles.append(ctx.register_hook("pre_tool_call", build_pre_tool_call(sealed, allowlist, ledger,
+                                                                                   decisions=decisions)))
         handles.append(ctx.register_hook("post_approval_response",
                                          build_post_approval_response(sealed, ledger, decisions)))
         handles.append(ctx.register_middleware("tool_execution",
@@ -189,7 +190,9 @@ def test_off_machine_tool_prompts_with_our_message_and_runs_only_on_explicit_app
     out = call(OFF, args)
     assert hermes.prompts == [(f"<{OFF}> (plugin approval rule)", msg)]
     assert OFF not in hermes.ran and "BLOCKED" in out
-    assert hermes.events() == [("tool_asked", "ask"), ("tool_refused", "deny"), ("tool_refused", "denied")]
+    # model order: Hermes' own deny ends the call before the middleware; agent order: the middleware refuses too.
+    assert hermes.events() == [("tool_asked", "ask"), ("tool_refused", "deny")] + (
+        [("tool_refused", "denied")] if path == "agent_order_call" else [])
 
     hermes.human("once")
     out = call(OFF, args)

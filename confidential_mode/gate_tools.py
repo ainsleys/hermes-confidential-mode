@@ -82,6 +82,8 @@ class Route(str, Enum):
 # ToolInfo.mode, build_allowlist's mode argument and that function.
 MODE_TOOLS: frozenset[str] = frozenset({"terminal", "execute_code"})
 
+_ROUTE_STRICTNESS = {"local": 0, "delegate": 1, "ask": 2, "block-cron": 3, "block-mcp-url": 3}
+
 
 @dataclass(frozen=True)
 class ToolInfo:
@@ -103,10 +105,42 @@ class Allowlist:
     built_at: float = field(default_factory=time.time)
     added: set[str] = field(default_factory=set)
     added_path: Optional[Path] = None   # allowlist.yaml; additions persist there (Amendment 3)
+    # Pinned at seal (Amendment 3 addendum): name -> (toolset, handler object). Holding the handler keeps
+    # its id from being reused. A live entry whose toolset or handler differs => unclassified.
+    pins: dict[str, tuple[str, Any]] = field(default_factory=dict, repr=False)
+    registry: Any = field(default=None, repr=False)
+    # Re-read at call time for MCP tools so a server re-pointed after seal is re-judged (fail closed).
+    mcp_config_loader: Optional[Callable[[], Mapping[str, Any]]] = field(default=None, repr=False)
+    predicate: Any = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def get(self, name: str) -> Optional[ToolInfo]:
         return self.tools.get(name)
+
+    def current(self, name: str) -> Optional[ToolInfo]:
+        """The seal-time classification, only if the live registry entry is still the one pinned
+        (same toolset, same handler object) and, for MCP tools, re-judged on the live config with the
+        stricter of the two routes. None => unclassified => block."""
+        info = self.tools.get(name)
+        if info is None:
+            return None
+        if self.registry is not None:
+            pin = self.pins.get(name)
+            live = _live_entry(self.registry, name)
+            if pin is None or live is None:
+                return None
+            if str(getattr(live, "toolset", "") or "") != pin[0] or getattr(live, "handler", None) is not pin[1]:
+                return None
+        if info.origin is Origin.MCP and self.mcp_config_loader is not None:
+            try:
+                cfgs = self.mcp_config_loader() or {}
+                fresh = classify_tool(name, info.toolset, origin=Origin.MCP, mcp_server=info.mcp_server,
+                                      mcp_config=cfgs.get(info.mcp_server), predicate=self.predicate)
+            except Exception:
+                return None
+            if _ROUTE_STRICTNESS[fresh.route] > _ROUTE_STRICTNESS[info.route]:
+                return fresh
+        return info
 
     def names(self, route: Route) -> list[str]:
         return sorted(n for n, t in self.tools.items() if t.route is route)
@@ -128,6 +162,16 @@ class Allowlist:
             self.added.add(name)
             if self.added_path is not None:
                 _write_added(self.added_path, self.added)
+
+
+def _live_entry(registry: Any, name: str) -> Any:
+    get = getattr(registry, "get_entry", None)
+    if callable(get):
+        return get(name)
+    for entry in registry.get_all_entries():
+        if entry.name == name:
+            return entry
+    return None
 
 
 def _read_added(path: Path) -> set[str]:
@@ -294,13 +338,19 @@ def build_allowlist(registry: Any, *, mcp_configs: Optional[Mapping[str, Mapping
     A LOCAL-set name re-registered by a plugin (``override=True``) or by an MCP server is NOT local:
     locality is a property of the built-in implementation, not of the name."""
     if mcp_configs is None:
-        mcp_configs = _default_mcp_configs()
+        mcp_loader: Callable[[], Mapping[str, Any]] = _default_mcp_configs
+    else:
+        _fixed = mcp_configs
+        mcp_loader = lambda: _fixed  # noqa: E731
+    mcp_configs = mcp_loader()
     if mcp_tool_servers is None:
         mcp_tool_servers = _default_mcp_tool_servers()
     plugin_names = set(_default_plugin_tool_names() if plugin_tool_names is None else plugin_tool_names)
     tools: dict[str, ToolInfo] = {}
+    pins: dict[str, tuple[str, Any]] = {}
     for entry in registry.get_all_entries():
         name, toolset = str(entry.name), str(entry.toolset or "")
+        pins[name] = (toolset, getattr(entry, "handler", None))
         if toolset.startswith("mcp-"):
             server = mcp_tool_servers.get(name) or toolset[len("mcp-"):]
             tools[name] = classify_tool(name, toolset, origin=Origin.MCP, mcp_server=server,
@@ -313,7 +363,8 @@ def build_allowlist(registry: Any, *, mcp_configs: Optional[Mapping[str, Mapping
     if added_path is not None:
         # Only names that are still on the ask route at this seal are honoured.
         added = {n for n in _read_added(added_path) if n in tools and tools[n].route is Route.ASK}
-    return Allowlist(tools=tools, added=added, added_path=Path(added_path) if added_path is not None else None)
+    return Allowlist(tools=tools, added=added, added_path=Path(added_path) if added_path is not None else None,
+                     pins=pins, registry=registry, mcp_config_loader=mcp_loader, predicate=predicate)
 
 
 _ROUTE_TITLES = (
@@ -325,8 +376,22 @@ _ROUTE_TITLES = (
 )
 
 
+def _printable(value: Any) -> str:
+    """Escape control/format characters (newline, ESC, NUL, zero-width, bidi) so a registered name
+    cannot forge lines or terminal sequences in the printed allowlist."""
+    import unicodedata
+    out = []
+    for ch in str(value):
+        cat = unicodedata.category(ch)
+        if ch == "\\" or cat[0] == "C" or cat in ("Zl", "Zp"):
+            out.append(ch.encode("unicode_escape").decode("ascii") if ch != "\\" else "\\\\")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def format_allowlist(allowlist: Allowlist) -> str:
-    """Printed on seal."""
+    """Printed on seal. Every field is escaped with _printable."""
     lines: list[str] = []
     for route, title in _ROUTE_TITLES:
         infos = [allowlist.tools[n] for n in allowlist.names(route)]
@@ -334,11 +399,11 @@ def format_allowlist(allowlist: Allowlist) -> str:
         for info in infos:
             extra = [info.origin.value]
             if info.mcp_server is not None:
-                extra.append(f"server={info.mcp_server}, transport={info.mcp_transport}"
-                             + (f", host={info.mcp_host}" if info.mcp_host else ""))
+                extra.append(f"server={_printable(info.mcp_server)}, transport={info.mcp_transport}"
+                             + (f", host={_printable(info.mcp_host)}" if info.mcp_host else ""))
             if info.name in allowlist.added:
                 extra.append("allowed by you")
-            lines.append(f"  {info.name}  [{info.toolset}; {'; '.join(extra)}]")
+            lines.append(f"  {_printable(info.name)}  [{_printable(info.toolset)}; {'; '.join(extra)}]")
     return "\n".join(lines)
 
 
@@ -382,7 +447,7 @@ def _sealed_flag(value: Any) -> bool:
     """is_sealed() is canonically (bool, Tier | None) (Amendment 2); a bare bool is also accepted."""
     if isinstance(value, bool):
         return value
-    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], bool):
+    if isinstance(value, (tuple, list)) and len(value) == 2 and isinstance(value[0], bool):
         return value[0]
     raise TypeError(f"is_sealed() returned {type(value).__name__}; expected bool or (bool, tier)")
 
@@ -391,17 +456,34 @@ def bypass_active_for(tool_name: str) -> Callable[[], bool]:
     return lambda: hermes_bypass_active(tool_name)
 
 
-# Task/top-level keys that would move a child off the parent's route (delegate_tool.py:911,
-# agent/delegation_provider.py:45-48, delegate_tool_routes.py:227-235).
+# Route keys named in Hermes (tools/delegate_tool.py:911 _MODEL_HIDDEN_TASK_FIELDS acp_command/acp_args;
+# agent/delegation_provider.py:45-48 RESERVED_TASK_PARAMETERS; delegate_tool_routes.py:227-235 profile /
+# fallback_providers; delegate_tool.py:432-438 request_overrides / command / args / service_tier). Kept for
+# documentation and the report; the ARGUMENT check below is stricter: anything outside the documented
+# schema blocks, so these are all blocked a fortiori.
 DELEGATION_ROUTE_KEYS = frozenset({
     "profile", "acp_command", "acp_args", "provider", "model", "base_url", "api_key", "api_mode",
     "fallback_providers", "request_overrides", "backend", "command", "args", "reasoning_effort",
     "service_tier", "credentials_cfg",
 })
+# The documented delegate_task argument schema at 84a0301: DELEGATE_TASK_SCHEMA (delegate_tool.py:778-857)
+# plus the legacy fields the registry handler reads (delegate_tool.py:921-929). Exact-match: a key that is
+# not one of these (incl. case/space variants such as "Profile" or "profile ", and backend-declared
+# per-task parameters such as "persona") blocks.
+DELEGATE_TOP_LEVEL_KEYS = frozenset({
+    "goal", "context", "tasks", "max_iterations", "role", "background", "output_schema", "images",
+    "action", "subagent_id", "message",
+})
+DELEGATE_TASK_KEYS = frozenset({"goal", "context", "output_schema", "images", "group", "role"})
 # delegation config keys that move a child off the parent's route under the default backend
 # (plugins/delegation/default/__init__.py:32-34 returns the whole section as the route;
-# delegate_tool_config.py:478-497; delegate_tool.py:435-436, :620-630).
-DELEGATION_CONFIG_ROUTE_KEYS = frozenset({"profile", "command", "args", "provider", "base_url"})
+# delegate_tool_config.py:478-497; delegate_tool.py:432-438, :620-630). Matched after strip+casefold.
+DELEGATION_CONFIG_ROUTE_KEYS = frozenset({"profile", "command", "args", "provider", "base_url",
+                                          "fallback_providers", "request_overrides", "acp_command", "acp_args"})
+
+
+def _norm_key(key: Any) -> str:
+    return key.strip().casefold() if isinstance(key, str) else ""
 
 
 def _load_delegation_config() -> dict:
@@ -410,34 +492,44 @@ def _load_delegation_config() -> dict:
     return cfg if isinstance(cfg, dict) else {}
 
 
+def _keys_ok(obj: Mapping[str, Any], allowed: frozenset[str]) -> bool:
+    for key, value in obj.items():
+        if not isinstance(key, str) or key not in allowed:
+            return False
+        if _norm_key(key) in DELEGATION_ROUTE_KEYS:   # cannot happen with the sets above; belt and braces
+            return False
+    return True
+
+
 def default_delegation_ok(args: Mapping[str, Any], *,
                           load_config: Callable[[], Mapping[str, Any]] = _load_delegation_config) -> bool:
     """delegate_task is allowed iff the child inherits the parent's (sealed, in-tier) route: the
-    ``default`` backend, no profile / ACP command / provider / base_url in ``delegation``, and no
-    route keys in the model's arguments. Any error -> False."""
+    ``default`` backend (read per call), no route key in ``delegation`` config (strip+casefold), and
+    arguments that use only the documented delegate_task schema, with ``tasks`` a list of dicts.
+    Any error -> False."""
     try:
-        cfg = dict(load_config() or {})
-        backend = cfg.get("backend")
-        if isinstance(backend, str) and backend.strip() and backend.strip().lower() != "default":
+        cfg = load_config() or {}
+        if not isinstance(cfg, Mapping):
             return False
-        if backend is not None and not isinstance(backend, str):
+        norm = {}
+        for key, value in cfg.items():
+            norm.setdefault(_norm_key(key), []).append(value)
+        backends = norm.get("backend", [])
+        for backend in backends:
+            if backend is None or (isinstance(backend, str) and backend.strip().casefold() in ("", "default")):
+                continue
             return False
         for key in DELEGATION_CONFIG_ROUTE_KEYS:
-            value = cfg.get(key)
-            if value not in (None, "", [], {}):
+            if any(v not in (None, "", [], {}) for v in norm.get(key, [])):
                 return False
-        if not isinstance(args, Mapping):
-            return False
-        if any(args.get(k) not in (None, "", []) for k in DELEGATION_ROUTE_KEYS):
+        if not isinstance(args, Mapping) or not _keys_ok(args, DELEGATE_TOP_LEVEL_KEYS):
             return False
         tasks = args.get("tasks")
         if tasks is not None:
             if not isinstance(tasks, list):   # incl. tasks passed as a JSON string (Amendment 3)
                 return False
             for task in tasks:
-                if not isinstance(task, Mapping):
-                    return False
-                if any(task.get(k) not in (None, "", []) for k in DELEGATION_ROUTE_KEYS):
+                if not isinstance(task, Mapping) or not _keys_ok(task, DELEGATE_TASK_KEYS):
                     return False
         return True
     except Exception:
@@ -449,10 +541,14 @@ def default_delegation_ok(args: Mapping[str, Any], *,
 # --------------------------------------------------------------------------------------------------
 
 def _dumps(args: Any) -> str:
+    """json.dumps(args); non-serialisable args fall back to repr, and to "" if even that raises."""
     try:
         return json.dumps(args if args is not None else {}, default=str)
     except Exception:
-        return str(args)
+        try:
+            return repr(args)
+        except Exception:
+            return ""
 
 
 def args_kb(args: Any) -> int:
@@ -526,12 +622,12 @@ class _Policy:
 
     def decide(self, tool_name: str, args: dict) -> CallDecision:
         al = self.allowlist()
-        info = al.get(tool_name)
+        info = al.current(tool_name) if isinstance(tool_name, str) else None
         if info is None:
             return CallDecision("refuse", "unclassified",
-                                f"confidential mode: {tool_name} was not registered when this profile was sealed, "
-                                "so it is not classified and is blocked. Run /confidential off and seal again "
-                                "to classify it.")
+                                f"confidential mode: {_printable(tool_name)} is not the tool that was registered "
+                                "when this profile was sealed (new, renamed, re-registered or swapped), so it is "
+                                "blocked. Run /confidential off and seal again to classify it.")
         if info.route is Route.LOCAL:
             return self.local_decision(info, args)
         if info.route is Route.BLOCK_CRON:
@@ -539,8 +635,9 @@ class _Policy:
                                                   "while sealed; a job would run later outside this sealed session.")
         if info.route is Route.BLOCK_MCP_URL:
             return CallDecision("refuse", "mcp_url",
-                                f"confidential mode: {tool_name} belongs to MCP server '{info.mcp_server}' "
-                                f"({info.mcp_host or 'host unknown'}: {info.reason}); blocked while sealed.")
+                                f"confidential mode: {_printable(tool_name)} belongs to MCP server "
+                                f"'{_printable(info.mcp_server)}' ({_printable(info.mcp_host or 'host unknown')}: "
+                                f"{_printable(info.reason)}); blocked while sealed.")
         if info.route is Route.DELEGATE:
             if self.delegation_ok(args):
                 return CallDecision("run", "delegation_default")
@@ -558,30 +655,80 @@ class _Policy:
                                 "unattended context with no one to ask). Blocked. Turn the bypass off, or add "
                                 "the tool with /confidential allow-tool.")
         n = args_kb(args)
-        if self.remembered(tool_name):
-            return CallDecision("run", "remembered", kb=n)
-        return CallDecision("ask", "ask", f"{tool_name} wants to send ~{n} KB of this conversation off the machine",
-                            kb=n)
+        return CallDecision("ask", "remembered" if self.remembered(tool_name) else "ask",
+                            f"{tool_name} wants to send ~{n} KB of this conversation off the machine", kb=n)
 
 
 def _policy(allowlist, bypass_active, delegation_ok, remembered) -> _Policy:
     return _Policy(allowlist, bypass_active, delegation_ok, remembered)
 
 
+def _call_key(tool_name: Any, tool_call_id: Any) -> str:
+    return f"{tool_name}\x00{tool_call_id or ''}"
+
+
+class ApprovalDecisions:
+    """Shared between post_approval_response, pre_tool_call and tool_execution.
+
+    * ``record/pop``: the human's exact answer, keyed by (tool, tool_call_id) as Hermes reports it in
+      post_approval_response (the observability context carries the call's tool_call_id,
+      hermes_cli/plugins.py:1996-2009, tools/approval_context.py:55-73).
+    * ``grant/take_grant``: the middleware asked and got an explicit answer for this call (agent-loop
+      order, where the middleware runs first), so the inner pre_tool_call must not ask again."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._choices: dict[str, Any] = {}
+        self._grants: set[str] = set()
+
+    def record(self, key: str, choice: Any) -> None:
+        with self._lock:
+            self._choices[key] = choice
+
+    def pop(self, key: str) -> Any:
+        with self._lock:
+            return self._choices.pop(key, _MISSING)
+
+    def grant(self, key: str) -> None:
+        with self._lock:
+            self._grants.add(key)
+
+    def take_grant(self, key: str) -> bool:
+        with self._lock:
+            if key in self._grants:
+                self._grants.discard(key)
+                return True
+            return False
+
+    def drop_grant(self, key: str) -> None:
+        with self._lock:
+            self._grants.discard(key)
+
+
+_MISSING = object()
+DEFAULT_DECISIONS = ApprovalDecisions()   # used when the builders are not handed one explicitly
+
+
 def build_pre_tool_call(is_sealed: Callable[[], Any], allowlist: Allowlist | Callable[[], Allowlist],
                         ledger: Any, bypass_active: Callable[[str], bool] = hermes_bypass_active,
                         delegation_ok: Callable[[dict], bool] = default_delegation_ok,
-                        remembered: Callable[[str], bool] = hermes_remembered_grant) -> Callable[..., Optional[dict]]:
-    """``pre_tool_call`` callback: the FIRST line. It blocks every refuse decision (and ledgers
-    tool_refused) and otherwise returns None. It never returns the approve directive: Hermes' CLI
-    approve path grants on any answer except the exact string "deny" (tools/approval.py:1006-1009)
-    and the hook cannot veto after the prompt, so asking and enforcement live in the
-    ``tool_execution`` middleware (build_tool_execution). REGISTER BOTH: without the middleware,
-    ask-route tools run unasked.
+                        remembered: Callable[[str], bool] = hermes_remembered_grant,
+                        decisions: Optional[ApprovalDecisions] = None) -> Callable[..., Optional[dict]]:
+    """``pre_tool_call`` callback: blocks every refuse decision (ledgered tool_refused) and, for an
+    off-machine tool, returns the approve directive with the "~N KB" message (ledgered tool_asked).
+    The directive only ASKS: Hermes' CLI grants on any answer except the exact string "deny"
+    (tools/approval.py:1006-1009), so enforcement is build_tool_execution. REGISTER BOTH, with the
+    same ``decisions`` (or both defaulting to DEFAULT_DECISIONS) and build_post_approval_response.
+
+    If the middleware already asked for this exact call (agent-loop order: tool_execution is
+    outermost, agent/tool_executor.py:775-812, and pre_tool_call runs inside its next_call,
+    :677-736), the hook returns None instead of asking a second time.
 
     ``bypass_active(tool_name)`` (zero-arg also accepted), ``delegation_ok(args)`` and
-    ``remembered(tool_name)`` are injectable. ``is_sealed()`` may return ``(bool, Tier | None)`` or a bool."""
+    ``remembered(tool_name)`` are injectable. ``is_sealed()`` returns ``(bool, Tier | None)`` or a bool;
+    anything else, or raising, blocks every tool."""
     pol = _policy(allowlist, bypass_active, delegation_ok, remembered)
+    dec = decisions if decisions is not None else DEFAULT_DECISIONS
 
     def pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
                       tool_call_id: str = "", **_kw: Any) -> Optional[dict]:
@@ -589,39 +736,38 @@ def build_pre_tool_call(is_sealed: Callable[[], Any], allowlist: Allowlist | Cal
             sealed = _seal_state(is_sealed)
         except SealStateError as exc:
             _try_ledger(ledger, "tool_refused", tool_name, session_id, "seal_state_unreadable", args,
-                        {"tool": tool_name, "tool_call_id": tool_call_id, "error": str(exc)}, "gate")
+                        {"tool": str(tool_name), "tool_call_id": str(tool_call_id or ""), "error": str(exc)[:200]},
+                        "gate")
             return _block(_SEAL_UNREADABLE)
         if not sealed:
             return None
         try:
-            d = pol.decide(tool_name, args if isinstance(args, dict) else {})
-            if d.action != "refuse":
+            a = args if isinstance(args, dict) else {}
+            d = pol.decide(tool_name, a)
+            base = {"tool": str(tool_name), "tool_call_id": str(tool_call_id or "")}
+            if d.action == "refuse":
+                ledger.append(_event("tool_refused", tool_name=tool_name, session_id=session_id or "",
+                                     decision=d.decision, nbytes=args_bytes(a), surface="gate",
+                                     detail={**base, "reason": d.decision}))
+                return _block(d.message)
+            if d.action == "run":
                 return None
-            ledger.append(_event("tool_refused", tool_name=tool_name, session_id=session_id, decision=d.decision,
-                                 nbytes=args_bytes(args), surface="gate",
-                                 detail={"tool": tool_name, "tool_call_id": tool_call_id, "reason": d.decision}))
-            return _block(d.message)
+            key = _call_key(tool_name, tool_call_id)
+            if dec.take_grant(key):
+                return None                      # the middleware asked for this call already
+            directive = {"action": "approve", "message": d.message, "rule_key": rule_key_for(tool_name)}
+            dec.pop(key)                         # forget any stale answer for this key: only a fresh one counts
+            if d.decision == "remembered":
+                return directive                 # Hermes honours the grant silently; the middleware ledgers it
+            ledger.append(_event("tool_asked", tool_name=tool_name, session_id=session_id or "", decision="ask",
+                                 nbytes=args_bytes(a), surface="gate",
+                                 detail={**base, "kb": d.kb, "message": d.message}))
+            return directive
         except Exception as exc:  # never let a bug turn into "allow"
-            return _block(f"confidential mode: tool gate error ({type(exc).__name__}); {tool_name} blocked")
+            return _block(f"confidential mode: tool gate error ({type(exc).__name__}); "
+                          f"{_printable(tool_name)} blocked")
 
     return pre_tool_call
-
-
-class ApprovalDecisions:
-    """Explicit answers recorded by post_approval_response, keyed by the call's approval id."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._by_id: dict[str, str] = {}
-
-    def record(self, call_id: str, choice: str) -> None:
-        if call_id:
-            with self._lock:
-                self._by_id[call_id] = choice
-
-    def pop(self, call_id: str) -> Optional[str]:
-        with self._lock:
-            return self._by_id.pop(call_id, None)
 
 
 def hermes_request_approval(tool_name: str, message: str, *, rule_key: str, approval_id: str,
@@ -651,25 +797,28 @@ def _try_ledger(ledger, kind, tool_name, session_id, decision, args, detail, sur
 
 
 def build_tool_execution(is_sealed: Callable[[], Any], allowlist: Allowlist | Callable[[], Allowlist],
-                         ledger: Any, decisions: ApprovalDecisions, *,
+                         ledger: Any, decisions: Optional[ApprovalDecisions] = None, *,
                          bypass_active: Callable[[str], bool] = hermes_bypass_active,
                          delegation_ok: Callable[[dict], bool] = default_delegation_ok,
                          remembered: Callable[[str], bool] = hermes_remembered_grant,
                          ask: Callable[..., dict] = hermes_request_approval) -> Callable[..., Any]:
     """``tool_execution`` middleware: the ENFORCEMENT line, for ctx.register_middleware("tool_execution", fn).
 
-    Where it sits (84a0301): on the agent loop it is OUTERMOST, wrapping pre_tool_call, the approval
-    gate and the handler (agent/tool_executor.py:775-812, _dispatch_authorized_once at :677-736); on
-    model_tools.handle_function_call it runs after pre_tool_call (model_tools.py:954 then :855-859).
-    So it cannot wait for a prompt the hook raised: on the agent path that prompt has not happened yet.
-    It therefore asks itself, on the agent thread, and calls ``next_call`` for an ask-route tool only
-    when post_approval_response recorded an explicit once/session/always for THIS call (or a
-    remembered grant under our rule key exists). Any other answer, including one Hermes would
-    treat as a grant (None, "", "d", "yes"), is refused and ledgered tool_refused "unexpected_choice".
+    Off-machine tool => ``next_call`` only on an explicit once/session/always recorded by
+    post_approval_response for this call, or a remembered grant under our rule key. How the answer
+    is obtained depends on where Hermes put the middleware (84a0301):
+      * model_tools.handle_function_call: pre_tool_call ran first (model_tools.py:954) and its approve
+        directive asked; the middleware reads the recorded answer (model_tools.py:855-859);
+      * agent loop: the middleware is OUTERMOST and pre_tool_call + approval run inside next_call
+        (agent/tool_executor.py:775-812, :677-736), so no answer exists yet; the middleware asks
+        itself on the agent thread and tells the inner hook not to ask again.
+    Any other answer, including ones Hermes treats as a grant (None, "", "d", "yes"), is refused and
+    ledgered tool_refused "unexpected_choice". Block routes are refused here too (second line).
 
     Never raises: our own errors become a refusal result; an exception from ``next_call`` (the tool
     itself) propagates unchanged, as Hermes expects."""
     pol = _policy(allowlist, bypass_active, delegation_ok, remembered)
+    dec = decisions if decisions is not None else DEFAULT_DECISIONS
 
     def confidential_mode_tool_execution(tool_name: str = "", args: Any = None, next_call: Any = None,
                                          session_id: str = "", tool_call_id: str = "", turn_id: str = "",
@@ -690,63 +839,89 @@ def build_tool_execution(is_sealed: Callable[[], Any], allowlist: Allowlist | Ca
             if exc is downstream.get("exc") or not isinstance(exc, Exception):
                 raise
             _try_ledger(ledger, "tool_refused", tool_name, session_id, "gate_error", args,
-                        {"tool": tool_name, "tool_call_id": tool_call_id, "error": type(exc).__name__}, "middleware")
-            return _refusal_result(f"confidential mode: tool gate error ({type(exc).__name__}); {tool_name} blocked")
+                        {"tool": str(tool_name), "tool_call_id": str(tool_call_id or ""),
+                         "error": type(exc).__name__}, "middleware")
+            return _refusal_result(f"confidential mode: tool gate error ({type(exc).__name__}); "
+                                   f"{_printable(tool_name)} blocked")
+
+    def _refuse(tool_name, args, session_id, decision, message, detail):
+        ledger.append(_event("tool_refused", tool_name=tool_name, session_id=session_id, decision=decision,
+                             nbytes=args_bytes(args), surface="middleware", detail=detail))
+        return _refusal_result(message)
 
     def _handle(tool_name, args, run, session_id, tool_call_id, turn_id):
-        base = {"tool": tool_name, "tool_call_id": tool_call_id}
+        base = {"tool": str(tool_name), "tool_call_id": tool_call_id}
         try:
             sealed = _seal_state(is_sealed)
         except SealStateError as exc:
             _try_ledger(ledger, "tool_refused", tool_name, session_id, "seal_state_unreadable", args,
-                        {**base, "error": str(exc)}, "middleware")
+                        {**base, "error": str(exc)[:200]}, "middleware")
             return _refusal_result(_SEAL_UNREADABLE)
         if not sealed:
             return run()
         d = pol.decide(tool_name, args)
         if d.action == "refuse":
-            ledger.append(_event("tool_refused", tool_name=tool_name, session_id=session_id, decision=d.decision,
-                                 nbytes=args_bytes(args), surface="middleware", detail={**base, "reason": d.decision}))
-            return _refusal_result(d.message)
+            return _refuse(tool_name, args, session_id, d.decision, d.message, {**base, "reason": d.decision})
         if d.action == "run":
             if d.decision != "local":
                 ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id,
-                                     decision=d.decision, nbytes=args_bytes(args), surface="middleware",
-                                     detail={**base, **({"kb": d.kb} if d.kb else {})}))
+                                     decision=d.decision, nbytes=args_bytes(args), surface="middleware", detail=base))
             return run()
-        # ask
-        approval_id = f"cm-{tool_call_id or 'call'}-{uuid.uuid4().hex[:12]}"
+        key = _call_key(tool_name, tool_call_id)
+        choice = dec.pop(key)
+        if choice is not _MISSING:                 # pre_tool_call asked (model_tools order)
+            if isinstance(choice, str) and choice in _ALLOW_CHOICES:
+                return run()                       # tool_allowed was ledgered by post_approval_response
+            return _unexpected(tool_name, args, session_id, base, choice)
+        if d.decision == "remembered":
+            ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id, decision="remembered",
+                                 nbytes=args_bytes(args), surface="middleware", detail={**base, "kb": d.kb}))
+            return run()
+        # Nobody asked yet (agent-loop order, or pre_tool_call skipped): ask here.
+        approval_id = f"cm-{uuid.uuid4().hex}"
         ledger.append(_event("tool_asked", tool_name=tool_name, session_id=session_id, decision="ask",
                              nbytes=args_bytes(args), surface="middleware",
                              detail={**base, "kb": d.kb, "message": d.message, "approval_id": approval_id}))
         result = ask(tool_name, d.message, rule_key=rule_key_for(tool_name), approval_id=approval_id,
                      session_id=session_id, turn_id=turn_id)
-        choice = decisions.pop(approval_id)
+        choice = dec.pop(_call_key(tool_name, approval_id))
         approved = isinstance(result, dict) and result.get("approved") is True
-        if approved and choice in _ALLOW_CHOICES:
-            return run()   # tool_allowed was ledgered by post_approval_response
+        if approved and isinstance(choice, str) and choice in _ALLOW_CHOICES:
+            dec.grant(key)
+            try:
+                return run()
+            finally:
+                dec.drop_grant(key)
         if approved:
-            decision = "unexpected_choice"
-        elif choice is None and isinstance(result, dict) and result.get("status") == "approval_required":
-            decision = "no_surface"
-        else:
-            decision = "denied"
-        ledger.append(_event("tool_refused", tool_name=tool_name, session_id=session_id, decision=decision,
-                             nbytes=args_bytes(args), surface="middleware",
-                             detail={**base, "choice": choice, "approval_id": approval_id,
-                                     "hermes_approved": approved}))
-        if decision == "unexpected_choice":
-            return _refusal_result(f"confidential mode: {tool_name} was not run: the answer to the approval "
-                                   f"prompt was not once/session/always ({choice!r}).")
-        return _refusal_result(str((result or {}).get("message") or f"confidential mode: {tool_name} was not approved"))
+            return _unexpected(tool_name, args, session_id, {**base, "approval_id": approval_id},
+                               None if choice is _MISSING else choice)
+        decision = "no_surface" if (choice is _MISSING and isinstance(result, dict)
+                                    and result.get("status") == "approval_required") else "denied"
+        return _refuse(tool_name, args, session_id, decision,
+                       str((result or {}).get("message") or f"confidential mode: {tool_name} was not approved"),
+                       {**base, "choice": None if choice is _MISSING else _choice_repr(choice),
+                        "approval_id": approval_id})
+
+    def _unexpected(tool_name, args, session_id, base, choice):
+        return _refuse(tool_name, args, session_id, "unexpected_choice",
+                       f"confidential mode: {_printable(tool_name)} was not run: the answer to the approval prompt "
+                       f"was not once/session/always ({_printable(_choice_repr(choice))}).",
+                       {**base, "choice": _choice_repr(choice)})
 
     return confidential_mode_tool_execution
+
+
+def _choice_repr(choice: Any) -> Any:
+    return choice if isinstance(choice, str) or choice is None else repr(choice)[:80]
 
 
 def build_post_approval_response(is_sealed: Callable[[], Any], ledger: Any,
                                  decisions: Optional[ApprovalDecisions] = None) -> Callable[..., None]:
     """``post_approval_response`` observer: ledgers tool_allowed / tool_refused for OUR approve
-    directives only (pattern_key ``plugin_rule:confidential-mode:tool:<name>``). Never raises."""
+    directives only (pattern_key ``plugin_rule:confidential-mode:tool:<name>``), and records the exact
+    choice in ``decisions`` (default DEFAULT_DECISIONS) for build_tool_execution. Only the exact strings
+    once/session/always are tool_allowed; every other value is tool_refused. Never raises."""
+    dec = decisions if decisions is not None else DEFAULT_DECISIONS
 
     def post_approval_response(pattern_key: str = "", choice: str = "", session_id: str = "",
                                session_key: str = "", surface: str = "", tool_call_id: str = "",
@@ -755,14 +930,13 @@ def build_post_approval_response(is_sealed: Callable[[], Any], ledger: Any,
             if not isinstance(pattern_key, str) or not pattern_key.startswith(PATTERN_KEY_PREFIX):
                 return None
             tool_name = pattern_key[len(PATTERN_KEY_PREFIX):]
-            if decisions is not None:
-                decisions.record(str(tool_call_id or ""), choice if isinstance(choice, str) else repr(choice))
-            pick = str(choice or "")
+            dec.record(_call_key(tool_name, tool_call_id), choice)
+            pick = choice if isinstance(choice, str) else ""
             allowed = pick in _ALLOW_CHOICES
-            detail = {"tool": tool_name, "choice": pick, "tool_call_id": tool_call_id or "",
+            detail = {"tool": tool_name, "choice": _choice_repr(choice), "tool_call_id": tool_call_id or "",
                       "session_key": session_key or "", "sealed": _safe(is_sealed)}
             ledger.append(_event("tool_allowed" if allowed else "tool_refused", tool_name=tool_name,
-                                 session_id=session_id or "", decision=pick or "unknown",
+                                 session_id=session_id or "", decision=(pick or "unexpected_choice")[:64],
                                  surface=surface or None, detail=detail))
         except Exception:
             pass
