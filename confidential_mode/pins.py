@@ -66,10 +66,32 @@ class PendingPin:
     previous: str | None                       # code fingerprint of the pin this would replace
     previous_enclave_fingerprint: str | None
     models_seen: tuple[str, ...] = ()
+    # Prompt context (Miller-frame review). All optional so older pins.yaml files still load.
+    platform: str | None = None                  # "sev-snp" | "tdx" (from the attestation format)
+    previous_platform: str | None = None
+    previous_release_tag: str | None = None
+    release_published_at: str | None = None      # GitHub release JSON published_at (unsigned metadata)
+    rekor_log_index: int | None = None           # verificationMaterial.tlogEntries[0].logIndex
+    code_changed: bool = True                    # code_fingerprint != previous (True when no previous pin)
+    hardware_measurements_verified: bool = False  # SDK's signed hardware-measurements check (TDX) passed
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.vendor, self.router_repo)
+
+    @property
+    def platform_only(self) -> bool:
+        """Same code, different enclave measurement: an AMD/Intel platform flap, not a new build."""
+        return (self.previous is not None and not self.code_changed
+                and self.enclave_fingerprint != self.previous_enclave_fingerprint)
+
+    @property
+    def release_url(self) -> str | None:
+        return release_url(self.router_repo, self.release_tag)
+
+    @property
+    def compare_url(self) -> str | None:
+        return compare_url(self.router_repo, self.previous_release_tag, self.release_tag)
 
 
 @dataclass(frozen=True)
@@ -86,10 +108,57 @@ class PinRecord:
     approval_rule_key: str
     previous: str | None
     previous_enclave_fingerprint: str | None = None
+    platform: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.vendor, self.router_repo)
+
+
+def release_url(repo: str | None, tag: str | None) -> str | None:
+    """https://github.com/<repo>/releases/tag/<tag>, or None."""
+    if not repo or not tag:
+        return None
+    from urllib.parse import quote
+    return f"https://github.com/{repo}/releases/tag/{quote(tag, safe='')}"
+
+
+def compare_url(repo: str | None, old_tag: str | None, new_tag: str | None) -> str | None:
+    """https://github.com/<repo>/compare/<old_tag>...<new_tag>, or None when either tag is missing or
+    they are equal."""
+    if not repo or not old_tag or not new_tag or old_tag == new_tag:
+        return None
+    from urllib.parse import quote
+    return f"https://github.com/{repo}/compare/{quote(old_tag, safe='')}...{quote(new_tag, safe='')}"
+
+
+def _prompt_context(result: VerificationResult) -> dict:
+    """platform, release published_at, Rekor log index and the TDX hardware-measurement verdict from
+    the evidence the adapter captured. Missing pieces are None/False; never raises."""
+    ev = result.evidence if isinstance(result.evidence, dict) else {}
+    out: dict = {"platform": None, "release_published_at": None, "rekor_log_index": None,
+                 "hardware_measurements_verified": False}
+    try:
+        platform = ev.get("platform")
+        out["platform"] = platform if platform in ("sev-snp", "tdx") else None
+        rel = ev.get("release") or {}
+        if isinstance(rel.get("published_at"), str):
+            out["release_published_at"] = rel["published_at"]
+        bundle = ev.get("sigstore_bundle")
+        if isinstance(bundle, str) and bundle:
+            import json
+            entries = (json.loads(bundle).get("verificationMaterial") or {}).get("tlogEntries") or []
+            if entries and str(entries[0].get("logIndex", "")).strip().isdigit():
+                out["rekor_log_index"] = int(entries[0]["logIndex"])
+        doc = ev.get("verification_document") or {}
+        steps = doc.get("steps") or {}
+        out["hardware_measurements_verified"] = bool(
+            out["platform"] == "tdx" and doc.get("hardwareMeasurement")
+            and all((steps.get(k) or {}).get("status") == "success"
+                    for k in ("verifyEnclave", "verifyCode", "compareMeasurements")))
+    except Exception:
+        pass
+    return out
 
 
 def _record_to_dict(rec) -> dict:
@@ -217,6 +286,7 @@ class PinStore:
                     and pending.enclave_host == result.enclave_host):
                 return pending
             current = pins.get((result.vendor, result.router_repo))
+            ctx = _prompt_context(result)
             new = PendingPin(
                 vendor=result.vendor, router_repo=result.router_repo,
                 code_fingerprint=result.code_fingerprint, enclave_fingerprint=result.enclave_fingerprint,
@@ -225,6 +295,13 @@ class PinStore:
                 previous=current.code_fingerprint if current else None,
                 previous_enclave_fingerprint=current.enclave_fingerprint if current else None,
                 models_seen=(model,) if model else (),
+                platform=ctx["platform"],
+                previous_platform=current.platform if current else None,
+                previous_release_tag=current.release_tag if current else None,
+                release_published_at=ctx["release_published_at"],
+                rekor_log_index=ctx["rekor_log_index"],
+                code_changed=(current is None or current.code_fingerprint != result.code_fingerprint),
+                hardware_measurements_verified=ctx["hardware_measurements_verified"],
             )
             self.save(pins, new)
             return new
@@ -255,6 +332,7 @@ class PinStore:
                 approved_via=approved_via, approval_rule_key=approval_rule_key,
                 previous=current.code_fingerprint if current else None,
                 previous_enclave_fingerprint=current.enclave_fingerprint if current else None,
+                platform=pending.platform,
             )
             pins[rec.key] = rec
             self.save(pins, None, applied=pending)

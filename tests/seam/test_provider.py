@@ -493,6 +493,7 @@ def test_verify_ok_is_emitted_once_with_evidence_and_lands_in_the_ledger(env, tm
     d = ev["detail"]
     assert (d["code_fingerprint"], d["enclave_fingerprint"], d["release_tag"], d["enclave_host"]) == (
         "c1", "e1", "v1.0.0", ENCLAVE)
+    assert d["ttl_seconds"] == 300.0
     assert d["verifier"] == "tinfoil/0.14.2" and d["evidence"]["schema"] == "confidential-mode/tinfoil-evidence/v1"
     json.dumps(d)
     (row,) = led.tail()

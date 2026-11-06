@@ -182,6 +182,7 @@ def sev_report(amd, *, tls_fp, hpke, measurement=SNP, build=21, sign_key=None, t
 def signed_bundle(statement: dict, *, repo: str, tag: str | None) -> dict:
     payload = json.dumps({"statement": statement, "repo": repo, "tag": tag}).encode()
     return {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+            "verificationMaterial": {"tlogEntries": [{"logIndex": "123456789"}]},
             "testEnvelope": {"payload": base64.b64encode(payload).decode(),
                              "mac": hmac.new(FIXTURE_KEY, payload, "sha256").hexdigest()}}
 
@@ -240,18 +241,20 @@ def captured(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch):
     vcek_der = amd_anchor.vcek.public_bytes(serialization.Encoding.DER)
     urls = []
 
-    def fake_get(url, *a, **k):
+    def fake_request(self, method, url, *a, **k):  # the network leaf under requests.get
         urls.append(url.split("?")[0])
         if url == f"https://{ENCLAVE}/.well-known/tinfoil-attestation":
             return _Resp(json.dumps({"format": PredicateType.SEV_GUEST_V2.value, "body": body}).encode())
         if url == f"https://github-proxy.tinfoil.sh/repos/{REPO}/releases/latest":
-            return _Resp(json.dumps({"tag_name": TAG, "body": f"Digest: `{DIGEST}`"}).encode())
+            return _Resp(json.dumps({"tag_name": TAG, "body": f"Digest: `{DIGEST}`",
+                                     "published_at": "2026-11-01T09:30:00Z",
+                                     "html_url": f"https://github.com/{REPO}/releases/tag/{TAG}"}).encode())
         if url == f"https://github-proxy.tinfoil.sh/repos/{REPO}/attestations/sha256:{DIGEST}":
             return _Resp(json.dumps({"attestations": [{"bundle": bundle}]}).encode())
         if url.startswith("https://kds-proxy.tinfoil.sh/vcek/v1/Genoa/"):
             return _Resp(vcek_der)
         raise AssertionError(f"unexpected fetch {url}")
-    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests.Session, "request", fake_request)
     ad = TinfoilAdapter(data_dir=tmp_path / "plugin-data", enclave=ENCLAVE, hold_until_accepted=False)
     res = ad.verify()
     return SimpleNamespace(adapter=ad, result=res, evidence=res.evidence, urls=urls, tls_fp=tls_fp, hpke=hpke,
@@ -264,7 +267,8 @@ def test_capture_records_every_input_under_the_v1_schema(captured, offline):
         "capture_missing")
     assert ev["platform"] == "sev-snp" and ev["sdk_version"] == "0.14.2"
     assert ev["repo"] == REPO and ev["enclave_host"] == ENCLAVE and ev["enclave_source"] == "config"
-    assert ev["release"] == {"tag": TAG, "digest": DIGEST}
+    assert ev["release"] == {"tag": TAG, "digest": DIGEST, "published_at": "2026-11-01T09:30:00Z",
+                             "html_url": f"https://github.com/{REPO}/releases/tag/{TAG}"}
     assert ev["attestation"]["format"] == PredicateType.SEV_GUEST_V2.value
     assert base64.b64decode(ev["sev"]["vcek_der_b64"]) == captured.vcek_der
     assert ev["claims"]["code_fingerprint"] == res.code_fingerprint
@@ -327,7 +331,7 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
     fake_sigstore.clear()
     r = replay(captured.evidence)
     assert r.ok is True, r.checks
-    assert r.checks == {"hardware_signature": True, "cert_chain": True, "tcb_policy": True,
+    assert r.checks == {"repo_match": True, "trust_root_source": "from_evidence", "hardware_signature": True, "cert_chain": True, "tcb_policy": True,
                         "collateral_fresh_at_capture": "n/a: SEV-SNP has no Intel collateral",
                         "code_signature": True, "measurement_match": True,
                         "hardware_platform_match": "n/a: SEV-SNP", "report_data_keys": True,
@@ -337,8 +341,12 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
     assert r.enclave_fingerprint == captured.result.enclave_fingerprint == SNP.hex()
     assert r.hpke_public_key == captured.hpke.hex() and r.tls_key_fp == captured.tls_fp.hex()
     assert r.release_tag == TAG and r.sdk_version == "0.14.2"
+    assert (r.repo, r.enclave_host, r.platform, r.captured_at) == (REPO, ENCLAVE, "sev-snp",
+                                                                   captured.evidence["captured_at"])
     assert r.as_of == captured.evidence["captured_at"]
-    assert r.not_established == NOT_ESTABLISHED and len(NOT_ESTABLISHED) == 4
+    assert r.not_established == NOT_ESTABLISHED and len(NOT_ESTABLISHED) == 5
+    assert any("captured_at is when the capture happened" in x for x in NOT_ESTABLISHED)
+    assert any("binds the release tag" in x and "latest" in x for x in NOT_ESTABLISHED)
     assert fake_sigstore == ["Verifier"]  # Verifier.production() was served from the stored root
     assert offline == []
 
@@ -576,3 +584,56 @@ def test_replay_overrides_do_not_leak_to_a_concurrent_live_verify(tdx_world, off
         t.join()
     assert here == "OVERRIDDEN" and other == ["platform"]
     assert collateral_tdx._determine_pck_ca_type(None) == "platform"
+
+
+# ── identity, not just validity (Miller-frame review) ─────────────────────────────────────────
+
+def test_capture_records_release_published_at(captured):
+    rel = captured.evidence["release"]
+    assert rel["published_at"] == "2026-11-01T09:30:00Z"
+    assert rel["html_url"] == f"https://github.com/{REPO}/releases/tag/{TAG}"
+
+
+def test_forged_evidence_from_another_repo_fails_repo_match(captured, amd_anchor, offline):
+    """Someone with a genuine SEV-SNP VM and their OWN tag-signing repo produces internally consistent
+    evidence. Validity checks pass; identity does not."""
+    ev = copy.deepcopy(captured.evidence)
+    ev["repo"] = "attacker/router"
+    ev["sigstore_bundle"] = json.dumps(signed_bundle(code_statement(), repo="attacker/router", tag=TAG))
+    r = replay(ev)
+    assert r.ok is False and r.checks["repo_match"].startswith("fail:")
+    assert r.checks["code_signature"].startswith("fail:")  # Sigstore policy uses the EXPECTED repo
+    assert r.repo == "attacker/router"
+    # With no expected repo the same forgery is merely valid, and says so.
+    loose = replay(ev, expected_repo=None)
+    assert loose.checks["repo_match"].startswith("n/a:") and loose.checks["code_signature"] is True
+
+
+def test_expected_fingerprints(captured, offline):
+    good = (captured.result.code_fingerprint, captured.result.enclave_fingerprint)
+    assert replay(captured.evidence, expected_fingerprints=good).ok is True
+    r = replay(captured.evidence, expected_fingerprints=(good[0], "00" * 48))
+    _expect(r, "measurement_match")
+    assert "expected_fingerprints" in r.checks["measurement_match"]
+
+
+def test_supplied_trusted_root_is_independent(captured, offline, tmp_path):
+    root = Path(captured.evidence["trusted_root"]["path"]).read_bytes()
+    r = replay(captured.evidence, trusted_root=root)
+    assert r.ok is True and r.checks["trust_root_source"] == "supplied"
+    p = tmp_path / "root.json"
+    p.write_bytes(root)
+    assert replay(captured.evidence, trusted_root=p).checks["trust_root_source"] == "supplied"
+    bad = replay(captured.evidence, trusted_root=b'{"not": "a trusted root"}')
+    assert bad.ok is False and bad.checks["code_signature"].startswith("fail:")
+
+
+def test_pending_pin_from_a_captured_result_carries_the_prompt_context(captured, tmp_path):
+    from confidential_mode.pins import PinStore
+    store = PinStore(tmp_path / "pins.yaml")
+    p = store.stage(captured.result)
+    assert p.platform == "sev-snp" and p.enclave_host == ENCLAVE
+    assert p.release_published_at == "2026-11-01T09:30:00Z" and p.rekor_log_index == 123456789
+    assert p.code_changed is True and p.previous is None and p.previous_platform is None
+    assert p.hardware_measurements_verified is False  # SEV-SNP: the SDK runs no hardware-measurements check
+    assert p.release_url == f"https://github.com/{REPO}/releases/tag/{TAG}" and p.compare_url is None
