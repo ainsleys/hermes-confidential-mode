@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 PLUGIN_STORAGE_NAME = "confidential-mode"
 LEDGER_FILENAME = "ledger.sqlite"
@@ -96,6 +96,33 @@ def _check_detail(value: Any, path: str = "detail") -> None:
             _check_detail(sub, f"{path}[{i}]")
 
 
+_EVENT_FIELDS = frozenset(_COLUMNS)
+
+
+def coerce_event(event: Any) -> LedgerEvent:
+    """LedgerEvent passes through; a Mapping with column-name keys becomes a LedgerEvent.
+    Unknown keys are rejected (a typo must not silently drop a field); ``id`` is ignored;
+    ``detail`` None means {}."""
+    if isinstance(event, LedgerEvent):
+        return event
+    if not isinstance(event, Mapping):
+        raise LedgerError(f"ledger event must be a LedgerEvent or a dict, not {type(event).__name__}")
+    unknown = sorted(str(k) for k in event if k not in _EVENT_FIELDS)
+    if unknown:
+        raise LedgerError(f"unknown ledger event fields: {', '.join(unknown)}")
+    if "kind" not in event:
+        raise LedgerError("ledger event dict has no kind")
+    fields = {k: v for k, v in event.items() if k != "id"}
+    detail = fields.get("detail")
+    if detail is None:
+        fields["detail"] = {}
+    elif not isinstance(detail, Mapping):
+        raise LedgerError("detail must be a dict")
+    else:
+        fields["detail"] = dict(detail)
+    return LedgerEvent(**fields)
+
+
 def _default_connect() -> sqlite3.Connection:
     from plugins.plugin_storage import plugin_db
     return plugin_db(PLUGIN_STORAGE_NAME, LEDGER_FILENAME)
@@ -132,8 +159,11 @@ class Ledger:
             self._conn = conn
         return self._conn
 
-    def append(self, event: LedgerEvent) -> int:
-        """Validate and insert one event; returns its id. Raises LedgerError on a rejected event."""
+    def append(self, event: LedgerEvent | Mapping[str, Any]) -> int:
+        """Validate and insert one event; returns its id. Accepts a LedgerEvent or a plain dict
+        keyed by column names (W4 emits dicts; INTERFACES Amendment 2). Raises LedgerError on a
+        rejected event."""
+        event = coerce_event(event)
         if event.kind not in KINDS:
             raise LedgerError(f"unknown ledger kind {event.kind!r}")
         detail = dict(event.detail or {})

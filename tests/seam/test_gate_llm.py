@@ -126,6 +126,12 @@ class MutantNoCatchAll(LlmGate):
         return self.handle(request, next_call, context)
 
 
+class MutantLetsInternalErrorsEscape(MutantNoCatchAll):
+    """No catch-all and no state guard: an unreadable seal state escapes the middleware."""
+    def internal_error(self, context, exc, **kw):
+        raise exc
+
+
 class MutantSkipsAttested(LlmGate):
     def handle(self, request, next_call, context):
         dest = self.destination(context)
@@ -332,7 +338,23 @@ def check_state_raising_refused(monkeypatch, manager, tmp_path, gate_cls=LlmGate
     env.fn = build_middleware(ledger=env.ledger, is_sealed=env.state.sealed, predicate_for=lambda t: env.predicate,
                               attested_ok=env.attested, gate_cls=gate_cls)
     register(manager, env.fn)
-    assert_clean_refusal(agent.run_conversation("q"), rec, agent, TEXT_INTERNAL_ERROR)
+    assert_clean_refusal(agent.run_conversation("q"), rec, agent, gate_llm.TEXT_STATE_UNREADABLE)
+    assert "/confidential status" in gate_llm.TEXT_STATE_UNREADABLE
+    assert "/confidential off" in gate_llm.TEXT_STATE_UNREADABLE
+    rows = env.ledger.tail(0)
+    assert [r.kind for r in rows] == ["send_refused"]
+    assert rows[0].detail["reason_code"] == "seal_state_unreadable"
+
+
+@pytest.mark.parametrize("stored", [{"sealed": True, "sealed_tier": "bogus"}, {"sealed": True}])
+def test_sealed_with_unknown_tier_refused_naming_repair(monkeypatch, manager, tmp_path, stored):
+    rec = Rec()
+    agent = build_agent(monkeypatch, "chat_completions", rec)
+    env = Env(tmp_path)
+    for k, v in stored.items():
+        env.state._store.set(k, v)
+    register(manager, env.fn)
+    assert_clean_refusal(agent.run_conversation("q"), rec, agent, gate_llm.TEXT_STATE_UNREADABLE)
 
 
 def test_state_raising_refused(monkeypatch, manager, tmp_path):
@@ -341,7 +363,7 @@ def test_state_raising_refused(monkeypatch, manager, tmp_path):
 
 def test_mutant_state_raising_without_catch_all_is_caught(monkeypatch, manager, tmp_path):
     with pytest.raises(AssertionError):
-        check_state_raising_refused(monkeypatch, manager, tmp_path, MutantNoCatchAll)
+        check_state_raising_refused(monkeypatch, manager, tmp_path, MutantLetsInternalErrorsEscape)
 
 
 # ---------------------------------------------------------------------------------------------

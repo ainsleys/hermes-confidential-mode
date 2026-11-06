@@ -40,6 +40,8 @@ TEXT_INTERNAL_ERROR = (REFUSAL_PREFIX + "the confidentiality check failed, so th
                        "sent to any model provider.")
 TEXT_PROVIDER_ERROR = REFUSAL_PREFIX + "attested endpoint unavailable; this turn ended; resend."
 TEXT_PIN_CHANGED = REFUSAL_PREFIX + "enclave build changed; run /confidential pins approve"
+TEXT_STATE_UNREADABLE = (REFUSAL_PREFIX + "seal state is unreadable, so every request is refused until it "
+                         "is repaired; run /confidential status or /confidential off.")
 REFUSAL_MODEL = "confidential-mode"
 KNOWN_API_MODES = ("chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse")
 
@@ -222,13 +224,18 @@ class LlmGate:
 
     def handle(self, request: Any, next_call: Callable[..., Any], context: Mapping[str, Any]) -> Any:
         dest = self.destination(context)
-        sealed, tier = self.is_sealed()
+        try:
+            sealed, tier = self.is_sealed()
+            if sealed:
+                tier = Tier(tier)
+        except Exception as exc:  # corrupt seal state: fail closed (INTERFACES Amendment 2)
+            return self.internal_error(context, exc, text=TEXT_STATE_UNREADABLE,
+                                       reason_code="seal_state_unreadable")
         if not sealed:
             self.record("send_observed", dest, context, host=_host(dest.base_url),
                         nbytes=request_bytes(request), decision="observed")
             return next_call(request)
 
-        tier = Tier(tier)
         predicate = self.predicate_for(tier)
         if Tier(predicate.tier) != tier:
             raise RuntimeError(f"predicate tier {predicate.tier!r} does not match sealed tier {tier.value!r}")
@@ -286,17 +293,18 @@ class LlmGate:
                     decision="refused", detail=d)
         return refusal
 
-    def internal_error(self, context: Mapping[str, Any], exc: BaseException) -> Any:
+    def internal_error(self, context: Mapping[str, Any], exc: BaseException, *, text: str = TEXT_INTERNAL_ERROR,
+                       reason_code: str = "internal_error") -> Any:
         logger.warning("confidential-mode gate refused after internal error: %s", type(exc).__name__)
         api_mode = ""
         try:
             api_mode = str(context.get("api_mode") or "")
         except Exception:  # noqa: BLE001
             pass
-        refusal, note = build_refusal(api_mode, TEXT_INTERNAL_ERROR, self.builders)
+        refusal, note = build_refusal(api_mode, text, self.builders)
         try:
             dest = self.destination(context)
-            d = {"reason_code": "internal_error", "error_type": type(exc).__name__}
+            d = {"reason_code": reason_code, "error_type": type(exc).__name__}
             if note:
                 d["note"] = note
             self.record("send_refused", dest, context, host=_host(dest.base_url), verdict="error",

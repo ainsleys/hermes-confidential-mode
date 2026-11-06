@@ -30,6 +30,7 @@ def base_config(**over):
         "memory": {"provider": ""},
         "mcp_servers": {},
         "plugins": {"isolation": "in_process"},
+        "tts": {"provider": "piper"},
     }
     cfg.update(over)
     return cfg
@@ -147,9 +148,18 @@ def test_vision_missing_block_is_off_tier():
 
 
 @pytest.mark.parametrize("value", ["none", "off", "disabled"])
-def test_vision_disabled(value):
+def test_vision_has_no_disabled_convention(value):
+    # Amendment 1: no "disabled" convention; these are just unknown provider names -> off-tier.
     cfg = base_config(auxiliary={"vision": {"provider": value}})
-    assert item(run(cfg), "auxiliary.vision.provider").verdict == "disabled"
+    assert item(run(cfg), "auxiliary.vision.provider").verdict == "off_tier"
+
+
+@pytest.mark.parametrize("vision", ["openrouter", ["x"], 3])
+def test_vision_non_dict_block_off_tier(vision):
+    r = run(base_config(auxiliary={"vision": vision}))
+    assert item(r, "auxiliary.vision").verdict == "off_tier"
+    i = item(r, "auxiliary.vision.provider")
+    assert i.verdict == "off_tier" and "inbound images" in i.fix
 
 
 def test_vision_main_inherits_main():
@@ -172,12 +182,12 @@ def test_vision_explicit_remote_off_tier():
 
 
 def test_aux_explicit_provider_and_base_url():
-    ok = base_config(auxiliary={"vision": {"provider": "none"},
+    ok = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL},
                                 "compression": {"provider": "custom", "base_url": "http://192.168.1.4:8080/v1"}})
     r = run(ok)
     assert item(r, "auxiliary.compression.provider").verdict == "local"
     assert item(r, "auxiliary.compression.base_url").value_redacted == "http://192.168.1.4:8080/v1"
-    bad = base_config(auxiliary={"vision": {"provider": "none"},
+    bad = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL},
                                  "compression": {"provider": "custom", "base_url": "https://api.example.com/v1"}})
     r = run(bad)
     i = item(r, "auxiliary.compression.base_url")
@@ -185,16 +195,16 @@ def test_aux_explicit_provider_and_base_url():
 
 
 def test_aux_moa_provider_off_tier():
-    cfg = base_config(auxiliary={"vision": {"provider": "none"},
+    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL},
                                  "approval": {"provider": "moa", "base_url": LOCAL_URL}})
     assert item(run(cfg), "auxiliary.approval.provider").verdict == "off_tier"
 
 
 def test_aux_fallback_chain_entries():
-    good = base_config(auxiliary={"vision": {"provider": "none"}, "curator": {
+    good = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "curator": {
         "provider": "auto", "fallback_chain": [{"provider": "ollama", "model": "q"}]}})
     assert item(run(good), "auxiliary.curator.fallback_chain[0]").verdict == "local"
-    bad = base_config(auxiliary={"vision": {"provider": "none"}, "curator": {
+    bad = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "curator": {
         "provider": "auto", "fallback_chain": [{"provider": "ollama"}, {"provider": "openrouter", "model": "x"},
                                                {"provider": "moa"}, {"provider": "auto"}, "junk"]}})
     r = run(bad)
@@ -206,7 +216,7 @@ def test_plugin_aux_task_by_name_inherits_main():
     r = run(base_config(), plugin=["my_plugin_task"])
     assert item(r, "auxiliary.my_plugin_task.provider").verdict == "local"
     assert "my_plugin_task" in r.aux_tasks
-    cfg = base_config(auxiliary={"vision": {"provider": "none"}, "my_plugin_task": {"provider": "openrouter"}})
+    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "my_plugin_task": {"provider": "openrouter"}})
     assert item(run(cfg, plugin=["my_plugin_task"]), "auxiliary.my_plugin_task.provider").verdict == "off_tier"
 
 
@@ -214,13 +224,13 @@ def test_plugin_aux_task_defaults_are_honoured():
     entry = {"key": "pt", "defaults": {"provider": "openrouter", "model": "x"}, "inherit_from": None}
     r = run(base_config(), plugin=[entry])
     assert item(r, "auxiliary.pt.provider").verdict == "off_tier"
-    cfg = base_config(auxiliary={"vision": {"provider": "none"}, "pt": {"provider": "ollama"}})
+    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "pt": {"provider": "ollama"}})
     assert item(run(cfg, plugin=[entry]), "auxiliary.pt.provider").verdict == "local"  # user wins
 
 
 def test_plugin_aux_task_inherit_from():
     entry = {"key": "pt", "defaults": {}, "inherit_from": "compression"}
-    cfg = base_config(auxiliary={"vision": {"provider": "none"}, "compression": {"provider": "openrouter"}})
+    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "compression": {"provider": "openrouter"}})
     assert item(run(cfg, plugin=[entry]), "auxiliary.pt.provider").verdict == "off_tier"
     cfg["auxiliary"]["pt"] = {"provider": "ollama"}  # pinned on the task itself
     assert item(run(cfg, plugin=[entry]), "auxiliary.pt.provider").verdict == "local"
@@ -256,7 +266,9 @@ def test_mcp_servers():
     assert "abc" not in format_report(r)
 
 
-@pytest.mark.parametrize("iso,verdict", [("in_process", "local"), ("host", "off_tier"), ("", "missing"), (None, "missing")])
+@pytest.mark.parametrize("iso,verdict", [("in_process", "local"), ("host", "off_tier"), ("", "missing"),
+                                         (None, "local"), ("IN-PROCESS", "off_tier"), (1, "off_tier"),
+                                         (["in_process"], "off_tier")])
 def test_plugins_isolation(iso, verdict):
     i = item(run(base_config(), isolation=iso), "plugins.isolation")
     assert i.verdict == verdict
@@ -264,9 +276,24 @@ def test_plugins_isolation(iso, verdict):
         assert "plugins.isolation: in_process" in i.fix
 
 
+def test_plugins_isolation_read_from_config_when_not_passed():
+    def go(cfg):
+        return run_preflight(Tier.LOCAL, local_pred(), cfg, plugin_aux_tasks=[], provider_lookup=lambda n: None,
+                             attested_profile=None)
+    assert item(go(base_config()), "plugins.isolation").verdict == "local"
+    assert item(go(base_config(plugins={})), "plugins.isolation").verdict == "local"   # absent -> default
+    cfg = base_config()
+    del cfg["plugins"]
+    assert item(go(cfg), "plugins.isolation").verdict == "local"
+    assert item(go(base_config(plugins={"isolation": "host"})), "plugins.isolation").verdict == "off_tier"
+    assert item(go(base_config(plugins={"isolation": ""})), "plugins.isolation").verdict == "missing"
+    assert item(go(base_config(plugins={"isolation": None})), "plugins.isolation").verdict == "missing"
+    assert item(go(base_config(plugins="in_process")), "plugins.isolation").verdict == "off_tier"
+
+
 def attested_config(**over):
     cfg = base_config(model={"provider": "attested-tinfoil", "default": "llama"},
-                      auxiliary={"vision": {"provider": "none"}})
+                      auxiliary={"vision": {"provider": "attested-tinfoil"}})
     cfg.update(over)
     return cfg
 
@@ -408,3 +435,124 @@ def test_builtin_aux_snapshot_used_when_import_fails(monkeypatch):
         return real(name, *a, **k)
     monkeypatch.setattr(builtins, "__import__", fake)
     assert pf.builtin_aux_task_names() == list(BUILTIN_AUX_TASKS_SNAPSHOT)
+
+
+# --- Amendment 1 additions ----------------------------------------------------------------------
+
+def test_mcp_url_server_classified_by_host():
+    cfg = base_config(mcp_servers={"lh": {"url": "http://localhost:8000/mcp"},
+                                   "lan": {"url": "http://192.168.1.20:9000/sse", "command": "npx"},
+                                   "bad": {"url": "http://evil.com\\@127.0.0.1/mcp"},
+                                   "empty": {"url": ""}})
+    r = run(cfg)
+    assert item(r, "mcp_servers.lh.url").verdict == "local"
+    assert item(r, "mcp_servers.lan.url").verdict == "local"   # url wins over command
+    assert item(r, "mcp_servers.bad.url").verdict == "off_tier"
+    assert item(r, "mcp_servers.empty.url").verdict == "off_tier"
+
+
+@pytest.mark.parametrize("servers", [["https://x"], "https://x"])
+def test_mcp_servers_non_mapping_off_tier(servers):
+    assert item(run(base_config(mcp_servers=servers)), "mcp_servers").verdict == "off_tier"
+
+
+def test_delegation_inherits_main_when_unset():
+    r = run(base_config())
+    assert item(r, "delegation.provider").verdict == "local"
+    assert item(r, "delegation.model").verdict == "local"
+    r = run(base_config(model={"provider": "openrouter", "default": "x"}))
+    assert item(r, "delegation.provider").verdict == "off_tier"
+
+
+def test_delegation_explicit_routes():
+    ok = run(base_config(delegation={"provider": "custom", "model": "q", "base_url": "http://10.0.0.3/v1"}))
+    assert item(ok, "delegation.base_url").verdict == "local"
+    assert ok.ok, format_report(ok)
+    for deleg in ({"provider": "openrouter", "model": "x"}, {"base_url": "https://api.example.com/v1"},
+                  {"provider": "moa"}, {"provider": "openai-codex", "base_url": LOCAL_URL}):
+        r = run(base_config(delegation=deleg))
+        assert item(r, "delegation.provider").verdict == "off_tier", deleg
+        assert "delegation." in item(r, "delegation.provider").fix
+    r = run(base_config(delegation={"fallback_providers": [{"provider": "openrouter", "model": "x"}]}))
+    assert item(r, "delegation.fallback_providers").verdict == "off_tier"
+
+
+@pytest.mark.parametrize("prov,verdict", [("piper", "local"), ("kittentts", "local"), ("neutts", "local"),
+                                          ("none", "local"), ("edge", "off_tier"), ("", "off_tier"),
+                                          ("elevenlabs", "off_tier"), ("openai", "off_tier")])
+def test_tts_provider(prov, verdict):
+    i = item(run(base_config(tts={"provider": prov})), "tts.provider")
+    assert i.verdict == verdict
+    if verdict == "off_tier":
+        assert "tts.provider" in i.fix
+
+
+def test_tts_absent_is_hermes_default_edge():
+    cfg = base_config()
+    del cfg["tts"]
+    i = item(run(cfg), "tts.provider")
+    assert i.verdict == "off_tier" and "edge" in i.value_redacted
+
+
+def test_tts_named_command_provider_is_local():
+    cfg = base_config(tts={"provider": "mysay", "providers": {"mysay": {"command": "say -o {out} {text}"}}})
+    assert item(run(cfg), "tts.provider").verdict == "local"
+    cfg = base_config(tts={"provider": "myhttp", "providers": {"myhttp": {"url": "https://x"}}})
+    assert item(run(cfg), "tts.provider").verdict == "off_tier"
+
+
+@pytest.mark.parametrize("mem", ["honcho", ["honcho"], 3])
+def test_memory_non_mapping_off_tier(mem):
+    assert item(run(base_config(memory=mem)), "memory").verdict == "off_tier"
+
+
+def test_memory_absent_or_null_is_builtin():
+    cfg = base_config()
+    del cfg["memory"]
+    assert item(run(cfg), "memory.provider").verdict == "local"
+    assert item(run(base_config(memory=None)), "memory.provider").verdict == "local"
+
+
+@pytest.mark.parametrize("fb", ["openrouter", 1, [None]])
+def test_fallback_providers_junk_off_tier(fb):
+    r = run(base_config(fallback_providers=fb))
+    assert item(r, "fallback_providers[0]").verdict == "off_tier"
+
+
+@pytest.mark.parametrize("chain", [{"provider": "openrouter"}, "openrouter"])
+def test_aux_fallback_chain_non_list_off_tier(chain):
+    cfg = base_config()
+    cfg["auxiliary"]["approval"] = {"fallback_chain": chain}
+    assert item(run(cfg), "auxiliary.approval.fallback_chain").verdict == "off_tier"
+
+
+def test_aux_non_dict_block_off_tier():
+    cfg = base_config()
+    cfg["auxiliary"]["compression"] = "openrouter"
+    assert item(run(cfg), "auxiliary.compression").verdict == "off_tier"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda c: c.update(delegation={"provider": "openrouter"}),
+    lambda c: c.update(delegation={"model": "x"}),
+    lambda c: c.update(delegation={"base_url": "http://x"}),
+    lambda c: c.update(delegation={"fallback_providers": [{"provider": "x"}]}),
+    lambda c: c["tts"].update(provider="edge"),
+    lambda c: c["model"].update(api_mode="codex_responses"),
+    lambda c: c["auxiliary"].update(compression="openrouter"),
+    lambda c: c.update(mcp_servers=["https://x"]),
+    lambda c: c.update(memory="honcho"),
+    lambda c: c.update(plugins="host"),
+])
+def test_fingerprint_changes_on_amendment_keys(mutate):
+    a = base_config()
+    b = copy.deepcopy(a)
+    mutate(b)
+    assert config_fingerprint(a) != config_fingerprint(b)
+
+
+def test_fingerprint_ignores_non_task_aux_scalars():
+    a = base_config()
+    b = copy.deepcopy(a)
+    b["auxiliary"]["transient_retries"] = 6
+    assert config_fingerprint(a) == config_fingerprint(b)

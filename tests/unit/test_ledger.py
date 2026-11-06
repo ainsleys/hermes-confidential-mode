@@ -180,3 +180,60 @@ def test_state_over_real_plugin_state(tmp_path, monkeypatch):
     st.mark_breached("sess")
     again = ConfidentialState(mod.PluginState("confidential-mode"))
     assert again.sealed() == (True, Tier.LOCAL) and again.breached_sessions() == ["sess"]
+
+
+# --------------------------------------------------------------------------- dict events (Amendment 2)
+
+
+def _w4_tool_event(kind, decision, **over):
+    """Exactly the shape gate_tools._event / consent._event build."""
+    ev = {"ts": 5.0, "session_id": "s9", "kind": kind, "purpose": "tool:web_search", "provider": "",
+          "host": "", "model": "", "bytes": 2048, "tier": None, "verdict": None, "decision": decision,
+          "surface": "gate", "detail": {"tool": "web_search", "tool_call_id": "c1", "kb": 2}}
+    ev.update(over)
+    return ev
+
+
+@pytest.mark.parametrize("kind,decision,purpose", [
+    ("tool_asked", "ask", "tool:web_search"),
+    ("tool_allowed", "remembered", "tool:web_search"),
+    ("tool_allowed", "allowlist", "tool:web_search"),
+    ("tool_refused", "bypass_active", "tool:web_search"),
+    ("pin_staged", "staged", "pin"),
+    ("pin_applied", "approve", "pin"),
+    ("pin_denied", "no_answer", "pin"),
+])
+def test_append_accepts_w4_dicts(ledger, kind, decision, purpose):
+    eid = ledger.append(_w4_tool_event(kind, decision, purpose=purpose))
+    [row] = ledger.session("s9")
+    assert row.id == eid
+    assert (row.kind, row.decision, row.purpose, row.bytes, row.ts, row.surface) == \
+        (kind, decision, purpose, 2048, 5.0, "gate")
+    assert row.detail == {"tool": "web_search", "tool_call_id": "c1", "kb": 2}
+
+
+def test_dict_and_dataclass_store_identically(ledger):
+    ledger.append(_w4_tool_event("tool_asked", "ask"))
+    ledger.append(LedgerEvent(**{k: v for k, v in _w4_tool_event("tool_asked", "ask").items()}))
+    a, b = ledger.session("s9")
+    assert {**a.__dict__, "id": 0} == {**b.__dict__, "id": 0}
+
+
+def test_minimal_dict_and_none_detail(ledger):
+    ledger.append({"kind": "unseal", "detail": None, "id": 999})
+    [row] = ledger.tail(0)
+    assert row.kind == "unseal" and row.detail == {} and row.id != 999 and row.ts == 1000.0
+
+
+@pytest.mark.parametrize("bad", [
+    {"kind": "tool_asked", "sesion_id": "typo"},          # unknown field
+    {"session_id": "s"},                                    # no kind
+    {"kind": "tool_banana"},                                # unknown kind
+    {"kind": "tool_asked", "detail": "not a dict"},
+    {"kind": "tool_asked", "detail": {"args": 1, "messages": ["secret"]}},  # content-shaped
+    ["kind", "tool_asked"],                                 # not a mapping
+])
+def test_bad_dicts_rejected(ledger, bad):
+    with pytest.raises(LedgerError):
+        ledger.append(bad)
+    assert ledger.tail(0) == []
