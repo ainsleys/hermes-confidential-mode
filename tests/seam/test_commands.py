@@ -466,3 +466,42 @@ def test_cli_replay_flags_parse(plugin):
     a = parser.parse_args(["replay", "r.json", "--pins", "p.yaml", "--expected-fingerprints", "aa:bb",
                            "--expected-repo-id", "1", "--expected-owner-id", "2"])
     assert (a.pins, a.expected_fingerprints, a.expected_repo_id, a.expected_owner_id) == ("p.yaml", "aa:bb", "1", "2")
+
+
+def _setup_block(plugin, capsys, *argv):
+    parser, handler = _replay_parser(plugin)
+    assert handler(parser.parse_args(["setup", "--no-verify", *argv])) == 0
+    out = capsys.readouterr().out
+    import hermes_yaml
+    return out, hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Then run")])
+
+
+def test_setup_block_gives_vision_and_side_jobs_suitable_models(plugin, capsys):
+    out, cfg = _setup_block(plugin, capsys, "--model", "llama3-3-70b")
+    aux = cfg["auxiliary"]
+    assert cfg["model"] == {"provider": "attested-tinfoil", "default": "llama3-3-70b"}
+    assert aux["vision"]["model"] == "gemma4-31b"
+    for task in ("title_generation", "compression", "approval", "mcp", "memory_query_rewrite"):
+        assert aux[task] == {"provider": "attested-tinfoil", "model": "deepseek-v4-1-flash"}, task
+    assert aux["background_review"]["model"] == "llama3-3-70b"
+    assert all(v["provider"] == "attested-tinfoil" for v in aux.values())
+    assert not any(k.startswith("moa") for k in aux)
+    for marker in ("# vision: a vision-capable model", "# short side jobs", "# tasks that reason over"):
+        assert out.count(marker) == 1, marker
+    assert "confidential:" not in out                          # --no-verify resolved no host
+    out, cfg = _setup_block(plugin, capsys, "--model", "m", "--vision-model", "v", "--aux-model", "a")
+    assert cfg["auxiliary"]["vision"]["model"] == "v" and cfg["auxiliary"]["title_generation"]["model"] == "a"
+    # The printed block passes the attested preflight structurally (no network).
+    sealing = _sub(plugin, "sealing")
+    report = sealing.run_tier_preflight("attested", config=cfg,
+                                        predicate=sealing.structural_predicate("attested", config=cfg))
+    assert report.ok, _sub(plugin, "preflight").format_report(report)
+
+
+def test_setup_prints_the_resolved_enclave_line(plugin):
+    import io
+    commands = _sub(plugin, "commands")
+    block = commands.config_block(plugin.rt, "m", enclave="router-3.inf6.tinfoil.sh")
+    assert block.rstrip().endswith("  tinfoil:\n    # the router this setup verified and pinned; without it each "
+                                   "restart may pick another\n    # router (possibly another hardware platform) and "
+                                   "refuse until you re-approve the pin\n    enclave: router-3.inf6.tinfoil.sh")
