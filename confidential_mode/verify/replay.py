@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import _sdkpatch, policy_check
+from . import _sdkpatch, policy_check, sev_check
 
 EVIDENCE_SCHEMA = "confidential-mode/tinfoil-evidence/v1"
 HARDWARE_MEASUREMENTS_REPO = "tinfoilsh/hardware-measurements"
@@ -41,6 +41,7 @@ CHECK_KEYS = (
     "collateral_fresh_at_capture",  # TDX: TCB info / QE identity not expired at as_of (n/a for SEV)
     "code_signature",               # Sigstore DSSE + Rekor + GitHub workflow policy for the release digest
     "policy_check",                 # second column: verify/policy_check.py (no tinfoil code) on the same bundle(s)
+    "sev_check",                    # second column: verify/sev_check.py (no tinfoil code) on the SEV report (n/a TDX)
     "measurement_match",            # signed code measurement == enclave measurement; fingerprints == claims
     "hardware_platform_match",      # TDX: MRTD/RTMR0 match a signed hardware-measurements entry (n/a for SEV)
     "report_data_keys",             # report_data (TLS key fp || HPKE key) == the keys the client used
@@ -83,6 +84,8 @@ class ReplayResult:
     source_commit: str | None = None
     log_index: int | None = None
     integrated_time: int | None = None
+    sev_checker_sha256: str | None = None      # identifies the independent SEV checker (file hash)
+    policy_checker_sha256: str | None = None
     not_established: tuple[str, ...] = field(default=NOT_ESTABLISHED)
     # Older spellings, kept in sync with the *_asserted fields (same capturer-asserted values).
     enclave_host: str | None = None
@@ -142,6 +145,13 @@ def _as_datetime(value) -> datetime:
     if isinstance(value, str):
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
     raise ValueError(f"unusable time {value!r}")
+
+
+def _file_sha256(path) -> str:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except Exception:
+        return ""
 
 
 def _b64d(s: str) -> bytes:
@@ -427,6 +437,23 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
         checks.failed("hardware_signature", f"evidence: attestation unusable: {exc}")
         return
     is_tdx = doc.format == PredicateType.TDX_GUEST_V2
+    out["sev_checker_sha256"] = sev_check.checker_sha256()
+    out["policy_checker_sha256"] = _file_sha256(policy_check.__file__)
+    indep = None
+    if is_tdx:
+        checks.na("sev_check", "TDX: no independent checker")
+    else:
+        sev = ev.get("sev") or {}
+        try:
+            vcek = _b64d(sev.get("vcek_der_b64") or "")
+        except Exception:
+            vcek = b""
+        indep = sev_check.check(doc.body, vcek, as_of=when)
+        if not indep.ok:
+            checks.failed("sev_check", indep.reason)
+        elif (indep.tls_key_fp, indep.hpke_public_key) != (claims.get("tls_public_key_fp"), claims.get("hpke_public_key")):
+            checks.failed("sev_check", "report_data keys differ from the keys recorded at capture")
+            indep = None
 
     base = _network_ban(attempts)
     stages = _tdx_stages(checks, ev) if is_tdx else _sev_stages(checks)
@@ -513,6 +540,15 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
                     out[k_out] = getattr(pc, k_pc)
             else:
                 checks.failed("policy_check", f"code bundle: {pc.reason}")
+            if indep is not None and indep.ok:
+                # Compare the independently parsed measurement with the SIGNED release predicate, as read
+                # by the independent policy checker when it passed (else by the SDK's verifier).
+                pred = ((pc.statement or {}).get("predicate") or {}) if pc.ok else {}
+                expected_m = pred.get("snp_measurement") or (code.registers[0] if code.registers else None)
+                if indep.measurement != expected_m:
+                    checks.failed("sev_check", "report measurement is not the signed release's snp_measurement")
+                else:
+                    checks.passed("sev_check")
 
             # 5) measurement match + the fingerprints recorded at capture
             try:

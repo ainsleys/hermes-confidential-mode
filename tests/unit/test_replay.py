@@ -140,6 +140,15 @@ def amd():
 def amd_anchor(amd, monkeypatch):
     monkeypatch.setattr(verify_sev, "ARK_CERT", amd.ark.public_bytes(serialization.Encoding.PEM))
     monkeypatch.setattr(verify_sev, "ASK_CERT", amd.ask.public_bytes(serialization.Encoding.PEM))
+    # The independent checker pins the REAL AMD ARK by hash; for synthetic reports substitute the test
+    # anchor there too, and the SDK's lower TCB floor (the synthetic report uses it).
+    from confidential_mode.verify import sev_check
+    der = lambda c: c.public_bytes(serialization.Encoding.DER)  # noqa: E731
+    monkeypatch.setattr(sev_check, "ARK_PEM", amd.ark.public_bytes(serialization.Encoding.PEM).decode())
+    monkeypatch.setattr(sev_check, "ASK_PEM", amd.ask.public_bytes(serialization.Encoding.PEM).decode())
+    monkeypatch.setattr(sev_check, "ARK_SHA256", hashlib.sha256(der(amd.ark)).hexdigest())
+    monkeypatch.setattr(sev_check, "ASK_SHA256", hashlib.sha256(der(amd.ask)).hexdigest())
+    monkeypatch.setattr(sev_check, "MIN_TCB", {"bl": 7, "tee": 0, "snp": 0x0E, "ucode": 0x48})
     return amd
 
 
@@ -453,7 +462,8 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
     assert r.checks == {"repo_match": True, "repo_identity": "name only (ids not supplied)",
                         "trust_root_source": "from_evidence", "hardware_signature": True, "cert_chain": True, "tcb_policy": True,
                         "collateral_fresh_at_capture": "n/a: SEV-SNP has no Intel collateral",
-                        "code_signature": True, "policy_check": True, "measurement_match": True,
+                        "code_signature": True, "policy_check": True, "sev_check": True,
+                        "measurement_match": True,
                         "hardware_platform_match": "n/a: SEV-SNP", "report_data_keys": True,
                         "tls_cert_binding": "n/a: TLS certificate not captured"}
     assert set(r.checks) == set(CHECK_KEYS)
@@ -529,7 +539,7 @@ def test_tampering_fails_the_right_check(captured, amd_anchor, offline, tmp_path
         ev["claims"]["hpke_public_key"] = "00" * 32
     r = replay(ev)
     print("TAMPER", case, r.checks[failed][:160])
-    _expect(r, failed)
+    _expect(r, failed, also=("sev_check", "policy_check"))  # the independent columns may (should) agree
     assert offline == []
 
 
@@ -660,6 +670,7 @@ def test_tdx_replay_at_capture_time_passes(tdx_world, offline):
     r = replay(tdx_world)
     assert r.ok is True, r.checks
     assert r.checks["collateral_fresh_at_capture"] is True and r.checks["hardware_platform_match"] is True
+    assert r.checks["sev_check"] == "n/a: TDX: no independent checker"
     assert r.as_of == tdx_world["captured_at"]
     assert offline == []
 

@@ -67,6 +67,7 @@ def test_real_capture_replays_offline_with_numeric_ids(ev, root, offline):
                expected_fingerprints=(CODE_FP, ENCLAVE_FP))
     assert r.ok is True, r.checks
     assert r.checks["repo_identity"] == "name+id" and r.checks["policy_check"] is True
+    assert r.checks["sev_check"] is True and len(r.sev_checker_sha256) == 64 and len(r.policy_checker_sha256) == 64
     assert r.checks["trust_root_source"] == "supplied"
     assert (r.code_fingerprint, r.enclave_fingerprint) == (CODE_FP, ENCLAVE_FP)
     assert r.build_signer_uri == f"https://github.com/{REPO}/.github/workflows/tinfoil-release-publish.yml@refs/tags/v0.0.170"
