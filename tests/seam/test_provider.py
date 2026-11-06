@@ -625,3 +625,38 @@ def test_verify_rows_carry_source_and_key_first_seen_and_silent_reattest_reaches
     ad._sc.verify()  # an SDK-internal re-attestation (key rotation path)
     assert [e["detail"]["source"] for e in events] == ["verify", "silent_reattest"]
     assert events[1]["provider"] == PROFILE and events[1]["detail"]["key_first_seen"]["new"] is False
+
+
+def test_cache_adopts_a_fresh_adapter_verification_instead_of_attesting_twice(env):
+    events = []
+    profile = env["register"](on_event=events.append)
+    ad = profile._confidential_adapter
+    ad.verify()  # e.g. `hermes confidential setup` or a script verifying directly
+    assert env["sdk"]["verify_calls"] == 1
+    v = provider_mod.attested_ok(PROFILE)
+    assert v.in_tier is True  # adopted; pins match (no consent ledger configured with ctx=None)
+    assert env["sdk"]["verify_calls"] == 1, "the cold cache attested again"
+    assert [e["kind"] for e in events] == ["verify_ok"]  # the adopted verification is ledgered once
+
+
+def test_verification_pending_is_distinguishable_and_the_wait_can_be_extended(env):
+    import threading
+    gate = threading.Event()
+    real = tinfoil_client.SecureClient.verify
+
+    def slow(self):
+        gate.wait(5)
+        return real(self)
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(tinfoil_client.SecureClient, "verify", slow)
+    try:
+        profile = env["register"]()
+        v = provider_mod.attested_ok(PROFILE, wait_seconds=0.2)
+        assert v.in_tier is False and provider_mod.is_verification_pending(v.reason)
+        assert provider_mod.DEFAULT_VERIFY_WAIT_SECONDS == 20.0
+        gate.set()
+        assert provider_mod.attested_ok(PROFILE, wait_seconds=10).in_tier is True
+    finally:
+        gate.set()
+        mp.undo()

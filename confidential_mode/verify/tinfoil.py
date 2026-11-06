@@ -208,6 +208,7 @@ class TinfoilAdapter:
         # TLS spike: after each explicit verify, one bodyless GET of the attestation document over the
         # VERIFIED EHBP pool records the TLS peer certificate (evidence.tls_cert_pem/tls_observation).
         self.tls_probe = bool(tls_probe)
+        self.verified_mono: float | None = None
         self.event_sink: Callable[[dict], None] | None = None  # set by provider: ledger verify rows it cannot see
         self._spki_cache: dict[bytes, str] = {}
         self.sdk_cache_paths: dict[str, str] = {}
@@ -442,6 +443,7 @@ class TinfoilAdapter:
                         _close_quietly(stale)
                     self._retired_sync = [old]
                 self._accepted = result
+                self.verified_mono = time.monotonic()  # lets the provider adopt this instead of re-attesting
                 if self._hold_until_accepted:
                     self.held_reason = "verification not yet accepted against pins"
                 if self.tls_probe:

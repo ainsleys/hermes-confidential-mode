@@ -30,11 +30,17 @@ DEFAULT_FAILURE_BACKOFF_SECONDS = 10.0
 
 # create_client / attested_ok wait at most this long for an attestation, then refuse while it continues
 # in the background (Amendment 4: bounded, < 10 s).
-DEFAULT_VERIFY_WAIT_SECONDS = 5.0
+DEFAULT_VERIFY_WAIT_SECONDS = 20.0  # a cold live verify() measured ~5.6 s against router-0.tinfoil.sh
 # Context window reported to Hermes without probing the endpoint (confidential.tinfoil.context_length).
 DEFAULT_CONTEXT_LENGTH = 65536
 
-REASON_VERIFY_PENDING = "attestation still in progress; this turn ended; resend"
+VERIFY_PENDING_PREFIX = "verification pending"
+REASON_VERIFY_PENDING = "verification pending: attestation still in progress; this turn ended; resend"
+
+
+def is_verification_pending(reason: str | None) -> bool:
+    """For preflight/status wording: a pending attestation is not an off-tier destination."""
+    return isinstance(reason, str) and reason.startswith(VERIFY_PENDING_PREFIX)
 REASON_NO_CONSENT = "pin has no consent record"
 REASON_BAD_RESULT = "attestation returned no usable fingerprints"
 REASON_NOT_REGISTERED = "attested provider is not registered"
@@ -55,7 +61,7 @@ class _Entry:
     lock: Any = None
     profile: Any = None   # the registered ProviderProfile; its base_url follows the adapter's resolved host
     on_event: Callable[[dict], None] | None = None  # ledger sink (plain dicts, ledger.py column names)
-    verify_wait_seconds: float = 5.0
+    verify_wait_seconds: float = DEFAULT_VERIFY_WAIT_SECONDS
     verify_lock: Any = field(default_factory=threading.Lock)
     inflight: threading.Event | None = None
     consent_ledger: Any = None      # Ledger-like (.tail); when set, a pin needs a matching pin_applied row
@@ -149,22 +155,7 @@ class VerificationCache:
                 raise exc if isinstance(exc, VerifyError) else VerifyError(e.last_error) from exc
             with e.lock:
                 e.result, e.verified_mono, e.last_error, e.failed_mono = result, self._now(), None, None
-            claims = (result.evidence or {}).get("claims") or {} if isinstance(result.evidence, dict) else {}
-            observe = getattr(e.adapter, "observe_key", None)
-            try:
-                first_seen = observe(result.enclave_host, claims.get("tls_public_key_fp"),
-                                     claims.get("hpke_public_key")) if callable(observe) else None
-            except Exception:
-                first_seen = None
-            _emit(e, {"kind": "verify_ok", "provider": provider, "purpose": "verify", "host": result.enclave_host,
-                      "detail": {"vendor": result.vendor, "source": "verify", "key_first_seen": first_seen,
-                                 "code_fingerprint": result.code_fingerprint,
-                                 "enclave_fingerprint": result.enclave_fingerprint,
-                                 "release_tag": result.release_tag, "enclave_host": result.enclave_host,
-                                 "verifier": result.verifier, "ttl_seconds": e.ttl_seconds,
-                                 **_tlog_fields(result.evidence),
-                                 "policy_check": _policy_check_detail(result.evidence),
-                                 "evidence": result.evidence}})
+            self._emit_verify_ok(provider, e, result)
             return result
 
     def _start_refresh(self, provider: str, e: _Entry) -> threading.Event:
@@ -185,7 +176,40 @@ class VerificationCache:
             threading.Thread(target=run, name=f"confidential-verify-{provider}", daemon=True).start()
         return e.inflight
 
-    def ensure(self, provider: str) -> tuple[bool, str, VerificationResult | None]:
+    def _emit_verify_ok(self, provider: str, e: _Entry, result: VerificationResult) -> None:
+        claims = (result.evidence or {}).get("claims") or {} if isinstance(result.evidence, dict) else {}
+        observe = getattr(e.adapter, "observe_key", None)
+        try:
+            first_seen = observe(result.enclave_host, claims.get("tls_public_key_fp"),
+                                 claims.get("hpke_public_key")) if callable(observe) else None
+        except Exception:
+            first_seen = None
+        _emit(e, {"kind": "verify_ok", "provider": provider, "purpose": "verify", "host": result.enclave_host,
+                  "detail": {"vendor": result.vendor, "source": "verify", "key_first_seen": first_seen,
+                             "code_fingerprint": result.code_fingerprint,
+                             "enclave_fingerprint": result.enclave_fingerprint,
+                             "release_tag": result.release_tag, "enclave_host": result.enclave_host,
+                             "verifier": result.verifier, "ttl_seconds": e.ttl_seconds,
+                             **_tlog_fields(result.evidence),
+                             "policy_check": _policy_check_detail(result.evidence),
+                             "evidence": result.evidence}})
+
+    def _adopt_adapter_result(self, provider: str, e: _Entry) -> bool:
+        """If the adapter itself holds a fresh verification (e.g. a setup command or script called
+        adapter.verify() directly), adopt it instead of attesting again. Caller holds e.lock."""
+        res = getattr(e.adapter, "last_result", None)
+        at = getattr(e.adapter, "verified_mono", None)
+        if not isinstance(res, VerificationResult) or not isinstance(at, (int, float)) or res is e.result:
+            return False
+        if self._now() - at >= e.ttl_seconds:
+            return False
+        if at <= max(e.verified_mono or 0.0, e.failed_mono or 0.0):
+            return False  # never resurrect a result older than the cache's last attempt (e.g. a failed refresh)
+        e.result, e.verified_mono, e.last_error, e.failed_mono = res, float(at), None, None
+        self._emit_verify_ok(provider, e, res)
+        return True
+
+    def ensure(self, provider: str, *, wait_seconds: float | None = None) -> tuple[bool, str, VerificationResult | None]:
         """(ok, reason, result). ok iff a fresh result exists and the pins match it. Re-attests once if
         the cached result is stale or missing (subject to the failure backoff), waiting at most
         ``verify_wait_seconds``; on timeout it refuses while the attestation continues in the
@@ -197,13 +221,15 @@ class VerificationCache:
                 return False, REASON_NOT_REGISTERED, None
             with e.lock:
                 needs = not self.fresh(provider)
+                if needs and e.inflight is None and self._adopt_adapter_result(provider, e):
+                    needs = False
                 if needs:
                     if e.failed_mono is not None and self._now() - e.failed_mono < e.failure_backoff_seconds:
                         _hold(e.adapter, _fail_reason(e.last_error))
                         return False, _fail_reason(e.last_error), None
                     e.result = None  # stale results never vouch again (TTL is elapsed < ttl, monotonic)
                     done = self._start_refresh(provider, e)
-            if needs and not done.wait(e.verify_wait_seconds):
+            if needs and not done.wait(e.verify_wait_seconds if wait_seconds is None else float(wait_seconds)):
                 _hold(e.adapter, REASON_VERIFY_PENDING)
                 return False, REASON_VERIFY_PENDING, None
             with e.lock:
@@ -420,10 +446,12 @@ def _reset_for_tests() -> None:
     verification_cache.clear()
 
 
-def attested_ok(provider_name: str) -> Verdict:
-    """ATTESTED-tier verdict for W1/W3: fresh verification (TTL handled here) and pins match."""
+def attested_ok(provider_name: str, *, wait_seconds: float | None = None) -> Verdict:
+    """ATTESTED-tier verdict for W1/W3: fresh verification (TTL handled here) and pins match.
+    ``wait_seconds`` overrides the bounded wait (interactive commands such as check/setup may pass
+    e.g. 60); a reason starting with VERIFY_PENDING_PREFIX means "verification pending", not off-tier."""
     entry = verification_cache.entry(provider_name)
-    ok, reason, result = verification_cache.ensure(provider_name)
+    ok, reason, result = verification_cache.ensure(provider_name, wait_seconds=wait_seconds)
     host = ""
     if result is not None:
         host = result.enclave_host
