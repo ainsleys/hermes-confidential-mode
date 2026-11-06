@@ -28,6 +28,43 @@ measurement types, so their enclave fingerprints differ even for the same releas
 tinfoil/attestation/types.py Measurement.fingerprint). Discovery picks a random router once per process,
 so a restart can land on the other platform and refuse with "enclave build changed" until a human
 re-approves. Configuring ``confidential.tinfoil.enclave`` to one router host avoids this.
+
+Evidence capture (VerificationResult.evidence, schema ``confidential-mode/tinfoil-evidence/v1``):
+every SDK attestation runs inside thread-scoped wrappers (verify/_sdkpatch.py) around the SDK's own
+fetch points, which call through and record the bytes:
+  tinfoil.client.fetch_attestation          -> attestation {format, body}
+  tinfoil.client.fetch_latest_release       -> release {tag, digest}
+  tinfoil.client.fetch_attestation_bundle   -> sigstore_bundle (JSON text)
+  verify_sev.CertificateChain.from_report   -> sev.vcek_der_b64                      (SEV-SNP)
+  collateral_tdx.fetch_collateral           -> tdx.* raw TCB info / QE identity + chains, CRLs (TDX)
+  collateral_tdx._verify_crl_signature      -> tdx.pck_crl_issuer_chain_pem          (TDX)
+  tinfoil.sigstore.fetch_latest_digest / fetch_attestation_bundle -> hardware_measurements (TDX)
+  sigstore TrustUpdater.get_trusted_root_path -> trusted_root.json, stored once as
+                                               <data_dir>/trust-roots/<sha256>.json
+Layout: schema, vendor, captured_at (SDK verifiedAt), captured_at_unix, sdk_version, repo, enclave_host,
+enclave_source, platform ("sev-snp"|"tdx"), attestation, sev, tdx, release, sigstore_bundle,
+hardware_measurements, trusted_root {sha256, path}, tls_cert_pem (always None on the ehbp path),
+claims {code_fingerprint, enclave_fingerprint, release_tag, tls_public_key_fp, hpke_public_key},
+verification_document (SDK to_dict), capture_complete, capture_missing[, capture_errors]. Every blob is
+a string, so the dict is JSON-serialisable and passes the ledger's content-key filter.
+verify/replay.py re-verifies it offline.
+
+Sizes measured from a stubbed SEV capture (tests/unit/test_replay.py, real SDK code, test AMD anchor):
+  attestation.body      404 chars (gzip+base64 of the fixed 1184-byte report; the synthetic report is
+                        mostly zeros, a real one has ~600 B of high-entropy fields: expect ~1.2-1.6 KB)
+  sev.vcek_der_b64      1696 chars (~1.27 KB DER; format-faithful: P-384 key, RSA-PSS-4096 signature)
+  sigstore_bundle       1090 chars (test stand-in, NOT representative; real v0.3 DSSE bundles carry a
+                        Fulcio cert and a Rekor inclusion proof: unmeasured, estimate 4-8 KB)
+  trusted_root.json     6787 B (real file, sigstore-python 4.5.1 embedded root; stored once, not per verify)
+  evidence JSON total   6404 chars for that capture (without the trust root)
+TDX sizes were not measured (no format-faithful quote or Intel collateral can be produced offline).
+
+SDK on-disk caches: tinfoil 0.14.2 fixes platformdirs paths at import (default macOS
+~/Library/Caches/tinfoil, Linux ~/.cache/tinfoil: Sigstore bundles, VCEKs, Intel collateral) and
+sigstore-python uses ~/Library/Application Support/sigstore-python/tuf and ~/Library/Caches/sigstore-python/tuf
+(Linux ~/.local/share/sigstore-python/tuf, ~/.cache/sigstore-python/tuf). The adapter re-points all of
+them under <data_dir>/sdk-cache before its first verify (_sdkpatch.redirect_sdk_caches); a process that
+used the SDK before the adapter existed may already have written to the defaults.
 """
 from __future__ import annotations
 
@@ -42,6 +79,7 @@ from typing import Any, Callable
 
 import httpx
 
+from . import _sdkpatch
 from .base import VerificationResult, VerifyError
 
 VENDOR = "tinfoil"
@@ -53,6 +91,8 @@ ENCLAVE_SOURCE_ROUTER = "router_discovery"
 # used it would fail to connect, and the attested predicate's host check fails closed against it.
 PLACEHOLDER_BASE_URL = "https://unresolved.attested-tinfoil.invalid/v1"
 _REQUIRED_STEPS = ("fetch_digest", "verify_code", "verify_enclave", "compare_measurements")
+EVIDENCE_SCHEMA = "confidential-mode/tinfoil-evidence/v1"
+TRUST_ROOTS_SUBDIR = "trust-roots"
 
 
 def _sdk():
@@ -150,6 +190,8 @@ class TinfoilAdapter:
         self.sync_attestation_count = 0
         self.async_attestation_count = 0
         self._counter_bucket = threading.local()
+        self._capture_local = threading.local()
+        self.sdk_cache_paths: dict[str, str] = {}
         # Transport-level hold: while set, every view (sync and async) raises before sending. verify()
         # sets it (when hold_until_accepted) atomically with the pool swap; the provider releases it
         # once the pins match, and re-holds on mismatch or failure. This covers paths that bypass
@@ -193,6 +235,7 @@ class TinfoilAdapter:
         with self._lock:
             if self._sc is None:
                 host = self.resolve_enclave_host()
+                self.sdk_cache_paths = _sdkpatch.redirect_sdk_caches(self.data_dir)
                 secret = load_or_create_user_cache_secret(self.data_dir)
                 sc = _sdk().SecureClient(enclave=host, repo=self.router_repo, measurement=None,
                                          transport=self.transport, user_cache_secret=secret)
@@ -211,7 +254,9 @@ class TinfoilAdapter:
             self.sync_attestation_count += 1
         elif bucket == "async":
             self.async_attestation_count += 1
-        ground_truth = type(sc).verify(sc)
+        with _sdkpatch.capture_sink() as sink, _sdkpatch.overrides(_capture_hooks()):
+            ground_truth = type(sc).verify(sc)
+        self._capture_local.sink = sink
         if not getattr(self._explicit, "active", False):
             # Re-verification outside verify(): the SDK is about to rebind a transport. Only allow
             # it if the enclave is still the build we accepted.
@@ -225,7 +270,7 @@ class TinfoilAdapter:
         return ground_truth
 
     # ── verification ─────────────────────────────────────────────────────────────────────────
-    def _result_from_document(self, sc) -> VerificationResult:
+    def _result_from_document(self, sc, capture: dict | None = None) -> VerificationResult:
         doc = sc.get_verification_document()
         if doc is None:
             raise VerifyError("SDK produced no verification document")
@@ -243,14 +288,15 @@ class TinfoilAdapter:
             raise VerifyError(f"verified host {doc.enclave_host!r} is not {self.enclave_host!r}")
         if not doc.code_fingerprint or not doc.enclave_fingerprint:
             raise VerifyError("verification document lacks code or enclave fingerprint")
-        evidence = doc.to_dict()
         verifier = getattr(doc, "verifier", None)
         verifier_s = f"{getattr(verifier, 'name', 'tinfoil')}/{getattr(verifier, 'version', 'unknown')}"
-        evidence = dict(evidence, pluginEnclaveSource=self.enclave_source)
+        now = time.time()
+        evidence = build_evidence(capture or {}, doc, repo=self.router_repo, enclave_source=self.enclave_source,
+                                  trust_root_dir=self.data_dir / TRUST_ROOTS_SUBDIR, captured_at_unix=now)
         return VerificationResult(
             vendor=VENDOR, router_repo=self.router_repo, enclave_host=doc.enclave_host,
             code_fingerprint=doc.code_fingerprint, enclave_fingerprint=doc.enclave_fingerprint,
-            release_tag=doc.release_tag, verifier=verifier_s, verified_at_local=time.time(),
+            release_tag=doc.release_tag, verifier=verifier_s, verified_at_local=now,
             evidence=evidence,
         )
 
@@ -261,13 +307,14 @@ class TinfoilAdapter:
                 sc = self._secure_client()
                 self._explicit.active = True
                 self._counter_bucket.name = "sync"
+                self._capture_local.sink = None
                 try:
                     http = sc.make_secure_http_client()
                 finally:
                     self._explicit.active = False
                     self._counter_bucket.name = None
                 try:
-                    result = self._result_from_document(sc)
+                    result = self._result_from_document(sc, getattr(self._capture_local, "sink", None))
                 except BaseException:
                     _close_quietly(http)
                     raise
@@ -365,3 +412,166 @@ def _close_quietly(http) -> None:
         http.close()
     except Exception:
         pass
+
+
+# ── evidence capture ─────────────────────────────────────────────────────────────────────────
+
+def _b64(data: bytes) -> str:
+    import base64
+    return base64.b64encode(data).decode("ascii")
+
+
+def _capture_hooks() -> dict:
+    """Per-thread wrappers around the SDK's own fetch points (call through, then record the bytes)."""
+    from cryptography.hazmat.primitives import serialization
+    from tinfoil import client as tf_client
+    from tinfoil import sigstore as tf_sigstore
+    from tinfoil.attestation import collateral_tdx, verify_sev
+    from tinfoil.attestation.cert_utils import certs_to_pem
+
+    def rec(name, fn):
+        def override(orig, *a, **kw):
+            out = orig(*a, **kw)
+            sink = _sdkpatch.current_sink()
+            if sink is not None:
+                try:
+                    fn(sink, out, a, kw)
+                except Exception as exc:  # capture must never break verification
+                    sink.setdefault("capture_errors", []).append(f"{name}: {type(exc).__name__}: {exc}")
+            return out
+        return override
+
+    def attestation(sink, out, a, kw):
+        sink["attestation"] = {"format": out.format.value, "body": out.body}
+
+    def release(sink, out, a, kw):
+        sink["release"] = {"tag": out.tag, "digest": out.digest}
+
+    def code_bundle(sink, out, a, kw):
+        sink["sigstore_bundle"] = out.decode("utf-8")
+
+    def hw_digest(sink, out, a, kw):
+        sink.setdefault("hardware_measurements", {}).update(repo=a[0] if a else kw.get("repo"), digest=out)
+
+    def hw_bundle(sink, out, a, kw):
+        sink.setdefault("hardware_measurements", {})["bundle"] = out.decode("utf-8")
+
+    def vcek(sink, out, a, kw):
+        sink["vcek_der_b64"] = _b64(out.vcek.public_bytes(serialization.Encoding.DER))
+
+    def collateral(sink, out, a, kw):
+        sink.setdefault("tdx", {}).update(
+            tcb_info_raw_b64=_b64(out.tcb_info_raw),
+            tcb_info_issuer_chain_pem=certs_to_pem(out.tcb_info_issuer_chain or []),
+            qe_identity_raw_b64=_b64(out.qe_identity_raw),
+            qe_identity_issuer_chain_pem=certs_to_pem(out.qe_identity_issuer_chain or []),
+            pck_crl_pem=out.pck_crl.crl.public_bytes(serialization.Encoding.PEM).decode("ascii"),
+            pck_crl_ca_type=out.pck_crl.ca_type,
+            root_crl_der_b64=_b64(out.root_crl.crl.public_bytes(serialization.Encoding.DER)),
+        )
+
+    def pck_crl_chain(sink, out, a, kw):
+        sink.setdefault("tdx", {})["pck_crl_issuer_chain_pem"] = certs_to_pem(a[1])
+
+    def trusted_root(sink, out, a, kw):
+        sink["trusted_root_bytes"] = Path(out).read_bytes()
+
+    hooks = {
+        (tf_client, "fetch_attestation"): rec("attestation", attestation),
+        (tf_client, "fetch_latest_release"): rec("release", release),
+        (tf_client, "fetch_attestation_bundle"): rec("sigstore_bundle", code_bundle),
+        (tf_sigstore, "fetch_latest_digest"): rec("hardware_measurements.digest", hw_digest),
+        (tf_sigstore, "fetch_attestation_bundle"): rec("hardware_measurements.bundle", hw_bundle),
+        (verify_sev.CertificateChain, "from_report"): rec("vcek", vcek),
+        (collateral_tdx, "fetch_collateral"): rec("tdx_collateral", collateral),
+        (collateral_tdx, "_verify_crl_signature"): rec("pck_crl_issuer_chain", pck_crl_chain),
+    }
+    try:
+        from sigstore._internal.tuf import TrustUpdater
+        hooks[(TrustUpdater, "get_trusted_root_path")] = rec("trusted_root", trusted_root)
+    except Exception:  # pragma: no cover - sigstore internals moved
+        pass
+    return hooks
+
+
+def store_trust_root(trust_root_dir: Path, data: bytes) -> tuple[str, Path]:
+    """Content-addressed, written once: <dir>/<sha256>.json."""
+    import hashlib
+    digest = hashlib.sha256(data).hexdigest()
+    trust_root_dir = Path(trust_root_dir)
+    path = trust_root_dir / f"{digest}.json"
+    if not path.exists():
+        trust_root_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".trusted_root.", dir=str(trust_root_dir))
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    return digest, path
+
+
+def build_evidence(capture: dict, doc, *, repo: str, enclave_source: str | None, trust_root_dir: Path,
+                   captured_at_unix: float) -> dict:
+    """The schema'd evidence for one verification (JSON-serialisable; every blob is a string)."""
+    from tinfoil._sdkinfo import sdk_version
+    from tinfoil.attestation.types import PredicateType
+    att = capture.get("attestation")
+    platform = None
+    if att:
+        platform = {PredicateType.SEV_GUEST_V2.value: "sev-snp",
+                    PredicateType.TDX_GUEST_V2.value: "tdx"}.get(att.get("format"), "unknown")
+    trusted_root = None
+    if capture.get("trusted_root_bytes"):
+        digest, path = store_trust_root(trust_root_dir, capture["trusted_root_bytes"])
+        trusted_root = {"sha256": digest, "path": str(path)}
+    hw = capture.get("hardware_measurements")
+    enclave_m = getattr(doc, "enclave_measurement", None)
+    evidence = {
+        "schema": EVIDENCE_SCHEMA,
+        "vendor": VENDOR,
+        "captured_at": getattr(doc, "verified_at", None),
+        "captured_at_unix": captured_at_unix,
+        "sdk_version": sdk_version(),
+        "repo": repo,
+        "enclave_host": doc.enclave_host,
+        "enclave_source": enclave_source,
+        "platform": platform,
+        "attestation": att,
+        "sev": {"vcek_der_b64": capture["vcek_der_b64"]} if capture.get("vcek_der_b64") else None,
+        "tdx": capture.get("tdx") or None,
+        "release": capture.get("release"),
+        "sigstore_bundle": capture.get("sigstore_bundle"),
+        "hardware_measurements": hw if hw and hw.get("bundle") else None,
+        "trusted_root": trusted_root,
+        "tls_cert_pem": None,  # never fetched on the default ehbp path
+        "claims": {
+            "code_fingerprint": doc.code_fingerprint,
+            "enclave_fingerprint": doc.enclave_fingerprint,
+            "release_tag": doc.release_tag,
+            "tls_public_key_fp": getattr(enclave_m, "public_key_fp", None) or doc.tls_public_key or None,
+            "hpke_public_key": getattr(enclave_m, "hpke_public_key", None) or doc.hpke_public_key or None,
+        },
+        "verification_document": doc.to_dict(),
+    }
+    missing = [k for k in ("attestation", "release", "sigstore_bundle", "trusted_root") if not evidence[k]]
+    if platform == "sev-snp" and not evidence["sev"]:
+        missing.append("sev")
+    if platform == "tdx":
+        tdx = evidence["tdx"] or {}
+        if not tdx.get("tcb_info_raw_b64") or not tdx.get("pck_crl_issuer_chain_pem"):
+            missing.append("tdx")
+        if not evidence["hardware_measurements"]:
+            missing.append("hardware_measurements")
+    evidence["capture_complete"] = not missing
+    evidence["capture_missing"] = missing
+    if capture.get("capture_errors"):
+        evidence["capture_errors"] = list(capture["capture_errors"])
+    return evidence

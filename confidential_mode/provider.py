@@ -46,6 +46,7 @@ class _Entry:
     failed_mono: float | None = None
     lock: Any = None
     profile: Any = None   # the registered ProviderProfile; its base_url follows the adapter's resolved host
+    on_event: Callable[[dict], None] | None = None  # ledger sink (plain dicts, ledger.py column names)
 
 
 class VerificationCache:
@@ -57,11 +58,12 @@ class VerificationCache:
         self._lock = threading.Lock()
 
     def register(self, provider: str, adapter, pins: PinStore, ttl_seconds: float,
-                 failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS) -> None:
+                 failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS, *,
+                 on_event: Callable[[dict], None] | None = None) -> None:
         with self._lock:
             self._entries[provider] = _Entry(adapter=adapter, pins=pins, ttl_seconds=float(ttl_seconds),
                                              failure_backoff_seconds=float(failure_backoff_seconds),
-                                             lock=threading.RLock())
+                                             lock=threading.RLock(), on_event=on_event)
 
     def unregister(self, provider: str) -> None:
         with self._lock:
@@ -108,8 +110,18 @@ class VerificationCache:
             except Exception as exc:
                 e.result, e.failed_mono = None, self._clock()
                 e.last_error = str(exc) if isinstance(exc, VerifyError) else f"{type(exc).__name__}: {exc}"
+                _emit(e, {"kind": "verify_fail", "provider": provider, "purpose": "verify",
+                          "host": _adapter_host(e.adapter),
+                          "detail": {"vendor": getattr(e.adapter, "vendor", ""),
+                                     "error_type": type(exc).__name__, "error": str(exc)[:300],
+                                     "enclave_host": _adapter_host(e.adapter)}})
                 raise exc if isinstance(exc, VerifyError) else VerifyError(e.last_error) from exc
             e.result, e.verified_mono, e.last_error, e.failed_mono = result, self._clock(), None, None
+            _emit(e, {"kind": "verify_ok", "provider": provider, "purpose": "verify", "host": result.enclave_host,
+                      "detail": {"vendor": result.vendor, "code_fingerprint": result.code_fingerprint,
+                                 "enclave_fingerprint": result.enclave_fingerprint,
+                                 "release_tag": result.release_tag, "enclave_host": result.enclave_host,
+                                 "verifier": result.verifier, "evidence": result.evidence}})
             return result
 
     def ensure(self, provider: str) -> tuple[bool, str, VerificationResult | None]:
@@ -139,7 +151,18 @@ class VerificationCache:
                 had_pin = e.pins.get(result.vendor, result.router_repo) is not None
                 reason = REASON_PIN_MISMATCH if had_pin else REASON_NO_PIN
                 _hold(e.adapter, reason)
-                e.pins.stage(result)
+                before = e.pins.pending()
+                staged = e.pins.stage(result)
+                if staged != before:  # a new pending pin, not an idempotent re-stage
+                    _emit(e, {"kind": "pin_staged", "provider": provider, "purpose": "verify",
+                              "host": result.enclave_host,
+                              "detail": {"vendor": staged.vendor, "router_repo": staged.router_repo,
+                                         "code_fingerprint": staged.code_fingerprint,
+                                         "enclave_fingerprint": staged.enclave_fingerprint,
+                                         "release_tag": staged.release_tag, "enclave_host": staged.enclave_host,
+                                         "previous": staged.previous,
+                                         "previous_enclave_fingerprint": staged.previous_enclave_fingerprint,
+                                         "reason": reason}})
                 return False, reason, result
         except Exception as exc:  # pins.yaml unreadable, etc.: fail closed
             logger.warning("attested verification check failed: %s", exc, exc_info=True)
@@ -161,6 +184,23 @@ def _sync_profile_base_url(e: _Entry) -> None:
             e.profile.base_url = url
     except Exception:
         logger.debug("could not sync attested profile base_url", exc_info=True)
+
+
+def _adapter_host(adapter) -> str:
+    try:
+        return getattr(adapter, "enclave_host", "") or ""
+    except Exception:
+        return ""
+
+
+def _emit(e: _Entry, event: dict) -> None:
+    """Best effort: a failing ledger never changes a verification decision."""
+    if e.on_event is None:
+        return
+    try:
+        e.on_event(event)
+    except Exception:
+        logger.warning("confidential-mode: ledger write for %s failed", event.get("kind"), exc_info=True)
 
 
 def _fail_reason(err: str | None) -> str:
@@ -204,7 +244,8 @@ def _profile_base():
 
 def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECONDS, *,
                  cache: VerificationCache | None = None,
-                 failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS):
+                 failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS,
+                 on_event: Callable[[dict], None] | None = None, ledger=None):
     """Build the 'attested-tinfoil' ProviderProfile and register its cache entry. Never touches the
     network: base_url is the configured enclave URL, or the adapter's .invalid placeholder until the
     first verify() resolves the host by router discovery (then it is updated in place)."""
@@ -225,7 +266,9 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
     )
     profile._confidential_adapter = adapter
     profile._confidential_pins = pins
-    cache.register(PROFILE_NAME, adapter, pins, ttl_seconds, failure_backoff_seconds)
+    if on_event is None and ledger is not None:
+        on_event = ledger.append
+    cache.register(PROFILE_NAME, adapter, pins, ttl_seconds, failure_backoff_seconds, on_event=on_event)
     cache.entry(PROFILE_NAME).profile = profile
     return profile
 
@@ -267,7 +310,8 @@ def _cfg_get(config: dict | None, *path, default=None):
 
 
 def register_provider_profile(ctx, *, config: dict | None = None, data_dir: Path | str | None = None,
-                              adapter=None, pins: PinStore | None = None):
+                              adapter=None, pins: PinStore | None = None,
+                              on_event: Callable[[dict], None] | None = None, ledger=None):
     """Wire the attested profile into Hermes. Called by W1's register(ctx). Returns the profile.
     Makes no network call: router discovery (when no enclave is configured) waits for the first
     create_client / attested_ok, or for a setup command calling ``adapter.resolve_enclave_host()``.
@@ -290,6 +334,6 @@ def register_provider_profile(ctx, *, config: dict | None = None, data_dir: Path
     if pins is None:
         pins = PinStore(data_dir / "pins.yaml")
     ttl = float(_cfg_get(config, "confidential", "verify_ttl_seconds", default=DEFAULT_TTL_SECONDS))
-    profile = make_profile(adapter, pins, ttl)
+    profile = make_profile(adapter, pins, ttl, on_event=on_event, ledger=ledger)
     providers.register_provider(profile)
     return profile
