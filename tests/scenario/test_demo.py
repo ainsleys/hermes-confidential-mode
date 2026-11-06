@@ -27,7 +27,8 @@ from confidential_mode.receipts import CLOSING_PARAGRAPH, render, verify_chain
 from confidential_mode.tiers import Tier
 
 from ._fakes import (
-    ATTESTED_MODEL, ENCLAVE, ENCLAVE_URL, LOCAL_HOST, LOCAL_MODEL, LOCAL_URL, OPENROUTER_URL, PROFILE, REPLY,
+    ATTESTED_MODEL, ENCLAVE, ENCLAVE_URL, HPKE_KEY, LOCAL_HOST, LOCAL_MODEL, LOCAL_URL, OPENROUTER_URL, PROFILE,
+    REPLY, REPO, TLS_FP,
     FakeCtx, MockNet, Plugin, attested_config, local_config, patch_hermes_http,
 )
 
@@ -284,7 +285,7 @@ def test_demo(world, monkeypatch):
     # consent: ask_choice scripted "approve" applies the pin; the next turn passes
     ctx = FakeCtx("approve")
     reply = approve_pending_pin(ctx, plugin.pins, plugin.ledger, session_key=SK, session_id=SID, platform="telegram")
-    assert len(ctx.questions) == 1 and "New code fingerprint: c0de2c0de2c0de2c" in ctx.questions[0][0]
+    assert len(ctx.questions) == 1 and "Code fingerprint new: " + "c0de2" * 8 in ctx.questions[0][0]
     assert reply.startswith("Pinned tinfoil build v1.1.0")
     assert plugin.pins.pending() is None
     assert plugin.pins.get("tinfoil", pending.router_repo).code_fingerprint == "c0de2" * 8
@@ -308,8 +309,27 @@ def test_demo(world, monkeypatch):
             "tool_refused", "verify_ok", "pin_staged", "pin_applied"} <= kinds
     assert doc["header"]["sealed_tier"] == "attested"
     assert {e["host"] for e in doc["header"]["enclave_hosts"]} == {ENCLAVE}
-    assert len(doc["evidence"]) == 2 and {e["evidence"]["codeFingerprint"] for e in doc["evidence"]} == {
+    assert len(doc["evidence"]) == 2 and {e["evidence"]["claims"]["code_fingerprint"] for e in doc["evidence"]} == {
         "c0de1" * 8, "c0de2" * 8}
+    assert doc["header"]["unverified_entries"] == []
+    # header: chain head first, with the instruction to record it elsewhere; a self-report; plugin + SDK
+    lines = text.splitlines()
+    assert lines[1] == f"CHAIN HEAD: {doc['header']['chain_head']}" and "somewhere other than this machine" in lines[2]
+    assert "self-report" in lines[3]
+    assert lines[4].startswith("Plugin: ") and "verifier SDK: 0.14.2" in lines[4]
+    # per verification row: repo, platform, host and the committed keys
+    vlines = [ln for ln in lines if "verify_ok  vendor=" in ln]
+    assert len(vlines) == 2
+    for ln in vlines:
+        assert f"repo={REPO}" in ln and "platform=sev-snp" in ln and f"enclave={ENCLAVE}" in ln
+        assert f"tls_key_fp={TLS_FP}" in ln and f"hpke_key={HPKE_KEY}" in ln
+    # every attested send names the verify row and TTL window that covered it
+    cov = doc["sections"]["send_coverage"]
+    verify_ids = [r["id"] for r in doc["rows"] if r["kind"] == "verify_ok"]
+    assert [c["verify"] for c in cov] == verify_ids and all(c["covered"] for c in cov)
+    assert {c["ttl_seconds"] for c in cov} == {300.0}
+    for c in cov:
+        assert f"covered by verify #{c['verify']}, TTL 300 s" in text
     assert "c0de2c0de2" in text and "approved by human" in text and "via telegram" in text
     assert "reason: provider_error; HTTP 500" in text
     assert "reason: off_tier; enclave build changed; run /confidential pins approve" in text

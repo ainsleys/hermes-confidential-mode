@@ -250,3 +250,86 @@ def test_seal_refuses_when_hook_timeout_lets_the_recheck_be_skipped(plugin):
     assert out.startswith("Not sealed") and "plugins.hook_callback_timeout" in out
     plugin.cfg.write_text(BASE_CONFIG.replace("plugins:\n", "plugins:\n  hook_callback_timeout: 30\n"))
     assert plugin.slash("on local-only").startswith("Sealed")
+
+
+# ── hermes confidential replay ───────────────────────────────────────────────────────────────────
+
+def _receipt_with_scenario_evidence(plugin, tmp_path):
+    """A receipt whose verify_ok row carries the scenario fake adapter's evidence (tests/scenario/_fakes.py)."""
+    from tests.scenario._fakes import FakeVendorAdapter, MockNet
+    r = FakeVendorAdapter(MockNet()).verify()
+    plugin.rt.ledger.append({"kind": "verify_ok", "provider": "attested-tinfoil", "purpose": "verify",
+                             "host": r.enclave_host, "detail": {
+                                 "vendor": r.vendor, "code_fingerprint": r.code_fingerprint,
+                                 "enclave_fingerprint": r.enclave_fingerprint, "release_tag": r.release_tag,
+                                 "enclave_host": r.enclave_host, "verifier": r.verifier, "evidence": r.evidence}})
+    plugin.rt.ledger.append({"kind": "send_observed", "session_id": "sess-rp", "purpose": "main",
+                             "host": r.enclave_host, "tier": "attested", "decision": "allowed"})
+    path = tmp_path / "receipt.json"
+    path.write_text(plugin.slash("receipts sess-rp --json"))
+    return path, r
+
+
+def _replay_parser(plugin):
+    parser = argparse.ArgumentParser()
+    plugin.mgr._cli_commands["confidential"]["setup_fn"](parser)
+    return parser, plugin.mgr._cli_commands["confidential"]["handler_fn"]
+
+
+def test_cli_replay_runs_the_real_replay_and_fails_on_scenario_evidence(plugin, tmp_path, capsys):
+    path, _ = _receipt_with_scenario_evidence(plugin, tmp_path)
+    parser, handler = _replay_parser(plugin)
+    assert handler(parser.parse_args(["replay", str(path)])) == 1      # fake evidence is not schema v1
+    out = capsys.readouterr().out
+    replay = _sub(plugin, "verify.replay")
+    assert "hash chain intact" in out and "Row #" in out and ": FAIL" in out
+    assert "  hardware_signature: fail: evidence:" in out                  # not schema-v1 evidence
+    assert "is not the expected tinfoilsh/confidential-model-router" in out
+    assert "Expected repo: tinfoilsh/confidential-model-router" in out
+    assert "not independent" in out                                     # trust root and as_of sources named
+    for line in replay.NOT_ESTABLISHED:
+        assert f"  - {line}\n" in out                                   # verbatim
+
+
+def test_cli_replay_passes_identity_arguments_and_exits_zero_only_when_all_match(plugin, tmp_path):
+    import io
+    path, r = _receipt_with_scenario_evidence(plugin, tmp_path)
+    commands, replay = _sub(plugin, "commands"), _sub(plugin, "verify.replay")
+    calls = []
+
+    def ok_result(**over):
+        base = dict(ok=True, checks={k: True for k in replay.CHECK_KEYS}, code_fingerprint=r.code_fingerprint,
+                    enclave_fingerprint=r.enclave_fingerprint, release_tag=r.release_tag, tls_key_fp=None,
+                    hpke_public_key=None, as_of="2026-11-06T00:00:00Z", sdk_version="0.14.2")
+        base.update(over)
+        return replay.ReplayResult(**base)
+
+    def new_replay(evidence, *, as_of=None, expected_repo=None, expected_fingerprints=None, trusted_root=None):
+        calls.append(dict(as_of=as_of, expected_repo=expected_repo, expected_fingerprints=expected_fingerprints,
+                          trusted_root=trusted_root))
+        return ok_result()
+
+    args = argparse.Namespace(receipt=str(path), expected_repo="tinfoilsh/confidential-model-router",
+                              trusted_root=str(tmp_path / "root.json"), as_of="2026-11-06T00:00:00Z")
+    out = io.StringIO()
+    assert commands.cli_replay(args, out=out, replay_fn=new_replay) == 0, out.getvalue()
+    assert calls == [dict(as_of="2026-11-06T00:00:00Z", expected_repo="tinfoilsh/confidential-model-router",
+                          expected_fingerprints=(r.code_fingerprint, r.enclave_fingerprint),
+                          trusted_root=str(tmp_path / "root.json"))]
+    assert "1/1 evidence row(s) replayed OK" in out.getvalue() and "(supplied with --trusted-root)" in out.getvalue()
+
+    # An older replay without the identity parameters: the command checks repo and fingerprints itself.
+    def old_replay(evidence, *, as_of=None, trust_root_dir=None):
+        return ok_result()
+    args.trusted_root = None
+    out = io.StringIO()
+    assert commands.cli_replay(args, out=out, replay_fn=old_replay) == 1   # scenario evidence carries no repo
+    assert "is not the expected tinfoilsh/confidential-model-router" in out.getvalue()
+    out = io.StringIO()
+    wrong = lambda evidence, *, as_of=None, trust_root_dir=None: ok_result(code_fingerprint="0" * 64)  # noqa: E731
+    assert commands.cli_replay(args, out=out, replay_fn=wrong) == 1
+    assert "do not match the receipt row's claimed fingerprints" in out.getvalue()
+    # A replay that is not ok fails, and an unreadable receipt is exit 2.
+    assert commands.cli_replay(args, out=io.StringIO(), replay_fn=lambda e, **k: ok_result(ok=False)) == 1
+    args.receipt = str(tmp_path / "missing.json")
+    assert commands.cli_replay(args, out=io.StringIO(), replay_fn=new_replay) == 2

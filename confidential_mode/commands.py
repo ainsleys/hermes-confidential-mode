@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import io
+import json
 import os
 import shlex
 import sys
@@ -462,6 +463,146 @@ def cli_setup(rt: Any, args: Any, out=None) -> int:
     return 0
 
 
+# ── offline replay of a receipt's evidence ───────────────────────────────────────────────────────
+
+DEFAULT_EXPECTED_REPO = "tinfoilsh/confidential-model-router"
+
+
+def _replay_module():
+    return importlib.import_module(__package__ + ".verify.replay")
+
+
+def _call_replay(replay_fn: Callable[..., Any], evidence: dict, *, expected_repo: str,
+                 expected_fingerprints: Optional[tuple], trusted_root: Optional[str], as_of: Optional[str]):
+    """Call replay with the keyword arguments it accepts. Returns (result, notes) where notes lists the
+    identity checks this replay version cannot do (they are then done here, on the result fields)."""
+    import inspect
+    try:
+        params = inspect.signature(replay_fn).parameters
+        var_kw = any(p.kind is p.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        params, var_kw = {}, False
+
+    def takes(name: str) -> bool:
+        return var_kw or name in params
+
+    kwargs: dict = {}
+    notes: list[str] = []
+    if as_of:
+        kwargs["as_of"] = as_of
+    if takes("expected_repo"):
+        kwargs["expected_repo"] = expected_repo
+    else:
+        notes.append("expected_repo")
+    if expected_fingerprints:
+        if takes("expected_fingerprints"):
+            kwargs["expected_fingerprints"] = expected_fingerprints
+        else:
+            notes.append("expected_fingerprints")
+    if trusted_root:
+        if takes("trusted_root"):
+            kwargs["trusted_root"] = trusted_root
+        elif takes("trust_root_dir"):
+            path = os.path.abspath(trusted_root)
+            kwargs["trust_root_dir"] = path if os.path.isdir(path) else os.path.dirname(path)
+        else:
+            notes.append("trusted_root")
+    return replay_fn(evidence, **kwargs), notes
+
+
+def _row_claims(doc: dict, row_id: Any) -> tuple[Optional[str], Optional[str]]:
+    for row in doc.get("rows") or []:
+        if isinstance(row, dict) and row.get("id") == row_id:
+            d = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+            return d.get("code_fingerprint"), d.get("enclave_fingerprint")
+    return None, None
+
+
+def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None) -> int:
+    """`hermes confidential replay <receipt.json>`: re-run every evidence blob in a receipt offline.
+    Exit 0 only when every row replays ok AND matches the expected repo and the row's fingerprints."""
+    out = out or sys.stdout
+    path = getattr(args, "receipt", None)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        out.write(f"Cannot read receipt {path!r}: {type(exc).__name__}: {exc}\n")
+        return 2
+    if not isinstance(doc, dict):
+        out.write("Not a receipt: the JSON is not an object.\n")
+        return 2
+    mod = _replay_module()
+    replay_fn = replay_fn or mod.replay
+    not_established = tuple(getattr(mod, "NOT_ESTABLISHED", ()) or ())
+    expected_repo = getattr(args, "expected_repo", None) or DEFAULT_EXPECTED_REPO
+    trusted_root = getattr(args, "trusted_root", None)
+    as_of = getattr(args, "as_of", None)
+    try:
+        from .receipts import verify_chain
+        chain = "intact" if verify_chain(doc) else "BROKEN (receipt edited, or rows no longer match)"
+    except Exception as exc:  # noqa: BLE001
+        chain = f"not checked ({type(exc).__name__})"
+    items = [i for i in (doc.get("evidence") or []) if isinstance(i, dict) and isinstance(i.get("evidence"), dict)]
+    out.write(f"Receipt: {path}  session {(doc.get('header') or {}).get('session_id', '?')}  hash chain {chain}\n")
+    out.write(f"Expected repo: {expected_repo}\n")
+    out.write("Trust root: " + (f"{trusted_root} (supplied with --trusted-root)" if trusted_root else
+                                "the copy recorded in the evidence (chosen by whoever captured it, not independent)")
+              + "\n")
+    out.write("as_of: " + (f"{as_of} (supplied with --as-of)" if as_of else
+                           "the evidence's captured_at (recorded by the capturer, not independent)") + "\n")
+    if not items:
+        out.write("No evidence rows in this receipt: nothing can be replayed.\n")
+        return 1
+    failed = 0
+    for item in items:
+        ev = item["evidence"]
+        row_id = item.get("row_id")
+        claimed = _row_claims(doc, row_id)
+        fps = claimed if all(claimed) else None
+        try:
+            result, notes = _call_replay(replay_fn, ev, expected_repo=expected_repo, expected_fingerprints=fps,
+                                         trusted_root=trusted_root, as_of=as_of)
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            out.write(f"\nRow #{row_id}: FAIL (replay raised {type(exc).__name__}: {exc})\n")
+            continue
+        problems: list[str] = []
+        repo = getattr(result, "repo", None) or ev.get("repo") or ""
+        host = getattr(result, "enclave_host", None) or getattr(result, "host", None) or ev.get("enclave_host") or ""
+        platform = getattr(result, "platform", None) or (ev.get("attestation") or {}).get("format") or ""
+        if "expected_repo" in notes and repo != expected_repo:
+            problems.append(f"repo {repo or '(none)'} is not the expected {expected_repo}")
+        if fps and "expected_fingerprints" in notes:
+            got = (getattr(result, "code_fingerprint", None), getattr(result, "enclave_fingerprint", None))
+            if got != tuple(fps):
+                problems.append("replayed fingerprints do not match the receipt row's claimed fingerprints")
+        if "trusted_root" in notes:
+            problems.append("this replay version cannot take --trusted-root; the evidence's own trust root was used")
+        if item.get("unverified_entry"):
+            problems.append("the receipt flags this row as an unverified entry")
+        ok = getattr(result, "ok", False) is True and not problems
+        failed += 0 if ok else 1
+        out.write(f"\nRow #{row_id}: {'OK' if ok else 'FAIL'}\n")
+        out.write(f"  repo: {repo or '(none)'}  host: {host or '(none)'}  platform: {platform or '(unknown)'}\n")
+        out.write(f"  as_of: {getattr(result, 'as_of', '?')}  sdk: {getattr(result, 'sdk_version', '?')}  "
+                  f"release: {getattr(result, 'release_tag', None) or '(untagged)'}\n")
+        out.write(f"  code {_short(getattr(result, 'code_fingerprint', None), 16)}  "
+                  f"enclave {_short(getattr(result, 'enclave_fingerprint', None), 16)}\n")
+        for key, value in (getattr(result, "checks", {}) or {}).items():
+            out.write(f"  {key}: {'pass' if value is True else value}\n")
+        for p in problems:
+            out.write(f"  ! {p}\n")
+        row_ne = tuple(getattr(result, "not_established", ()) or ())
+        if row_ne:
+            not_established = row_ne
+    out.write("\nA replay does NOT establish:\n")
+    for line in not_established:
+        out.write(f"  - {line}\n")
+    out.write(f"\n{len(items) - failed}/{len(items)} evidence row(s) replayed OK.\n")
+    return 1 if failed else 0
+
+
 def register_cli(ctx: Any, rt: Any) -> None:
     def setup_fn(parser: argparse.ArgumentParser) -> None:
         sub = parser.add_subparsers(dest="confidential_action")
@@ -474,12 +615,21 @@ def register_cli(ctx: Any, rt: Any) -> None:
         from . import watch
         watch.setup_parser(p)
         sub.add_parser("status", help="seal state, pins, verification, breaches")
+        p = sub.add_parser("replay", help="replay a receipt's attestation evidence offline")
+        p.add_argument("receipt", help="receipt JSON (/confidential receipts <session> --json)")
+        p.add_argument("--expected-repo", default=DEFAULT_EXPECTED_REPO,
+                       help=f"code repo the enclave must run (default {DEFAULT_EXPECTED_REPO})")
+        p.add_argument("--trusted-root", default=None,
+                       help="Sigstore trusted_root.json obtained independently (default: the evidence's copy)")
+        p.add_argument("--as-of", default=None, help="ISO time to check certificates at (default: captured_at)")
 
     def handler(args: Any) -> int:
         action = getattr(args, "confidential_action", None)
         try:
             if action == "setup":
                 return cli_setup(rt, args)
+            if action == "replay":
+                return cli_replay(args)
             if action == "check":
                 print(check_text(rt, getattr(args, "tier", None)))
                 return 0
@@ -491,7 +641,7 @@ def register_cli(ctx: Any, rt: Any) -> None:
             if action == "status":
                 print(status_text(rt))
                 return 0
-            print("Usage: hermes confidential setup|check|watch|status")
+            print("Usage: hermes confidential setup|check|watch|status|replay <receipt.json>")
             return 2
         except Exception as exc:  # noqa: BLE001
             print(f"confidential: error ({type(exc).__name__}: {exc})", file=sys.stderr)

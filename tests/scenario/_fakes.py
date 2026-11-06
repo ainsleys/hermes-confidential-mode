@@ -12,9 +12,8 @@ Fakes sit only at the network, SDK and human boundaries:
 ``Plugin`` is SCENARIO GLUE, standing in for W5's register(ctx) and /confidential commands, which are
 being written concurrently: it calls the real builders (build_middleware, build_pre_tool_call,
 build_tool_execution, build_post_approval_response, run_preflight, PinStore, provider.make_profile,
-consent.approve_pending_pin) the way the seam tests do, and writes the ledger rows that no merged
-module writes yet (seal, unseal, preflight_fail, verify_ok, verify_fail, pin_staged). Those rows are
-what W5/W2 are expected to write; see the W6 report.
+consent.approve_pending_pin) the way the seam tests do. It writes seal, unseal and preflight_fail rows the
+way W5's commands do; verification and pin rows come from the real VerificationCache and consent.
 """
 from __future__ import annotations
 
@@ -50,6 +49,8 @@ OPENROUTER_URL = f"https://{OPENROUTER_HOST}/api/v1"
 REPO = "tinfoilsh/confidential-model-router"
 PROFILE = provider_mod.PROFILE_NAME
 REPLY = "DEMO-PROVIDER-REPLY"
+TLS_FP = "71" * 32
+HPKE_KEY = "48" * 32
 
 
 # ── network ─────────────────────────────────────────────────────────────────────────────────────
@@ -151,9 +152,12 @@ class FakeVendorAdapter:
             vendor=self.vendor, router_repo=REPO, enclave_host=ENCLAVE, code_fingerprint=self.code,
             enclave_fingerprint=self.enclave, release_tag=self.release, verifier="fake-tinfoil/0.14.2",
             verified_at_local=time.time(),
-            evidence={"format": "fake-attestation", "enclaveHost": ENCLAVE, "codeFingerprint": self.code,
-                      "enclaveFingerprint": self.enclave, "releaseTag": self.release,
-                      "attestationNumber": self.attestation_count, "capture_complete": True})
+            evidence={"schema": "fake-attestation", "vendor": self.vendor, "repo": REPO, "platform": "sev-snp",
+                      "enclave_host": ENCLAVE, "sdk_version": "0.14.2", "captured_at_unix": time.time(),
+                      "attestation_number": self.attestation_count, "capture_complete": True,
+                      "claims": {"code_fingerprint": self.code, "enclave_fingerprint": self.enclave,
+                                 "release_tag": self.release, "tls_public_key_fp": TLS_FP,
+                                 "hpke_public_key": HPKE_KEY}})
 
     def hold(self, reason: str) -> None:
         self.held = reason
@@ -221,34 +225,10 @@ class Plugin:
         self.attested_predicate = AttestedPredicate([PROFILE], self.attested_ok, pf.profile_base_url)
         self.handles = []
 
-    # verification rows: provider.py does not ledger them (see report), so the glue observes the cache.
     def attested_ok(self, provider: str):
-        cache = provider_mod.verification_cache
-        entry = cache.entry(provider)
-        before = entry.result if entry else None
-        before_err = entry.failed_mono if entry else None
-        before_pending = self._pending()
-        verdict = provider_mod.attested_ok(provider)
-        entry = cache.entry(provider)
-        if entry is not None:
-            if entry.result is not None and entry.result is not before:
-                r = entry.result
-                self.ledger.append({"kind": "verify_ok", "provider": provider, "host": r.enclave_host,
-                                    "detail": {"vendor": r.vendor, "router_repo": r.router_repo,
-                                               "enclave_host": r.enclave_host, "code_fingerprint": r.code_fingerprint,
-                                               "enclave_fingerprint": r.enclave_fingerprint,
-                                               "release_tag": r.release_tag, "verifier": r.verifier,
-                                               "verified_at_local": r.verified_at_local, "evidence": r.evidence}})
-            elif entry.result is None and entry.failed_mono is not None and entry.failed_mono != before_err:
-                self.ledger.append({"kind": "verify_fail", "provider": provider, "host": ENCLAVE,
-                                    "detail": {"vendor": "tinfoil", "error": entry.last_error or ""}})
-        pending = self._pending()
-        if pending is not None and pending != before_pending:
-            self.ledger.append({"kind": "pin_staged", "provider": pending.vendor, "host": pending.enclave_host,
-                                "detail": {"vendor": pending.vendor, "code_fingerprint": pending.code_fingerprint,
-                                           "enclave_fingerprint": pending.enclave_fingerprint,
-                                           "release_tag": pending.release_tag, "previous": pending.previous}})
-        return verdict
+        """provider.attested_ok; verify_ok / verify_fail / pin_staged rows are written by the real
+        VerificationCache into this ledger (make_profile(ledger=...), Amendment 4 F4)."""
+        return provider_mod.attested_ok(provider)
 
     def _pending(self):
         try:
@@ -261,7 +241,8 @@ class Plugin:
 
     def register_attested_profile(self, ttl: float = 300.0):
         import providers
-        self.profile = provider_mod.make_profile(self.adapter, self.pins, ttl)
+        self.profile = provider_mod.make_profile(self.adapter, self.pins, ttl, ledger=self.ledger,
+                                                 consent_ledger=self.ledger)
         providers.register_provider(self.profile)
         return self.profile
 
