@@ -313,6 +313,13 @@ def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
     if registry is None:
         from tools.registry import registry as _registry
         registry = _registry
+        try:
+            # Built-in tools self-register on import; a `hermes confidential on` process never imported them,
+            # and an allowlist built from that registry would classify nothing (every tool blocked later).
+            from tools.registry import discover_builtin_tools
+            discover_builtin_tools()
+        except Exception:  # noqa: BLE001
+            pass
     if allowlist_builder is None:
         from .gate_tools import build_allowlist as allowlist_builder
     from .gate_tools import format_allowlist
