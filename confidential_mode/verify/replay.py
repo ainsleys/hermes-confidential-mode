@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import _sdkpatch
+from . import _sdkpatch, policy_check
 
 EVIDENCE_SCHEMA = "confidential-mode/tinfoil-evidence/v1"
 HARDWARE_MEASUREMENTS_REPO = "tinfoilsh/hardware-measurements"
@@ -33,6 +33,7 @@ TINFOIL_ROUTER_REPO = "tinfoilsh/confidential-model-router"
 
 CHECK_KEYS = (
     "repo_match",                   # evidence repo == expected_repo (identity, not just validity)
+    "repo_identity",                # Fulcio cert: "name+id" | "name only (ids not supplied)" | "fail: ..."
     "trust_root_source",            # INFORMATIONAL: "supplied" or "from_evidence" (not independent)
     "hardware_signature",           # report / quote signature by the CPU vendor key
     "cert_chain",                   # VCEK -> AMD ARK/ASK, or PCK -> Intel root, collateral signatures, revocation
@@ -56,6 +57,7 @@ NOT_ESTABLISHED = (
     "that captured_at is when the capture happened (it is taken from the evidence itself)",
 )
 INFORMATIONAL_CHECKS = ("trust_root_source",)
+REPO_IDENTITY_PASSING = ("name+id", "name only (ids not supplied)")
 
 
 @dataclass(frozen=True)
@@ -70,9 +72,16 @@ class ReplayResult:
     as_of: str
     sdk_version: str
     repo: str | None = None
-    enclave_host: str | None = None
+    enclave_host_asserted: str | None = None   # capturer-asserted: the evidence says so, nothing proves it
     platform: str | None = None
-    captured_at: str | None = None
+    captured_at_asserted: str | None = None    # capturer-asserted (see NOT_ESTABLISHED)
+    # From the release bundle's Fulcio certificate and tlog entry (after code_signature passed):
+    source_repo_id: str | None = None
+    source_owner_id: str | None = None
+    build_signer_uri: str | None = None        # workflow path, e.g. https://github.com/o/r/.github/workflows/x.yml@refs/tags/v1
+    source_commit: str | None = None
+    log_index: int | None = None
+    integrated_time: int | None = None
     not_established: tuple[str, ...] = field(default=NOT_ESTABLISHED)
 
 
@@ -295,6 +304,7 @@ def _sigstore_verifier_override(trusted_root_bytes: bytes) -> dict:
 # ── replay ───────────────────────────────────────────────────────────────────────────────────
 
 def replay(evidence: dict, *, expected_repo: str | None = TINFOIL_ROUTER_REPO,
+           expected_repo_id: str | int | None = None, expected_owner_id: str | int | None = None,
            expected_fingerprints: tuple[str, str] | None = None, trusted_root: Path | str | bytes | None = None,
            as_of=None, trust_root_dir: Path | str | None = None) -> ReplayResult:
     """Re-run the captured verification offline, checking IDENTITY as well as validity: the Sigstore
@@ -306,10 +316,11 @@ def replay(evidence: dict, *, expected_repo: str | None = TINFOIL_ROUTER_REPO,
     ev = evidence if isinstance(evidence, dict) else {}
     out: dict[str, Any] = {"code_fingerprint": None, "enclave_fingerprint": None, "release_tag": None,
                            "tls_key_fp": None, "hpke_public_key": None, "repo": ev.get("repo"),
-                           "enclave_host": ev.get("enclave_host"), "platform": ev.get("platform"),
-                           "captured_at": ev.get("captured_at")}
+                           "enclave_host_asserted": ev.get("enclave_host"), "platform": ev.get("platform"),
+                           "captured_at_asserted": ev.get("captured_at")}
     opts = {"expected_repo": expected_repo, "expected_fingerprints": expected_fingerprints,
-            "trusted_root": trusted_root}
+            "trusted_root": trusted_root, "expected_repo_id": expected_repo_id,
+            "expected_owner_id": expected_owner_id}
     try:
         when = _as_datetime(as_of if as_of is not None else (evidence.get("captured_at")
                                                              or evidence.get("captured_at_unix")))
@@ -329,10 +340,45 @@ def replay(evidence: dict, *, expected_repo: str | None = TINFOIL_ROUTER_REPO,
 
 def _result(checks: _Checks, out: dict, when: datetime) -> ReplayResult:
     vals = dict(checks.values)
-    ok = all(v is True or (isinstance(v, str) and v.startswith("n/a:"))
+    ok = all(v is True or (isinstance(v, str) and (v.startswith("n/a:") or v in REPO_IDENTITY_PASSING))
              for k, v in vals.items() if k not in INFORMATIONAL_CHECKS)
     return ReplayResult(ok=ok, checks=vals, as_of=when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
                         sdk_version=_sdk_version(), **out)
+
+
+def _repo_identity(checks: _Checks, out: dict, bundle: bytes, opts: dict, evidence_repo: str) -> None:
+    """Bind the release signature to the repository by NUMERIC id, not only by name (names can be
+    renamed or transferred): Fulcio's Source Repository Identifier (1.15) and Owner Identifier (1.17)."""
+    try:
+        ident = policy_check.fulcio_identity(bundle)
+    except Exception as exc:
+        checks.failed("repo_identity", f"cannot read the signing certificate: {type(exc).__name__}: {exc}")
+        return
+    for k in ("build_signer_uri", "source_commit", "log_index", "integrated_time"):
+        out[k] = ident.get(k)
+    out["source_repo_id"], out["source_owner_id"] = ident.get("repo_id"), ident.get("owner_id")
+    expected_repo = opts.get("expected_repo")
+    name = ident.get("repository") or evidence_repo
+    if expected_repo and name != expected_repo:
+        checks.failed("repo_identity", f"certificate repository {name or '(none)'} is not the expected {expected_repo}")
+        return
+    want = {"repo_id": opts.get("expected_repo_id"), "owner_id": opts.get("expected_owner_id")}
+    if all(v is None for v in want.values()):
+        checks.values["repo_identity"] = "name only (ids not supplied)"
+        checks._touched.add("repo_identity")
+        return
+    if not ident.get("has_certificate"):
+        checks.failed("repo_identity", "bundle carries no signing certificate to read repository ids from")
+        return
+    for key, expected in want.items():
+        if expected is None:
+            continue
+        got = ident.get(key)
+        if got is None or str(got) != str(expected):
+            checks.failed("repo_identity", f"certificate {key} {got or '(absent)'} is not the expected {expected}")
+            return
+    checks.values["repo_identity"] = "name+id"
+    checks._touched.add("repo_identity")
 
 
 def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir: Path | None,
@@ -433,6 +479,7 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
                 checks.failed("code_signature", exc)
                 return
             out["code_fingerprint"] = code.fingerprint()
+            _repo_identity(checks, out, bundle, opts, repo)
 
             # 5) measurement match + the fingerprints recorded at capture
             try:

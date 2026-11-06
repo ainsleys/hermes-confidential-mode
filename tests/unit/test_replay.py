@@ -179,10 +179,46 @@ def sev_report(amd, *, tls_fp, hpke, measurement=SNP, build=21, sign_key=None, t
 
 # ── Sigstore stand-in ─────────────────────────────────────────────────────────────────────────
 
-def signed_bundle(statement: dict, *, repo: str, tag: str | None) -> dict:
+REPO_ID, OWNER_ID = "800001", "700001"
+COMMIT = "1f" * 20
+
+
+def _der_utf8(text: str) -> bytes:
+    b = text.encode()
+    assert len(b) < 128
+    return bytes([0x0C, len(b)]) + b
+
+
+def fulcio_cert_der(repo: str, tag: str | None, *, repo_id=REPO_ID, owner_id=OWNER_ID) -> bytes:
+    """A stand-in Fulcio leaf carrying the GitHub Actions identity extensions (DER UTF8String values)."""
+    from cryptography.x509 import ObjectIdentifier as O
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "sigstore-intermediate")])
+    ref = f"refs/tags/{tag or 'v0'}"
+    exts = {"1.3.6.1.4.1.57264.1.8": "https://token.actions.githubusercontent.com",
+            "1.3.6.1.4.1.57264.1.9": f"https://github.com/{repo}/.github/workflows/release.yml@{ref}",
+            "1.3.6.1.4.1.57264.1.12": f"https://github.com/{repo}",
+            "1.3.6.1.4.1.57264.1.13": COMMIT,
+            "1.3.6.1.4.1.57264.1.14": ref}
+    if repo_id is not None:
+        exts["1.3.6.1.4.1.57264.1.15"] = str(repo_id)
+    if owner_id is not None:
+        exts["1.3.6.1.4.1.57264.1.17"] = str(owner_id)
+    b = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+         .serial_number(1).not_valid_before(CAPTURED_AT - timedelta(days=1))
+         .not_valid_after(CAPTURED_AT + timedelta(minutes=10)))
+    for oid, val in exts.items():
+        b = b.add_extension(x509.UnrecognizedExtension(O(oid), _der_utf8(val)), critical=False)
+    return b.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER)
+
+
+def signed_bundle(statement: dict, *, repo: str, tag: str | None, cert_repo: str | None = None,
+                  repo_id=REPO_ID, owner_id=OWNER_ID) -> dict:
     payload = json.dumps({"statement": statement, "repo": repo, "tag": tag}).encode()
+    cert = fulcio_cert_der(cert_repo or repo, tag, repo_id=repo_id, owner_id=owner_id)
     return {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
-            "verificationMaterial": {"tlogEntries": [{"logIndex": "123456789"}]},
+            "verificationMaterial": {"certificate": {"rawBytes": base64.b64encode(cert).decode()},
+                                     "tlogEntries": [{"logIndex": "123456789", "integratedTime": "1762400000"}]},
             "testEnvelope": {"payload": base64.b64encode(payload).decode(),
                              "mac": hmac.new(FIXTURE_KEY, payload, "sha256").hexdigest()}}
 
@@ -331,7 +367,8 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
     fake_sigstore.clear()
     r = replay(captured.evidence)
     assert r.ok is True, r.checks
-    assert r.checks == {"repo_match": True, "trust_root_source": "from_evidence", "hardware_signature": True, "cert_chain": True, "tcb_policy": True,
+    assert r.checks == {"repo_match": True, "repo_identity": "name only (ids not supplied)",
+                        "trust_root_source": "from_evidence", "hardware_signature": True, "cert_chain": True, "tcb_policy": True,
                         "collateral_fresh_at_capture": "n/a: SEV-SNP has no Intel collateral",
                         "code_signature": True, "measurement_match": True,
                         "hardware_platform_match": "n/a: SEV-SNP", "report_data_keys": True,
@@ -341,7 +378,7 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
     assert r.enclave_fingerprint == captured.result.enclave_fingerprint == SNP.hex()
     assert r.hpke_public_key == captured.hpke.hex() and r.tls_key_fp == captured.tls_fp.hex()
     assert r.release_tag == TAG and r.sdk_version == "0.14.2"
-    assert (r.repo, r.enclave_host, r.platform, r.captured_at) == (REPO, ENCLAVE, "sev-snp",
+    assert (r.repo, r.enclave_host_asserted, r.platform, r.captured_at_asserted) == (REPO, ENCLAVE, "sev-snp",
                                                                    captured.evidence["captured_at"])
     assert r.as_of == captured.evidence["captured_at"]
     assert r.not_established == NOT_ESTABLISHED and len(NOT_ESTABLISHED) == 5
@@ -657,3 +694,54 @@ def test_override_applies_once_even_when_the_attribute_is_wrapped_twice():
     with _sdkpatch.overrides({(mod, "f"): ov}):
         assert mod.f(1) == 20
     assert calls == [1] and mod.f(1) == 2
+
+
+# ── repository identity by numeric id (Fulcio 1.15 / 1.17) ────────────────────────────────────
+
+def _with_bundle(captured, **kw):
+    ev = copy.deepcopy(captured.evidence)
+    ev["sigstore_bundle"] = json.dumps(signed_bundle(code_statement(), repo=REPO, tag=TAG, **kw))
+    return ev
+
+
+def test_repo_identity_right_name_and_ids(captured, offline):
+    r = replay(_with_bundle(captured), expected_repo_id=REPO_ID, expected_owner_id=OWNER_ID)
+    assert r.ok is True and r.checks["repo_identity"] == "name+id", r.checks
+    assert (r.source_repo_id, r.source_owner_id, r.source_commit) == (REPO_ID, OWNER_ID, COMMIT)
+    assert r.build_signer_uri == f"https://github.com/{REPO}/.github/workflows/release.yml@refs/tags/{TAG}"
+    assert (r.log_index, r.integrated_time) == (123456789, 1762400000)
+
+
+def test_repo_identity_wrong_repo_id_with_the_right_name_fails(captured, offline):
+    """A deleted-and-recreated (or transferred) repository keeps the name but not the numeric id."""
+    r = replay(_with_bundle(captured, repo_id="999999"), expected_repo_id=REPO_ID, expected_owner_id=OWNER_ID)
+    _expect(r, "repo_identity")
+    assert "repo_id 999999" in r.checks["repo_identity"]
+    r = replay(_with_bundle(captured, owner_id="1"), expected_repo_id=REPO_ID, expected_owner_id=OWNER_ID)
+    _expect(r, "repo_identity")
+
+
+def test_repo_identity_wrong_repo_name_in_the_certificate_fails(captured, offline):
+    r = replay(_with_bundle(captured, cert_repo="attacker/router"))
+    _expect(r, "repo_identity")
+    assert "attacker/router" in r.checks["repo_identity"]
+
+
+def test_repo_identity_ids_requested_but_absent_from_the_certificate(captured, offline):
+    r = replay(_with_bundle(captured, repo_id=None, owner_id=None), expected_repo_id=REPO_ID)
+    _expect(r, "repo_identity")
+
+
+def test_policy_check_module_has_no_tinfoil_import_and_runs_isolated(captured, tmp_path):
+    import subprocess
+    from confidential_mode.verify import policy_check
+    src = Path(policy_check.__file__).read_text()
+    import re
+    assert not re.search(r"^\s*(import|from)\s+(tinfoil|confidential_mode|\.)", src, re.M)
+    p = tmp_path / "bundle.json"
+    p.write_text(json.dumps(signed_bundle(code_statement(), repo=REPO, tag=TAG)))
+    done = subprocess.run([sys.executable, "-I", policy_check.__file__, str(p)], capture_output=True, text=True,
+                          timeout=60)
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["repo_id"] == REPO_ID and out["repository"] == REPO and out["log_index"] == 123456789
