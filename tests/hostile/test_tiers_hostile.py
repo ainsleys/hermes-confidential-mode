@@ -1,17 +1,16 @@
 """Hostile tests for confidential_mode.tiers (W3 contract, docs/INTERFACES.md).
 
-Written blind, against the contract only. Constructor signatures for the predicates are not
-frozen, so `_build` wires fakes by parameter name and also patches module-level lookups; if it
-cannot satisfy a required parameter the test FAILS with the signature, which is itself a finding
-(the contract must say how extra_hosts / profile lookup / attested_ok reach the predicate).
+Written blind against the contract, then adapted to W3's public signatures and to the
+adjudications in INTERFACES.md Amendments 1 and 2:
+    LocalPredicate(extra_hosts=(), profile_base_url=None)
+    AttestedPredicate(attested_profiles, attested_ok, profile_base_url=None)
+    ZdrPredicate()
 
-Policy for ambiguous inputs: off-tier is the fail-closed direction, so for inputs the contract
-does not explicitly bless we assert NOT in_tier. Cases where the contract literally implies a
-riskier answer are marked xfail(strict=False) with an "ADJUDICATE" reason.
+Policy: off-tier is the fail-closed direction; inputs the contract does not bless must not be
+in_tier.
 """
 from __future__ import annotations
 
-import inspect
 import socket
 
 import pytest
@@ -58,55 +57,15 @@ class FakeProfile:
         return self.base_url
 
 
-_ALIASES = {
-    "extra_hosts": {"extra_hosts", "local_hosts", "hosts", "extra"},
-    "profile_lookup": {"profile_lookup", "provider_lookup", "get_profile", "lookup",
-                       "get_provider_profile", "profiles", "resolve_profile"},
-    "attested_ok": {"attested_ok", "verifier", "check", "verify", "attest"},
-    "config": {"config", "cfg", "settings"},
-}
+def _profile_url(profiles):
+    def f(name):
+        prof = (profiles or {}).get(name)
+        return getattr(prof, "base_url", "") if prof is not None else ""
+    return f
 
 
-def _build(cls, monkeypatch, **wanted):
-    """Instantiate a predicate, matching wanted fakes to parameter names; also patch module-level
-    names the implementation might use instead of injection."""
-    if "profile_lookup" in wanted:
-        monkeypatch.setattr(tiers, "get_provider_profile", wanted["profile_lookup"], raising=False)
-        try:
-            import providers  # Hermes
-            monkeypatch.setattr(providers, "get_provider_profile", wanted["profile_lookup"])
-        except Exception:
-            pass
-    if "attested_ok" in wanted:
-        monkeypatch.setattr(tiers, "attested_ok", wanted["attested_ok"], raising=False)
-    extra = wanted.get("extra_hosts", ())
-    wanted.setdefault("config", {"confidential": {"local": {"extra_hosts": list(extra)}}})
-    try:
-        sig = inspect.signature(cls)
-    except (TypeError, ValueError):
-        return cls()
-    kwargs = {}
-    for pname, p in sig.parameters.items():
-        if p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL):
-            continue
-        for logical, names in _ALIASES.items():
-            if pname in names and logical in wanted:
-                kwargs[pname] = wanted[logical]
-                break
-        else:
-            if p.default is p.empty:
-                pytest.fail(f"cannot wire required parameter {pname!r} of {cls.__name__}{sig}; "
-                            "contract does not name it (ADJUDICATE)")
-    return cls(**kwargs)
-
-
-def _lookup(table):
-    return lambda name, *a, **k: table.get(name)
-
-
-def local(monkeypatch, extra_hosts=(), profiles=None):
-    return _build(LocalPredicate, monkeypatch, extra_hosts=tuple(extra_hosts),
-                  profile_lookup=_lookup(profiles or {}))
+def local(monkeypatch=None, extra_hosts=(), profiles=None):
+    return LocalPredicate(extra_hosts=tuple(extra_hosts), profile_base_url=_profile_url(profiles))
 
 
 def dest(base_url, provider="custom", purpose="main"):
@@ -137,7 +96,6 @@ LOOKS_LOCAL_BUT_IS_NOT = [
     "http://evil.com#127.0.0.1",               # fragment
     "http://evil.com?h=127.0.0.1",             # query
     "http://evil.com/127.0.0.1",               # path
-    "http://evil.com\\@127.0.0.1/v1",          # urllib says 127.0.0.1, WHATWG/httpx say evil.com
     "http://lоcalhost/v1",                # Cyrillic o homoglyph
     "http://xn--lcalhost-9vf/v1",              # punycode of a homoglyph
     "http://localhost%2eevil.com/v1",          # percent-encoded dot
@@ -223,6 +181,36 @@ def test_scheme_missing_fails_closed(monkeypatch):
         assert classify(pred, dest(url)).in_tier is False, url
 
 
+# Amendment 2: fail closed on parser disagreement. urllib and httpx 0.28 read the first case as
+# 127.0.0.1 while urllib3 (requests) reads evil.com; urllib silently strips TAB/CR/LF that httpx
+# rejects. Any backslash, TAB, CR, LF or NUL anywhere in the URL is off_tier.
+PARSER_DISAGREEMENT = [
+    "http://evil.com\\@127.0.0.1/v1",
+    "http://[::1]\\@evil.com/v1",            # urllib raises, httpx reads evil.com
+    "http://127.0.0.1:11434\\@evil.com/v1",
+    "http:\\\\evil.com\\@127.0.0.1/",
+    "http://127.0.0.1\\v1",                  # backslash in the path of a local URL
+    "http://evil.com\t@127.0.0.1/v1",
+    "http://evil.com\n@127.0.0.1/v1",
+    "http://evil.com\r@127.0.0.1/v1",
+    "http://evil.com\x00@127.0.0.1/v1",
+    "http://127.0.0.1/v1\t",                  # control char anywhere, even trailing
+    "http://127.0.0.1/v1\x00",
+    "http://local\nhost/v1",
+]
+
+
+@pytest.mark.parametrize("url", PARSER_DISAGREEMENT)
+def test_parser_disagreement_is_off_tier(monkeypatch, url):
+    assert classify(local(monkeypatch), dest(url)).in_tier is False, repr(url)
+
+
+def test_encoded_backslash_userinfo_is_local_control(monkeypatch):
+    # All parsers agree: %5C stays inside userinfo, host is 127.0.0.1.
+    v = classify(local(monkeypatch), dest("http://evil.com%5C@127.0.0.1/v1"))
+    assert v.in_tier is True and v.host == "127.0.0.1", v
+
+
 def test_trailing_dot_localhost_does_not_widen(monkeypatch):
     # "localhost." is the FQDN of localhost; either verdict is defensible (ADJUDICATE), but it must
     # not crash and must not open "localhost.<anything>".
@@ -243,10 +231,12 @@ def test_unencoded_zone_id_does_not_crash(monkeypatch):
     classify(local(monkeypatch), dest("http://[fe80::1%en0]/v1"))
 
 
-def test_ipv4_mapped_loopback_does_not_crash(monkeypatch):
-    # ::ffff:127.0.0.1 is loopback on Python >= 3.13 ipaddress; contract silent (ADJUDICATE).
-    classify(local(monkeypatch), dest("http://[::ffff:127.0.0.1]/v1"))
-    classify(local(monkeypatch), dest("http://[::ffff:10.0.0.1]/v1"))
+def test_ipv4_mapped_private_is_local(monkeypatch):
+    # Amendment 1: IPv4-mapped private/loopback IPv6 is local.
+    for url in ("http://[::ffff:127.0.0.1]/v1", "http://[::ffff:10.0.0.1]/v1",
+                "http://[::ffff:192.168.1.1]:8080/v1"):
+        assert classify(local(monkeypatch), dest(url)).in_tier is True, url
+    assert classify(local(monkeypatch), dest("http://[::ffff:169.254.169.254]/v1")).in_tier is False
 
 
 @pytest.mark.parametrize("url", [
@@ -312,7 +302,7 @@ def test_provider_name_is_not_evidence(monkeypatch):
 def test_profile_lookup_that_raises_fails_closed(monkeypatch):
     def bad(*a, **k):
         raise RuntimeError("registry exploded")
-    pred = _build(LocalPredicate, monkeypatch, profile_lookup=bad)
+    pred = LocalPredicate(profile_base_url=bad)
     assert classify(pred, dest("", provider="ollama")).in_tier is False
 
 
@@ -405,7 +395,9 @@ class AttestRecorder:
 
 
 def attested(monkeypatch, ok, profiles):
-    return _build(AttestedPredicate, monkeypatch, attested_ok=ok, profile_lookup=_lookup(profiles))
+    names = {n for n, p in profiles.items() if getattr(p, "attested", False)}
+    return AttestedPredicate(attested_profiles=names, attested_ok=ok,
+                             profile_base_url=_profile_url(profiles))
 
 
 REGISTERED = {ATTESTED: FakeProfile(ATTESTED, "https://inference.tinfoil.sh/v1", attested=True)}
@@ -422,7 +414,7 @@ def test_attested_positive_control(monkeypatch):
     assert ok.calls, "attested_ok was never consulted"
 
 
-def test_attested_profile_lookup_none_is_off(monkeypatch):
+def test_attested_no_registered_profiles_is_off(monkeypatch):
     v = classify(attested(monkeypatch, AttestRecorder(True), {}), adest())
     assert v.in_tier is False
 
@@ -455,8 +447,9 @@ def test_attested_other_registered_provider_is_off(monkeypatch):
     # profile, not merely a registered one (ADJUDICATE: how does W3 know a profile is attested?).
     profiles = {**REGISTERED, "openrouter": FakeProfile("openrouter", "https://openrouter.ai/api/v1")}
     pred = attested(monkeypatch, AttestRecorder(True), profiles)
-    for prov in ("openrouter", "custom", "", "attested-tinfoil-evil", "Attested-Tinfoil",
-                 " attested-tinfoil"):
+    # Case variants are NOT asserted: W3 lowercases provider names, as Hermes normalizes them.
+    for prov in ("openrouter", "custom", "", "attested-tinfoil-evil", "attested_tinfoil",
+                 "tinfoil"):
         assert classify(pred, adest(provider=prov)).in_tier is False, prov
 
 
@@ -465,11 +458,14 @@ def test_attested_local_url_does_not_qualify(monkeypatch):
     assert classify(pred, adest(provider="custom", base_url="http://127.0.0.1:11434/v1")).in_tier is False
 
 
-@pytest.mark.xfail(strict=False, reason="ADJUDICATE: contract decides ATTESTED by provider only; an "
-                   "attested provider with a foreign base_url override arguably must be off-tier")
 def test_attested_provider_with_foreign_base_url_is_off(monkeypatch):
+    # Amendment 1 (A9): a base_url host other than the attested endpoint is off_tier.
     pred = attested(monkeypatch, AttestRecorder(True), REGISTERED)
-    assert classify(pred, adest(base_url="https://evil.com/v1")).in_tier is False
+    for url in ("https://evil.com/v1", "https://inference.tinfoil.sh.evil.com/v1",
+                "https://inference.tinfoil.sh@evil.com/v1", "http://127.0.0.1/v1",
+                "https://inference.tinfoil.sh\\@evil.com/v1"):
+        assert classify(pred, adest(base_url=url)).in_tier is False, url
+    assert classify(pred, adest(base_url="")).in_tier is True, "empty base_url uses the profile"
 
 
 def test_attested_predicate_tier_attribute(monkeypatch):
@@ -479,7 +475,7 @@ def test_attested_predicate_tier_attribute(monkeypatch):
 # --------------------------------------------------------------------------- ZDR
 
 def test_zdr_stub_is_always_off(monkeypatch):
-    pred = _build(ZdrPredicate, monkeypatch)
+    pred = ZdrPredicate()
     assert pred.tier == Tier.ZDR
     for d in (dest("http://127.0.0.1/v1"), adest(), dest("", provider="openrouter")):
         v = classify(pred, d)
