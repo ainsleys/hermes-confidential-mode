@@ -1,0 +1,96 @@
+# PLUGIN_NAME: confidential-mode  (working name; the config section below is `confidential:` either way)
+#
+# Example ~/.hermes/config.yaml fragment for the attested tier. Merge it into your own config by
+# hand: the plugin never writes config. `hermes confidential setup --model <id>` prints the
+# auxiliary block for your Hermes version; `hermes confidential check --tier attested` tells you
+# what still fails.
+#
+# Model ids are Tinfoil's (https://docs.tinfoil.sh/models/chat.md, read 2026-11-06). This example
+# uses kimi-k3-1-pro because it takes images, so vision can stay on the same model.
+
+# ── Plugin keys (every key the code reads) ────────────────────────────────────────────────────
+confidential:
+  # Model id that `hermes confidential setup` writes into the config block it prints. Setup only.
+  model: kimi-k3-1-pro
+
+  # Seconds a verification vouches before the next send re-attests (monotonic clock). Default 300.
+  verify_ttl_seconds: 300
+
+  # Seconds a turn waits for an attestation before refusing ("attestation still in progress; this
+  # turn ended; resend") while it finishes in the background. Default 5.
+  verify_wait_seconds: 5
+
+  tinfoil:
+    # One router host to verify and use. Unset (default) = router discovery via atc.tinfoil.sh,
+    # one random router per process; AMD and Intel routers have different enclave fingerprints, so a
+    # restart can ask you to re-approve. Setting this stops that. Example: <router host>.tinfoil.sh
+    enclave: null
+
+    # Context window reported to Hermes for the attested provider, so Hermes never probes /models
+    # or /api/show off the attested transport. One value for the profile, not per model: set it for
+    # the model in model.default, at or below Tinfoil's documented window. Default 65536.
+    # Tinfoil documents (rounded, no exact integers published):
+    #   kimi-k3-1-pro        256K  -> 256000   (text + image)
+    #   glm-5-3              1M    -> 1000000  (reasoning tokens count toward max_tokens)
+    #   deepseek-v4-1-flash  1M    -> 1000000  (image input; marked experimental)
+    #   gemma4-31b           256K  -> 256000   (image input)
+    #   gpt-oss-120b         131K  -> 131000
+    #   llama3-3-70b         128K  -> 128000
+    # Going lower than the documented window is safe (Hermes compresses earlier); higher is not.
+    context_length: 256000
+
+  local:
+    # Extra hostnames or IPs the local-only tier counts as local (in addition to loopback,
+    # RFC 1918, 100.64/10, fe80::/10, fc00::/7 and localhost). Default [].
+    extra_hosts: []
+
+# ── Core keys the attested preflight checks ───────────────────────────────────────────────────
+model:
+  provider: attested-tinfoil       # registered by this plugin
+  default: kimi-k3-1-pro           # alias: model.model
+  # base_url: leave unset; a base_url whose host differs from the attested enclave is off-tier
+
+fallback_providers: []             # must be empty while sealed
+# fallback_model:                  # legacy key; must be absent or empty
+
+auxiliary:
+  # Vision must be explicit and in-tier: Hermes describes gateway images through it even without a
+  # tool call, and "auto" walks openrouter -> nous -> deepinfra when the main model can't take images.
+  vision:            {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  # Text tasks set to "auto" (the default) or "main" inherit the main route and pass. Pinning them
+  # explicitly keeps a later change of model.provider from moving them silently.
+  compression:          {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  approval:             {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  review:               {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  mcp:                  {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  title_generation:     {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  memory_query_rewrite: {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  tts_audio_tags:       {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  voice_chat:           {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  triage_specifier:     {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  kanban_decomposer:    {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  profile_describer:    {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  goal_judge:           {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  group_router:         {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  curator:              {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  monitor:              {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  background_review:    {provider: attested-tinfoil, model: kimi-k3-1-pro}
+  # moa_reference / moa_aggregator: leave unset (they inherit main); moa as a provider is refused.
+  # Any fallback_chain under a task must be empty or in-tier. Plugin-registered tasks are checked too.
+
+memory:
+  provider: ""                     # built-in local memory ("", builtin, local, none); hosted is off-tier
+
+delegation: {}                     # leave provider/base_url unset so children inherit the sealed route
+
+voice:
+  auto_tts: false                  # with tts.provider unset Hermes uses edge (hosted)
+
+# tts:
+#   provider: piper                # local engines pass: piper, kittentts, neutts, or a providers.<name> command
+
+# mcp_servers:                     # URL servers must point at an in-tier host or set enabled: false;
+#   notes: {command: ...}          # command servers pass (and are not inspected)
+
+plugins:
+  isolation: in_process            # Hermes' default; under host the attested provider is invisible

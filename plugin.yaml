@@ -1,6 +1,7 @@
 name: confidential-mode
 version: 0.1.0
-description: Attested inference provider (Tinfoil) plus a sealed mode that refuses every route that would carry the conversation off-tier, with human-approved enclave pins and a local receipt ledger.
+description: "Seal a profile to local-only or attested (Tinfoil enclave) inference: refuses off-tier model calls and fallbacks, asks before every off-machine tool call, refuses to seal while auxiliary, vision, memory or MCP routes leave the tier, pins the enclave build you approved, and ledgers every send locally (watch view, receipts). Disclosure: docs/DISCLOSURE.md."
+homepage: https://github.com/ainsleys/hermes-confidential-mode#readme
 author: ainsleys
 kind: standalone
 requires_hermes: ">=0.22.7"
