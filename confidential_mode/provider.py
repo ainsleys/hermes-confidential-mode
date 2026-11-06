@@ -8,7 +8,6 @@ missing), otherwise a RefusingClient.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -36,6 +35,7 @@ DEFAULT_VERIFY_WAIT_SECONDS = 5.0
 DEFAULT_CONTEXT_LENGTH = 65536
 
 REASON_VERIFY_PENDING = "attestation still in progress; this turn ended; resend"
+REASON_NO_CONSENT = "pin has no consent record"
 REASON_BAD_RESULT = "attestation returned no usable fingerprints"
 REASON_NOT_REGISTERED = "attested provider is not registered"
 REASON_PIN_MISMATCH = "enclave build changed; run /confidential pins approve"
@@ -58,6 +58,8 @@ class _Entry:
     verify_wait_seconds: float = 5.0
     verify_lock: Any = field(default_factory=threading.Lock)
     inflight: threading.Event | None = None
+    consent_ledger: Any = None      # Ledger-like (.tail); when set, a pin needs a matching pin_applied row
+    consented: set = field(default_factory=set)  # (vendor, code_fp, enclave_fp) already seen in the ledger
 
 
 class VerificationCache:
@@ -188,6 +190,9 @@ class VerificationCache:
                     _hold(e.adapter, _fail_reason(e.last_error))
                     return False, _fail_reason(e.last_error), None
                 if e.pins.match(result) is True:
+                    if not _consent_recorded(e, result):
+                        _hold(e.adapter, REASON_NO_CONSENT)
+                        return False, REASON_NO_CONSENT, result  # stage nothing (F8)
                     _release(e.adapter)
                     return True, "attested enclave verified and pinned", result
                 try:
@@ -236,6 +241,43 @@ def _sync_profile_base_url(e: _Entry) -> None:
             e.profile.base_url = url
     except Exception:
         logger.debug("could not sync attested profile base_url", exc_info=True)
+
+
+def _consent_recorded(e: _Entry, result: VerificationResult) -> bool:
+    """F8: the pin in force must have a ``pin_applied`` (decision approve) ledger row with the same
+    fingerprints, i.e. it went through consent.py's ask_choice flow, not a direct PinStore.apply by other
+    in-process code. In-process code can still forge the row; this raises the bar (disclosed). Without a
+    consent ledger configured the check is skipped. A ledger read error refuses (fail closed)."""
+    if e.consent_ledger is None:
+        return True
+    key = (result.vendor, result.code_fingerprint, result.enclave_fingerprint)
+    if key in e.consented:
+        return True
+    try:
+        since = 0
+        while True:
+            rows = e.consent_ledger.tail(since, limit=5000)
+            if not rows:
+                return False
+            for row in rows:
+                since = max(since, int(getattr(row, "id", since) or since))
+                if getattr(row, "kind", None) != "pin_applied" or getattr(row, "decision", None) != "approve":
+                    continue
+                d = getattr(row, "detail", None)
+                if isinstance(d, str):
+                    import json
+                    d = json.loads(d)
+                if not isinstance(d, dict):
+                    continue
+                if (d.get("code_fingerprint"), d.get("enclave_fingerprint")) == key[1:] and \
+                        (d.get("vendor") or key[0]) == key[0]:
+                    e.consented.add(key)
+                    return True
+            if len(rows) < 5000:
+                return False
+    except Exception:
+        logger.warning("attested: consent ledger unreadable; refusing", exc_info=True)
+        return False
 
 
 def _adapter_host(adapter) -> str:
@@ -303,7 +345,8 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
                  failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS,
                  on_event: Callable[[dict], None] | None = None, ledger=None,
                  context_length: int = DEFAULT_CONTEXT_LENGTH,
-                 verify_wait_seconds: float = DEFAULT_VERIFY_WAIT_SECONDS):
+                 verify_wait_seconds: float = DEFAULT_VERIFY_WAIT_SECONDS,
+                 consent_ledger=None):
     """Build the 'attested-tinfoil' ProviderProfile and register its cache entry. Never touches the
     network: base_url is the configured enclave URL, or the adapter's .invalid placeholder until the
     first verify() resolves the host by router discovery (then it is updated in place)."""
@@ -335,12 +378,15 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
         on_event = ledger.append
     cache.register(PROFILE_NAME, adapter, pins, ttl_seconds, failure_backoff_seconds, on_event=on_event,
                    verify_wait_seconds=verify_wait_seconds)
+    if consent_ledger is None and ledger is not None and callable(getattr(ledger, "tail", None)):
+        consent_ledger = ledger
+    cache.entry(PROFILE_NAME).consent_ledger = consent_ledger
     cache.entry(PROFILE_NAME).profile = profile
     return profile
 
 
 def _create_client(profile, cache: VerificationCache, client_kwargs: dict):
-    api_key = client_kwargs.get("api_key") or os.environ.get(API_KEY_ENV, "")
+    api_key = client_kwargs.get("api_key") or tinfoil_api_key()
     base_url = profile.base_url
     try:
         ok, reason, _ = cache.ensure(profile.name)
@@ -362,6 +408,18 @@ def _create_client(profile, cache: VerificationCache, client_kwargs: dict):
                                   base_url=base_url)
         except Exception:
             return RefusingClient("attested client unavailable")
+
+
+def tinfoil_api_key() -> str:
+    """TINFOIL_API_KEY through Hermes' secret scope (agent.secret_scope.get_secret, as Hermes' own
+    provider plugins do); never os.environ directly. get_secret falls back to the environment itself
+    where Hermes allows it, and fails closed under multiplexing."""
+    try:
+        from agent.secret_scope import get_secret
+        return (get_secret(API_KEY_ENV) or "").strip()
+    except Exception as exc:
+        logger.warning("attested: could not resolve %s: %s", API_KEY_ENV, type(exc).__name__)
+        return ""
 
 
 def _cfg_get(config: dict | None, *path, default=None):
@@ -399,6 +457,14 @@ def register_provider_profile(ctx, *, config: dict | None = None, data_dir: Path
         adapter = TinfoilAdapter(data_dir=data_dir, enclave=_cfg_get(config, "confidential", "tinfoil", "enclave"))
     if pins is None:
         pins = PinStore(data_dir / "pins.yaml")
+    if ledger is None and on_event is None and ctx is not None:
+        # The plugin's ledger (same default file consent.py writes pin_applied rows to): verify rows go
+        # there, and attested_ok requires a consent record for the pin in force (F8).
+        try:
+            from .ledger import Ledger
+            ledger = Ledger()
+        except Exception:
+            logger.warning("attested: no ledger; pins will not be cross-checked against consent", exc_info=True)
     ttl = float(_cfg_get(config, "confidential", "verify_ttl_seconds", default=DEFAULT_TTL_SECONDS))
     profile = make_profile(
         adapter, pins, ttl, on_event=on_event, ledger=ledger,
