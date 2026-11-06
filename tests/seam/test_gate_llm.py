@@ -29,7 +29,7 @@ from confidential_mode.tiers import Destination, Tier, Verdict
 
 
 class FakePredicate:
-    def __init__(self, tier=Tier.LOCAL, *, in_tier=True, reason="", host="llm.example.test", raises=None):
+    def __init__(self, tier=Tier.ON_HOST, *, in_tier=True, reason="", host="llm.example.test", raises=None):
         self.tier = tier
         self.in_tier, self.reason, self.host, self.raises = in_tier, reason, host, raises
         self.calls: list[Destination] = []
@@ -54,15 +54,15 @@ class FakeAttested:
 
 
 class Env:
-    def __init__(self, tmp_path, *, sealed=False, tier=Tier.LOCAL, predicate=None, attested=None,
+    def __init__(self, tmp_path, *, locked=False, tier=Tier.ON_HOST, predicate=None, attested=None,
                  pin_pending=None, builders=None, gate_cls=LlmGate):
         self.ledger = Ledger(tmp_path / "ledger.sqlite")
         self.state = ConfidentialState(InMemoryState())
-        if sealed:
-            self.state.seal(tier, "fp")
+        if locked:
+            self.state.lock(tier, "fp")
         self.predicate = predicate or FakePredicate(tier)
         self.attested = attested or FakeAttested()
-        self.fn = build_middleware(ledger=self.ledger, is_sealed=self.state.sealed,
+        self.fn = build_middleware(ledger=self.ledger, is_locked=self.state.locked,
                                    predicate_for=lambda t: self.predicate, attested_ok=self.attested,
                                    pin_pending=pin_pending, builders=builders, gate_cls=gate_cls)
 
@@ -95,8 +95,8 @@ class MutantNoObserve(LlmGate):
 class MutantIgnoresVerdict(LlmGate):
     def handle(self, request, next_call, context):
         dest = self.destination(context)
-        sealed, tier = self.is_sealed()
-        if not sealed:
+        locked, tier = self.is_locked()
+        if not locked:
             return next_call(request)
         self.predicate_for(Tier(tier)).classify(dest)
         return self.guarded_call(request, next_call, dest, context, Tier(tier), Verdict(True, "", ""))
@@ -105,7 +105,7 @@ class MutantIgnoresVerdict(LlmGate):
 class MutantRefusesAll(LlmGate):
     def handle(self, request, next_call, context):
         dest = self.destination(context)
-        return self.refuse(dest, context, Tier.LOCAL, Verdict(False, "no", ""), "refused", reason_code="mutant")
+        return self.refuse(dest, context, Tier.ON_HOST, Verdict(False, "no", ""), "refused", reason_code="mutant")
 
 
 class MutantUncaughtProviderError(LlmGate):
@@ -127,7 +127,7 @@ class MutantNoCatchAll(LlmGate):
 
 
 class MutantLetsInternalErrorsEscape(MutantNoCatchAll):
-    """No catch-all and no state guard: an unreadable seal state escapes the middleware."""
+    """No catch-all and no state guard: an unreadable lock state escapes the middleware."""
     def internal_error(self, context, exc, **kw):
         raise exc
 
@@ -135,18 +135,18 @@ class MutantLetsInternalErrorsEscape(MutantNoCatchAll):
 class MutantSkipsAttested(LlmGate):
     def handle(self, request, next_call, context):
         dest = self.destination(context)
-        sealed, tier = self.is_sealed()
+        locked, tier = self.is_locked()
         verdict = self.predicate_for(Tier(tier)).classify(dest)
         return self.guarded_call(request, next_call, dest, context, Tier(tier), verdict)
 
 
 # ---------------------------------------------------------------------------------------------
-# 1. Unsealed: observe and pass through
+# 1. Unlocked: observe and pass through
 # ---------------------------------------------------------------------------------------------
 
 
-def check_unsealed_observes(monkeypatch, manager, tmp_path, api_mode, gate_cls=LlmGate):
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, sealed=False, gate_cls=gate_cls)
+def check_unlocked_observes(monkeypatch, manager, tmp_path, api_mode, gate_cls=LlmGate):
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, locked=False, gate_cls=gate_cls)
     assert result["final_response"] == PROVIDER_TEXT
     assert len(rec.all_provider_calls) == 1, "provider called exactly once"
     rows = env.ledger.tail(0)
@@ -158,32 +158,32 @@ def check_unsealed_observes(monkeypatch, manager, tmp_path, api_mode, gate_cls=L
     assert row.decision == "observed" and row.tier is None
     assert isinstance(row.bytes, int) and row.bytes > len("secret question about the merger")
     assert row.provider == agent.provider and row.model == agent.model and row.purpose == "main"
-    assert env.predicate.calls == [], "unsealed never classifies"
+    assert env.predicate.calls == [], "unlocked never classifies"
 
 
 @pytest.mark.parametrize("api_mode", MODES)
-def test_unsealed_observes_and_passes_through(monkeypatch, manager, tmp_path, api_mode):
-    check_unsealed_observes(monkeypatch, manager, tmp_path, api_mode)
+def test_unlocked_observes_and_passes_through(monkeypatch, manager, tmp_path, api_mode):
+    check_unlocked_observes(monkeypatch, manager, tmp_path, api_mode)
 
 
-def test_unsealed_never_stores_prompt_text(monkeypatch, manager, tmp_path):
+def test_unlocked_never_stores_prompt_text(monkeypatch, manager, tmp_path):
     result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions")
     raw = (tmp_path / "ledger.sqlite").read_bytes()
     assert b"merger" not in raw
 
 
-def test_mutant_unsealed_no_observe_is_caught(monkeypatch, manager, tmp_path):
+def test_mutant_unlocked_no_observe_is_caught(monkeypatch, manager, tmp_path):
     with pytest.raises(AssertionError):
-        check_unsealed_observes(monkeypatch, manager, tmp_path, "chat_completions", MutantNoObserve)
+        check_unlocked_observes(monkeypatch, manager, tmp_path, "chat_completions", MutantNoObserve)
 
 
-def test_mutant_unsealed_refusing_is_caught(monkeypatch, manager, tmp_path):
+def test_mutant_unlocked_refusing_is_caught(monkeypatch, manager, tmp_path):
     with pytest.raises(AssertionError):
-        check_unsealed_observes(monkeypatch, manager, tmp_path, "chat_completions", MutantRefusesAll)
+        check_unlocked_observes(monkeypatch, manager, tmp_path, "chat_completions", MutantRefusesAll)
 
 
-def test_unsealed_provider_error_propagates_to_hermes(monkeypatch, manager, tmp_path):
-    """Unsealed, the gate must not change Hermes' error handling: a 500 is retried as usual."""
+def test_unlocked_provider_error_propagates_to_hermes(monkeypatch, manager, tmp_path):
+    """Unlocked, the gate must not change Hermes' error handling: a 500 is retried as usual."""
     result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions",
                                        provider_exc=status_error_500)
     assert len(rec.provider_calls) > 1, "Hermes' own retry ran"
@@ -191,24 +191,24 @@ def test_unsealed_provider_error_propagates_to_hermes(monkeypatch, manager, tmp_
 
 
 # ---------------------------------------------------------------------------------------------
-# 2. Sealed off-tier: refused in all four api_modes, zero provider calls
+# 2. Locked off-tier: refused in all four api_modes, zero provider calls
 # ---------------------------------------------------------------------------------------------
 
 
 def check_off_tier_refused(monkeypatch, manager, tmp_path, api_mode, gate_cls=LlmGate):
-    pred = FakePredicate(Tier.LOCAL, in_tier=False, reason="host is not local", host="llm.example.test")
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, sealed=True,
-                                       tier=Tier.LOCAL, predicate=pred, fallback=True, gate_cls=gate_cls)
-    assert_clean_refusal(result, rec, agent, off_tier_text(Tier.LOCAL, "host is not local"))
+    pred = FakePredicate(Tier.ON_HOST, in_tier=False, reason="host is not on-host", host="llm.example.test")
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, locked=True,
+                                       tier=Tier.ON_HOST, predicate=pred, fallback=True, gate_cls=gate_cls)
+    assert_clean_refusal(result, rec, agent, off_tier_text(Tier.ON_HOST, "host is not on-host"))
     assert len(pred.calls) == 1 and pred.calls[0].api_mode == api_mode
     rows = env.ledger.tail(0)
     assert [r.kind for r in rows] == ["send_refused"]
-    assert rows[0].decision == "refused" and rows[0].tier == "local-only" and rows[0].verdict == "off_tier"
+    assert rows[0].decision == "refused" and rows[0].tier == "on-host-only" and rows[0].verdict == "off_tier"
     assert rows[0].detail["reason_code"] == "off_tier"
 
 
 @pytest.mark.parametrize("api_mode", MODES)
-def test_sealed_off_tier_refused(monkeypatch, manager, tmp_path, api_mode):
+def test_locked_off_tier_refused(monkeypatch, manager, tmp_path, api_mode):
     check_off_tier_refused(monkeypatch, manager, tmp_path, api_mode)
 
 
@@ -219,13 +219,13 @@ def test_mutant_off_tier_ignored_verdict_is_caught(monkeypatch, manager, tmp_pat
 
 
 # ---------------------------------------------------------------------------------------------
-# 3. Sealed in-tier: passes
+# 3. Locked in-tier: passes
 # ---------------------------------------------------------------------------------------------
 
 
 def check_in_tier_passes(monkeypatch, manager, tmp_path, api_mode, gate_cls=LlmGate):
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, sealed=True,
-                                       tier=Tier.LOCAL, gate_cls=gate_cls)
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, locked=True,
+                                       tier=Tier.ON_HOST, gate_cls=gate_cls)
     assert result["final_response"] == PROVIDER_TEXT and result["completed"] is True
     assert len(rec.all_provider_calls) == 1
     rows = env.ledger.tail(0)
@@ -234,7 +234,7 @@ def check_in_tier_passes(monkeypatch, manager, tmp_path, api_mode, gate_cls=LlmG
 
 
 @pytest.mark.parametrize("api_mode", MODES)
-def test_sealed_in_tier_passes(monkeypatch, manager, tmp_path, api_mode):
+def test_locked_in_tier_passes(monkeypatch, manager, tmp_path, api_mode):
     check_in_tier_passes(monkeypatch, manager, tmp_path, api_mode)
 
 
@@ -244,13 +244,13 @@ def test_mutant_in_tier_refused_is_caught(monkeypatch, manager, tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------
-# 4. Sealed in-tier, provider 500 / 429 -> refusal; fallback never armed; no cooldown
+# 4. Locked in-tier, provider 500 / 429 -> refusal; fallback never armed; no cooldown
 # ---------------------------------------------------------------------------------------------
 
 
 def check_provider_error_refused(monkeypatch, manager, tmp_path, api_mode, err, gate_cls=LlmGate):
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, sealed=True,
-                                       tier=Tier.LOCAL, provider_exc=err, fallback=True, gate_cls=gate_cls)
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, locked=True,
+                                       tier=Tier.ON_HOST, provider_exc=err, fallback=True, gate_cls=gate_cls)
     assert result["final_response"] == TEXT_PROVIDER_ERROR and result["completed"] is True
     assert len(rec.all_provider_calls) == 1, "provider called exactly once, no retry"
     assert rec.fallback_calls == [], "_try_activate_fallback never called"
@@ -269,7 +269,7 @@ ERRS = pytest.mark.parametrize("err", [status_error_500, rate_limit_429], ids=["
 
 @ERRS
 @pytest.mark.parametrize("api_mode", MODES)
-def test_sealed_provider_error_becomes_refusal(monkeypatch, manager, tmp_path, api_mode, err):
+def test_locked_provider_error_becomes_refusal(monkeypatch, manager, tmp_path, api_mode, err):
     check_provider_error_refused(monkeypatch, manager, tmp_path, api_mode, err)
 
 
@@ -286,8 +286,8 @@ def test_mutant_uncaught_provider_error_is_caught(monkeypatch, manager, tmp_path
 
 
 def check_interrupt_reraised(monkeypatch, manager, tmp_path, gate_cls=LlmGate):
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
-                                       tier=Tier.LOCAL, provider_exc=InterruptedError, gate_cls=gate_cls)
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
+                                       tier=Tier.ON_HOST, provider_exc=InterruptedError, gate_cls=gate_cls)
     assert result.get("interrupted") is True, result
     assert result.get("final_response") != TEXT_PROVIDER_ERROR
     assert len(rec.provider_calls) == 1
@@ -310,9 +310,9 @@ def test_mutant_swallowed_interrupt_is_caught(monkeypatch, manager, tmp_path):
 
 
 def check_predicate_raising_refused(monkeypatch, manager, tmp_path, api_mode, gate_cls=LlmGate):
-    pred = FakePredicate(Tier.LOCAL, raises=RuntimeError("predicate crashed"))
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, sealed=True,
-                                       tier=Tier.LOCAL, predicate=pred, fallback=True, gate_cls=gate_cls)
+    pred = FakePredicate(Tier.ON_HOST, raises=RuntimeError("predicate crashed"))
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, locked=True,
+                                       tier=Tier.ON_HOST, predicate=pred, fallback=True, gate_cls=gate_cls)
     assert_clean_refusal(result, rec, agent, TEXT_INTERNAL_ERROR)
     rows = env.ledger.tail(0)
     assert [r.kind for r in rows] == ["send_refused"]
@@ -330,12 +330,12 @@ def test_mutant_predicate_raising_without_catch_all_is_caught(monkeypatch, manag
 
 
 def check_state_raising_refused(monkeypatch, manager, tmp_path, gate_cls=LlmGate):
-    """Corrupt seal state (is_sealed raising) fails closed, even though we cannot tell if sealed."""
+    """Corrupt lock state (is_locked raising) fails closed, even though we cannot tell if locked."""
     rec = Rec()
     agent = build_agent(monkeypatch, "chat_completions", rec)
     env = Env(tmp_path, gate_cls=gate_cls)
-    env.state._store.set("sealed", "yes")  # not a bool -> StateError
-    env.fn = build_middleware(ledger=env.ledger, is_sealed=env.state.sealed, predicate_for=lambda t: env.predicate,
+    env.state._store.set("locked", "yes")  # not a bool -> StateError
+    env.fn = build_middleware(ledger=env.ledger, is_locked=env.state.locked, predicate_for=lambda t: env.predicate,
                               attested_ok=env.attested, gate_cls=gate_cls)
     register(manager, env.fn)
     assert_clean_refusal(agent.run_conversation("q"), rec, agent, gate_llm.TEXT_STATE_UNREADABLE)
@@ -343,11 +343,11 @@ def check_state_raising_refused(monkeypatch, manager, tmp_path, gate_cls=LlmGate
     assert "/confidential off" in gate_llm.TEXT_STATE_UNREADABLE
     rows = env.ledger.tail(0)
     assert [r.kind for r in rows] == ["send_refused"]
-    assert rows[0].detail["reason_code"] == "seal_state_unreadable"
+    assert rows[0].detail["reason_code"] == "lock_state_unreadable"
 
 
-@pytest.mark.parametrize("stored", [{"sealed": True, "sealed_tier": "bogus"}, {"sealed": True}])
-def test_sealed_with_unknown_tier_refused_naming_repair(monkeypatch, manager, tmp_path, stored):
+@pytest.mark.parametrize("stored", [{"locked": True, "locked_tier": "bogus"}, {"locked": True}])
+def test_locked_with_unknown_tier_refused_naming_repair(monkeypatch, manager, tmp_path, stored):
     rec = Rec()
     agent = build_agent(monkeypatch, "chat_completions", rec)
     env = Env(tmp_path)
@@ -374,7 +374,7 @@ def test_mutant_state_raising_without_catch_all_is_caught(monkeypatch, manager, 
 def check_attested_mismatch_refused(monkeypatch, manager, tmp_path, gate_cls=LlmGate):
     att = FakeAttested(ok=False, reason="enclave fingerprint does not match pin")
     pred = FakePredicate(Tier.ATTESTED, in_tier=True)
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
                                        tier=Tier.ATTESTED, predicate=pred, attested=att,
                                        pin_pending=lambda: True, fallback=True, gate_cls=gate_cls)
     assert_clean_refusal(result, rec, agent, TEXT_PIN_CHANGED)
@@ -394,7 +394,7 @@ def test_mutant_attested_check_skipped_is_caught(monkeypatch, manager, tmp_path)
 
 def test_attested_not_ok_without_pending_pin_uses_reason(monkeypatch, manager, tmp_path):
     att = FakeAttested(ok=False, reason="verification is stale")
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
                                        tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED),
                                        attested=att, pin_pending=lambda: False)
     assert_clean_refusal(result, rec, agent, gate_llm.attested_fail_text("verification is stale"))
@@ -402,7 +402,7 @@ def test_attested_not_ok_without_pending_pin_uses_reason(monkeypatch, manager, t
 
 def check_attested_raising_refused(monkeypatch, manager, tmp_path, gate_cls=LlmGate):
     att = FakeAttested(raises=RuntimeError("verifier exploded"))
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
                                        tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED),
                                        attested=att, fallback=True, gate_cls=gate_cls)
     assert_clean_refusal(result, rec, agent, TEXT_INTERNAL_ERROR)
@@ -420,16 +420,16 @@ def test_mutant_attested_raising_without_catch_all_is_caught(monkeypatch, manage
 
 def test_attested_ok_passes(monkeypatch, manager, tmp_path):
     att = FakeAttested(ok=True)
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
                                        tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED), attested=att)
     assert result["final_response"] == PROVIDER_TEXT and len(rec.provider_calls) == 1
     assert att.calls == ["custom"]
 
 
 def test_predicate_for_wrong_tier_refused(monkeypatch, manager, tmp_path):
-    """A predicate whose tier differs from the sealed tier is an internal error, not a pass."""
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
-                                       tier=Tier.ATTESTED, predicate=FakePredicate(Tier.LOCAL))
+    """A predicate whose tier differs from the locked tier is an internal error, not a pass."""
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
+                                       tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ON_HOST))
     assert_clean_refusal(result, rec, agent, TEXT_INTERNAL_ERROR)
 
 
@@ -446,11 +446,11 @@ def check_builder_failure_refused(monkeypatch, manager, tmp_path):
     """Every chat-completions builder raises (injected and module-level): the last-resort
     SimpleNamespace shape must still end the turn cleanly."""
     monkeypatch.setattr(gate_llm, "chat_completions_refusal", _raising_builder)
-    pred = FakePredicate(Tier.LOCAL, in_tier=False, reason="off")
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
-                                       tier=Tier.LOCAL, predicate=pred,
+    pred = FakePredicate(Tier.ON_HOST, in_tier=False, reason="off")
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
+                                       tier=Tier.ON_HOST, predicate=pred,
                                        builders={"chat_completions": _raising_builder}, fallback=True)
-    assert_clean_refusal(result, rec, agent, off_tier_text(Tier.LOCAL, "off"))
+    assert_clean_refusal(result, rec, agent, off_tier_text(Tier.ON_HOST, "off"))
     rows = env.ledger.tail(0)
     assert rows[-1].detail["note"].startswith("refusal_builder_failed")
 
@@ -471,22 +471,22 @@ def test_mutant_builder_without_fallback_is_caught(monkeypatch, manager, tmp_pat
 def test_unknown_api_mode_in_real_turn_gets_chat_shape(monkeypatch, manager, tmp_path):
     """No builder for bedrock_converse -> unknown-mode path -> ChatCompletion, which bedrock
     validation accepts (C0). Ledger carries the note."""
-    pred = FakePredicate(Tier.LOCAL, in_tier=False, reason="off")
+    pred = FakePredicate(Tier.ON_HOST, in_tier=False, reason="off")
     builders = {k: v for k, v in gate_llm.REFUSAL_BUILDERS.items() if k != "bedrock_converse"}
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "bedrock_converse", sealed=True,
-                                       tier=Tier.LOCAL, predicate=pred, builders=builders)
-    assert_clean_refusal(result, rec, agent, off_tier_text(Tier.LOCAL, "off"))
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "bedrock_converse", locked=True,
+                                       tier=Tier.ON_HOST, predicate=pred, builders=builders)
+    assert_clean_refusal(result, rec, agent, off_tier_text(Tier.ON_HOST, "off"))
     assert env.ledger.tail(0)[-1].detail["note"] == "unknown_api_mode"
 
 
 def test_unknown_api_mode_direct_call_returns_chat_completion(tmp_path):
     from openai.types.chat import ChatCompletion
-    env = Env(tmp_path, sealed=True, predicate=FakePredicate(Tier.LOCAL, in_tier=False, reason="off"))
+    env = Env(tmp_path, locked=True, predicate=FakePredicate(Tier.ON_HOST, in_tier=False, reason="off"))
     calls = []
     out = env.fn(request={"messages": []}, next_call=lambda p=None: calls.append(p),
                  api_mode="mystery_mode", provider="x", base_url="https://x.test", model="m", session_id="s1")
     assert isinstance(out, ChatCompletion)
-    assert out.choices[0].finish_reason == "stop" and out.choices[0].message.content == off_tier_text(Tier.LOCAL, "off")
+    assert out.choices[0].finish_reason == "stop" and out.choices[0].message.content == off_tier_text(Tier.ON_HOST, "off")
     assert calls == []
     row = env.ledger.session("s1")[0]
     assert row.kind == "send_refused" and row.detail["note"] == "unknown_api_mode"
@@ -514,11 +514,11 @@ def test_ledger_failure_never_changes_decision(monkeypatch, manager, tmp_path):
             raise OSError("disk full")
     rec = Rec()
     agent = build_agent(monkeypatch, "chat_completions", rec)
-    fn = build_middleware(ledger=BrokenLedger(), is_sealed=lambda: (True, Tier.LOCAL),
-                          predicate_for=lambda t: FakePredicate(Tier.LOCAL, in_tier=False, reason="off"),
+    fn = build_middleware(ledger=BrokenLedger(), is_locked=lambda: (True, Tier.ON_HOST),
+                          predicate_for=lambda t: FakePredicate(Tier.ON_HOST, in_tier=False, reason="off"),
                           attested_ok=FakeAttested())
     register(manager, fn)
-    assert_clean_refusal(agent.run_conversation("q"), rec, agent, off_tier_text(Tier.LOCAL, "off"))
+    assert_clean_refusal(agent.run_conversation("q"), rec, agent, off_tier_text(Tier.ON_HOST, "off"))
 
 
 def test_purpose_from_context():
@@ -553,15 +553,15 @@ def test_documentation_twin_gate_with_same_crash_fails_closed(monkeypatch, manag
 
 
 @pytest.mark.parametrize("api_mode", MODES)
-def test_sealed_off_tier_refused_on_streaming_turn(monkeypatch, manager, tmp_path, api_mode):
+def test_locked_off_tier_refused_on_streaming_turn(monkeypatch, manager, tmp_path, api_mode):
     from agent.turn_api_call import _should_stream
     rec = Rec()
     agent = build_agent(monkeypatch, api_mode, rec, streaming=True)
     if not _should_stream(agent):
         pytest.skip(f"{api_mode}: Hermes does not stream for this agent configuration")
-    env = Env(tmp_path, sealed=True, predicate=FakePredicate(Tier.LOCAL, in_tier=False, reason="off"))
+    env = Env(tmp_path, locked=True, predicate=FakePredicate(Tier.ON_HOST, in_tier=False, reason="off"))
     register(manager, env.fn)
-    assert_clean_refusal(agent.run_conversation("q"), rec, agent, off_tier_text(Tier.LOCAL, "off"))
+    assert_clean_refusal(agent.run_conversation("q"), rec, agent, off_tier_text(Tier.ON_HOST, "off"))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -610,7 +610,7 @@ def _truthiness_mutant(site):
     return M
 
 
-class MutantTruthySealedFalse(LlmGate):
+class MutantTruthyLockedFalse(LlmGate):
     @staticmethod
     def is_false(value):
         return not value
@@ -623,10 +623,10 @@ class MutantNoTierMatch(LlmGate):
 
 
 def check_verdict_truthy_refused(monkeypatch, manager, tmp_path, value, gate_cls=LlmGate):
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
-                                       tier=Tier.LOCAL, predicate=OddPredicate(Tier.LOCAL, value),
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
+                                       tier=Tier.ON_HOST, predicate=OddPredicate(Tier.ON_HOST, value),
                                        fallback=True, gate_cls=gate_cls)
-    assert_clean_refusal(result, rec, agent, off_tier_text(Tier.LOCAL, "odd"))
+    assert_clean_refusal(result, rec, agent, off_tier_text(Tier.ON_HOST, "odd"))
 
 
 @pytest.mark.parametrize("value", TRUTHY_NOT_TRUE + ["magic"], ids=repr)
@@ -651,7 +651,7 @@ class OddAttested(FakeAttested):
 
 
 def check_attested_truthy_refused(monkeypatch, manager, tmp_path, value, gate_cls=LlmGate):
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
                                        tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED),
                                        attested=OddAttested(value), fallback=True, gate_cls=gate_cls)
     assert_clean_refusal(result, rec, agent, gate_llm.attested_fail_text("odd attestation"))
@@ -668,33 +668,33 @@ def test_mutant_truthy_attested_is_caught(monkeypatch, manager, tmp_path, value)
         check_attested_truthy_refused(monkeypatch, manager, tmp_path, value, _truthiness_mutant("attested"))
 
 
-def check_sealed_flag_non_bool_refused(monkeypatch, manager, tmp_path, flag, gate_cls=LlmGate):
-    """A falsy-but-not-False sealed flag must not read as 'unsealed' (that would skip the gate)."""
+def check_locked_flag_non_bool_refused(monkeypatch, manager, tmp_path, flag, gate_cls=LlmGate):
+    """A falsy-but-not-False locked flag must not read as 'unlocked' (that would skip the gate)."""
     rec = Rec()
     agent = build_agent(monkeypatch, "chat_completions", rec)
     env = Env(tmp_path)
-    fn = build_middleware(ledger=env.ledger, is_sealed=lambda: (flag, Tier.LOCAL),
-                          predicate_for=lambda t: FakePredicate(Tier.LOCAL, in_tier=False, reason="off"),
+    fn = build_middleware(ledger=env.ledger, is_locked=lambda: (flag, Tier.ON_HOST),
+                          predicate_for=lambda t: FakePredicate(Tier.ON_HOST, in_tier=False, reason="off"),
                           attested_ok=env.attested, gate_cls=gate_cls)
     register(manager, fn)
     assert_clean_refusal(agent.run_conversation("q"), rec, agent, gate_llm.TEXT_STATE_UNREADABLE)
 
 
 @pytest.mark.parametrize("flag", [0, None, "", [], "False", "yes", 1, _Truthy()], ids=repr)
-def test_sealed_flag_not_a_bool_refuses(monkeypatch, manager, tmp_path, flag):
-    check_sealed_flag_non_bool_refused(monkeypatch, manager, tmp_path, flag)
+def test_locked_flag_not_a_bool_refuses(monkeypatch, manager, tmp_path, flag):
+    check_locked_flag_non_bool_refused(monkeypatch, manager, tmp_path, flag)
 
 
 @pytest.mark.parametrize("flag", [0, None, ""], ids=repr)
-def test_mutant_truthy_sealed_flag_is_caught(monkeypatch, manager, tmp_path, flag):
+def test_mutant_truthy_locked_flag_is_caught(monkeypatch, manager, tmp_path, flag):
     with pytest.raises(AssertionError):
-        check_sealed_flag_non_bool_refused(monkeypatch, manager, tmp_path, flag, MutantTruthySealedFalse)
+        check_locked_flag_non_bool_refused(monkeypatch, manager, tmp_path, flag, MutantTruthyLockedFalse)
 
 
 def check_tier_mismatch_refused(monkeypatch, manager, tmp_path, gate_cls=LlmGate):
     att = FakeAttested(ok=True)
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
-                                       tier=Tier.ATTESTED, predicate=FakePredicate(Tier.LOCAL, in_tier=True),
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
+                                       tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ON_HOST, in_tier=True),
                                        attested=att, gate_cls=gate_cls)
     assert_clean_refusal(result, rec, agent, TEXT_INTERNAL_ERROR)
 
@@ -711,7 +711,7 @@ def test_mutant_tier_match_skipped_is_caught(monkeypatch, manager, tmp_path):
 def check_pin_pending_truthy_not_pin_message(monkeypatch, manager, tmp_path, value, gate_cls=LlmGate):
     """pin_pending only picks the text (both branches refuse), but a truthy non-True must not claim
     a staged pin exists."""
-    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", sealed=True,
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, "chat_completions", locked=True,
                                        tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED),
                                        attested=FakeAttested(ok=False, reason="stale"),
                                        pin_pending=lambda: value, gate_cls=gate_cls)
@@ -747,7 +747,7 @@ def check_refusing_client_refused(monkeypatch, manager, tmp_path, gate_cls=LlmGa
         return client.chat.completions.create(**api_kwargs)   # raises ConfidentialRefused
 
     agent._interruptible_api_call = _terminal
-    env = Env(tmp_path, sealed=True, tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED),
+    env = Env(tmp_path, locked=True, tier=Tier.ATTESTED, predicate=FakePredicate(Tier.ATTESTED),
               attested=FakeAttested(ok=True), gate_cls=gate_cls)
     register(manager, env.fn)
     result = agent.run_conversation("q")

@@ -22,11 +22,13 @@ If you maintain Hermes, this is the list of seams we would use.
 your messages, and runs the tools it asks for. A **profile** is a separate Hermes home directory with
 its own config and data. A **session** is one conversation.
 
-To **seal** a profile is to lock it to one **tier**, which is a rule about where the model may run.
-The `local-only` tier accepts loopback and private-range hosts. The `attested` tier accepts only
+To **lock** a profile is to hold it to one **tier**, which is a rule about where the model may run.
+The word is "lock" and not "seal", because sealing means something else in confidential computing.
+**On-host** means on the machine that runs Hermes, and **off-host** means anywhere else.
+The `on-host-only` tier accepts loopback and private-range hosts. The `attested` tier accepts only
 Tinfoil's verified enclave. A destination the rule accepts is "in-tier", and any other is "off-tier".
 
-The **preflight** is the check the plugin runs over your config before it seals. It records a
+The **preflight** is the check the plugin runs over your config before it locks. It records a
 fingerprint of the routing config so that later changes can be detected.
 
 A **hook** is a callback Hermes calls at a named moment. Some hooks can return an instruction that
@@ -37,9 +39,9 @@ calls (`llm_execution`) and around tool calls (`tool_execution`).
 An **auxiliary call** is a model call Hermes makes for a side job, such as compressing context,
 writing a title, or describing an image. Each side job is an **auxiliary task**.
 
-The **ledger** is the plugin's local log of sends, refusals, questions and answers. A **receipt** is
+The **ledger** is the plugin's on-host log of sends, refusals, questions and answers. A **receipt** is
 a rendering of the ledger for one session. A **breach** row records an auxiliary call that went
-off-tier while sealed.
+off-tier while locked.
 
 An **enclave** is a virtual machine whose memory the CPU encrypts, so that the host's operator cannot
 read it. The general name for this CPU feature is a trusted execution environment (TEE).
@@ -74,15 +76,15 @@ of them fails, Hermes logs the failure and carries on.
 
 **What the plugin does today.** The plugin works on four fronts.
 
-1. **At seal time.** It refuses to seal unless every auxiliary task resolves in-tier. That covers the
+1. **At lock time.** It refuses to lock unless every auxiliary task resolves in-tier. That covers the
    built-in tasks, 19 at 84a0301, read from `DEFAULT_CONFIG["auxiliary"]`. It also covers every task
    a plugin registers. The plugin refuses `openai-codex` and `moa` as the main provider.
-2. **On every sealed turn.** It runs the same check again.
+2. **On every locked turn.** It runs the same check again.
 3. **On the live runtime.** Tasks set to `auto` follow the live main runtime, not the config. Hermes
    holds that runtime in `agent.auxiliary_client.set_runtime_main`. The plugin therefore classifies
-   the live runtime on every sealed turn and ends the turn when it is off-tier. On gateway surfaces
+   the live runtime on every locked turn and ends the turn when it is off-tier. On gateway surfaces
    (Telegram, Discord and the other messaging platforms), it also refuses `/model` and `/moa` while
-   sealed, through the `pre_gateway_dispatch` hook.
+   locked, through the `pre_gateway_dispatch` hook.
 4. **At runtime.** It writes a ledger row for every auxiliary attempt. If an attempt goes off-tier
    anyway, it writes a `breach` row and marks the session as breached.
 
@@ -105,8 +107,8 @@ The plugin handles this in three steps.
 
 1. The preflight includes every `plugins.*` key that governs hooks in the config fingerprint
    (`confidential_mode/preflight.py:55-56`).
-2. The preflight refuses to seal if the timeout is more than 0 and less than 5 seconds.
-3. If someone edits the timeout after sealing, the fingerprint changes. The `llm_execution` gate
+2. The preflight refuses to lock if the timeout is more than 0 and less than 5 seconds.
+3. If someone edits the timeout after locking, the fingerprint changes. The `llm_execution` gate
    then refuses the main call.
 
 One case remains. A title-generation call can run before the main call in a turn. Such a call is
@@ -142,7 +144,7 @@ In the bypass modes listed above, the plugin blocks the tool instead of asking.
 
 `session` and `always` are real grants. Hermes stores an `always` grant in its `command_allowlist`
 as `plugin_rule:confidential-mode:tool:<name>`. That grant stops the asking for the tool, across
-seals, until you remove the entry.
+locks, until you remove the entry.
 
 **The core change that would close it.** Grant only on an explicit allow choice, and treat `None`,
 empty and unknown values as deny. Let a plugin's approve directive carry its own header text. Fire
@@ -151,13 +153,13 @@ can block it.
 
 ## 3. Shell and code-execution tools are not inspected
 
-**The gap.** `terminal`, `process_manage` and `execute_code` run locally, and they can open any
+**The gap.** `terminal`, `process_manage` and `execute_code` run on this host, and they can open any
 network connection. A command such as `curl -d @notes.txt https://...` sends a file off the machine.
 
 **Why it exists.** Hermes gives a plugin the command string. It does not tell the plugin what the
 command will connect to. Guessing from command text is unreliable.
 
-**What the plugin does today.** It classifies these tools as local and lets them run. The closing
+**What the plugin does today.** It classifies these tools as on-host and lets them run. The closing
 paragraph of every receipt says that shell and code tools are not covered.
 
 A three-mode rule is reserved in the code but not shipped (`gate_tools.MODE_TOOLS`). The three modes
@@ -165,13 +167,13 @@ would be: ask on commands that look like network access, allow all, or block.
 
 **The core change that would close it.** A network policy on the terminal backend that a plugin can
 read and require. One example is the docker backend with networking off, exposed through
-`terminal.backend` and `terminal.docker_network`. Sealed mode could then refuse to seal on a backend
+`terminal.backend` and `terminal.docker_network`. Locked mode could then refuse to lock on a backend
 that is not contained, instead of guessing from command text.
 
 ## 4. MCP command servers are not inspected
 
 **The gap.** MCP (the Model Context Protocol) is a standard way to plug external tool servers into
-an agent. An MCP server configured with `command:` runs as a local child process. That process can
+an agent. An MCP server configured with `command:` runs as a child process on this host. That process can
 itself be a network client, or a proxy to a hosted service.
 
 **Why it exists.** Hermes does not tell plugins what network access an MCP server has.
@@ -181,7 +183,7 @@ as the terminal.
 
 It treats servers configured with a `url:` differently. It blocks their tools when the URL's host is
 off-tier. It re-reads the server config at call time, so a server that someone re-points after the
-seal is judged again.
+lock is judged again.
 
 **The core change that would close it.** A declared network capability for each MCP server, visible
 to plugins. A sandboxed launcher with networking off would also work.
@@ -189,7 +191,7 @@ to plugins. A sandboxed launcher with networking off would also work.
 ## 5. Safe-worker mode disables hooks and middleware
 
 **The gap.** Safe-worker mode is a mode for managed Hermes worker processes in which Hermes
-deliberately loads no plugins. Sealed mode does not apply inside a safe worker.
+deliberately loads no plugins. Locked mode does not apply inside a safe worker.
 
 **Why it exists.** In a safe worker, Hermes never discovers plugins (`hermes_cli/plugins.py:1206-1208`).
 Hook dispatch returns nothing (`hermes_cli/plugins_dispatch.py:285-288`). `has_hook` returns false
@@ -199,9 +201,9 @@ not run either.
 **What the plugin does today.** Nothing. A plugin that is not loaded can do nothing. The gap is
 disclosed, not mitigated.
 
-**The core change that would close it.** Persist a "sealed" flag for each profile that Hermes core can
+**The core change that would close it.** Persist a "locked" flag for each profile that Hermes core can
 see, and make safe workers honour it. A safe worker could then refuse off-tier routes, or refuse to run
-on a sealed profile at all. This would not depend on plugin code being loaded.
+on a locked profile at all. This would not depend on plugin code being loaded.
 
 ## 6. The trust boundary is the whole Hermes process
 
@@ -216,14 +218,14 @@ A policy plugin cannot require a particular order of middleware between plugins.
 however, this plugin's provider and middleware register in that child process. They are then invisible
 to Hermes, and Hermes gives no warning (C0 spike 2).
 
-**What the plugin does today.** It refuses to seal unless isolation is `in_process` and the attested
-provider is visible in the process. At seal time it records each tool's handler, and it blocks any
+**What the plugin does today.** It refuses to lock unless isolation is `in_process` and the attested
+provider is visible in the process. At lock time it records each tool's handler, and it blocks any
 tool whose handler later changes. That is all a plugin can do against another plugin.
 
 **The core change that would close it.** Three changes together.
 
 - A policy tier for middleware that always runs outermost.
-- A way for a profile to say "only these plugins load while sealed".
+- A way for a profile to say "only these plugins load while locked".
 - A `ctx.register_provider_profile` that works under host isolation. Today the plugin has to call
   `providers.register_provider` directly.
 
@@ -268,10 +270,10 @@ The release tag is bound. The SDK's Sigstore policy requires the signing workflo
 What nothing signs is which release the vendor called "latest". The SDK asks the GitHub proxy for that
 answer (`github.py:50`), and the answer is not signed.
 
-**What the plugin does today.** It labels every time "(local clock)". The offline replay returns a
+**What the plugin does today.** It labels every time "(host clock)". The offline replay returns a
 fixed `NOT_ESTABLISHED` list with every result. That list names the missing nonce, the unsigned
 "latest" answer, and the fact that the capture time comes from the evidence itself. The plugin makes
-no freshness claim beyond "verified at local time T".
+no freshness claim beyond "verified at host-clock time T".
 
 **The change that would close it.** None in Hermes. On the vendor's side: a client nonce in the report,
 and signed responses.
@@ -371,12 +373,12 @@ default paths.
 
 **The change that would close it.** None in Hermes. On the SDK's side: a cache-directory parameter.
 
-## 13. No mixed "attested or local" tier (planned)
+## 13. No mixed "attested or on-host" tier (planned)
 
-**The gap.** A seal is one tier. You cannot run the main model attested and send cheap side jobs, such
-as titles and compression, to a local model.
+**The gap.** A lock is one tier. You cannot run the main model attested and send cheap side jobs, such
+as titles and compression, to an on-host model.
 
-**Why it exists.** The `local-only` rule refuses the enclave, and the `attested` rule refuses the local
+**Why it exists.** The `on-host-only` rule refuses the enclave, and the `attested` rule refuses the on-host
 host (`confidential_mode/tiers.py`). This is a limit of the plugin, not of Hermes.
 
 **Plan.** A tier inside the plugin whose rule accepts any destination that either existing rule
@@ -394,14 +396,14 @@ Each item below is a smaller gap. Each one is stated in full.
   agent's thread, there is a short window in which the two disagree. This window is accepted in
   Amendment 2.
 
-- **The seal is profile-wide.** Concurrent gateway sessions on one profile share the same seal.
+- **The lock is profile-wide.** Concurrent gateway sessions on one profile share the same lock.
 
 - **Group chats and untested surfaces.** In a group chat, `ctx.ask_choice` may accept an answer from
   any authorised member. The consent spike did not exercise Desktop, the Ink TUI or shared-runtime
   routing.
 
 - **Delegation and cron config.** The hook cannot see the delegation backend that an agent has pinned.
-  The preflight does not enumerate `cron.model_provider`. Cron jobs are blocked while sealed instead.
+  The preflight does not enumerate `cron.model_provider`. Cron jobs are blocked while locked instead.
 
 - **Voice paths.** The voice-chat and gateway voice-note TTS paths were not traced. The preflight's
   "disabled" verdict for `tts.provider` holds only while `voice.auto_tts` is false and the
@@ -409,14 +411,14 @@ Each item below is a smaller gap. Each one is stated in full.
 
 - **`tts.enabled` is a plugin convention.** Hermes 84a0301 has no such key.
 
-- **Remembered `always` grants outlive the seal.** Hermes stores them in `command_allowlist` as
-  `plugin_rule:confidential-mode:tool:<name>`. They survive an unseal. `/confidential pins` lists them.
+- **Remembered `always` grants outlive the lock.** Hermes stores them in `command_allowlist` as
+  `plugin_rule:confidential-mode:tool:<name>`. They survive an unlock. `/confidential pins` lists them.
   This build has no revoke command. To revoke a grant, remove its entry from `command_allowlist`.
 
-- **`/confidential allow` additions last for one seal only.** The plugin enforces this in four places.
-  It stores additions with the seal's identity in `allowlist.yaml`. A new seal starts with none
-  (`confidential_mode/gate_tools.py:452-454`). Each seal saves its additions tagged with its own
-  identity (`confidential_mode/sealing.py:323-324`). `/confidential off` deletes the file
+- **`/confidential allow` additions last for one lock only.** The plugin enforces this in four places.
+  It stores additions with the lock's identity in `allowlist.yaml`. A new lock starts with none
+  (`confidential_mode/gate_tools.py:452-454`). Each lock saves its additions tagged with its own
+  identity (`confidential_mode/locking.py:323-324`). `/confidential off` deletes the file
   (`confidential_mode/commands.py:347-348`).
 
 - **Pins need a consent record.** The attested check refuses a pin that has no matching `pin_applied`

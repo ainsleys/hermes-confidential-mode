@@ -7,7 +7,7 @@ from typing import Protocol
 
 
 class Tier(str, Enum):
-    LOCAL = "local-only"
+    ON_HOST = "on-host-only"
     ATTESTED = "attested"
     ZDR = "zero-retention"
 
@@ -40,11 +40,11 @@ import ipaddress
 from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlsplit
 
-#: Names that are local without an IP literal. No DNS is ever consulted: any other hostname is off-tier
-#: unless the user lists it in ``confidential.local.extra_hosts``.
-LOCAL_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
+#: Names that are on-host without an IP literal. No DNS is ever consulted: any other hostname is off-tier
+#: unless the user lists it in ``confidential.on_host.extra_hosts``.
+ON_HOST_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
 
-_LOCAL_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+_ON_HOST_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "127.0.0.0/8", "::1/128",                                   # loopback
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",            # RFC1918
     "100.64.0.0/10",                                            # CGNAT / tailnet
@@ -136,12 +136,12 @@ def _norm_hosts(hosts: Iterable[str]) -> set[str]:
     return out
 
 
-def is_local_host(host: str, extra_hosts: Iterable[str] = ()) -> bool:
-    """True for loopback / RFC1918 / 100.64/10 / fe80::/10 / fc00::/7 literals, local names, or extra hosts."""
+def is_on_host(host: str, extra_hosts: Iterable[str] = ()) -> bool:
+    """True for loopback / RFC1918 / 100.64/10 / fe80::/10 / fc00::/7 literals, on-host names, or extra hosts."""
     if not isinstance(host, str) or not host:
         return False
     host = host.lower()
-    if host in LOCAL_NAMES or host in _norm_hosts(extra_hosts):
+    if host in ON_HOST_NAMES or host in _norm_hosts(extra_hosts):
         return True
     ip = _ip_of(host)
     if ip is None:
@@ -149,7 +149,7 @@ def is_local_host(host: str, extra_hosts: Iterable[str] = ()) -> bool:
     mapped = getattr(ip, "ipv4_mapped", None)  # ::ffff:10.0.0.1 is the IPv4 address
     if mapped is not None:
         ip = mapped
-    return any(ip.version == net.version and ip in net for net in _LOCAL_NETWORKS)
+    return any(ip.version == net.version and ip in net for net in _ON_HOST_NETWORKS)
 
 
 def _profile_url(lookup: Callable[[str], Any] | None, provider: str) -> str:
@@ -166,16 +166,16 @@ def _profile_url(lookup: Callable[[str], Any] | None, provider: str) -> str:
     return url if isinstance(url, str) else ""
 
 
-class LocalPredicate:
-    """``local-only`` tier: the destination host must be on this machine or its private network.
+class OnHostPredicate:
+    """``on-host-only`` tier: the destination host must be on this machine or its private network.
 
     An empty ``base_url`` is resolved through ``profile_base_url(provider)`` (a URL string, or a
-    profile object with ``base_url``); a local result is in-tier, anything else off-tier. Real Hermes
-    local profiles (ollama, lmstudio, llama-cpp) have ``base_url ""`` at 84a0301, so in practice the
+    profile object with ``base_url``); an on-host result is in-tier, anything else off-tier. Hermes'
+    on-host profiles (ollama, lmstudio, llama-cpp) have ``base_url ""`` at 84a0301, so in practice the
     user sets ``model.base_url`` / ``auxiliary.<task>.base_url`` explicitly.
     """
 
-    tier = Tier.LOCAL
+    tier = Tier.ON_HOST
 
     def __init__(self, extra_hosts: Iterable[str] = (), profile_base_url: Callable[[str], Any] | None = None):
         self.extra_hosts = _norm_hosts(extra_hosts)
@@ -189,16 +189,16 @@ class LocalPredicate:
             via_profile = True
             if not base_url:
                 return Verdict(False, f"no base_url and provider {dest.provider or '(none)'} has no known "
-                                      "local endpoint; set base_url explicitly", "")
+                                      "on-host endpoint; set base_url explicitly", "")
         host, problem = strict_host(base_url)
         if problem:
             return Verdict(False, problem, host)
-        if is_local_host(host, self.extra_hosts):
+        if is_on_host(host, self.extra_hosts):
             src = " (provider default)" if via_profile else ""
-            return Verdict(True, f"local host {host}{src}", host)
+            return Verdict(True, f"on-host endpoint {host}{src}", host)
         if _ip_of(host) is None:
-            return Verdict(False, f"host {host} is not an IP literal or a listed local host", host)
-        return Verdict(False, f"host {host} is not on a local network", host)
+            return Verdict(False, f"host {host} is not an IP literal or a listed on-host name", host)
+        return Verdict(False, f"host {host} is not on this host or a private network", host)
 
 
 class AttestedPredicate:

@@ -1,4 +1,4 @@
-"""``llm_execution`` middleware: the sealed-mode gate on every main-loop provider call (W1).
+"""``llm_execution`` middleware: the locked-mode gate on every main-loop provider call (W1).
 
 Register with ``ctx.register_middleware("llm_execution", build_middleware(...))``.
 
@@ -13,9 +13,9 @@ Proven constraints (docs/C0-spikes.md, tests/spikes/test_refusal_shape.py):
   content_filter, length and message.refusal re-enter Hermes' fallback or continuation paths.
 
 Behaviour:
-- unsealed: ledger ``send_observed`` (host, serialised request byte size), call through
+- unlocked: ledger ``send_observed`` (host, serialised request byte size), call through
   unchanged; downstream exceptions propagate untouched so Hermes' normal retry/fallback runs.
-- sealed: classify the destination with the sealed tier's predicate. Off-tier: ledger
+- locked: classify the destination with the locked tier's predicate. Off-tier: ledger
   ``send_refused`` and refuse without calling ``next_call``. Attested tier: ``attested_ok``
   must also pass before ``next_call``. In-tier: call through; any provider error except
   ``InterruptedError`` becomes a refusal so Hermes never retries, backs off or arms a fallback.
@@ -41,14 +41,14 @@ TEXT_INTERNAL_ERROR = (REFUSAL_PREFIX + "the confidentiality check failed, so th
                        "sent to any model provider.")
 TEXT_PROVIDER_ERROR = REFUSAL_PREFIX + "attested endpoint unavailable; this turn ended; resend."
 TEXT_PIN_CHANGED = REFUSAL_PREFIX + "enclave build changed; run /confidential pins approve"
-TEXT_STATE_UNREADABLE = (REFUSAL_PREFIX + "seal state is unreadable, so every request is refused until it "
+TEXT_STATE_UNREADABLE = (REFUSAL_PREFIX + "lock state is unreadable, so every request is refused until it "
                          "is repaired; run /confidential status or /confidential off.")
 REFUSAL_MODEL = "confidential-mode"
 KNOWN_API_MODES = ("chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse")
 
 
 def off_tier_text(tier: Tier, reason: str) -> str:
-    return f"{REFUSAL_PREFIX}sealed to {Tier(tier).value}; this request was not sent. {reason}".rstrip()
+    return f"{REFUSAL_PREFIX}locked to {Tier(tier).value}; this request was not sent. {reason}".rstrip()
 
 
 def attested_fail_text(reason: str) -> str:
@@ -178,20 +178,20 @@ class _Call:
 class LlmGate:
     """The middleware body. Collaborators are injected so W2/W3 can be faked:
 
-    - ``is_sealed() -> (bool, Tier | None)``  (state.ConfidentialState.sealed)
+    - ``is_locked() -> (bool, Tier | None)``  (state.ConfidentialState.locked)
     - ``predicate_for(tier) -> TierPredicate`` (W3 predicates)
     - ``attested_ok(provider) -> Verdict``     (W2; handles TTL and stages pending_pin)
     - ``pin_pending() -> bool``                (W2 PinStore.pending() is not None); optional
     - ``ledger`` with ``append(LedgerEvent)``
     """
 
-    def __init__(self, *, ledger, is_sealed: Callable[[], tuple[bool, Tier | None]],
+    def __init__(self, *, ledger, is_locked: Callable[[], tuple[bool, Tier | None]],
                  predicate_for: Callable[[Tier], TierPredicate],
                  attested_ok: Callable[[str], Verdict],
                  pin_pending: Callable[[], bool] | None = None,
                  builders: Mapping[str, Callable[[str], Any]] | None = None):
         self.ledger = ledger
-        self.is_sealed = is_sealed
+        self.is_locked = is_locked
         self.predicate_for = predicate_for
         self.attested_ok = attested_ok
         self.pin_pending = pin_pending
@@ -226,24 +226,24 @@ class LlmGate:
     def handle(self, request: Any, next_call: Callable[..., Any], context: Mapping[str, Any]) -> Any:
         dest = self.destination(context)
         # Values crossing a trust boundary are compared by identity, never truthiness (Ruling 8):
-        # only ``True`` permits, only ``False`` means unsealed; anything else fails closed.
+        # only ``True`` permits, only ``False`` means unlocked; anything else fails closed.
         try:
-            sealed, tier = self.is_sealed()
-            if self.permits(sealed, "sealed"):
+            locked, tier = self.is_locked()
+            if self.permits(locked, "locked"):
                 tier = Tier(tier)
-            elif not self.is_false(sealed):
-                raise StateError(f"is_sealed returned a non-bool sealed flag ({type(sealed).__name__})")
-        except Exception as exc:  # corrupt seal state: fail closed (INTERFACES Amendment 2)
+            elif not self.is_false(locked):
+                raise StateError(f"is_locked returned a non-bool locked flag ({type(locked).__name__})")
+        except Exception as exc:  # corrupt lock state: fail closed (INTERFACES Amendment 2)
             return self.internal_error(context, exc, text=TEXT_STATE_UNREADABLE,
-                                       reason_code="seal_state_unreadable")
-        if self.is_false(sealed):
+                                       reason_code="lock_state_unreadable")
+        if self.is_false(locked):
             self.record("send_observed", dest, context, host=_host(dest.base_url),
                         nbytes=request_bytes(request), decision="observed")
             return next_call(request)
 
         predicate = self.predicate_for(tier)
         if not self.same_tier(Tier(predicate.tier), tier):
-            raise RuntimeError(f"predicate tier {predicate.tier!r} does not match sealed tier {tier.value!r}")
+            raise RuntimeError(f"predicate tier {predicate.tier!r} does not match locked tier {tier.value!r}")
         verdict = predicate.classify(dest)
         if not isinstance(verdict, Verdict):
             raise TypeError("predicate returned a non-Verdict")
@@ -355,8 +355,8 @@ class LlmGate:
         return confidential_mode_llm_execution
 
 
-def build_middleware(*, ledger, is_sealed, predicate_for, attested_ok, pin_pending=None,
+def build_middleware(*, ledger, is_locked, predicate_for, attested_ok, pin_pending=None,
                      builders=None, gate_cls: type[LlmGate] = LlmGate) -> Callable[..., Any]:
     """Return the callable for ``ctx.register_middleware("llm_execution", fn)``."""
-    return gate_cls(ledger=ledger, is_sealed=is_sealed, predicate_for=predicate_for,
+    return gate_cls(ledger=ledger, is_locked=is_locked, predicate_for=predicate_for,
                     attested_ok=attested_ok, pin_pending=pin_pending, builders=builders).as_middleware()

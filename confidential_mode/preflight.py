@@ -27,9 +27,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .tiers import Destination, Tier, TierPredicate, Verdict, host_of
 
-IN_TIER, LOCAL, DISABLED, OFF_TIER, MISSING = "in_tier", "local", "disabled", "off_tier", "missing"
-VERDICTS = (IN_TIER, LOCAL, DISABLED, OFF_TIER, MISSING)
-PASSING = frozenset({IN_TIER, LOCAL, DISABLED})
+IN_TIER, ON_HOST, DISABLED, OFF_TIER, MISSING = "in_tier", "on_host", "disabled", "off_tier", "missing"
+VERDICTS = (IN_TIER, ON_HOST, DISABLED, OFF_TIER, MISSING)
+PASSING = frozenset({IN_TIER, ON_HOST, DISABLED})
 
 #: Built-in auxiliary tasks at Hermes 84a0301 (dict-valued keys of DEFAULT_CONFIG["auxiliary"],
 #: hermes_cli/config_defaults.py:725-800). Used only if that import fails; the import wins.
@@ -43,7 +43,7 @@ BUILTIN_AUX_TASKS_SNAPSHOT = (
 _AUTO = frozenset({"", "auto"})
 _MOA = "moa"
 _CODEX = frozenset({"openai-codex", "codex"})
-_LOCAL_TTS = frozenset({"neutts", "kittentts", "piper", "none"})
+_ON_HOST_TTS = frozenset({"neutts", "kittentts", "piper", "none"})
 #: Hermes resolves an unset/empty tts.provider to "edge" (tools/tts_tool.py:105,145-148), a hosted service.
 _TTS_DEFAULT = "edge"
 _VISION_FIX = ("set {p}.provider (or {p}.base_url) explicitly to an in-tier vision route; Hermes describes "
@@ -54,7 +54,7 @@ _ABSENT = object()
 HOOK_TIMEOUT_FLOOR_SECONDS = 5.0
 #: plugins.* keys that govern whether and how plugin hooks run; all are fingerprinted.
 _PLUGIN_EXECUTION_KEYS = ("isolation", "hook_callback_timeout", "load_timeout_seconds", "enabled", "disabled")
-_LOCAL_MEMORY = frozenset({"", "builtin", "built-in", "local", "none"})
+_ON_HOST_MEMORY = frozenset({"", "builtin", "built-in", "local", "none"})
 _AUX_ROUTE_KEYS = frozenset({"provider", "model", "base_url", "api_key", "api_mode", "key_env",
                              "api_key_env", "reasoning_effort"})
 _SECRET_WORDS = ("api_key", "apikey", "token", "secret", "password", "authorization", "key_env")
@@ -197,7 +197,7 @@ class _Ctx:
     def __init__(self, tier: Tier, predicate: TierPredicate):
         self.tier = tier
         self.predicate = predicate
-        self.pass_verdict = LOCAL if tier == Tier.LOCAL else IN_TIER
+        self.pass_verdict = ON_HOST if tier == Tier.ON_HOST else IN_TIER
 
     def classify(self, provider: str, base_url: str, model: str, api_mode: str, purpose: str) -> tuple[str, str]:
         """(verdict, reason) for one concrete route."""
@@ -270,7 +270,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     if main_provider in _CODEX:
         main_fix = "set model.provider to an in-tier provider; openai-codex runs turns in an app-server subprocess the middleware never sees"
     elif main_provider == _MOA:
-        main_fix = "set model.provider to an in-tier provider; moa is not allowed while sealed"
+        main_fix = "set model.provider to an in-tier provider; moa is not allowed while locked"
     elif main_provider in _AUTO:
         main_fix = "set model.provider explicitly to an in-tier provider"
     else:
@@ -286,10 +286,10 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     if not fb_list:
         add("fallback_providers", [], DISABLED)
     for i, entry in enumerate(fb_list):
-        add(f"fallback_providers[{i}]", entry, OFF_TIER, "remove fallback_providers entries while sealed")
+        add(f"fallback_providers[{i}]", entry, OFF_TIER, "remove fallback_providers entries while locked")
     legacy = config.get("fallback_model")
     if legacy:
-        add("fallback_model", legacy, OFF_TIER, "remove the legacy fallback_model key while sealed")
+        add("fallback_model", legacy, OFF_TIER, "remove the legacy fallback_model key while locked")
 
     # auxiliary tasks
     builtins = list(builtin_aux_tasks) if builtin_aux_tasks is not None else builtin_aux_task_names()
@@ -340,7 +340,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     deleg = deleg if isinstance(deleg, Mapping) else {}
     d_provider = _s(deleg.get("provider")).lower()
     d_base = _s(deleg.get("base_url"))
-    d_fix = "clear delegation.provider/delegation.base_url (inherit the sealed main route) or point them in-tier"
+    d_fix = "clear delegation.provider/delegation.base_url (inherit the locked main route) or point them in-tier"
     if d_provider in _AUTO and not d_base:
         d_verdict = main_verdict
         shown = f"(inherit) -> {main_provider or 'auto'}"
@@ -360,14 +360,14 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
         add("delegation.base_url", d_base, d_verdict, d_fix)
     d_fb = deleg.get("fallback_providers")
     if d_fb not in (None, [], "", {}):
-        add("delegation.fallback_providers", d_fb, OFF_TIER, "set delegation.fallback_providers: [] while sealed")
+        add("delegation.fallback_providers", d_fb, OFF_TIER, "set delegation.fallback_providers: [] while locked")
 
     # tts (assistant text is conversation content). Coordinator ruling (Amendment 3 addendum): the enabled
     # flag applies first; unset/false => disabled; enabled true + hosted (or unset provider, which Hermes
-    # resolves to edge: tools/tts_tool.py:105,145-148) => off_tier; local engine or command provider =>
-    # local. NOTE: Hermes 84a0301 has no tts.enabled key at all (DEFAULT_CONFIG["tts"]), so the flag is a
+    # resolves to edge: tools/tts_tool.py:105,145-148) => off_tier; on-host engine or command provider =>
+    # on_host. NOTE: Hermes 84a0301 has no tts.enabled key at all (DEFAULT_CONFIG["tts"]), so the flag is a
     # plugin-side convention. Fail-closed guard: when voice.auto_tts is on, Hermes speaks replies
-    # automatically through tts.provider, so a non-local provider is off_tier whatever tts.enabled says.
+    # automatically through tts.provider, so a off-host provider is off_tier whatever tts.enabled says.
     tts = config.get("tts")
     tts = tts if isinstance(tts, Mapping) else {}
     voice = config.get("voice")
@@ -376,13 +376,13 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     effective = raw_provider or _TTS_DEFAULT
     named = tts.get("providers") if isinstance(tts.get("providers"), Mapping) else {}
     named_cfg = named.get(raw_provider) if isinstance(named.get(raw_provider), Mapping) else None
-    engine_local = raw_provider in _LOCAL_TTS or (named_cfg is not None and "command" in named_cfg)
+    engine_on_host = raw_provider in _ON_HOST_TTS or (named_cfg is not None and "command" in named_cfg)
     enabled_raw = tts.get("enabled", _ABSENT)
     enabled = enabled_raw is not _ABSENT and _truthy(enabled_raw)
-    tts_fix = ("set tts.provider to a local engine (piper, kittentts, neutts) or a tts.providers.<name> command, "
-               "or tts.enabled: false with voice.auto_tts: false, while sealed")
-    if engine_local:
-        tts_verdict, tts_value = LOCAL, raw_provider
+    tts_fix = ("set tts.provider to an on-host engine (piper, kittentts, neutts) or a tts.providers.<name> command, "
+               "or tts.enabled: false with voice.auto_tts: false, while locked")
+    if engine_on_host:
+        tts_verdict, tts_value = ON_HOST, raw_provider
     elif auto_tts:
         tts_verdict, tts_value = OFF_TIER, effective
         tts_fix += f"; voice.auto_tts is on and the provider resolves to {effective} (hosted)"
@@ -405,8 +405,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
         add("memory", mem, OFF_TIER, "memory must be a mapping; set memory.provider: \"\" (built-in)")
     else:
         add("memory.provider", mem_provider or "(built-in)",
-            LOCAL if mem_provider.lower() in _LOCAL_MEMORY else OFF_TIER,
-            'set memory.provider: "" (built-in local memory) while sealed')
+            ON_HOST if mem_provider.lower() in _ON_HOST_MEMORY else OFF_TIER,
+            'set memory.provider: "" (built-in on-host memory) while locked')
 
     # MCP servers
     servers = config.get("mcp_servers")
@@ -429,7 +429,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                     v, reason = OFF_TIER, "url is empty or not a string"
                 add(f"{key}.url", url, v, f"set {key}.enabled: false or point {key}.url at an in-tier host ({reason})")
         elif "command" in scfg:
-            add(f"{key}.command", scfg.get("command"), DISABLED if off else LOCAL)
+            add(f"{key}.command", scfg.get("command"), DISABLED if off else ON_HOST)
         else:
             add(key, "", MISSING, f"{key} has neither url nor command")
 
@@ -452,8 +452,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     pcfg = config.get("plugins") if isinstance(config.get("plugins"), Mapping) else {}
     t_key = "plugins.hook_callback_timeout"
     raw_t = pcfg.get("hook_callback_timeout", _ABSENT)
-    t_fix = (f"remove {t_key} or set it to at least {HOOK_TIMEOUT_FLOOR_SECONDS:g} (seconds) while sealed; a "
-             "shorter timeout lets Hermes skip the per-turn seal recheck")
+    t_fix = (f"remove {t_key} or set it to at least {HOOK_TIMEOUT_FLOOR_SECONDS:g} (seconds) while locked; a "
+             "shorter timeout lets Hermes skip the per-turn lock recheck")
     if raw_t is _ABSENT or raw_t is None:
         add(t_key, "(default 30s)", ctx.pass_verdict)
     else:

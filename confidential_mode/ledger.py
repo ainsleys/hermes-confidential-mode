@@ -23,9 +23,9 @@ LEDGER_FILENAME = "ledger.sqlite"
 
 KINDS = frozenset({
     "send_observed", "send_refused", "verify_ok", "verify_fail", "tool_asked", "tool_allowed",
-    "tool_refused", "pin_staged", "pin_applied", "pin_denied", "seal", "unseal", "preflight_fail",
+    "tool_refused", "pin_staged", "pin_applied", "pin_denied", "lock", "unlock", "preflight_fail",
     "breach", "compaction",
-    # Amendment 4 F7: session boundary markers (never "seal": receipts open a sealed period only at a seal row).
+    # Amendment 4 F7: session boundary markers (never "lock": receipts open a locked period only at a lock row).
     "session_start", "session_end",
 })
 

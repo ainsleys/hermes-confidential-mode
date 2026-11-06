@@ -1,4 +1,4 @@
-"""Tool gate for sealed mode (W4): allowlist built from Hermes' live registry, a ``pre_tool_call``
+"""Tool gate for locked mode (W4): allowlist built from Hermes' live registry, a ``pre_tool_call``
 hook, and a ``post_approval_response`` observer.
 
 Hermes facts this module relies on (pinned checkout 84a0301):
@@ -25,7 +25,7 @@ Hermes facts this module relies on (pinned checkout 84a0301):
 * The approval gate auto-approves WITHOUT asking anybody under: yolo (``_yolo_active``: --yolo,
   session /yolo, ``hermes -z`` unattended turns), ``approvals.mode: off``, and cron /
   unattended-platform / single-query contexts whose mode is ``approve`` (tools/approval.py:1071-1113).
-  Sealed mode BLOCKS in those instead of returning the approve directive (docs/C0-spikes.md, spike 3).
+  Locked mode BLOCKS in those instead of returning the approve directive (docs/C0-spikes.md, spike 3).
   A remembered once/session/always grant on OUR rule key is a human's answer to our own prompt and is
   honoured (INTERFACES.md Amendment 2): ledgered as tool_allowed, decision "remembered".
 """
@@ -45,8 +45,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
-# The contract's local set (docs/INTERFACES.md, "W4 gate_tools.py, consent.py"). Exactly these.
-LOCAL_TOOLS: frozenset[str] = frozenset({
+# The contract's on-host set (docs/INTERFACES.md, "W4 gate_tools.py, consent.py"). Exactly these.
+ON_HOST_TOOLS: frozenset[str] = frozenset({
     "terminal", "process_manage", "execute_code", "read_file", "write_file", "patch", "search_files",
     "skills_list", "skill_view", "skill_manage", "todo_list", "memory", "clarify", "session_search",
 })
@@ -69,21 +69,21 @@ class Origin(str, Enum):
 
 
 class Route(str, Enum):
-    """What the sealed gate does with a tool."""
-    LOCAL = "local"                 # runs, nothing asked, nothing ledgered
-    ASK = "ask"                     # off-machine: per-call human approval (block under bypass)
+    """What the locked gate does with a tool."""
+    ON_HOST = "on-host"                 # runs, nothing asked, nothing ledgered
+    ASK = "ask"                     # off-host: per-call human approval (block under bypass)
     DELEGATE = "delegate"           # allowed only via delegation_ok
     BLOCK_CRON = "block-cron"       # cronjob_manage: always blocked
     BLOCK_MCP_URL = "block-mcp-url"  # MCP server whose URL host is off-tier (or unreadable config): blocked
 
 
 # Tools that will get a per-tool "mode" (pending product decision, INTERFACES.md Amendment 1:
-# ask on network-looking commands / allow all / block). Today they are plain LOCAL with mode None;
-# the decision hook is _local_decision() in build_pre_tool_call, so adding modes touches only
+# ask on network-looking commands / allow all / block). Today they are plain ON_HOST with mode None;
+# the decision hook is _on_host_decision() in build_pre_tool_call, so adding modes touches only
 # ToolInfo.mode, build_allowlist's mode argument and that function.
 MODE_TOOLS: frozenset[str] = frozenset({"terminal", "execute_code"})
 
-_ROUTE_STRICTNESS = {"local": 0, "delegate": 1, "ask": 2, "block-cron": 3, "block-mcp-url": 3}
+_ROUTE_STRICTNESS = {"on-host": 0, "delegate": 1, "ask": 2, "block-cron": 3, "block-mcp-url": 3}
 
 
 @dataclass(frozen=True)
@@ -101,20 +101,20 @@ class ToolInfo:
 
 @dataclass
 class Allowlist:
-    """Classification computed at seal. ``added`` holds names a human allowed via consent.allow_tool."""
+    """Classification computed at lock. ``added`` holds names a human allowed via consent.allow_tool."""
     tools: dict[str, ToolInfo]
     built_at: float = field(default_factory=time.time)
     added: set[str] = field(default_factory=set)
     added_path: Optional[Path] = None   # allowlist.yaml; additions persist there (Amendment 3)
-    # Pinned at seal (Amendment 3 addendum): name -> (toolset, handler object). Holding the handler keeps
+    # Pinned at lock (Amendment 3 addendum): name -> (toolset, handler object). Holding the handler keeps
     # its id from being reused. A live entry whose toolset or handler differs => unclassified.
     pins: dict[str, tuple[str, Any]] = field(default_factory=dict, repr=False)
     registry: Any = field(default=None, repr=False)
-    # Re-read at call time for MCP tools so a server re-pointed after seal is re-judged (fail closed).
+    # Re-read at call time for MCP tools so a server re-pointed after lock is re-judged (fail closed).
     mcp_config_loader: Optional[Callable[[], Mapping[str, Any]]] = field(default=None, repr=False)
     predicate: Any = field(default=None, repr=False)
-    seal_id: str = ""                    # identity of the seal this allowlist belongs to (F5/F6)
-    # name -> (toolset, handler module, handler qualname) as persisted at seal; set on a restart rebuild
+    lock_id: str = ""                    # identity of the lock this allowlist belongs to (F5/F6)
+    # name -> (toolset, handler module, handler qualname) as persisted at lock; set on a restart rebuild
     persisted_identity: Optional[dict[str, tuple[str, str, str]]] = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -122,7 +122,7 @@ class Allowlist:
         return self.tools.get(name)
 
     def current(self, name: str) -> Optional[ToolInfo]:
-        """The seal-time classification, only if the live registry entry is still the one pinned
+        """The lock-time classification, only if the live registry entry is still the one pinned
         (same toolset, same handler object) and, for MCP tools, re-judged on the live config with the
         stricter of the two routes. None => unclassified => block."""
         info = self.tools.get(name)
@@ -150,8 +150,8 @@ class Allowlist:
         return sorted(n for n, t in self.tools.items() if t.route is route)
 
     @property
-    def local(self) -> list[str]:
-        return self.names(Route.LOCAL)
+    def on_host(self) -> list[str]:
+        return self.names(Route.ON_HOST)
 
     def is_added(self, name: str) -> bool:
         with self._lock:
@@ -169,8 +169,8 @@ class Allowlist:
 
     # -- persistence (Amendment 4 F5/F6) ------------------------------------------------------------
     def persist(self, path: Optional[Path] = None) -> None:
-        """Write the seal's tool identities (name, toolset, handler module, qualname) and the
-        human-approved additions, tagged with ``seal_id``. Called at seal and after each add.
+        """Write the lock's tool identities (name, toolset, handler module, qualname) and the
+        human-approved additions, tagged with ``lock_id``. Called at lock and after each add.
         JSON (a YAML subset): Hermes ships ruamel via hermes_yaml, not PyYAML."""
         target = Path(path) if path is not None else self.added_path
         if target is None:
@@ -183,26 +183,26 @@ class Allowlist:
                 continue
             module, qualname = _handler_identity(handler)
             tools.append({"name": name, "toolset": toolset, "module": module, "qualname": qualname})
-        data = {"version": 2, "seal_id": self.seal_id, "tools": tools, "allowed": added}
+        data = {"version": 2, "lock_id": self.lock_id, "tools": tools, "allowed": added}
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name + ".tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, target)
 
     @classmethod
-    def load_persisted(cls, path: Optional[Path], registry: Any, *, seal_id: str, predicate: Any = None,
+    def load_persisted(cls, path: Optional[Path], registry: Any, *, lock_id: str, predicate: Any = None,
                        mcp_configs: Optional[Mapping[str, Mapping[str, Any]]] = None,
                        mcp_tool_servers: Optional[Mapping[str, str]] = None,
                        plugin_tool_names: Optional[Iterable[str]] = None) -> "Allowlist":
-        """Rebuild the allowlist after a restart. Only tools persisted at THIS seal (matching
-        ``seal_id``) whose live toolset, handler module and qualname still match are classified;
-        everything else is unclassified (block/refuse) until a reseal. A missing, corrupt or
-        other-seal file yields an empty allowlist: every tool blocked. Additions are honoured only
-        from the same seal."""
-        empty = cls(tools={}, added_path=Path(path) if path is not None else None, seal_id=seal_id,
+        """Rebuild the allowlist after a restart. Only tools persisted at THIS lock (matching
+        ``lock_id``) whose live toolset, handler module and qualname still match are classified;
+        everything else is unclassified (block/refuse) until a relock. A missing, corrupt or
+        other-lock file yields an empty allowlist: every tool blocked. Additions are honoured only
+        from the same lock."""
+        empty = cls(tools={}, added_path=Path(path) if path is not None else None, lock_id=lock_id,
                     registry=registry, persisted_identity={})
         data = _read_json_or_yaml(path) if path is not None else None
-        if not isinstance(data, dict) or data.get("version") != 2 or not seal_id or data.get("seal_id") != seal_id:
+        if not isinstance(data, dict) or data.get("version") != 2 or not lock_id or data.get("lock_id") != lock_id:
             return empty
         identity: dict[str, tuple[str, str, str]] = {}
         for t in data.get("tools") or []:
@@ -217,7 +217,7 @@ class Allowlist:
             if identity.get(name) == (toolset, *_handler_identity(handler)):
                 keep[name] = info
         fresh.tools = keep
-        fresh.seal_id = seal_id
+        fresh.lock_id = lock_id
         fresh.persisted_identity = identity
         allowed = data.get("allowed") if isinstance(data.get("allowed"), list) else []
         fresh.added = {n for n in allowed if isinstance(n, str) and n in keep and keep[n].route is Route.ASK}
@@ -225,17 +225,17 @@ class Allowlist:
 
 
 def clear_persisted(path: Optional[Path]) -> None:
-    """Unseal: drop the seal's persisted allowlist and its additions (Amendment 4 F6)."""
+    """Unlock: drop the lock's persisted allowlist and its additions (Amendment 4 F6)."""
     if path is None:
         return
     with contextlib.suppress(FileNotFoundError):
         Path(path).unlink()
 
 
-def seal_id_for(state: Any) -> str:
-    """A seal's identity: when it was sealed plus the config fingerprint recorded at seal."""
+def lock_id_for(state: Any) -> str:
+    """A lock's identity: when it was locked plus the config fingerprint recorded at lock."""
     try:
-        since, fp = state.sealed_since(), state.config_fingerprint()
+        since, fp = state.locked_since(), state.config_fingerprint()
     except Exception:
         return ""
     return f"{since!r}|{fp}" if since is not None else ""
@@ -370,19 +370,19 @@ def _mcp_transport(cfg: Optional[Mapping[str, Any]]) -> str:
 
 
 def _mcp_url_route(server: str, url: Any, predicate: Any) -> tuple[Route, str, str]:
-    """(route, host, reason) for a URL MCP server. Local host (LocalPredicate, plus the active
-    predicate's extra_hosts when it is a LocalPredicate) -> LOCAL; in-tier under the active
+    """(route, host, reason) for a URL MCP server. On-host endpoint (OnHostPredicate, plus the active
+    predicate's extra_hosts when it is an OnHostPredicate) -> ON_HOST; in-tier under the active
     predicate -> ASK; anything else, or any error -> BLOCK_MCP_URL."""
-    from .tiers import Destination, LocalPredicate, host_of
+    from .tiers import Destination, OnHostPredicate, host_of
     try:
         if not isinstance(url, str) or not url.strip():
             return Route.BLOCK_MCP_URL, "", "url is empty or not a string"
         dest = Destination(provider="", base_url=url, model="", api_mode="", purpose=f"mcp:{server}")
-        local = predicate if isinstance(predicate, LocalPredicate) else LocalPredicate()
-        v = local.classify(dest)
+        on_host_pred = predicate if isinstance(predicate, OnHostPredicate) else OnHostPredicate()
+        v = on_host_pred.classify(dest)
         if v.in_tier:
-            return Route.LOCAL, v.host or host_of(url), v.reason
-        if predicate is not None and not isinstance(predicate, LocalPredicate):
+            return Route.ON_HOST, v.host or host_of(url), v.reason
+        if predicate is not None and not isinstance(predicate, OnHostPredicate):
             pv = predicate.classify(dest)
             if pv.in_tier:
                 return Route.ASK, pv.host or host_of(url), pv.reason
@@ -400,14 +400,14 @@ def classify_tool(name: str, toolset: str, *, origin: Origin, mcp_server: Option
             route, host, reason = _mcp_url_route(mcp_server or "", mcp_config.get("url"), predicate)
             return ToolInfo(name, toolset, origin, route, mcp_server, transport, host, reason)
         if transport == "stdio":
-            # A local child process: allowed per contract (Amendment 3), disclosed as the same class of
+            # A child process on this host: allowed per contract (Amendment 3), disclosed as the same class of
             # gap as terminal (the command can itself be a network proxy).
-            return ToolInfo(name, toolset, origin, Route.LOCAL, mcp_server, transport, None, "stdio server")
+            return ToolInfo(name, toolset, origin, Route.ON_HOST, mcp_server, transport, None, "stdio server")
         # config unreadable / neither url nor command: fail closed
         return ToolInfo(name, toolset, origin, Route.BLOCK_MCP_URL, mcp_server, transport, None,
                         "server config not found")
-    if name in LOCAL_TOOLS and origin is Origin.BUILTIN:
-        route = Route.LOCAL
+    if name in ON_HOST_TOOLS and origin is Origin.BUILTIN:
+        route = Route.ON_HOST
     elif name == CRON_TOOL:
         route = Route.BLOCK_CRON
     elif name == DELEGATE_TOOL:
@@ -423,9 +423,9 @@ def build_allowlist(registry: Any, *, mcp_configs: Optional[Mapping[str, Mapping
                     added_path: Optional[Path] = None) -> Allowlist:
     """Classify every tool in ``registry.get_all_entries()``. The keyword arguments default to Hermes'
     live state (see the module docstring); tests pass fakes. ``predicate`` is the active
-    TierPredicate (confidential_mode.tiers); it classifies MCP server URLs. None = LocalPredicate().
+    TierPredicate (confidential_mode.tiers); it classifies MCP server URLs. None = OnHostPredicate().
 
-    A LOCAL-set name re-registered by a plugin (``override=True``) or by an MCP server is NOT local:
+    An on-host-set name re-registered by a plugin (``override=True``) or by an MCP server is NOT on-host:
     locality is a property of the built-in implementation, not of the name."""
     if mcp_configs is None:
         mcp_loader: Callable[[], Mapping[str, Any]] = _default_mcp_configs
@@ -449,15 +449,15 @@ def build_allowlist(registry: Any, *, mcp_configs: Optional[Mapping[str, Mapping
         is_plugin = name in plugin_names or _handler_module(getattr(entry, "handler", None)).startswith(
             "hermes_plugins.")
         tools[name] = classify_tool(name, toolset, origin=Origin.PLUGIN if is_plugin else Origin.BUILTIN)
-    # A NEW seal starts with no additions (Amendment 4 F6): ``added_path`` is where this seal persists
-    # them; only Allowlist.load_persisted (same seal, after a restart) reads them back.
+    # A NEW lock starts with no additions (Amendment 4 F6): ``added_path`` is where this lock persists
+    # them; only Allowlist.load_persisted (same lock, after a restart) reads them back.
     return Allowlist(tools=tools, added=set(), added_path=Path(added_path) if added_path is not None else None,
                      pins=pins, registry=registry, mcp_config_loader=mcp_loader, predicate=predicate)
 
 
 _ROUTE_TITLES = (
-    (Route.LOCAL, "local (runs without asking)"),
-    (Route.ASK, "off-machine (asks each call; blocked under yolo/approvals off/unattended)"),
+    (Route.ON_HOST, "on-host (runs without asking)"),
+    (Route.ASK, "off-host (asks each call; blocked under yolo/approvals off/unattended)"),
     (Route.DELEGATE, "delegation (default backend only, no profile/ACP)"),
     (Route.BLOCK_CRON, "blocked (scheduled jobs)"),
     (Route.BLOCK_MCP_URL, "blocked (MCP server URL off-tier or unreadable)"),
@@ -479,7 +479,7 @@ def _printable(value: Any) -> str:
 
 
 def format_allowlist(allowlist: Allowlist) -> str:
-    """Printed on seal. Every field is escaped with _printable."""
+    """Printed on lock. Every field is escaped with _printable."""
     lines: list[str] = []
     for route, title in _ROUTE_TITLES:
         infos = [allowlist.tools[n] for n in allowlist.names(route)]
@@ -531,13 +531,13 @@ def hermes_remembered_grant(tool_name: str) -> bool:
         return False
 
 
-def _sealed_flag(value: Any) -> bool:
-    """is_sealed() is canonically (bool, Tier | None) (Amendment 2); a bare bool is also accepted."""
+def _locked_flag(value: Any) -> bool:
+    """is_locked() is canonically (bool, Tier | None) (Amendment 2); a bare bool is also accepted."""
     if isinstance(value, bool):
         return value
     if isinstance(value, (tuple, list)) and len(value) == 2 and isinstance(value[0], bool):
         return value[0]
-    raise TypeError(f"is_sealed() returned {type(value).__name__}; expected bool or (bool, tier)")
+    raise TypeError(f"is_locked() returned {type(value).__name__}; expected bool or (bool, tier)")
 
 
 def bypass_active_for(tool_name: str) -> Callable[[], bool]:
@@ -591,7 +591,7 @@ def _keys_ok(obj: Mapping[str, Any], allowed: frozenset[str]) -> bool:
 
 def default_delegation_ok(args: Mapping[str, Any], *,
                           load_config: Callable[[], Mapping[str, Any]] = _load_delegation_config) -> bool:
-    """delegate_task is allowed iff the child inherits the parent's (sealed, in-tier) route: the
+    """delegate_task is allowed iff the child inherits the parent's (locked, in-tier) route: the
     ``default`` backend (read per call), no route key in ``delegation`` config (strip+casefold), and
     arguments that use only the documented delegate_task schema, with ``tasks`` a list of dicts.
     Any error -> False."""
@@ -671,19 +671,19 @@ class CallDecision:
     kb: int = 0
 
 
-class SealStateError(RuntimeError):
+class LockStateError(RuntimeError):
     pass
 
 
-def _seal_state(is_sealed: Callable[[], Any]) -> bool:
-    """True/False, or raise SealStateError (unreadable seal state blocks every tool, Amendment 3)."""
+def _lock_state(is_locked: Callable[[], Any]) -> bool:
+    """True/False, or raise LockStateError (unreadable lock state blocks every tool, Amendment 3)."""
     try:
-        return _sealed_flag(is_sealed())
+        return _locked_flag(is_locked())
     except Exception as exc:
-        raise SealStateError(f"{type(exc).__name__}: {exc}") from exc
+        raise LockStateError(f"{type(exc).__name__}: {exc}") from exc
 
 
-_SEAL_UNREADABLE = ("confidential mode: the seal state cannot be read, so every tool is blocked. "
+_LOCK_UNREADABLE = ("confidential mode: the lock state cannot be read, so every tool is blocked. "
                     "Run /confidential status (or /confidential off) to repair it.")
 
 
@@ -703,10 +703,10 @@ class _Policy:
     def bypass(self, tool_name: str) -> bool:
         return bool(self._bypass_fn(tool_name) if self._takes_name else self._bypass_fn())  # type: ignore[call-arg]
 
-    def local_decision(self, info: ToolInfo, args: dict) -> CallDecision:
+    def on_host_decision(self, info: ToolInfo, args: dict) -> CallDecision:
         # Extension point for MODE_TOOLS (terminal / execute_code three-mode rule, pending).
         # mode None -> run. A future mode returns run, refuse, or ask here.
-        return CallDecision("run", "local")
+        return CallDecision("run", "on-host")
 
     def decide(self, tool_name: str, args: dict) -> CallDecision:
         al = self.allowlist()
@@ -714,18 +714,18 @@ class _Policy:
         if info is None:
             return CallDecision("refuse", "unclassified",
                                 f"confidential mode: {_printable(tool_name)} is not the tool that was registered "
-                                "when this profile was sealed (new, renamed, re-registered or swapped), so it is "
-                                "blocked. Run /confidential off and seal again to classify it.")
-        if info.route is Route.LOCAL:
-            return self.local_decision(info, args)
+                                "when this profile was locked (new, renamed, re-registered or swapped), so it is "
+                                "blocked. Run /confidential off and lock again to classify it.")
+        if info.route is Route.ON_HOST:
+            return self.on_host_decision(info, args)
         if info.route is Route.BLOCK_CRON:
             return CallDecision("refuse", "cron", "confidential mode: scheduled jobs (cronjob_manage) are blocked "
-                                                  "while sealed; a job would run later outside this sealed session.")
+                                                  "while locked; a job would run later outside this locked session.")
         if info.route is Route.BLOCK_MCP_URL:
             return CallDecision("refuse", "mcp_url",
                                 f"confidential mode: {_printable(tool_name)} belongs to MCP server "
                                 f"'{_printable(info.mcp_server)}' ({_printable(info.mcp_host or 'host unknown')}: "
-                                f"{_printable(info.reason)}); blocked while sealed.")
+                                f"{_printable(info.reason)}); blocked while locked.")
         if info.route is Route.DELEGATE:
             if self.delegation_ok(args):
                 return CallDecision("run", "delegation_default")
@@ -797,13 +797,13 @@ _MISSING = object()
 DEFAULT_DECISIONS = ApprovalDecisions()   # used when the builders are not handed one explicitly
 
 
-def build_pre_tool_call(is_sealed: Callable[[], Any], allowlist: Allowlist | Callable[[], Allowlist],
+def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Callable[[], Allowlist],
                         ledger: Any, bypass_active: Callable[[str], bool] = hermes_bypass_active,
                         delegation_ok: Callable[[dict], bool] = default_delegation_ok,
                         remembered: Callable[[str], bool] = hermes_remembered_grant,
                         decisions: Optional[ApprovalDecisions] = None) -> Callable[..., Optional[dict]]:
     """``pre_tool_call`` callback: blocks every refuse decision (ledgered tool_refused) and, for an
-    off-machine tool, returns the approve directive with the "~N KB" message (ledgered tool_asked).
+    off-host tool, returns the approve directive with the "~N KB" message (ledgered tool_asked).
     The directive only ASKS: Hermes' CLI grants on any answer except the exact string "deny"
     (tools/approval.py:1006-1009), so enforcement is build_tool_execution. REGISTER BOTH, with the
     same ``decisions`` (or both defaulting to DEFAULT_DECISIONS) and build_post_approval_response.
@@ -813,7 +813,7 @@ def build_pre_tool_call(is_sealed: Callable[[], Any], allowlist: Allowlist | Cal
     :677-736), the hook returns None instead of asking a second time.
 
     ``bypass_active(tool_name)`` (zero-arg also accepted), ``delegation_ok(args)`` and
-    ``remembered(tool_name)`` are injectable. ``is_sealed()`` returns ``(bool, Tier | None)`` or a bool;
+    ``remembered(tool_name)`` are injectable. ``is_locked()`` returns ``(bool, Tier | None)`` or a bool;
     anything else, or raising, blocks every tool."""
     pol = _policy(allowlist, bypass_active, delegation_ok, remembered)
     dec = decisions if decisions is not None else DEFAULT_DECISIONS
@@ -821,13 +821,13 @@ def build_pre_tool_call(is_sealed: Callable[[], Any], allowlist: Allowlist | Cal
     def pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
                       tool_call_id: str = "", **_kw: Any) -> Optional[dict]:
         try:
-            sealed = _seal_state(is_sealed)
-        except SealStateError as exc:
-            _try_ledger(ledger, "tool_refused", tool_name, session_id, "seal_state_unreadable", args,
+            locked = _lock_state(is_locked)
+        except LockStateError as exc:
+            _try_ledger(ledger, "tool_refused", tool_name, session_id, "lock_state_unreadable", args,
                         {"tool": str(tool_name), "tool_call_id": str(tool_call_id or ""), "error": str(exc)[:200]},
                         "gate")
-            return _block(_SEAL_UNREADABLE)
-        if not sealed:
+            return _block(_LOCK_UNREADABLE)
+        if not locked:
             return None
         try:
             a = args if isinstance(args, dict) else {}
@@ -888,7 +888,7 @@ def _try_ledger(ledger, kind, tool_name, session_id, decision, args, detail, sur
         pass
 
 
-def build_tool_execution(is_sealed: Callable[[], Any], allowlist: Allowlist | Callable[[], Allowlist],
+def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Callable[[], Allowlist],
                          ledger: Any, decisions: Optional[ApprovalDecisions] = None, *,
                          bypass_active: Callable[[str], bool] = hermes_bypass_active,
                          delegation_ok: Callable[[dict], bool] = default_delegation_ok,
@@ -896,7 +896,7 @@ def build_tool_execution(is_sealed: Callable[[], Any], allowlist: Allowlist | Ca
                          ask: Callable[..., dict] = hermes_request_approval) -> Callable[..., Any]:
     """``tool_execution`` middleware: the ENFORCEMENT line, for ctx.register_middleware("tool_execution", fn).
 
-    Off-machine tool => ``next_call`` only on an explicit once/session/always recorded by
+    Off-host tool => ``next_call`` only on an explicit once/session/always recorded by
     post_approval_response for this call, or a remembered grant under our rule key. How the answer
     is obtained depends on where Hermes put the middleware (84a0301):
       * model_tools.handle_function_call: pre_tool_call ran first (model_tools.py:954) and its approve
@@ -944,18 +944,18 @@ def build_tool_execution(is_sealed: Callable[[], Any], allowlist: Allowlist | Ca
     def _handle(tool_name, args, run, session_id, tool_call_id, turn_id):
         base = {"tool": str(tool_name), "tool_call_id": tool_call_id}
         try:
-            sealed = _seal_state(is_sealed)
-        except SealStateError as exc:
-            _try_ledger(ledger, "tool_refused", tool_name, session_id, "seal_state_unreadable", args,
+            locked = _lock_state(is_locked)
+        except LockStateError as exc:
+            _try_ledger(ledger, "tool_refused", tool_name, session_id, "lock_state_unreadable", args,
                         {**base, "error": str(exc)[:200]}, "middleware")
-            return _refusal_result(_SEAL_UNREADABLE)
-        if not sealed:
+            return _refusal_result(_LOCK_UNREADABLE)
+        if not locked:
             return run()
         d = pol.decide(tool_name, args)
         if d.action == "refuse":
             return _refuse(tool_name, args, session_id, d.decision, d.message, {**base, "reason": d.decision})
         if d.action == "run":
-            if d.decision != "local":
+            if d.decision != "on-host":
                 ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id,
                                      decision=d.decision, nbytes=args_bytes(args), surface="middleware", detail=base))
             return run()
@@ -1010,7 +1010,7 @@ def _choice_repr(choice: Any) -> Any:
     return choice if isinstance(choice, str) or choice is None else repr(choice)[:80]
 
 
-def build_post_approval_response(is_sealed: Callable[[], Any], ledger: Any,
+def build_post_approval_response(is_locked: Callable[[], Any], ledger: Any,
                                  decisions: Optional[ApprovalDecisions] = None) -> Callable[..., None]:
     """``post_approval_response`` observer: ledgers tool_allowed / tool_refused for OUR approve
     directives only (pattern_key ``plugin_rule:confidential-mode:tool:<name>``), and records the exact
@@ -1030,7 +1030,7 @@ def build_post_approval_response(is_sealed: Callable[[], Any], ledger: Any,
             pick = choice if type(choice) is str else ""
             allowed = pick in _ALLOW_CHOICES
             detail = {"tool": tool_name, "choice": _choice_repr(choice), "tool_call_id": tool_call_id or "",
-                      "session_key": session_key or "", "sealed": _safe(is_sealed)}
+                      "session_key": session_key or "", "locked": _safe(is_locked)}
             ledger.append(_event("tool_allowed" if allowed else "tool_refused", tool_name=tool_name,
                                  session_id=session_id or "", decision=(pick or "unexpected_choice")[:64],
                                  surface=surface or None, detail=detail))
@@ -1051,6 +1051,6 @@ def _accepts_positional(fn: Callable[..., Any]) -> bool:
 
 def _safe(fn: Callable[[], Any]) -> Any:
     try:
-        return _sealed_flag(fn())
+        return _locked_flag(fn())
     except Exception:
         return None

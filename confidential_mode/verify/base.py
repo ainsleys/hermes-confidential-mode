@@ -20,7 +20,7 @@ class VerificationResult:
     enclave_fingerprint: str
     release_tag: str | None
     verifier: str               # SDK verifier identity string
-    verified_at_local: float    # time.time(); NOT attested, labelled so everywhere it is shown
+    verified_at_host_clock: float    # time.time(); NOT attested, labelled so everywhere it is shown
     evidence: dict = field(default_factory=dict)  # raw, JSON-serialisable
 
 

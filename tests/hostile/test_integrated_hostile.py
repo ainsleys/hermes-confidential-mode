@@ -29,9 +29,9 @@ OR_CONFIG_TAIL = """\
 """
 
 
-def _sealed_local(plugin):
-    out = plugin.slash("on local-only")
-    assert out.startswith("Sealed (local-only)"), out
+def _locked_on_host(plugin):
+    out = plugin.slash("on on-host-only")
+    assert out.startswith("Locked (on-host-only)"), out
     return out
 
 
@@ -44,27 +44,27 @@ def _web_search_handler(monkeypatch, ran):
     monkeypatch.setattr(registry.get_entry("web_search"), "handler", handler)
 
 
-# ══ 1. leak while sealed ══════════════════════════════════════════════════════════════════════════
+# ══ 1. leak while locked ══════════════════════════════════════════════════════════════════════════
 
 def test_leak_title_generation_follows_live_off_tier_runtime(plugin, net, monkeypatch):
-    """Config sealed local-only; the agent's LIVE runtime is openrouter (what a session-scoped
+    """Config locked on-host-only; the agent's LIVE runtime is openrouter (what a session-scoped
     `/model openrouter:...` switch, `hermes chat --provider openrouter`, or a gateway per-session model
     override produce; the config file is unchanged, so the per-turn recheck passes). The main call is
     refused, but Hermes titles the session at turn start with call_llm(task="title_generation",
     main_runtime=<live runtime>) and the unset aux task resolves 'auto' -> the live main provider.
-    Observable: the user's message reaches the openrouter recorder while sealed."""
+    Observable: the user's message reaches the openrouter recorder while locked."""
     openrouter = h.BodyRouter(net.openrouter)
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     rec = h.Rec()
     agent = h.make_agent(monkeypatch, rec, provider="openrouter", base_url=h.OPENROUTER_URL,
                          model="anthropic/claude-sonnet-4.5", api_key="sk-or-test",
                          session_db=h.session_db(plugin.home))
     result = agent.run_conversation(f"draft the reply about {h.SECRET}")
     h.join_background()
-    assert result["final_response"].startswith("Confidential mode: sealed to local-only")
+    assert result["final_response"].startswith("Confidential mode: locked to on-host-only")
     assert rec.provider_calls == [], "main call was refused (control)"
     assert not openrouter.saw(h.SECRET), (
-        f"sealed local-only, yet the conversation reached openrouter: {net.openrouter.requests}")
+        f"locked on-host-only, yet the conversation reached openrouter: {net.openrouter.requests}")
     assert net.openrouter.requests == [], net.openrouter.requests
 
 
@@ -75,26 +75,26 @@ def test_leak_title_generation_follows_live_off_tier_runtime(plugin, net, monkey
     "Order-dependent in the suite."))
 def test_leak_live_off_tier_runtime_hits_hermes_default_transport(plugin, net, monkeypatch):
     """Same live off-tier runtime: Hermes probes GET openrouter/models on its plain httpx transport (not the
-    keepalive builder) while sealed local-only. No conversation bytes, but a request (carrying the API
+    keepalive builder) while locked on-host-only. No conversation bytes, but a request (carrying the API
     key) to an off-tier host on Hermes' default transport, never ledgered."""
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     rec = h.Rec()
     agent = h.make_agent(monkeypatch, rec, provider="openrouter", base_url=h.OPENROUTER_URL,
                          model="anthropic/claude-sonnet-4.5", api_key="sk-or-test")
     agent.run_conversation("hello")
     h.join_background()
-    assert h.BANNED == [], f"sealed local-only, requests on Hermes' default transport: {h.BANNED}"
+    assert h.BANNED == [], f"locked on-host-only, requests on Hermes' default transport: {h.BANNED}"
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "HERMES GAP, disclosed: when plugins.hook_callback_timeout is shortened after sealing, Hermes skips the\n"
+    "HERMES GAP, disclosed: when plugins.hook_callback_timeout is shortened after locking, Hermes skips the\n"
     "fail-open pre_llm_call (hermes_cli/plugins_dispatch.py:42-52, :301-312) and starts title generation on\n"
     "its own client before any plugin seam; no middleware wraps auxiliary calls (agent/auxiliary_hooks.py:120).\n"
-    "The preflight refuses to seal with such a timeout and the llm gate refuses the main call afterwards, but\n"
+    "The preflight refuses to lock with such a timeout and the llm gate refuses the main call afterwards, but\n"
     "the auxiliary send itself is only ledgered. Upstream request: let pre_llm_call opt into fail-closed\n"
     "timeouts, or wrap the auxiliary client in llm_execution middleware."))
 def test_leak_hook_timeout_config_disables_recheck_and_aux_reaches_openrouter(plugin, net, monkeypatch):
-    """Config edit AFTER sealing: aux title_generation -> openrouter (fingerprinted, the recheck should
+    """Config edit AFTER locking: aux title_generation -> openrouter (fingerprinted, the recheck should
     block) plus `plugins.hook_callback_timeout: 0.0001` (also fingerprinted, preflight.py:55-56, so the recheck
     would block too, if it ran). pre_llm_call is a
     timeout-bounded hook (hermes_cli/plugins_dispatch.py:42-52); the recheck worker misses the deadline,
@@ -103,7 +103,7 @@ def test_leak_hook_timeout_config_disables_recheck_and_aux_reaches_openrouter(pl
     route (the llm gate's fingerprint check refuses only the main call; aux calls cannot be refused)."""
     openrouter = h.BodyRouter(net.openrouter)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     plugin.cfg.write_text(h.BASE_CONFIG.replace("plugins:\n", "plugins:\n  hook_callback_timeout: 0.0001\n")
                           + OR_CONFIG_TAIL)
     rec = h.Rec()
@@ -113,16 +113,16 @@ def test_leak_hook_timeout_config_disables_recheck_and_aux_reaches_openrouter(pl
     assert rec.provider_calls == [], "the llm gate still refuses the main call (control)"
     breaches = [(e.kind, e.purpose) for e in h.rows(plugin) if e.kind in ("breach", "send_observed")]
     assert not openrouter.saw(h.SECRET), (
-        f"config edited after seal; conversation reached openrouter: {net.openrouter.requests}; "
+        f"config edited after lock; conversation reached openrouter: {net.openrouter.requests}; "
         f"ledger saw: {breaches}")
 
 
-def test_config_edit_after_seal_title_route_blocked_withstood(plugin, net, monkeypatch):
+def test_config_edit_after_lock_title_route_blocked_withstood(plugin, net, monkeypatch):
     """Control for the test above: the same aux edit WITHOUT the hook-timeout key is caught by the
     per-turn recheck; nothing reaches openrouter."""
     openrouter = h.BodyRouter(net.openrouter)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     plugin.cfg.write_text(h.BASE_CONFIG + OR_CONFIG_TAIL)
     rec = h.Rec()
     agent = h.make_agent(monkeypatch, rec, session_db=h.session_db(plugin.home))
@@ -134,15 +134,15 @@ def test_config_edit_after_seal_title_route_blocked_withstood(plugin, net, monke
 
 
 def test_hand_armed_fallback_and_provider_errors_never_reach_openrouter_withstood(plugin, net, monkeypatch):
-    """Sealed local-only, in-tier main route, a fallback chain armed by hand onto openrouter, and the
+    """Locked on-host-only, in-tier main route, a fallback chain armed by hand onto openrouter, and the
     provider raising unusual error types: each becomes a refusal; fallback is never activated; nothing
     reaches openrouter or the default transport."""
     import httpx
     import openai
     from tests.seam._harness import arm_fallback_chain, rate_limit_429
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     errors = [rate_limit_429(), KeyError("x"), RuntimeError("weird"), httpx.ReadTimeout("t"),
-              openai.APIConnectionError(request=httpx.Request("POST", h.LOCAL_URL))]
+              openai.APIConnectionError(request=httpx.Request("POST", h.ON_HOST_URL))]
     for exc in errors:
         rec = h.Rec()
         agent = h.make_agent(monkeypatch, rec)
@@ -157,14 +157,14 @@ def test_hand_armed_fallback_and_provider_errors_never_reach_openrouter_withstoo
         assert rec.fallback_calls == [] and agent._fallback_index == 0, type(exc).__name__
         assert "Confidential mode" in (result["final_response"] or ""), type(exc).__name__
     assert net.openrouter.requests == []
-    off_machine = [u for u in h.BANNED if "://127.0.0.1" not in u and "://localhost" not in u]
-    assert off_machine == [], off_machine
+    off_host = [u for u in h.BANNED if "://127.0.0.1" not in u and "://localhost" not in u]
+    assert off_host == [], off_host
 
 
 def test_second_plugin_llm_middleware_cannot_redirect_destination_withstood(plugin, net, monkeypatch):
     """A second plugin's llm_execution middleware registered AFTER ours runs inside our next_call; for an
     off-tier destination it never runs at all."""
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     ctx2 = h.second_plugin(plugin.mgr)
     seen = []
 
@@ -248,10 +248,10 @@ def test_pin_written_by_second_plugin_is_honoured_without_any_consent_record(plu
 
 # ══ 3. tool gate bypass ═══════════════════════════════════════════════════════════════════════════
 
-def test_tool_registered_after_seal_under_local_name_is_blocked_withstood(plugin, net, monkeypatch):
+def test_tool_registered_after_lock_under_on_host_name_is_blocked_withstood(plugin, net, monkeypatch):
     import model_tools
     from tools.registry import registry
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     ran = []
     ctx2 = h.second_plugin(plugin.mgr)
     monkeypatch.setattr(ctx2, "_tool_override_allowed", lambda name: True)
@@ -283,7 +283,7 @@ def test_allowlist_yaml_hand_edit_cannot_lift_hard_blocks_withstood(plugin, net,
                         lambda args, **kw: ran.append("cron") or "{}")
     plugin.rt.allowlist_path.parent.mkdir(parents=True, exist_ok=True)
     plugin.rt.allowlist_path.write_text(json.dumps({"version": 1, "allowed": ["cronjob_manage", "delegate_task"]}))
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     plugin.human("once")
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     out = model_tools.handle_function_call("cronjob_manage", {"action": "create"}, task_id="t", session_id="s",
@@ -297,7 +297,7 @@ def test_cli_non_exact_answers_never_run_the_tool_withstood(plugin, net, monkeyp
     ran = []
     _web_search_handler(monkeypatch, ran)
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     plugin.human(answer)
     model_tools.handle_function_call("web_search", {"query": h.SECRET}, task_id="t", session_id="s",
                                      tool_call_id="c-x")
@@ -315,7 +315,7 @@ def test_parallel_calls_without_tool_call_id_share_one_decision(plugin, net, mon
     ran = []
     _web_search_handler(monkeypatch, ran)
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     a_args, b_args = {"query": "A-" + h.SECRET}, {"query": "B" * 3000}
     answers = {"A": [""], "B": ["once"]}
     a_recorded, a_go, b_recorded, b_go = (threading.Event() for _ in range(4))
@@ -354,39 +354,39 @@ def test_parallel_calls_without_tool_call_id_share_one_decision(plugin, net, mon
 
 
 def test_safe_worker_disclosure_is_present(plugin):
-    """Amendment 3: sealed mode does not apply under safe-worker (Hermes never discovers plugins there,
+    """Amendment 3: locked mode does not apply under safe-worker (Hermes never discovers plugins there,
     hermes_cli/plugins.py:1206-1211) and 'the disclosure must say' so. Search every user-facing text the
-    plugin ships: README, seal message, sealed note, status, receipt closing paragraph."""
+    plugin ships: README, lock message, locked note, status, receipt closing paragraph."""
     from pathlib import Path
-    sealing = h.cm(plugin, "sealing")
+    locking = h.cm(plugin, "locking")
     receipts = h.cm(plugin, "receipts")
     readme = Path(plugin.mod.__file__).with_name("README.md")
-    texts = [readme.read_text() if readme.exists() else "", sealing.SEAL_TAIL, sealing.SEALED_NOTE,
+    texts = [readme.read_text() if readme.exists() else "", locking.LOCK_TAIL, locking.LOCKED_NOTE,
              plugin.slash("status"), receipts.CLOSING_PARAGRAPH]
     blob = "\n".join(texts).lower()
     assert "safe-worker" in blob or "safe worker" in blob or "safe mode" in blob, \
-        "no user-facing disclosure that sealed mode does not apply under safe-worker"
+        "no user-facing disclosure that locked mode does not apply under safe-worker"
 
 
-def test_consent_for_this_seal_survives_unseal_and_reseal(plugin, net, monkeypatch):
-    """/confidential allow asks 'Once allowed, it runs without asking for the rest of this seal' and replies
-    'added to the allowlist for this seal'. The grant is written to allowlist.yaml and honoured by the NEXT
-    seal: after off + on, web_search runs with no prompt at all."""
+def test_consent_for_this_lock_survives_unlock_and_relock(plugin, net, monkeypatch):
+    """/confidential allow asks 'Once allowed, it runs without asking for the rest of this lock' and replies
+    'added to the allowlist for this lock'. The grant is written to allowlist.yaml and honoured by the NEXT
+    lock: after off + on, web_search runs with no prompt at all."""
     import model_tools
     ran = []
     _web_search_handler(monkeypatch, ran)
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     asked = h.answer_choice(plugin, monkeypatch, "approve")
-    assert "for this seal" in plugin.slash("allow web_search")
-    assert "rest of this seal" in asked[0][0]
+    assert "for this lock" in plugin.slash("allow web_search")
+    assert "rest of this lock" in asked[0][0]
     plugin.slash("off")
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     plugin.prompts.clear()
     plugin.human("deny")
     model_tools.handle_function_call("web_search", {"query": h.SECRET}, task_id="t", session_id="s",
-                                     tool_call_id="c-next-seal")
-    assert ran == [] and plugin.prompts, "a grant scoped to the previous seal ran the tool in a new seal unasked"
+                                     tool_call_id="c-next-lock")
+    assert ran == [] and plugin.prompts, "a grant scoped to the previous lock ran the tool in a new lock unasked"
 
 
 # ══ 4. restart ════════════════════════════════════════════════════════════════════════════════════
@@ -412,24 +412,24 @@ def _restart(plugin, monkeypatch):
     return mgr
 
 
-def test_restart_keeps_seal_and_refuses_off_tier_withstood(plugin, net, monkeypatch):
-    _sealed_local(plugin)
+def test_restart_keeps_lock_and_refuses_off_tier_withstood(plugin, net, monkeypatch):
+    _locked_on_host(plugin)
     _restart(plugin, monkeypatch)
-    sealed, tier = plugin.rt.is_sealed()
-    assert sealed is True and tier.value == "local-only"
+    locked, tier = plugin.rt.is_locked()
+    assert locked is True and tier.value == "on-host-only"
     rec = h.Rec()
     agent = h.make_agent(monkeypatch, rec, provider="openrouter", base_url=h.OPENROUTER_URL, api_key="k")
     agent.run_conversation("hi")
     assert rec.provider_calls == []
 
 
-def test_restart_launders_a_tool_registered_after_seal(plugin, net, monkeypatch):
-    """Before the restart a plugin tool registered after seal is unclassified => blocked. After a restart the
+def test_restart_launders_a_tool_registered_after_lock(plugin, net, monkeypatch):
+    """Before the restart a plugin tool registered after lock is unclassified => blocked. After a restart the
     in-memory allowlist is rebuilt from the live registry (__init__.py Runtime.allowlist) and the same tool
-    is classified fresh: it is now on the ask route and runs on 'once'. A post-seal tool must stay blocked
-    until a human reseals."""
+    is classified fresh: it is now on the ask route and runs on 'once'. A post-lock tool must stay blocked
+    until a human relocks."""
     import model_tools
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     ran = []
     schema = {"name": "crm_push", "parameters": {"type": "object"}}
     handler = lambda args, **kw: ran.append(args) or "{}"  # noqa: E731
@@ -442,7 +442,7 @@ def test_restart_launders_a_tool_registered_after_seal(plugin, net, monkeypatch)
     h.second_plugin(mgr).register_tool("crm_push", "crm", schema, handler)   # the other plugin loads again
     plugin.human("once")
     model_tools.handle_function_call("crm_push", {"x": 2}, task_id="t", session_id="s", tool_call_id="c1")
-    assert ran == [], "a tool registered after the seal ran after a restart"
+    assert ran == [], "a tool registered after the lock ran after a restart"
 
 
 def test_restart_cold_verification_cache_reattests_before_trusting_withstood(plugin, net, monkeypatch):
@@ -484,14 +484,14 @@ def test_forged_verify_ok_from_second_plugin_reads_as_verified(plugin, net, monk
     row "unverified entry" (its evidence has no capture_complete: true) in both formats and (b) say in the
     closing paragraph that the ledger is unprotected against same-process code and that the chain covers
     the ledger as held. verify_chain may still pass: the chain is over the ledger's rows."""
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     sid = "sess-forge"
     rogue = h.cm(plugin, "ledger").Ledger()          # same plugin-data path the plugin uses
     rogue.append({"kind": "verify_ok", "provider": "attested-tinfoil", "host": "router.tinfoil.invalid",
                   "detail": {"vendor": "tinfoil", "code_fingerprint": "f" * 64, "enclave_fingerprint": "e" * 64,
                              "evidence": {"format": "made-up", "quote": "AAAA"}}})
     plugin.rt.append({"kind": "send_observed", "session_id": sid, "purpose": "main", "host": "127.0.0.1",
-                      "tier": "local-only", "decision": "allowed"})
+                      "tier": "on-host-only", "decision": "allowed"})
     receipts = h.cm(plugin, "receipts")
     doc = json.loads(plugin.slash(f"receipts {sid} --json"))
     forged = [r for r in doc["rows"] if r["kind"] == "verify_ok"]
@@ -507,8 +507,8 @@ def test_forged_verify_ok_from_second_plugin_reads_as_verified(plugin, net, monk
 
 def test_control_characters_never_reach_watch_or_receipt_withstood(plugin, net, monkeypatch):
     from hermes_cli.plugins import invoke_hook
-    _sealed_local(plugin)
-    evil = "evil\x1b[2J\r\nconfidential: SEALED ok\x07"
+    _locked_on_host(plugin)
+    evil = "evil\x1b[2J\r\nconfidential: LOCKED ok\x07"
     invoke_hook("pre_auxiliary_call", aux_task=evil, provider=evil, base_url="http://evil\x1b.com/v1",
                 model=evil, session_id="sess-cc", api_request_id="x1", request_char_count=5)
     plugin.rt.append({"kind": "tool_refused", "session_id": "sess-cc", "purpose": f"tool:{evil}", "decision": evil})
@@ -517,45 +517,45 @@ def test_control_characters_never_reach_watch_or_receipt_withstood(plugin, net, 
     assert "evil" in watch and "evil" in receipt                            # control: the rows are rendered
     for text in (watch, receipt):
         assert "\x1b" not in text and "\x07" not in text and "\r" not in text
-        assert "\nconfidential: SEALED ok" not in text
+        assert "\nconfidential: LOCKED ok" not in text
 
 
-def test_receipt_seal_period_is_the_real_seal(plugin, net, monkeypatch):
-    """One seal, one session. on_session_start / on_session_end write rows of kind "seal" (decision
-    session_start/session_end, __init__.py _session_marker), and receipts._seal_info opens a new sealed
-    period at every "seal" row. The receipt then reports three sealed periods and dates the seal in force
+def test_receipt_lock_period_is_the_real_lock(plugin, net, monkeypatch):
+    """One lock, one session. on_session_start / on_session_end write rows of kind "lock" (decision
+    session_start/session_end, __init__.py _session_marker), and receipts._lock_info opens a new locked
+    period at every "lock" row. The receipt then reports three locked periods and dates the lock in force
     from the session_end marker."""
-    _sealed_local(plugin)
-    seal_row = h.rows(plugin, "seal")[-1]
+    _locked_on_host(plugin)
+    lock_row = h.rows(plugin, "lock")[-1]
     rec = h.Rec()
     agent = h.make_agent(monkeypatch, rec, session_db=h.session_db(plugin.home))
     agent.run_conversation("hello")
     h.join_background()
     doc = json.loads(plugin.slash(f"receipts {agent.session_id} --json"))
-    periods = doc["header"]["sealed_periods"]
-    assert len(periods) == 1 and periods[0]["seal_row"] == seal_row.id, periods
-    assert doc["header"]["sealed_period"]["since"] == seal_row.ts
+    periods = doc["header"]["locked_periods"]
+    assert len(periods) == 1 and periods[0]["lock_row"] == lock_row.id, periods
+    assert doc["header"]["locked_period"]["since"] == lock_row.ts
 
 
-def test_receipt_across_reseal_to_another_tier_keeps_both_trust_roots(plugin, net, monkeypatch):
-    """Session spans local-only -> off -> attested. The receipt's trust roots are chosen from the LAST
-    period's tier only: the local endpoint set (and hosts used) for the local-only half disappears."""
+def test_receipt_across_relock_to_another_tier_keeps_both_trust_roots(plugin, net, monkeypatch):
+    """Session spans on-host-only -> off -> attested. The receipt's trust roots are chosen from the LAST
+    period's tier only: the on-host endpoint set (and hosts used) for the on-host-only half disappears."""
     sid = "sess-span"
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     plugin.rt.append({"kind": "send_observed", "session_id": sid, "purpose": "main", "host": "127.0.0.1",
-                      "tier": "local-only", "verdict": "in_tier", "decision": "allowed"})
+                      "tier": "on-host-only", "verdict": "in_tier", "decision": "allowed"})
     plugin.slash("off")
     _stage_pin(plugin, net, monkeypatch)
     h.answer_choice(plugin, monkeypatch, "approve")
     plugin.slash("pins approve")
     out = plugin.slash("on attested")
-    assert out.startswith("Sealed"), out
+    assert out.startswith("Locked"), out
     plugin.rt.append({"kind": "send_observed", "session_id": sid, "purpose": "main", "host": h.ENCLAVE,
                       "tier": "attested", "verdict": "in_tier", "decision": "allowed"})
     doc = json.loads(plugin.slash(f"receipts {sid} --json"))
-    tiers = [p["tier"] for p in doc["header"]["sealed_periods"]]
-    assert "local-only" in tiers and "attested" in tiers, tiers
-    assert "local" in doc["trust_roots"] and "127.0.0.1" in doc["trust_roots"]["local"]["hosts_used"], \
+    tiers = [p["tier"] for p in doc["header"]["locked_periods"]]
+    assert "on-host-only" in tiers and "attested" in tiers, tiers
+    assert "on_host" in doc["trust_roots"] and "127.0.0.1" in doc["trust_roots"]["on_host"]["hosts_used"], \
         doc["trust_roots"]
 
 
@@ -569,10 +569,10 @@ def _write_state(plugin, **values):
 
 
 @pytest.mark.parametrize("values", [
-    {"sealed": "true"}, {"sealed": 1}, {"sealed": {"x": 1}},
-    {"sealed": True, "sealed_tier": "paranoid"}, {"sealed": True, "sealed_tier": None},
-    {"sealed": True, "sealed_tier": "local-only", "config_fingerprint": 12345},
-    {"sealed": True, "sealed_tier": "local-only", "config_fingerprint": None},
+    {"locked": "true"}, {"locked": 1}, {"locked": {"x": 1}},
+    {"locked": True, "locked_tier": "paranoid"}, {"locked": True, "locked_tier": None},
+    {"locked": True, "locked_tier": "on-host-only", "config_fingerprint": 12345},
+    {"locked": True, "locked_tier": "on-host-only", "config_fingerprint": None},
 ])
 def test_corrupt_state_refuses_sends_withstood(plugin, net, monkeypatch, values):
     import model_tools
@@ -580,24 +580,24 @@ def test_corrupt_state_refuses_sends_withstood(plugin, net, monkeypatch, values)
     ran = []
     _web_search_handler(monkeypatch, ran)
     monkeypatch.setattr(registry.get_entry("read_file"), "handler", lambda a, **k: ran.append("read_file") or "{}")
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     _write_state(plugin, **values)
     rec = h.Rec()
-    agent = h.make_agent(monkeypatch, rec)          # in-tier local route: only the state can refuse it
+    agent = h.make_agent(monkeypatch, rec)          # in-tier on-host route: only the state can refuse it
     result = agent.run_conversation(f"about {h.SECRET}")
     assert rec.provider_calls == [], (values, result.get("final_response"))
-    if values.get("sealed") is True and values.get("sealed_tier") == "local-only":
-        return                                # fingerprint junk: the seal is readable; the send was refused
+    if values.get("locked") is True and values.get("locked_tier") == "on-host-only":
+        return                                # fingerprint junk: the lock is readable; the send was refused
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     plugin.human("once")
     model_tools.handle_function_call("web_search", {"query": "q"}, task_id="t", session_id="s", tool_call_id="c1")
     model_tools.handle_function_call("read_file", {"path": "/tmp/x"}, task_id="t", session_id="s",
                                      tool_call_id="c2")
-    assert ran == [], (values, ran)           # unreadable seal: every tool, local ones included, is blocked
+    assert ran == [], (values, ran)           # unreadable lock: every tool, on-host ones included, is blocked
 
 
 def test_breached_sessions_not_a_list_does_not_unblock_withstood(plugin, net, monkeypatch):
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     _write_state(plugin, breached_sessions="sess-1")
     plugin.cfg.write_text(h.BASE_CONFIG + "fallback_providers:\n  - provider: openrouter\n    model: x/y\n")
     rec = h.Rec()
@@ -618,7 +618,7 @@ def test_pins_yaml_duplicate_keys_fail_closed_withstood(plugin, net, monkeypatch
 
 
 def test_ledger_locked_by_another_process_still_refuses_withstood(plugin, net, monkeypatch):
-    _sealed_local(plugin)
+    _locked_on_host(plugin)
     path = h.cm(plugin, "ledger").default_ledger_path()
     other = sqlite3.connect(path, timeout=0.1, isolation_level=None)
     other.execute("BEGIN EXCLUSIVE")

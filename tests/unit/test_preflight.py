@@ -7,15 +7,15 @@ from confidential_mode import preflight as pf
 from confidential_mode.preflight import (
     BUILTIN_AUX_TASKS_SNAPSHOT, PreflightReport, config_fingerprint, format_report, run_preflight,
 )
-from confidential_mode.tiers import AttestedPredicate, LocalPredicate, Tier, Verdict, ZdrPredicate
+from confidential_mode.tiers import AttestedPredicate, OnHostPredicate, Tier, Verdict, ZdrPredicate
 
-LOCAL_URL = "http://127.0.0.1:11434/v1"
-PROFILES = {"ollama": LOCAL_URL, "openrouter": "https://openrouter.ai/api/v1",
+ON_HOST_URL = "http://127.0.0.1:11434/v1"
+PROFILES = {"ollama": ON_HOST_URL, "openrouter": "https://openrouter.ai/api/v1",
             "attested-tinfoil": "https://inference.tinfoil.sh/v1"}
 
 
-def local_pred():
-    return LocalPredicate(profile_base_url=lambda p: PROFILES.get(p, ""))
+def on_host_pred():
+    return OnHostPredicate(profile_base_url=lambda p: PROFILES.get(p, ""))
 
 
 def attested_pred(ok=True):
@@ -24,7 +24,7 @@ def attested_pred(ok=True):
 
 def base_config(**over):
     cfg = {
-        "model": {"provider": "ollama", "default": "qwen3:8b", "base_url": LOCAL_URL},
+        "model": {"provider": "ollama", "default": "qwen3:8b", "base_url": ON_HOST_URL},
         "fallback_providers": [],
         "auxiliary": {"vision": {"provider": "ollama", "model": "llava", "base_url": ""}},
         "memory": {"provider": ""},
@@ -36,8 +36,8 @@ def base_config(**over):
     return cfg
 
 
-def run(cfg, tier=Tier.LOCAL, pred=None, *, plugin=(), isolation="in_process", lookup=None, profile=None):
-    return run_preflight(tier, pred or local_pred(), cfg, plugin_aux_tasks=list(plugin), isolation=isolation,
+def run(cfg, tier=Tier.ON_HOST, pred=None, *, plugin=(), isolation="in_process", lookup=None, profile=None):
+    return run_preflight(tier, pred or on_host_pred(), cfg, plugin_aux_tasks=list(plugin), isolation=isolation,
                          provider_lookup=lookup or (lambda n: object() if n in PROFILES else None),
                          attested_profile=profile)
 
@@ -48,10 +48,10 @@ def item(report: PreflightReport, key):
     return matches[0]
 
 
-def test_baseline_local_config_passes():
+def test_baseline_on_host_config_passes():
     r = run(base_config())
     assert r.ok, format_report(r)
-    assert item(r, "model.provider").verdict == "local"
+    assert item(r, "model.provider").verdict == "on_host"
     assert item(r, "fallback_providers").verdict == "disabled"
 
 
@@ -80,13 +80,13 @@ def test_main_remote_provider_off_tier_and_aux_inherit_it():
 
 def test_main_empty_base_url_resolved_via_profile():
     r = run(base_config(model={"provider": "ollama", "default": "q"}))
-    assert item(r, "model.provider").verdict == "local"
-    assert item(r, "auxiliary.compression.provider").verdict == "local"
+    assert item(r, "model.provider").verdict == "on_host"
+    assert item(r, "auxiliary.compression.provider").verdict == "on_host"
 
 
 @pytest.mark.parametrize("provider", ["", "auto"])
 def test_main_auto_off_tier(provider):
-    r = run(base_config(model={"provider": provider, "default": "q", "base_url": LOCAL_URL}))
+    r = run(base_config(model={"provider": provider, "default": "q", "base_url": ON_HOST_URL}))
     assert item(r, "model.provider").verdict == "off_tier"
     assert "model.provider" in item(r, "model.provider").fix
 
@@ -103,26 +103,26 @@ def test_main_model_alias_key():
 
 
 def test_main_moa_off_tier():
-    r = run(base_config(model={"provider": "moa", "default": "preset", "base_url": LOCAL_URL}))
+    r = run(base_config(model={"provider": "moa", "default": "preset", "base_url": ON_HOST_URL}))
     i = item(r, "model.provider")
     assert i.verdict == "off_tier" and "moa" in i.fix
 
 
 @pytest.mark.parametrize("provider", ["openai-codex", "codex"])
-def test_main_openai_codex_off_tier_even_if_local(provider):
-    r = run(base_config(model={"provider": provider, "default": "gpt", "base_url": LOCAL_URL}))
+def test_main_openai_codex_off_tier_even_if_on_host(provider):
+    r = run(base_config(model={"provider": provider, "default": "gpt", "base_url": ON_HOST_URL}))
     i = item(r, "model.provider")
     assert i.verdict == "off_tier" and "app-server" in i.fix
 
 
 # --- fallbacks ----------------------------------------------------------------------------------
 
-def test_fallback_providers_nonempty_off_tier_even_if_local():
-    cfg = base_config(fallback_providers=[{"provider": "ollama", "model": "q", "base_url": LOCAL_URL},
+def test_fallback_providers_nonempty_off_tier_even_if_on_host():
+    cfg = base_config(fallback_providers=[{"provider": "ollama", "model": "q", "base_url": ON_HOST_URL},
                                           {"provider": "moa", "model": "p"}])
     r = run(cfg)
     assert [i.verdict for i in r.items if i.key.startswith("fallback_providers[")] == ["off_tier", "off_tier"]
-    assert item(r, "fallback_providers[0]").fix == "remove fallback_providers entries while sealed"
+    assert item(r, "fallback_providers[0]").fix == "remove fallback_providers entries while locked"
     assert not r.ok
 
 
@@ -135,7 +135,7 @@ def test_fallback_providers_dict_form_and_legacy_fallback_model():
 
 # --- auxiliary ----------------------------------------------------------------------------------
 
-def test_vision_auto_is_off_tier_even_with_local_main():
+def test_vision_auto_is_off_tier_even_with_on_host_main():
     cfg = base_config(auxiliary={"vision": {"provider": "auto"}})
     i = item(run(cfg), "auxiliary.vision.provider")
     assert i.verdict == "off_tier"
@@ -164,16 +164,16 @@ def test_vision_non_dict_block_off_tier(vision):
 
 def test_vision_main_inherits_main():
     assert item(run(base_config(auxiliary={"vision": {"provider": "main"}})),
-                "auxiliary.vision.provider").verdict == "local"
+                "auxiliary.vision.provider").verdict == "on_host"
     cfg = base_config(model={"provider": "openrouter", "default": "x"}, auxiliary={"vision": {"provider": "main"}})
     assert item(run(cfg), "auxiliary.vision.provider").verdict == "off_tier"
 
 
-def test_vision_auto_with_local_base_url_is_explicit_custom():
+def test_vision_auto_with_on_host_base_url_is_explicit_custom():
     cfg = base_config(auxiliary={"vision": {"provider": "auto", "base_url": "http://10.0.0.9:8000/v1"}})
     r = run(cfg)
-    assert item(r, "auxiliary.vision.provider").verdict == "local"
-    assert item(r, "auxiliary.vision.base_url").verdict == "local"
+    assert item(r, "auxiliary.vision.provider").verdict == "on_host"
+    assert item(r, "auxiliary.vision.base_url").verdict == "on_host"
 
 
 def test_vision_explicit_remote_off_tier():
@@ -182,12 +182,12 @@ def test_vision_explicit_remote_off_tier():
 
 
 def test_aux_explicit_provider_and_base_url():
-    ok = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL},
+    ok = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL},
                                 "compression": {"provider": "custom", "base_url": "http://192.168.1.4:8080/v1"}})
     r = run(ok)
-    assert item(r, "auxiliary.compression.provider").verdict == "local"
+    assert item(r, "auxiliary.compression.provider").verdict == "on_host"
     assert item(r, "auxiliary.compression.base_url").value_redacted == "http://192.168.1.4:8080/v1"
-    bad = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL},
+    bad = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL},
                                  "compression": {"provider": "custom", "base_url": "https://api.example.com/v1"}})
     r = run(bad)
     i = item(r, "auxiliary.compression.base_url")
@@ -195,28 +195,28 @@ def test_aux_explicit_provider_and_base_url():
 
 
 def test_aux_moa_provider_off_tier():
-    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL},
-                                 "approval": {"provider": "moa", "base_url": LOCAL_URL}})
+    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL},
+                                 "approval": {"provider": "moa", "base_url": ON_HOST_URL}})
     assert item(run(cfg), "auxiliary.approval.provider").verdict == "off_tier"
 
 
 def test_aux_fallback_chain_entries():
-    good = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "curator": {
+    good = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL}, "curator": {
         "provider": "auto", "fallback_chain": [{"provider": "ollama", "model": "q"}]}})
-    assert item(run(good), "auxiliary.curator.fallback_chain[0]").verdict == "local"
-    bad = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "curator": {
+    assert item(run(good), "auxiliary.curator.fallback_chain[0]").verdict == "on_host"
+    bad = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL}, "curator": {
         "provider": "auto", "fallback_chain": [{"provider": "ollama"}, {"provider": "openrouter", "model": "x"},
                                                {"provider": "moa"}, {"provider": "auto"}, "junk"]}})
     r = run(bad)
     verdicts = [item(r, f"auxiliary.curator.fallback_chain[{i}]").verdict for i in range(5)]
-    assert verdicts == ["local", "off_tier", "off_tier", "off_tier", "off_tier"]
+    assert verdicts == ["on_host", "off_tier", "off_tier", "off_tier", "off_tier"]
 
 
 def test_plugin_aux_task_by_name_inherits_main():
     r = run(base_config(), plugin=["my_plugin_task"])
-    assert item(r, "auxiliary.my_plugin_task.provider").verdict == "local"
+    assert item(r, "auxiliary.my_plugin_task.provider").verdict == "on_host"
     assert "my_plugin_task" in r.aux_tasks
-    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "my_plugin_task": {"provider": "openrouter"}})
+    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL}, "my_plugin_task": {"provider": "openrouter"}})
     assert item(run(cfg, plugin=["my_plugin_task"]), "auxiliary.my_plugin_task.provider").verdict == "off_tier"
 
 
@@ -224,23 +224,23 @@ def test_plugin_aux_task_defaults_are_honoured():
     entry = {"key": "pt", "defaults": {"provider": "openrouter", "model": "x"}, "inherit_from": None}
     r = run(base_config(), plugin=[entry])
     assert item(r, "auxiliary.pt.provider").verdict == "off_tier"
-    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "pt": {"provider": "ollama"}})
-    assert item(run(cfg, plugin=[entry]), "auxiliary.pt.provider").verdict == "local"  # user wins
+    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL}, "pt": {"provider": "ollama"}})
+    assert item(run(cfg, plugin=[entry]), "auxiliary.pt.provider").verdict == "on_host"  # user wins
 
 
 def test_plugin_aux_task_inherit_from():
     entry = {"key": "pt", "defaults": {}, "inherit_from": "compression"}
-    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": LOCAL_URL}, "compression": {"provider": "openrouter"}})
+    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL}, "compression": {"provider": "openrouter"}})
     assert item(run(cfg, plugin=[entry]), "auxiliary.pt.provider").verdict == "off_tier"
     cfg["auxiliary"]["pt"] = {"provider": "ollama"}  # pinned on the task itself
-    assert item(run(cfg, plugin=[entry]), "auxiliary.pt.provider").verdict == "local"
+    assert item(run(cfg, plugin=[entry]), "auxiliary.pt.provider").verdict == "on_host"
 
 
 # --- memory / mcp / isolation / attested --------------------------------------------------------
 
 @pytest.mark.parametrize("value", ["", "builtin", "built-in", "local", "none", "None"])
-def test_memory_local(value):
-    assert item(run(base_config(memory={"provider": value})), "memory.provider").verdict == "local"
+def test_memory_on_host(value):
+    assert item(run(base_config(memory={"provider": value})), "memory.provider").verdict == "on_host"
 
 
 @pytest.mark.parametrize("value", ["honcho", "mem0", "supermemory"])
@@ -257,7 +257,7 @@ def test_mcp_servers():
         "weird": {"foo": 1},
     })
     r = run(cfg)
-    assert item(r, "mcp_servers.fs.command").verdict == "local"
+    assert item(r, "mcp_servers.fs.command").verdict == "on_host"
     remote = item(r, "mcp_servers.remote.url")
     assert remote.verdict == "off_tier" and "SECRET" not in remote.value_redacted
     assert "mcp_servers.remote.enabled: false" in remote.fix
@@ -266,25 +266,25 @@ def test_mcp_servers():
     assert "abc" not in format_report(r)
 
 
-@pytest.mark.parametrize("iso,verdict", [("in_process", "local"), ("host", "off_tier"), ("", "missing"),
-                                         (None, "local"), ("IN-PROCESS", "off_tier"), (1, "off_tier"),
+@pytest.mark.parametrize("iso,verdict", [("in_process", "on_host"), ("host", "off_tier"), ("", "missing"),
+                                         (None, "on_host"), ("IN-PROCESS", "off_tier"), (1, "off_tier"),
                                          (["in_process"], "off_tier")])
 def test_plugins_isolation(iso, verdict):
     i = item(run(base_config(), isolation=iso), "plugins.isolation")
     assert i.verdict == verdict
-    if verdict != "local":
+    if verdict != "on_host":
         assert "plugins.isolation: in_process" in i.fix
 
 
 def test_plugins_isolation_read_from_config_when_not_passed():
     def go(cfg):
-        return run_preflight(Tier.LOCAL, local_pred(), cfg, plugin_aux_tasks=[], provider_lookup=lambda n: None,
+        return run_preflight(Tier.ON_HOST, on_host_pred(), cfg, plugin_aux_tasks=[], provider_lookup=lambda n: None,
                              attested_profile=None)
-    assert item(go(base_config()), "plugins.isolation").verdict == "local"
-    assert item(go(base_config(plugins={})), "plugins.isolation").verdict == "local"   # absent -> default
+    assert item(go(base_config()), "plugins.isolation").verdict == "on_host"
+    assert item(go(base_config(plugins={})), "plugins.isolation").verdict == "on_host"   # absent -> default
     cfg = base_config()
     del cfg["plugins"]
-    assert item(go(cfg), "plugins.isolation").verdict == "local"
+    assert item(go(cfg), "plugins.isolation").verdict == "on_host"
     assert item(go(base_config(plugins={"isolation": "host"})), "plugins.isolation").verdict == "off_tier"
     assert item(go(base_config(plugins={"isolation": ""})), "plugins.isolation").verdict == "missing"
     assert item(go(base_config(plugins={"isolation": None})), "plugins.isolation").verdict == "missing"
@@ -321,7 +321,7 @@ def test_attested_tier_stale_verification_off_tier():
     assert item(r, "model.provider").verdict == "off_tier"
 
 
-def test_local_tier_has_no_profile_item():
+def test_on_host_tier_has_no_profile_item():
     assert not [i for i in run(base_config()).items if i.key.startswith("provider_profile")]
 
 
@@ -333,7 +333,7 @@ def test_zdr_tier_everything_off():
 
 def test_predicate_raising_is_off_tier():
     class Boom:
-        tier = Tier.LOCAL
+        tier = Tier.ON_HOST
 
         def classify(self, dest):
             raise RuntimeError("x")
@@ -357,7 +357,7 @@ def test_redaction():
 def test_format_report_table_shape():
     r = run(base_config(fallback_providers=[{"provider": "openrouter", "model": "x"}]))
     lines = format_report(r).splitlines()
-    assert lines[0].startswith("confidential preflight: tier=local-only FAIL")
+    assert lines[0].startswith("confidential preflight: tier=on-host-only FAIL")
     header = lines[1]
     assert header.split() == ["KEY", "VALUE", "VERDICT", "FIX"]
     vcol = header.index("VERDICT")
@@ -445,8 +445,8 @@ def test_mcp_url_server_classified_by_host():
                                    "bad": {"url": "http://evil.com\\@127.0.0.1/mcp"},
                                    "empty": {"url": ""}})
     r = run(cfg)
-    assert item(r, "mcp_servers.lh.url").verdict == "local"
-    assert item(r, "mcp_servers.lan.url").verdict == "local"   # url wins over command
+    assert item(r, "mcp_servers.lh.url").verdict == "on_host"
+    assert item(r, "mcp_servers.lan.url").verdict == "on_host"   # url wins over command
     assert item(r, "mcp_servers.bad.url").verdict == "off_tier"
     assert item(r, "mcp_servers.empty.url").verdict == "off_tier"
 
@@ -458,18 +458,18 @@ def test_mcp_servers_non_mapping_off_tier(servers):
 
 def test_delegation_inherits_main_when_unset():
     r = run(base_config())
-    assert item(r, "delegation.provider").verdict == "local"
-    assert item(r, "delegation.model").verdict == "local"
+    assert item(r, "delegation.provider").verdict == "on_host"
+    assert item(r, "delegation.model").verdict == "on_host"
     r = run(base_config(model={"provider": "openrouter", "default": "x"}))
     assert item(r, "delegation.provider").verdict == "off_tier"
 
 
 def test_delegation_explicit_routes():
     ok = run(base_config(delegation={"provider": "custom", "model": "q", "base_url": "http://10.0.0.3/v1"}))
-    assert item(ok, "delegation.base_url").verdict == "local"
+    assert item(ok, "delegation.base_url").verdict == "on_host"
     assert ok.ok, format_report(ok)
     for deleg in ({"provider": "openrouter", "model": "x"}, {"base_url": "https://api.example.com/v1"},
-                  {"provider": "moa"}, {"provider": "openai-codex", "base_url": LOCAL_URL}):
+                  {"provider": "moa"}, {"provider": "openai-codex", "base_url": ON_HOST_URL}):
         r = run(base_config(delegation=deleg))
         assert item(r, "delegation.provider").verdict == "off_tier", deleg
         assert "delegation." in item(r, "delegation.provider").fix
@@ -478,8 +478,8 @@ def test_delegation_explicit_routes():
 
 
 @pytest.mark.parametrize("tts,verdict", [
-    ({"provider": "piper"}, "local"), ({"provider": "kittentts", "enabled": True}, "local"),
-    ({"provider": "neutts"}, "local"), ({"provider": "none"}, "local"),
+    ({"provider": "piper"}, "on_host"), ({"provider": "kittentts", "enabled": True}, "on_host"),
+    ({"provider": "neutts"}, "on_host"), ({"provider": "none"}, "on_host"),
     ({"provider": "edge"}, "disabled"),                      # enabled unset => disabled (ruling)
     ({"provider": "edge", "enabled": False}, "disabled"),
     ({"provider": "elevenlabs", "enabled": "false"}, "disabled"),
@@ -509,13 +509,13 @@ def test_tts_auto_tts_overrides_disabled(tts):
     i = item(run(base_config(tts=tts, voice={"auto_tts": True})), "tts.provider")
     assert i.verdict == "off_tier" and "voice.auto_tts" in i.fix
     assert item(run(base_config(tts={"provider": "piper"}, voice={"auto_tts": True})),
-                "tts.provider").verdict == "local"
+                "tts.provider").verdict == "on_host"
 
 
-def test_tts_named_command_provider_is_local():
+def test_tts_named_command_provider_is_on_host():
     cfg = base_config(tts={"provider": "mysay", "enabled": True,
                            "providers": {"mysay": {"command": "say -o {out} {text}"}}})
-    assert item(run(cfg), "tts.provider").verdict == "local"
+    assert item(run(cfg), "tts.provider").verdict == "on_host"
     cfg = base_config(tts={"provider": "myhttp", "enabled": True, "providers": {"myhttp": {"url": "https://x"}}})
     assert item(run(cfg), "tts.provider").verdict == "off_tier"
 
@@ -534,8 +534,8 @@ def test_memory_non_mapping_off_tier(mem):
 def test_memory_absent_or_null_is_builtin():
     cfg = base_config()
     del cfg["memory"]
-    assert item(run(cfg), "memory.provider").verdict == "local"
-    assert item(run(base_config(memory=None)), "memory.provider").verdict == "local"
+    assert item(run(cfg), "memory.provider").verdict == "on_host"
+    assert item(run(base_config(memory=None)), "memory.provider").verdict == "on_host"
 
 
 @pytest.mark.parametrize("fb", ["openrouter", 1, [None]])

@@ -4,11 +4,11 @@
 hermes_cli/plugins_state.py): a profile-scoped JSON key/value store with ``get(key, default)``
 and ``set(key, value)`` only (no delete). Frozen keys (docs/INTERFACES.md):
 
-    sealed (bool), sealed_tier (str), sealed_since (float),
+    locked (bool), locked_tier (str), locked_since (float),
     config_fingerprint (str), breached_sessions (list[str])
 
 Reads are strict: a malformed value raises ``StateError`` so callers (the gate) fail closed
-instead of guessing whether the profile is sealed.
+instead of guessing whether the profile is locked.
 """
 from __future__ import annotations
 
@@ -17,16 +17,16 @@ from typing import Any, Callable, Protocol
 
 from .tiers import Tier
 
-KEY_SEALED = "sealed"
-KEY_SEALED_TIER = "sealed_tier"
-KEY_SEALED_SINCE = "sealed_since"
+KEY_LOCKED = "locked"
+KEY_LOCKED_TIER = "locked_tier"
+KEY_LOCKED_SINCE = "locked_since"
 KEY_CONFIG_FINGERPRINT = "config_fingerprint"
 KEY_BREACHED_SESSIONS = "breached_sessions"
-KEYS = (KEY_SEALED, KEY_SEALED_TIER, KEY_SEALED_SINCE, KEY_CONFIG_FINGERPRINT, KEY_BREACHED_SESSIONS)
+KEYS = (KEY_LOCKED, KEY_LOCKED_TIER, KEY_LOCKED_SINCE, KEY_CONFIG_FINGERPRINT, KEY_BREACHED_SESSIONS)
 
 
 class StateError(RuntimeError):
-    """Persisted state is malformed; treat as sealed-and-broken (refuse)."""
+    """Persisted state is malformed; treat as locked-and-broken (refuse)."""
 
 
 class StateStore(Protocol):
@@ -56,34 +56,34 @@ class ConfidentialState:
         self._store = store
         self._clock = clock
 
-    # -- seal -----------------------------------------------------------------
-    def sealed(self) -> tuple[bool, Tier | None]:
-        """(sealed, tier). Raises StateError when the stored values are inconsistent."""
-        raw = self._store.get(KEY_SEALED, False)
+    # -- lock -----------------------------------------------------------------
+    def locked(self) -> tuple[bool, Tier | None]:
+        """(locked, tier). Raises StateError when the stored values are inconsistent."""
+        raw = self._store.get(KEY_LOCKED, False)
         if raw is False or raw is None:
             return False, None
         if raw is not True:
-            raise StateError(f"state key {KEY_SEALED!r} is not a bool")
-        tier_raw = self._store.get(KEY_SEALED_TIER)
+            raise StateError(f"state key {KEY_LOCKED!r} is not a bool")
+        tier_raw = self._store.get(KEY_LOCKED_TIER)
         try:
             return True, Tier(tier_raw)
         except ValueError as exc:
-            raise StateError(f"sealed with unknown tier {tier_raw!r}") from exc
+            raise StateError(f"locked with unknown tier {tier_raw!r}") from exc
 
-    def seal(self, tier: Tier, config_fingerprint: str) -> None:
+    def lock(self, tier: Tier, config_fingerprint: str) -> None:
         tier = Tier(tier)
-        # Tier first, flag last: a crash between writes leaves the profile unsealed-with-a-tier,
-        # never sealed-without-one.
-        self._store.set(KEY_SEALED_TIER, tier.value)
-        self._store.set(KEY_SEALED_SINCE, float(self._clock()))
+        # Tier first, flag last: a crash between writes leaves the profile unlocked-with-a-tier,
+        # never locked-without-one.
+        self._store.set(KEY_LOCKED_TIER, tier.value)
+        self._store.set(KEY_LOCKED_SINCE, float(self._clock()))
         self._store.set(KEY_CONFIG_FINGERPRINT, str(config_fingerprint))
-        self._store.set(KEY_SEALED, True)
+        self._store.set(KEY_LOCKED, True)
 
-    def unseal(self) -> None:
-        self._store.set(KEY_SEALED, False)
+    def unlock(self) -> None:
+        self._store.set(KEY_LOCKED, False)
 
-    def sealed_since(self) -> float | None:
-        value = self._store.get(KEY_SEALED_SINCE)
+    def locked_since(self) -> float | None:
+        value = self._store.get(KEY_LOCKED_SINCE)
         return float(value) if value is not None else None
 
     def config_fingerprint(self) -> str | None:

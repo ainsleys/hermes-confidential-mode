@@ -17,9 +17,9 @@ def _ledger(tmp_path):
     led.append(LedgerEvent(kind="send_observed", session_id="sess-abcdefghijklmnop", purpose="main",
                            host="127.0.0.1", bytes=1234, decision="observed"))
     led.append(LedgerEvent(kind="send_refused", session_id="s2", purpose="main", host="openrouter.ai",
-                           bytes=20_480, tier="local-only", verdict="off_tier", decision="refused"))
+                           bytes=20_480, tier="on-host-only", verdict="off_tier", decision="refused"))
     led.append(LedgerEvent(kind="send_observed", session_id="s2", purpose="aux:title_generation",
-                           host="openrouter.ai", bytes=88, tier="local-only", verdict="off_tier", decision="observed"))
+                           host="openrouter.ai", bytes=88, tier="on-host-only", verdict="off_tier", decision="observed"))
     led.append(LedgerEvent(kind="breach", session_id="s2", purpose="aux:title_generation", host="openrouter.ai",
                            verdict="off_tier", decision="aux_sent"))
     return led

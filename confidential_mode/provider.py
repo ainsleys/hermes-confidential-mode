@@ -127,7 +127,7 @@ class VerificationCache:
                 e.result, e.failed_mono = None, None
 
     def _now(self) -> float:
-        # Looked up at call time (module ``time``), never the wall clock or verified_at_local.
+        # Looked up at call time (module ``time``), never the wall clock or verified_at_host_clock.
         return self._clock() if self._clock is not None else time.monotonic()
 
     def refresh(self, provider: str) -> VerificationResult:

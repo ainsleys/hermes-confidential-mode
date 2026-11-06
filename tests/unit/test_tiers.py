@@ -4,7 +4,7 @@ import socket
 import pytest
 
 from confidential_mode.tiers import (
-    AttestedPredicate, Destination, LocalPredicate, Tier, Verdict, ZdrPredicate, host_of, is_local_host,
+    AttestedPredicate, Destination, OnHostPredicate, Tier, Verdict, ZdrPredicate, host_of, is_on_host,
 )
 
 
@@ -41,8 +41,8 @@ def test_host_of(url, host):
     "100.64.0.1", "100.127.255.255", "fe80::1", "febf::1", "fe80::1%en0", "fc00::1", "fd12:3456::1",
     "localhost", "::ffff:10.0.0.1",
 ])
-def test_local_hosts(host):
-    assert is_local_host(host)
+def test_on_host_addresses(host):
+    assert is_on_host(host)
 
 
 @pytest.mark.parametrize("host", [
@@ -51,12 +51,12 @@ def test_local_hosts(host):
     "localhost.evil.com", "my-nas.local", "",
 ])
 def test_remote_hosts(host):
-    assert not is_local_host(host)
+    assert not is_on_host(host)
 
 
 def test_extra_hosts_case_and_brackets():
-    assert is_local_host("my-nas.lan", ["My-NAS.lan"])
-    p = LocalPredicate(extra_hosts={"My-NAS.lan", "[fd00::5]"})
+    assert is_on_host("my-nas.lan", ["My-NAS.lan"])
+    p = OnHostPredicate(extra_hosts={"My-NAS.lan", "[fd00::5]"})
     assert p.classify(dest("http://my-nas.lan:1234/v1")).in_tier
     assert not p.classify(dest("http://other.lan/v1")).in_tier
 
@@ -66,15 +66,15 @@ def test_extra_hosts_case_and_brackets():
     "http://100.100.1.1/v1", "http://[fd00::1]/v1", "http://[fe80::1%25en0]:8000/v1", "HTTP://192.168.1.9",
     "http://user:pw@evil.com@127.0.0.1/v1", "http://[::ffff:10.0.0.1]/v1",
 ])
-def test_local_predicate_in_tier(url):
-    v = LocalPredicate().classify(dest(url))
+def test_on_host_predicate_in_tier(url):
+    v = OnHostPredicate().classify(dest(url))
     assert v.in_tier and v.host and v.reason
 
 
 @pytest.mark.parametrize("url,reason_part", [
     ("https://api.openai.com/v1", "not an IP literal"),
-    ("http://8.8.8.8/v1", "not on a local network"),
-    ("http://[2001:db8::1]/v1", "not on a local network"),
+    ("http://8.8.8.8/v1", "not on this host or a private network"),
+    ("http://[2001:db8::1]/v1", "not on this host or a private network"),
     ("http://", "no host"),
     ("http://evil.com\\@127.0.0.1/v1", "backslash"),
     ("http://127.0.0.1\\/v1", "backslash"),
@@ -99,46 +99,46 @@ def test_local_predicate_in_tier(url):
     ("http://0x7f000001/v1", "not an IP literal"),
     ("http://2130706433/v1", "not an IP literal"),
     ("http://127.1/v1", "not an IP literal"),
-    ("http://0.0.0.0/v1", "not on a local network"),
-    ("http://169.254.169.254/latest", "not on a local network"),
-    ("http://[::ffff:8.8.8.8]/v1", "not on a local network"),
+    ("http://0.0.0.0/v1", "not on this host or a private network"),
+    ("http://169.254.169.254/latest", "not on this host or a private network"),
+    ("http://[::ffff:8.8.8.8]/v1", "not on this host or a private network"),
 ])
-def test_local_predicate_off_tier(url, reason_part):
-    v = LocalPredicate().classify(dest(url))
+def test_on_host_predicate_off_tier(url, reason_part):
+    v = OnHostPredicate().classify(dest(url))
     assert not v.in_tier and reason_part in v.reason
 
 
-def test_local_predicate_never_resolves_dns(monkeypatch):
+def test_on_host_predicate_never_resolves_dns(monkeypatch):
     def boom(*a, **k):
         raise AssertionError("DNS lookup attempted")
     monkeypatch.setattr(socket, "getaddrinfo", boom)
     monkeypatch.setattr(socket, "gethostbyname", boom)
-    v = LocalPredicate().classify(dest("http://resolves-to-localhost.example/v1"))
+    v = OnHostPredicate().classify(dest("http://resolves-to-localhost.example/v1"))
     assert not v.in_tier and v.host == "resolves-to-localhost.example"
 
 
-def test_local_predicate_empty_base_url_uses_profile():
+def test_on_host_predicate_empty_base_url_uses_profile():
     urls = {"ollama": "http://127.0.0.1:11434/v1", "openrouter": "https://openrouter.ai/api/v1"}
-    p = LocalPredicate(profile_base_url=lambda prov: urls.get(prov, ""))
+    p = OnHostPredicate(profile_base_url=lambda prov: urls.get(prov, ""))
     v = p.classify(dest("", provider="ollama"))
     assert v.in_tier and v.host == "127.0.0.1" and "provider default" in v.reason
     assert not p.classify(dest("", provider="openrouter")).in_tier
     assert not p.classify(dest("", provider="unknown")).in_tier
 
 
-def test_local_predicate_empty_base_url_without_profile_callable_is_off_tier():
-    v = LocalPredicate().classify(dest("", provider="ollama"))
+def test_on_host_predicate_empty_base_url_without_profile_callable_is_off_tier():
+    v = OnHostPredicate().classify(dest("", provider="ollama"))
     assert not v.in_tier and v.host == ""
 
 
-def test_local_predicate_profile_callable_raising_is_off_tier():
+def test_on_host_predicate_profile_callable_raising_is_off_tier():
     def boom(_):
         raise RuntimeError("x")
-    assert not LocalPredicate(profile_base_url=boom).classify(dest("", provider="ollama")).in_tier
+    assert not OnHostPredicate(profile_base_url=boom).classify(dest("", provider="ollama")).in_tier
 
 
-def test_local_predicate_explicit_base_url_beats_profile():
-    p = LocalPredicate(profile_base_url=lambda _: "http://127.0.0.1/v1")
+def test_on_host_predicate_explicit_base_url_beats_profile():
+    p = OnHostPredicate(profile_base_url=lambda _: "http://127.0.0.1/v1")
     assert not p.classify(dest("https://api.example.com", provider="ollama")).in_tier
 
 
@@ -191,7 +191,7 @@ def test_profile_lookup_may_return_profile_objects():
         def __init__(self, url):
             self.base_url = url
     table = {"ollama": P("http://localhost:11434/v1"), "hosted": P("https://x.example/v1"), "none": P(None)}
-    p = LocalPredicate(profile_base_url=table.get)
+    p = OnHostPredicate(profile_base_url=table.get)
     assert p.classify(dest("", provider="ollama")).in_tier
     assert not p.classify(dest("", provider="hosted")).in_tier
     assert not p.classify(dest("", provider="none")).in_tier
@@ -199,7 +199,7 @@ def test_profile_lookup_may_return_profile_objects():
 
 
 def test_profile_base_url_is_held_to_the_strict_parser():
-    p = LocalPredicate(profile_base_url=lambda _: "localhost:11434/v1")  # schemeless default
+    p = OnHostPredicate(profile_base_url=lambda _: "localhost:11434/v1")  # schemeless default
     assert not p.classify(dest("", provider="x")).in_tier
 
 

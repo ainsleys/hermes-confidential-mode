@@ -354,7 +354,7 @@ def tool_cmd(hermes, al, ledger, name, replies, **kw):
         hermes, "cm-allow",
         lambda sk, platform: allow_tool(hermes.ctx, al, ledger, name, session_key=sk or "", session_id="sess-1",
                                         platform=platform or ""),
-        f"Allow {name} while sealed?", replies, **kw)
+        f"Allow {name} while locked?", replies, **kw)
 
 
 def test_allow_tool_adds_on_allow_only(hermes):
@@ -364,10 +364,10 @@ def test_allow_tool_adds_on_allow_only(hermes):
     assert "  1. Allow — " in r.prompt and "  2. Deny — " in r.prompt
     r = tool_cmd(hermes, al, ledger, "web_search", ["1"])
     assert al.is_added("web_search") and ledger.kinds() == ["tool_refused", "tool_allowed"]
-    assert ledger.events[-1]["detail"]["raw_pick"] == "approve" and r.reply.endswith("added to the allowlist for this seal.")
+    assert ledger.events[-1]["detail"]["raw_pick"] == "approve" and r.reply.endswith("added to the allowlist for this lock.")
 
 
-def test_allow_tool_refuses_hard_blocked_and_local_without_asking(hermes):
+def test_allow_tool_refuses_hard_blocked_and_on_host_without_asking(hermes):
     from hermes_cli.plugin_choices import bind_asker
     al, ledger, asked = _allowlist(), Ledger(), []
     with bind_asker(lambda q, labels: asked.append(q) or "Allow"):

@@ -25,7 +25,7 @@ def _result(code="c1", enclave="e1", tag="v1", platform="sev-snp", hw=False, ste
           "verification_document": doc}
     return VerificationResult(vendor="tinfoil", router_repo=REPO, enclave_host="r.example", code_fingerprint=code,
                               enclave_fingerprint=enclave, release_tag=tag, verifier="tinfoil/0.14.2",
-                              verified_at_local=0.0, evidence=ev)
+                              verified_at_host_clock=0.0, evidence=ev)
 
 
 def test_url_helpers():

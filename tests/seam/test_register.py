@@ -2,12 +2,12 @@
 through Hermes' REAL directory discovery (PluginManager.discover_and_load, as
 tests/hermes_cli/test_plugins.py does), and driven through real turns:
 
-* unsealed: the call goes through and is observed in the ledger;
-* sealed local-only + in-tier provider: passes, and the sealed note is in the model's context;
-* sealed + off-tier provider: refused with zero provider calls;
-* sealed + web_search: our ask prompt, the tool runs only on the exact answer "once" (W4's harness:
+* unlocked: the call goes through and is observed in the ledger;
+* locked on-host-only + in-tier provider: passes, and the locked note is in the model's context;
+* locked + off-tier provider: refused with zero provider calls;
+* locked + web_search: our ask prompt, the tool runs only on the exact answer "once" (W4's harness:
   only the CLI approval callback seat is substituted);
-* a config edit after seal blocks the next turn (pre_llm_call), and the llm gate refuses too;
+* a config edit after lock blocks the next turn (pre_llm_call), and the llm gate refuses too;
 * one registration raising leaves every other registration in place;
 * ``hermes plugins doctor --ci`` passes on the worktree.
 
@@ -40,7 +40,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 MODULE = "hermes_plugins.confidential_mode"
 HOOKS = {"pre_tool_call", "post_approval_response", "pre_llm_call", "pre_api_request", "pre_auxiliary_call",
          "post_auxiliary_call", "on_session_start", "on_session_end", "post_compaction", "pre_gateway_dispatch"}
-LOCAL_URL = "http://127.0.0.1:11434/v1"
+ON_HOST_URL = "http://127.0.0.1:11434/v1"
 REMOTE_URL = "https://llm.example.test/v1"
 SK = "cm:w5:seam"
 BASE_CONFIG = f"""\
@@ -49,12 +49,12 @@ plugins:
 model:
   provider: custom
   default: llama3
-  base_url: {LOCAL_URL}
+  base_url: {ON_HOST_URL}
 auxiliary:
   vision:
     provider: custom
     model: llava
-    base_url: {LOCAL_URL}
+    base_url: {ON_HOST_URL}
 """
 
 
@@ -190,13 +190,13 @@ def test_cli_command_parses_through_argparse(plugin):
     entry["setup_fn"](parser)
     args = parser.parse_args(["watch", "--once"])
     assert args.confidential_action == "watch" and args.once is True
-    args = parser.parse_args(["check", "--tier", "local-only"])
+    args = parser.parse_args(["check", "--tier", "on-host-only"])
     assert entry["handler_fn"](args) == 0
 
 
 # ── turns ────────────────────────────────────────────────────────────────────────────────────────
 
-def test_unsealed_turn_is_observed_and_sent(plugin, monkeypatch):
+def test_unlocked_turn_is_observed_and_sent(plugin, monkeypatch):
     rec = Rec()
     agent = build_agent(monkeypatch, rec, REMOTE_URL)
     result = agent.run_conversation("hello there")
@@ -207,72 +207,72 @@ def test_unsealed_turn_is_observed_and_sent(plugin, monkeypatch):
     assert "[confidential mode]" not in _sent_text(rec.provider_calls[0])
 
 
-def test_sealed_local_in_tier_turn_passes_with_the_sealed_note(plugin, monkeypatch):
-    out = plugin.slash("on local-only")
-    assert out.startswith("Sealed (local-only). Model: custom/llama3 at 127.0.0.1"), out
-    assert "ask you first, each call" in out and "Memory: local. Fallbacks: none." in out
+def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeypatch):
+    out = plugin.slash("on on-host-only")
+    assert out.startswith("Locked (on-host-only). Model: custom/llama3 at 127.0.0.1"), out
+    assert "ask you first, each call" in out and "Memory: on-host. Fallbacks: none." in out
     assert "safe-worker" in out and "recorded after the fact" in out
-    assert "local (runs without asking)" in out and "web_search" in out
+    assert "on-host (runs without asking)" in out and "web_search" in out
     rec = Rec()
-    agent = build_agent(monkeypatch, rec, LOCAL_URL)
+    agent = build_agent(monkeypatch, rec, ON_HOST_URL)
     result = agent.run_conversation("summarise the board minutes")
     assert result["final_response"] == "provider answered"
     assert len(rec.provider_calls) == 1
-    assert "[confidential mode] This profile is sealed (local-only)" in _sent_text(rec.provider_calls[0])
+    assert "[confidential mode] This profile is locked (on-host-only)" in _sent_text(rec.provider_calls[0])
     rows = [(e.kind, e.decision, e.verdict) for e in plugin.rt.ledger.tail(0)]
-    assert ("seal", "sealed", "in_tier") in rows
+    assert ("lock", "locked", "in_tier") in rows
     assert ("send_observed", "allowed", "in_tier") in rows
 
 
-def test_sealed_off_tier_provider_is_refused_with_zero_provider_calls(plugin, monkeypatch):
-    assert plugin.slash("on local-only").startswith("Sealed")
+def test_locked_off_tier_provider_is_refused_with_zero_provider_calls(plugin, monkeypatch):
+    assert plugin.slash("on on-host-only").startswith("Locked")
     rec = Rec()
     agent = build_agent(monkeypatch, rec, REMOTE_URL)
     result = agent.run_conversation("the merger terms are")
-    assert result["final_response"].startswith("Confidential mode: sealed to local-only; this request was not sent.")
+    assert result["final_response"].startswith("Confidential mode: locked to on-host-only; this request was not sent.")
     assert "live model runtime is custom at llm.example.test" in result["final_response"]
     assert rec.provider_calls == [] and rec.streaming_calls == [] and rec.fallback_calls == []
     assert ("send_refused", "refused") in plugin.kinds() and ("breach", "live_runtime_off_tier") in plugin.kinds()
     assert "OFF-TIER" in plugin.slash("status")
-    # mutant twin: the same agent unsealed reaches the provider.
+    # mutant twin: the same agent unlocked reaches the provider.
     plugin.slash("off")
     agent.run_conversation("again")
     assert len(rec.provider_calls) == 1
 
 
-def test_config_edit_after_seal_blocks_the_next_turn(plugin, monkeypatch):
-    assert plugin.slash("on local-only").startswith("Sealed")
+def test_config_edit_after_lock_blocks_the_next_turn(plugin, monkeypatch):
+    assert plugin.slash("on on-host-only").startswith("Locked")
     rec = Rec()
-    agent = build_agent(monkeypatch, rec, LOCAL_URL)
+    agent = build_agent(monkeypatch, rec, ON_HOST_URL)
     assert agent.run_conversation("first")["final_response"] == "provider answered"
     plugin.cfg.write_text(BASE_CONFIG + "fallback_providers:\n  - provider: openrouter\n    model: x/y\n")
     result = agent.run_conversation("second")
-    assert "routing config changed after this profile was sealed" in (result["final_response"] or "")
+    assert "routing config changed after this profile was locked" in (result["final_response"] or "")
     assert len(rec.provider_calls) == 1, "the blocked turn made no provider call"
     assert ("breach", "config_changed") in plugin.kinds()
     assert plugin.rt.state.is_breached(agent.session_id)
     # Second line: the llm gate's predicate refuses every destination while the fingerprint differs.
     tiers = importlib.import_module(plugin.mod.__name__ + ".confidential_mode.tiers")
     Destination, Tier = tiers.Destination, tiers.Tier
-    v = plugin.rt.predicate_for(Tier.LOCAL).classify(Destination("custom", LOCAL_URL, "m", "chat_completions", "main"))
-    assert v.in_tier is False and "changed since seal" in v.reason
-    # Restoring the sealed config restores service.
+    v = plugin.rt.predicate_for(Tier.ON_HOST).classify(Destination("custom", ON_HOST_URL, "m", "chat_completions", "main"))
+    assert v.in_tier is False and "changed since lock" in v.reason
+    # Restoring the locked config restores service.
     plugin.cfg.write_text(BASE_CONFIG)
     assert agent.run_conversation("third")["final_response"] == "provider answered"
 
 
-def test_seal_refuses_with_the_report_when_preflight_fails(plugin):
+def test_lock_refuses_with_the_report_when_preflight_fails(plugin):
     plugin.cfg.write_text(BASE_CONFIG + "fallback_providers:\n  - provider: openrouter\n    model: x/y\n")
-    out = plugin.slash("on local-only")
-    assert out.startswith("Not sealed: the preflight found routes")
+    out = plugin.slash("on on-host-only")
+    assert out.startswith("Not locked: the preflight found routes")
     assert "fallback_providers[0]" in out and "off_tier" in out
-    assert plugin.rt.state.sealed() == (False, None)
+    assert plugin.rt.state.locked() == (False, None)
     assert ("preflight_fail", "refused") in plugin.kinds()
-    assert plugin.slash("on zero-retention").startswith("Not sealed: zero-retention tier not implemented")
+    assert plugin.slash("on zero-retention").startswith("Not locked: zero-retention tier not implemented")
 
 
-def test_aux_call_to_off_tier_host_while_sealed_is_a_breach(plugin):
-    assert plugin.slash("on local-only").startswith("Sealed")
+def test_aux_call_to_off_tier_host_while_locked_is_a_breach(plugin):
+    assert plugin.slash("on on-host-only").startswith("Locked")
     from hermes_cli.plugins import invoke_hook
     invoke_hook("pre_auxiliary_call", aux_task="title_generation", provider="openrouter",
                 base_url="https://openrouter.ai/api/v1", model="m", api_mode="chat_completions",
@@ -280,7 +280,7 @@ def test_aux_call_to_off_tier_host_while_sealed_is_a_breach(plugin):
                 request_char_count=50)
     invoke_hook("post_auxiliary_call", aux_task="title_generation", provider="openrouter",
                 base_url="https://openrouter.ai/api/v1", api_request_id="aux-1", session_id="sess-aux")
-    invoke_hook("pre_auxiliary_call", aux_task="compression", provider="custom", base_url=LOCAL_URL,
+    invoke_hook("pre_auxiliary_call", aux_task="compression", provider="custom", base_url=ON_HOST_URL,
                 model="m", session_id="sess-aux", api_request_id="aux-2", request_char_count=10)
     rows = [e for e in plugin.rt.ledger.tail(0) if e.purpose.startswith("aux:")]
     assert [(e.kind, e.purpose, e.verdict) for e in rows] == [
@@ -292,7 +292,7 @@ def test_aux_call_to_off_tier_host_while_sealed_is_a_breach(plugin):
 
 # ── tool gate through the plugin's registrations ─────────────────────────────────────────────────
 
-def test_sealed_web_search_asks_and_runs_only_on_exact_once(plugin, monkeypatch):
+def test_locked_web_search_asks_and_runs_only_on_exact_once(plugin, monkeypatch):
     import model_tools
     from tools.registry import registry
     ran = []
@@ -301,9 +301,9 @@ def test_sealed_web_search_asks_and_runs_only_on_exact_once(plugin, monkeypatch)
         ran.append(args)
         return json.dumps({"ok": "web_search"})
 
-    monkeypatch.setattr(registry.get_entry("web_search"), "handler", handler)   # before seal: identity pinned
+    monkeypatch.setattr(registry.get_entry("web_search"), "handler", handler)   # before lock: identity pinned
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
-    assert plugin.slash("on local-only").startswith("Sealed")
+    assert plugin.slash("on on-host-only").startswith("Locked")
 
     def call(n):
         return model_tools.handle_function_call("web_search", {"query": "q" * 1500}, task_id="t1",
@@ -403,7 +403,7 @@ def test_live_verification_is_ledgered_with_evidence(plugin):
             return base.VerificationResult(vendor="tinfoil", router_repo="tinfoilsh/confidential-model-router",
                                            enclave_host=self.enclave_host, code_fingerprint="c" * 64,
                                            enclave_fingerprint="e" * 64, release_tag="v9", verifier="test",
-                                           verified_at_local=time.time(), evidence=evidence)
+                                           verified_at_host_clock=time.time(), evidence=evidence)
 
     entry = provider.verification_cache.entry(provider.PROFILE_NAME)
     entry.adapter = Adapter()

@@ -20,7 +20,7 @@ REPO = "tinfoilsh/confidential-model-router"
 def _result(code="c1", enclave="e1", tag="v1", repo=REPO, vendor="tinfoil") -> VerificationResult:
     return VerificationResult(vendor=vendor, router_repo=repo, enclave_host="router.example",
                               code_fingerprint=code, enclave_fingerprint=enclave, release_tag=tag,
-                              verifier="tinfoil/0.14.2", verified_at_local=1.0, evidence={"x": 1})
+                              verifier="tinfoil/0.14.2", verified_at_host_clock=1.0, evidence={"x": 1})
 
 
 def _approve(store: PinStore, pending: PendingPin, via="cli") -> PinRecord:

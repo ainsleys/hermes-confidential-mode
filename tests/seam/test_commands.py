@@ -28,7 +28,7 @@ def _result(plugin, code="c0de" * 16, enclave="e9c1" * 16, tag="v1.2.3"):
     return base.VerificationResult(vendor="tinfoil", router_repo="tinfoilsh/confidential-model-router",
                                    enclave_host="router.tinfoil.invalid", code_fingerprint=code,
                                    enclave_fingerprint=enclave, release_tag=tag, verifier="test",
-                                   verified_at_local=time.time() - 42, evidence={})
+                                   verified_at_host_clock=time.time() - 42, evidence={})
 
 
 def human(answer):
@@ -45,16 +45,16 @@ def test_usage_and_unknown(plugin):
     assert plugin.slash("frobnicate").startswith("Usage: /confidential")
 
 
-def test_status_unsealed_and_sealed(plugin):
+def test_status_unlocked_and_locked(plugin):
     out = plugin.slash("status")
-    assert "not sealed" in out and "Provider/model: custom / llama3 at 127.0.0.1" in out
+    assert "not locked" in out and "Provider/model: custom / llama3 at 127.0.0.1" in out
     assert "Enclave host: (unresolved" in out and "Pinned: none" in out and "Pending pin: none" in out
-    assert "(local clock)" in out and "Tool grants (allowlist): none" in out
-    assert plugin.slash("on local-only").startswith("Sealed")
+    assert "(host clock)" in out and "Tool grants (allowlist): none" in out
+    assert plugin.slash("on on-host-only").startswith("Locked")
     out = plugin.slash("status")
-    assert "SEALED (local-only)" in out and "(local clock)" in out
-    assert "Preflight (local-only, routing config): PASS; config unchanged since seal" in out
-    assert "Breach: none this seal" in out
+    assert "LOCKED (on-host-only)" in out and "(host clock)" in out
+    assert "Preflight (on-host-only, routing config): PASS; config unchanged since lock" in out
+    assert "Breach: none this lock" in out
 
 
 def test_status_shows_pinned_and_pending_fingerprints_and_verification_age(plugin):
@@ -68,7 +68,7 @@ def test_status_shows_pinned_and_pending_fingerprints_and_verification_age(plugi
     out = plugin.slash("status")
     assert "Pinned: tinfoil tinfoilsh/confidential-model-router code c0dec0de enclave e9c1e9c1 release v1.2.3" in out
     assert "Pending pin: tinfoil code ab12cd34" in out and "/confidential pins approve" in out
-    assert "Last verification: 42s ago (local clock)" in out or "Last verification: 43s ago (local clock)" in out
+    assert "Last verification: 42s ago (host clock)" in out or "Last verification: 43s ago (host clock)" in out
 
 
 def test_pins_approve_applies_only_on_explicit_approve(plugin):
@@ -105,12 +105,12 @@ def test_allow_tool_then_it_runs_without_a_prompt(plugin, monkeypatch):
     ran = []
     monkeypatch.setattr(registry.get_entry("web_search"), "handler",
                         lambda args, **kw: ran.append(args) or json.dumps({"ok": 1}))
-    assert plugin.slash("allow web_search").startswith("Not sealed")
-    assert plugin.slash("on local-only").startswith("Sealed")
+    assert plugin.slash("allow web_search").startswith("Not locked")
+    assert plugin.slash("on on-host-only").startswith("Locked")
     asker, asked = human("Allow")
     with bind_asker(asker):
         out = plugin.slash("allow web_search")
-    assert out == "web_search added to the allowlist for this seal." and len(asked) == 1
+    assert out == "web_search added to the allowlist for this lock." and len(asked) == 1
     assert plugin.slash("allow cronjob_manage").startswith("cronjob_manage cannot be allowed")
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     plugin.human("deny")                                            # would refuse if asked
@@ -120,34 +120,34 @@ def test_allow_tool_then_it_runs_without_a_prompt(plugin, monkeypatch):
 
 
 def test_off_prints_counts_and_repairs_unreadable_state(plugin):
-    assert plugin.slash("on local-only").startswith("Sealed")
+    assert plugin.slash("on on-host-only").startswith("Locked")
     from hermes_cli.plugins import invoke_hook
     plugin.rt.ledger.append({"kind": "tool_refused", "purpose": "tool:x", "decision": "cron"})
     plugin.rt.ledger.append({"kind": "tool_asked", "purpose": "tool:y", "decision": "ask"})
     out = plugin.slash("off")
-    assert out.startswith("Unsealed (local-only). Sealed for") and "1 refusal(s)" in out and "1 ask(s)" in out
-    assert plugin.rt.state.sealed() == (False, None)
-    plugin.rt.ctx.state.set("sealed", "corrupt")
+    assert out.startswith("Unlocked (on-host-only). Locked for") and "1 refusal(s)" in out and "1 ask(s)" in out
+    assert plugin.rt.state.locked() == (False, None)
+    plugin.rt.ctx.state.set("locked", "corrupt")
     assert "UNREADABLE" in plugin.slash("status")
     blocked = invoke_hook("pre_llm_call", session_id="s")
     assert blocked and blocked[0]["action"] == "block"
-    assert plugin.slash("off").startswith("Seal state was unreadable; it is now cleared")
-    assert plugin.rt.state.sealed() == (False, None)
+    assert plugin.slash("off").startswith("Lock state was unreadable; it is now cleared")
+    assert plugin.rt.state.locked() == (False, None)
 
 
 def test_check_prints_the_preflight_table(plugin):
-    out = plugin.slash("check local-only")
-    assert out.startswith("confidential preflight: tier=local-only PASS")
+    out = plugin.slash("check on-host-only")
+    assert out.startswith("confidential preflight: tier=on-host-only PASS")
     assert "KEY" in out and "VERDICT" in out and "auxiliary.vision.provider" in out
     assert plugin.slash("check zero-retention").startswith("zero-retention: zero-retention tier not implemented")
 
 
 def test_receipts_delegate_to_w6_render(plugin, monkeypatch):
-    assert plugin.slash("on local-only").startswith("Sealed")
+    assert plugin.slash("on on-host-only").startswith("Locked")
     plugin.rt.ledger.append({"kind": "tool_refused", "session_id": "sess-1", "purpose": "tool:web_search",
                              "decision": "cron"})
     text = plugin.slash("receipts sess-1")
-    assert "sess-1" in text and "local clock" in text
+    assert "sess-1" in text and "host clock" in text
     receipts = _sub(plugin, "receipts")
     doc = json.loads(plugin.slash("receipts sess-1 --json"))
     assert receipts.verify_chain(doc)
@@ -160,9 +160,9 @@ def test_receipts_delegate_to_w6_render(plugin, monkeypatch):
 
 
 def test_slash_watch_shows_the_ledger(plugin):
-    plugin.slash("on local-only")
+    plugin.slash("on on-host-only")
     out = plugin.slash("watch")
-    assert out.splitlines()[0].startswith("TIME") and "seal in_tier sealed" in out
+    assert out.splitlines()[0].startswith("TIME") and "lock in_tier locked" in out
     assert "\x1b[" not in out
 
 
@@ -171,10 +171,10 @@ def test_cli_status_check_watch(plugin, capsys):
     parser = argparse.ArgumentParser()
     entry["setup_fn"](parser)
     assert entry["handler_fn"](parser.parse_args(["status"])) == 0
-    assert "not sealed" in capsys.readouterr().out
-    assert entry["handler_fn"](parser.parse_args(["check", "--tier", "local-only"])) == 0
-    assert "tier=local-only PASS" in capsys.readouterr().out
-    plugin.slash("on local-only")
+    assert "not locked" in capsys.readouterr().out
+    assert entry["handler_fn"](parser.parse_args(["check", "--tier", "on-host-only"])) == 0
+    assert "tier=on-host-only PASS" in capsys.readouterr().out
+    plugin.slash("on on-host-only")
     assert entry["handler_fn"](parser.parse_args(["watch", "--once"])) == 0
     out = capsys.readouterr().out
     assert out.startswith("TIME") and "\x1b[" not in out           # captured stdout is not a tty
@@ -211,7 +211,7 @@ auxiliary:
 """
 
 
-def test_attested_seal_message_and_refusal_reason_without_network(plugin, monkeypatch):
+def test_attested_lock_message_and_refusal_reason_without_network(plugin, monkeypatch):
     """Attested tier through the real AttestedPredicate and profile lookup; only W2's attested_ok (which
     would attest over the network) is replaced."""
     provider = _sub(plugin, "provider")
@@ -220,36 +220,36 @@ def test_attested_seal_message_and_refusal_reason_without_network(plugin, monkey
     monkeypatch.setattr(provider, "attested_ok", lambda name: verdict["v"])
     plugin.cfg.write_text(ATTESTED_CONFIG)
     out = plugin.slash("on attested")
-    assert out.startswith("Not sealed") and "no approved enclave build pinned" in out
+    assert out.startswith("Not locked") and "no approved enclave build pinned" in out
     verdict["v"] = tiers.Verdict(True, "attested enclave verified and pinned", "router.tinfoil.invalid")
     entry = provider.verification_cache.entry("attested-tinfoil")
     entry.result, entry.verified_mono = _result(plugin), time.monotonic()
     out = plugin.slash("on attested")
-    assert out.startswith("Sealed. Model: attested-tinfoil/llama3-3-70b at router.tinfoil.invalid, verified 4")
-    assert "ago (local clock). Tools that send data off this machine" in out and "Fallbacks: none." in out
-    assert "SEALED (attested)" in plugin.slash("status")
+    assert out.startswith("Locked. Model: attested-tinfoil/llama3-3-70b at router.tinfoil.invalid, verified 4")
+    assert "ago (host clock). Tools that send data off this machine" in out and "Fallbacks: none." in out
+    assert "LOCKED (attested)" in plugin.slash("status")
 
 
-def test_gateway_model_switch_is_refused_while_sealed(plugin):
+def test_gateway_model_switch_is_refused_while_locked(plugin):
     from types import SimpleNamespace as NS
     from hermes_cli.plugins import invoke_hook
-    assert invoke_hook("pre_gateway_dispatch", event=NS(text="/model openrouter:x")) == []      # unsealed
-    assert plugin.slash("on local-only").startswith("Sealed")
+    assert invoke_hook("pre_gateway_dispatch", event=NS(text="/model openrouter:x")) == []      # unlocked
+    assert plugin.slash("on on-host-only").startswith("Locked")
     out = invoke_hook("pre_gateway_dispatch", event=NS(text="/model openrouter:x"))
     assert out == [{"action": "rewrite", "text": "/confidential blocked model"}]
-    assert plugin.slash("blocked model").startswith("Refused while sealed: /model")
+    assert plugin.slash("blocked model").startswith("Refused while locked: /model")
     assert invoke_hook("pre_gateway_dispatch", event=NS(text="/moa hi")) == [
         {"action": "rewrite", "text": "/confidential blocked moa"}]
     assert invoke_hook("pre_gateway_dispatch", event=NS(text="/help")) == []
     assert invoke_hook("pre_gateway_dispatch", event=NS(text="model please")) == []
 
 
-def test_seal_refuses_when_hook_timeout_lets_the_recheck_be_skipped(plugin):
+def test_lock_refuses_when_hook_timeout_lets_the_recheck_be_skipped(plugin):
     plugin.cfg.write_text(BASE_CONFIG.replace("plugins:\n", "plugins:\n  hook_callback_timeout: 0.5\n"))
-    out = plugin.slash("on local-only")
-    assert out.startswith("Not sealed") and "plugins.hook_callback_timeout" in out
+    out = plugin.slash("on on-host-only")
+    assert out.startswith("Not locked") and "plugins.hook_callback_timeout" in out
     plugin.cfg.write_text(BASE_CONFIG.replace("plugins:\n", "plugins:\n  hook_callback_timeout: 30\n"))
-    assert plugin.slash("on local-only").startswith("Sealed")
+    assert plugin.slash("on on-host-only").startswith("Locked")
 
 
 # ── hermes confidential replay ───────────────────────────────────────────────────────────────────
@@ -492,9 +492,9 @@ def test_setup_block_gives_vision_and_side_jobs_suitable_models(plugin, capsys):
     out, cfg = _setup_block(plugin, capsys, "--model", "m", "--vision-model", "v", "--aux-model", "a")
     assert cfg["auxiliary"]["vision"]["model"] == "v" and cfg["auxiliary"]["title_generation"]["model"] == "a"
     # The printed block passes the attested preflight structurally (no network).
-    sealing = _sub(plugin, "sealing")
-    report = sealing.run_tier_preflight("attested", config=cfg,
-                                        predicate=sealing.structural_predicate("attested", config=cfg))
+    locking = _sub(plugin, "locking")
+    report = locking.run_tier_preflight("attested", config=cfg,
+                                        predicate=locking.structural_predicate("attested", config=cfg))
     assert report.ok, _sub(plugin, "preflight").format_report(report)
 
 
@@ -522,44 +522,44 @@ def _hermes(plugin, *argv, stdin=None):
 
 def test_cli_on_and_off_in_another_process_govern_the_running_gateway(plugin, monkeypatch):
     """`hermes confidential on/off` in a separate process (the scripted demo) writes the same ctx.state; the
-    loaded plugin (the 'gateway') reads it fresh on its next turn and its allowlist follows the new seal."""
-    from .test_register import LOCAL_URL, REMOTE_URL, build_agent
+    loaded plugin (the 'gateway') reads it fresh on its next turn and its allowlist follows the new lock."""
+    from .test_register import ON_HOST_URL, REMOTE_URL, build_agent
     from ._harness import Rec
-    proc = _hermes(plugin, "on", "local-only")
+    proc = _hermes(plugin, "on", "on-host-only")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.startswith("Sealed (local-only)") and "Preflight:" in proc.stdout
-    assert "confidential preflight: tier=local-only PASS" in proc.stdout
+    assert proc.stdout.startswith("Locked (on-host-only)") and "Preflight:" in proc.stdout
+    assert "confidential preflight: tier=on-host-only PASS" in proc.stdout
     tiers = _sub(plugin, "tiers")
-    assert plugin.rt.state.sealed() == (True, tiers.Tier.LOCAL)
+    assert plugin.rt.state.locked() == (True, tiers.Tier.ON_HOST)
     rec = Rec()
     agent = build_agent(monkeypatch, rec, REMOTE_URL)
-    assert agent.run_conversation("q1")["final_response"].startswith("Confidential mode: sealed to local-only")
+    assert agent.run_conversation("q1")["final_response"].startswith("Confidential mode: locked to on-host-only")
     assert rec.provider_calls == []
-    # The gateway's allowlist is the one persisted by the CLI's seal, not a stale or empty one.
+    # The gateway's allowlist is the one persisted by the CLI's lock, not a stale or empty one.
     gt = _sub(plugin, "gate_tools")
     al = plugin.rt.allowlist()
-    assert al.seal_id == gt.seal_id_for(plugin.rt.state) and al.get("web_search").route is gt.Route.ASK
+    assert al.lock_id == gt.lock_id_for(plugin.rt.state) and al.get("web_search").route is gt.Route.ASK
     # The CLI process imported the built-in tools before building it (else every tool would be unclassified).
-    assert al.get("read_file").route is gt.Route.LOCAL and len(al.tools) > 40
-    # An addition approved in another process (same seal) is honoured without a restart.
+    assert al.get("read_file").route is gt.Route.ON_HOST and len(al.tools) > 40
+    # An addition approved in another process (same lock) is honoured without a restart.
     from tools.registry import registry
-    other = gt.Allowlist.load_persisted(plugin.rt.allowlist_path, registry, seal_id=al.seal_id)
+    other = gt.Allowlist.load_persisted(plugin.rt.allowlist_path, registry, lock_id=al.lock_id)
     other.add("web_search")
     assert plugin.rt.allowlist().is_added("web_search")
     proc = _hermes(plugin, "off")
-    assert proc.returncode == 0 and proc.stdout.startswith("Unsealed (local-only)"), proc.stdout + proc.stderr
+    assert proc.returncode == 0 and proc.stdout.startswith("Unlocked (on-host-only)"), proc.stdout + proc.stderr
     assert agent.run_conversation("q2")["final_response"] == "provider answered"
-    # A reseal from the CLI starts a new seal: the earlier addition does not carry over.
-    assert _hermes(plugin, "on", "local-only").returncode == 0
+    # A relock from the CLI starts a new lock: the earlier addition does not carry over.
+    assert _hermes(plugin, "on", "on-host-only").returncode == 0
     assert not plugin.rt.allowlist().is_added("web_search")
-    ok = build_agent(monkeypatch, Rec(), LOCAL_URL).run_conversation("q3")
+    ok = build_agent(monkeypatch, Rec(), ON_HOST_URL).run_conversation("q3")
     assert ok["final_response"] == "provider answered"
 
 
 def test_cli_on_refusal_and_receipts_exit_codes(plugin):
     plugin.cfg.write_text(BASE_CONFIG + "fallback_providers:\n  - provider: openrouter\n    model: x/y\n")
-    proc = _hermes(plugin, "on", "local-only")
-    assert proc.returncode == 1 and proc.stdout.startswith("Not sealed") and "fallback_providers[0]" in proc.stdout
+    proc = _hermes(plugin, "on", "on-host-only")
+    assert proc.returncode == 1 and proc.stdout.startswith("Not locked") and "fallback_providers[0]" in proc.stdout
     plugin.cfg.write_text(BASE_CONFIG)
     assert _hermes(plugin, "receipts").returncode == 2
     plugin.rt.ledger.append({"kind": "send_observed", "session_id": "sess-cli", "purpose": "main", "host": "127.0.0.1"})
@@ -592,13 +592,13 @@ def test_cli_pins_and_allow_use_the_exact_terminal_asker(plugin):
     rc, out = run("pins", pins_action="approve")
     assert rc == 0 and out.startswith("Pinned tinfoil") and plugin.rt.pins.pending() is None
     rc, out = run("allow", tool="web_search")
-    assert rc == 1 and out.startswith("Not sealed")
-    assert run("on", tier="local-only")[0] == 0
+    assert rc == 1 and out.startswith("Not locked")
+    assert run("on", tier="on-host-only")[0] == 0
     ANSWER[0] = "1\n"
     rc, out = run("allow", tool="web_search")
     assert rc == 0 and plugin.rt.allowlist().is_added("web_search"), out
     rc, out = run("off")
-    assert rc == 0 and out.startswith("Unsealed")
+    assert rc == 0 and out.startswith("Unlocked")
     # The non-tty default asker (a script) answers nobody: nothing is pinned.
     plugin.rt.pins.stage(_result(plugin, code="ab" * 32))
     out = io.StringIO()

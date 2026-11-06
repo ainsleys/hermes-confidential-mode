@@ -871,7 +871,7 @@ def test_tls_probe_records_who_terminates_tls(offline, amd_anchor, fake_sigstore
         assert obs["matches_report_tls_key"] is False
         assert obs["verdict"] == "TLS terminated by a non-enclave key"
         assert r.checks["tls_cert_binding"].startswith("n/a: TLS terminated by a non-enclave key")
-        assert r.ok is True  # recorded, not failed: bodies are still sealed to H
+        assert r.ok is True  # recorded, not failed: bodies are still locked to H
     assert offline == []
 
 

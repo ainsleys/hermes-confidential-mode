@@ -268,8 +268,8 @@ def test_ttl_wall_clock_jumping_backwards_does_not_extend_freshness(cm, setup, c
     assert _verdict_in_tier(cm) is True
 
 
-def test_ttl_ignores_adapter_supplied_verified_at_local(cm, setup, clock):
-    """verified_at_local is NOT attested: a result claiming to be verified far in the future must not
+def test_ttl_ignores_adapter_supplied_verified_at_host_clock(cm, setup, clock):
+    """verified_at_host_clock is NOT attested: a result claiming to be verified far in the future must not
     push the expiry out."""
     future = h.make_result(cm, verified_at=clock.wall + 1e9)
     adapter, store, profile = setup([future, _good(cm, clock)], ttl=TTL)

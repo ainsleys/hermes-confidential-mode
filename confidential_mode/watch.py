@@ -2,7 +2,7 @@
 
 Columns: time, session, purpose, host, bytes, verdict/decision. Rows that left (or tried to leave)
 the tier are coloured: refusals and breaches red, off-tier verdicts yellow. ANSI colour is used only
-when the output stream is a tty. Works sealed or unsealed (the gate ledgers ``send_observed`` either
+when the output stream is a tty. Works locked or unlocked (the gate ledgers ``send_observed`` either
 way). ``once=True`` prints the most recent rows and returns (tests, scripts).
 """
 from __future__ import annotations

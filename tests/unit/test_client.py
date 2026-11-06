@@ -254,7 +254,7 @@ def test_adapter_verify_maps_document_and_counts_one_attestation(tmp_path, monke
                                                                  "router.example")
     assert (res.code_fingerprint, res.enclave_fingerprint, res.release_tag) == ("c1", "e1", "v9")
     assert res.verifier == "tinfoil/0.14.2"
-    assert abs(res.verified_at_local - time.time()) < 5
+    assert abs(res.verified_at_host_clock - time.time()) < 5
     assert res.evidence["schema"] == "confidential-mode/tinfoil-evidence/v1"
     assert res.evidence["claims"]["code_fingerprint"] == "c1"
     assert res.evidence["verification_document"]["securityVerified"] is True

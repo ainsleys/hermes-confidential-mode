@@ -1,18 +1,18 @@
-"""Seal, unseal and the per-turn recheck (W5): the glue between preflight (W3), the tool allowlist
-(W4), the attested provider (W2), and the persisted seal state / ledger (W1).
+"""Lock, unlock and the per-turn recheck (W5): the glue between preflight (W3), the tool allowlist
+(W4), the attested provider (W2), and the persisted lock state / ledger (W1).
 
 Every Hermes-facing collaborator is an injectable keyword with a default that reads Hermes' live
 state, so unit tests pass fakes and register(ctx) passes nothing.
 
-- ``seal(tier, ...)``: run the preflight for the tier; refuse with the formatted report on any
-  failure (ledger ``preflight_fail``); otherwise build the registry allowlist, write the seal state
-  with the config fingerprint, ledger ``seal`` and return the seal message plus the allowlist.
+- ``lock(tier, ...)``: run the preflight for the tier; refuse with the formatted report on any
+  failure (ledger ``preflight_fail``); otherwise build the registry allowlist, write the lock state
+  with the config fingerprint, ledger ``lock`` and return the lock message plus the allowlist.
   zero-retention always refuses (the predicate is a stub).
-- ``unseal(...)``: ledger ``unseal`` with refusal/ask counts for the seal period, clear the seal flag
+- ``unlock(...)``: ledger ``unlock`` with refusal/ask counts for the lock period, clear the lock flag
   and the attested verification cache.
 - ``recheck(...)``: for ``pre_llm_call``. Re-runs the preflight structurally (no network: the
   attestation check is replaced by "is the attested profile registered", the gate does the real
-  check per request) and compares its fingerprint with the one recorded at seal. A change, or a
+  check per request) and compares its fingerprint with the one recorded at lock. A change, or a
   structural failure, marks the session breached (ledger ``breach``) and returns the block message.
 """
 from __future__ import annotations
@@ -23,13 +23,13 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from . import preflight as _pf
 from .ledger import LedgerEvent
-from .tiers import AttestedPredicate, LocalPredicate, Tier, TierPredicate, Verdict, ZdrPredicate, host_of
+from .tiers import AttestedPredicate, OnHostPredicate, Tier, TierPredicate, Verdict, ZdrPredicate, host_of
 
 PROFILE_NAME = "attested-tinfoil"   # provider.PROFILE_NAME; repeated so this module imports no SDK code
 ZDR_REASON = "zero-retention tier not implemented"
 
 # User-facing disclosures (Amendment 4 F1(d), F12; must agree with the tool gate and the README).
-TOOLS_TEXT = ("Tools that send data off this machine (web, browser, messaging, media and other non-local tools) "
+TOOLS_TEXT = ("Tools that send data off this machine (web, browser, messaging, media and other off-host tools) "
               "ask you first, each call; under yolo, approvals off or an unattended run those asks become "
               "blocks. Off-tier remote MCP servers, scheduled jobs and routed delegation are blocked.")
 AUX_TEXT = ("Not prevented, only recorded after the fact: Hermes' auxiliary model calls (session titles, "
@@ -37,31 +37,31 @@ AUX_TEXT = ("Not prevented, only recorded after the fact: Hermes' auxiliary mode
             "stopped by a plugin. The plugin checks the configured and live model runtime before each turn and "
             "ends the turn when either is off-tier, but an auxiliary call that runs anyway (outside a turn, "
             "mid-turn after a switch, or when Hermes skips the check) is recorded as a breach, not refused.")
-SAFE_WORKER_TEXT = ("Sealed mode does not apply when Hermes runs in safe-worker mode: plugins are not loaded there, "
+SAFE_WORKER_TEXT = ("Locked mode does not apply when Hermes runs in safe-worker mode: plugins are not loaded there, "
                     "so nothing is checked, refused or recorded.")
-SEAL_TAIL = (f"{TOOLS_TEXT} Memory: local. Fallbacks: none. {AUX_TEXT} {SAFE_WORKER_TEXT}")
+LOCK_TAIL = (f"{TOOLS_TEXT} Memory: on-host. Fallbacks: none. {AUX_TEXT} {SAFE_WORKER_TEXT}")
 CONFIG_CHANGED_TEXT = (
-    "Confidential mode: the routing config changed after this profile was sealed, so this turn was not "
+    "Confidential mode: the routing config changed after this profile was locked, so this turn was not "
     "sent to any model. Run /confidential check to see what changed, then /confidential off and "
-    "/confidential on <tier> to seal again.")
+    "/confidential on <tier> to lock again.")
 STRUCTURE_FAILED_TEXT = (
-    "Confidential mode: the sealed routing config no longer passes the preflight, so this turn was not "
+    "Confidential mode: the locked routing config no longer passes the preflight, so this turn was not "
     "sent to any model. Run /confidential check, fix the listed keys, then /confidential off and "
     "/confidential on <tier>.")
-SEALED_NOTE = (
-    "[confidential mode] This profile is sealed ({tier}). Tools that send data off this machine ask the user "
+LOCKED_NOTE = (
+    "[confidential mode] This profile is locked ({tier}). Tools that send data off this machine ask the user "
     "first, each call (blocked outright under yolo or approvals off); off-tier remote MCP servers, scheduled "
     "jobs and routed delegation are blocked. If a tool is blocked or refused, tell the user what was blocked "
-    "and ask them to unseal if they need it; do not retry it or look for a workaround. Disclosure for the "
+    "and ask them to unlock if they need it; do not retry it or look for a workaround. Disclosure for the "
     "user if asked: auxiliary model calls (titles, compression, vision) are recorded, not prevented, and "
-    "sealed mode does not apply in Hermes safe-worker mode.")
+    "locked mode does not apply in Hermes safe-worker mode.")
 
 
 def live_runtime_text(tier: Tier, provider: str, host: str, reason: str) -> str:
     """Starts like the llm gate's off-tier refusal (gate_llm.off_tier_text)."""
-    return (f"Confidential mode: sealed to {Tier(tier).value}; this request was not sent. The session's live "
+    return (f"Confidential mode: locked to {Tier(tier).value}; this request was not sent. The session's live "
             f"model runtime is {provider or '(unknown)'} at {host or '(no host)'}, which is off-tier ({reason}), "
-            "so this turn was ended before any model or auxiliary call. Switch the session back to the sealed "
+            "so this turn was ended before any model or auxiliary call. Switch the session back to the locked "
             "model (/model), or run /confidential off.")
 
 
@@ -70,7 +70,7 @@ ASK_KINDS = frozenset({"tool_asked"})
 
 
 @dataclass
-class SealResult:
+class LockResult:
     ok: bool
     message: str
     tier: Optional[Tier] = None
@@ -96,7 +96,7 @@ def _cfg(config: Any, *path: str, default: Any = None) -> Any:
 
 
 def extra_hosts(config: Mapping | None) -> list[str]:
-    hosts = _cfg(config or {}, "confidential", "local", "extra_hosts", default=[])
+    hosts = _cfg(config or {}, "confidential", "on_host", "extra_hosts", default=[])
     return [h for h in hosts if isinstance(h, str)] if isinstance(hosts, list) else []
 
 
@@ -112,8 +112,8 @@ def predicate_for(tier: Tier | str, *, config: Mapping | None = None,
     and ``attested_ok`` from provider (both injectable)."""
     tier = Tier(tier)
     pbu = profile_base_url if profile_base_url is not None else _pf.profile_base_url
-    if tier is Tier.LOCAL:
-        return LocalPredicate(extra_hosts=extra_hosts(config), profile_base_url=pbu)
+    if tier is Tier.ON_HOST:
+        return OnHostPredicate(extra_hosts=extra_hosts(config), profile_base_url=pbu)
     if tier is Tier.ATTESTED:
         return AttestedPredicate([PROFILE_NAME], attested_ok or _default_attested_ok, profile_base_url=pbu)
     return ZdrPredicate()
@@ -179,7 +179,7 @@ def age_text(seconds: float | None) -> str:
 
 
 def _append(ledger: Any, event: Any) -> None:
-    """Best effort: a ledger failure never changes a seal decision."""
+    """Best effort: a ledger failure never changes a lock decision."""
     try:
         ledger.append(event)
     except Exception:
@@ -204,18 +204,18 @@ def _default_verification(provider: str):
         return None
 
 
-def seal_message(tier: Tier, config: Mapping, *, verification: Any = None,
+def lock_message(tier: Tier, config: Mapping, *, verification: Any = None,
                  clock: Callable[[], float] = time.time) -> str:
     provider, model, base_url = _main_route(config)
     route = f"{provider or '?'}/{model or '?'}"
     if tier is Tier.ATTESTED:
-        verified_at = getattr(verification, "verified_at_local", None)
+        verified_at = getattr(verification, "verified_at_host_clock", None)
         host = getattr(verification, "enclave_host", "") or host_of(base_url)
         age = age_text(clock() - verified_at) if isinstance(verified_at, (int, float)) else "never"
-        head = f"Sealed. Model: {route} at {host or '(enclave unresolved)'}, verified {age} ago (local clock)."
+        head = f"Locked. Model: {route} at {host or '(enclave unresolved)'}, verified {age} ago (host clock)."
     else:
-        head = f"Sealed ({tier.value}). Model: {route} at {host_of(base_url) or '(provider default)'} (local endpoint)."
-    return f"{head} {SEAL_TAIL}"
+        head = f"Locked ({tier.value}). Model: {route} at {host_of(base_url) or '(provider default)'} (on-host endpoint)."
+    return f"{head} {LOCK_TAIL}"
 
 
 # ── live main runtime (Amendment 4 F1) ───────────────────────────────────────────────────────────
@@ -253,9 +253,9 @@ def classify_live_runtime(tier: Tier | str, runtime: Mapping, *, config: Mapping
     return v
 
 
-# ── seal / unseal ────────────────────────────────────────────────────────────────────────────────
+# ── lock / unlock ────────────────────────────────────────────────────────────────────────────────
 
-def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, registry: Any = None,
+def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, registry: Any = None,
          plugin_aux_tasks: Optional[Sequence[Any]] = None,
          provider_lookup: Callable[[str], Any] | None = None,
          attested_ok: Callable[[str], Verdict] | None = None,
@@ -264,26 +264,26 @@ def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
          allowlist_builder: Callable[..., Any] | None = None, allowlist_path: Any = None,
          verification: Callable[[str], Any] | None = None, session_id: str = "", surface: str = "",
          live_runtime: Callable[[], Optional[dict]] | None = None,
-         clock: Callable[[], float] = time.time) -> SealResult:
-    """Seal the profile to ``tier`` or refuse with the reason. Never raises for a refusal."""
+         clock: Callable[[], float] = time.time) -> LockResult:
+    """Lock the profile to ``tier`` or refuse with the reason. Never raises for a refusal."""
     try:
         tier = Tier(tier)
     except ValueError:
         names = ", ".join(t.value for t in Tier)
-        return SealResult(False, f"Not sealed: unknown tier {tier!r} (one of: {names}).")
+        return LockResult(False, f"Not locked: unknown tier {tier!r} (one of: {names}).")
 
     base = dict(session_id=session_id or "", tier=tier.value, surface=surface or None)
     if tier is Tier.ZDR:
-        _append(ledger, LedgerEvent(kind="preflight_fail", purpose="seal", verdict="off_tier", decision="refused",
+        _append(ledger, LedgerEvent(kind="preflight_fail", purpose="lock", verdict="off_tier", decision="refused",
                                     detail={"reason": ZDR_REASON}, **base))
-        return SealResult(False, f"Not sealed: {ZDR_REASON}. Use local-only or attested.", tier=tier)
+        return LockResult(False, f"Not locked: {ZDR_REASON}. Use on-host-only or attested.", tier=tier)
 
     try:
-        sealed, current = state.sealed()
+        locked, current = state.locked()
     except Exception:
-        sealed, current = None, None
-    if sealed is True:
-        return SealResult(False, f"Already sealed ({current.value}). Run /confidential off first, then seal again.",
+        locked, current = None, None
+    if locked is True:
+        return LockResult(False, f"Already locked ({current.value}). Run /confidential off first, then lock again.",
                           tier=current)
 
     config = _pf.load_core_config() if config is None else config
@@ -293,9 +293,9 @@ def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
                                 provider_lookup=provider_lookup, builtin_aux_tasks=builtin_aux_tasks)
     if not report.ok:
         _append(ledger, LedgerEvent(
-            kind="preflight_fail", purpose="seal", verdict="off_tier", decision="refused",
+            kind="preflight_fail", purpose="lock", verdict="off_tier", decision="refused",
             detail={"failures": [i.key for i in report.failures()][:100], "fingerprint": report.fingerprint}, **base))
-        return SealResult(False, "Not sealed: the preflight found routes that would leave the tier.\n"
+        return LockResult(False, "Not locked: the preflight found routes that would leave the tier.\n"
                           + _pf.format_report(report), tier=tier, report=report, fingerprint=report.fingerprint)
 
     runtime = (live_runtime or live_main_runtime)()
@@ -304,9 +304,9 @@ def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
                                    profile_base_url=profile_base_url)
         if lv.in_tier is not True:
             _append(ledger, LedgerEvent(
-                kind="preflight_fail", purpose="seal:live_runtime", provider=str(runtime.get("provider") or ""),
+                kind="preflight_fail", purpose="lock:live_runtime", provider=str(runtime.get("provider") or ""),
                 host=lv.host, verdict="off_tier", decision="refused", detail={"reason": lv.reason}, **base))
-            return SealResult(False, f"Not sealed: this session's live model runtime ({runtime.get('provider')} at "
+            return LockResult(False, f"Not locked: this session's live model runtime ({runtime.get('provider')} at "
                               f"{lv.host or '(no host)'}) is off-tier ({lv.reason}), although the config passes. "
                               "Switch the session to the configured model (/model) first.", tier=tier, report=report)
 
@@ -326,31 +326,31 @@ def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
     allowlist = allowlist_builder(registry, predicate=predicate, added_path=allowlist_path)
     allowlist_text = format_allowlist(allowlist)
 
-    state.seal(tier, report.fingerprint)
-    # Amendment 4 F5/F6 (W4): persist this seal's tool identities, tagged with the seal, so a restart
-    # rebuilds from them (not from the live registry) and grants never outlive the seal.
+    state.lock(tier, report.fingerprint)
+    # Amendment 4 F5/F6 (W4): persist this lock's tool identities, tagged with the lock, so a restart
+    # rebuilds from them (not from the live registry) and grants never outlive the lock.
     if hasattr(allowlist, "persist"):
-        from .gate_tools import seal_id_for
-        allowlist.seal_id = seal_id_for(state)
+        from .gate_tools import lock_id_for
+        allowlist.lock_id = lock_id_for(state)
         try:
             allowlist.persist(allowlist_path)
         except Exception:
-            pass   # an unpersisted seal rebuilds as an empty allowlist after a restart: fail closed
+            pass   # an unpersisted lock rebuilds as an empty allowlist after a restart: fail closed
     verification_result = (verification or _default_verification)(PROFILE_NAME) if tier is Tier.ATTESTED else None
-    message = seal_message(tier, config, verification=verification_result, clock=clock)
+    message = lock_message(tier, config, verification=verification_result, clock=clock)
     provider, model, base_url = _main_route(config)
     from .gate_tools import Route
     routes = {r.value: len(allowlist.names(r)) for r in Route}
     _append(ledger, LedgerEvent(
-        kind="seal", purpose="seal", provider=provider, model=model, host=host_of(base_url), verdict="in_tier",
-        decision="sealed", detail={"fingerprint": report.fingerprint, "routes": routes,
+        kind="lock", purpose="lock", provider=provider, model=model, host=host_of(base_url), verdict="in_tier",
+        decision="locked", detail={"fingerprint": report.fingerprint, "routes": routes,
                                    "aux_tasks": len(report.aux_tasks)}, **base))
-    return SealResult(True, message + "\n\nTools:\n" + allowlist_text, tier=tier, report=report,
+    return LockResult(True, message + "\n\nTools:\n" + allowlist_text, tier=tier, report=report,
                       allowlist=allowlist, allowlist_text=allowlist_text, fingerprint=report.fingerprint)
 
 
 def period_counts(ledger: Any, since: float | None, *, page: int = 1000) -> dict:
-    """Refusal / ask / breach counts for events at or after ``since`` (local clock)."""
+    """Refusal / ask / breach counts for events at or after ``since`` (host clock)."""
     counts = {"refused": 0, "asked": 0, "allowed": 0, "breach": 0, "send_refused": 0, "tool_refused": 0}
     last = 0
     while True:
@@ -372,36 +372,36 @@ def period_counts(ledger: Any, since: float | None, *, page: int = 1000) -> dict
         last = rows[-1].id
 
 
-def unseal(*, state, ledger, session_id: str = "", surface: str = "",
-           clear_cache: Callable[[], None] | None = None, clock: Callable[[], float] = time.time) -> SealResult:
-    """Clear the seal (also repairs unreadable seal state) and print the seal period's counts."""
+def unlock(*, state, ledger, session_id: str = "", surface: str = "",
+           clear_cache: Callable[[], None] | None = None, clock: Callable[[], float] = time.time) -> LockResult:
+    """Clear the lock (also repairs unreadable lock state) and print the lock period's counts."""
     try:
-        sealed, tier = state.sealed()
+        locked, tier = state.locked()
     except Exception:
-        sealed, tier = None, None   # unreadable: unsealing is the repair
+        locked, tier = None, None   # unreadable: unlocking is the repair
     try:
-        since = state.sealed_since()
+        since = state.locked_since()
     except Exception:
         since = None
     try:
         counts = period_counts(ledger, since)
     except Exception:
         counts = {}
-    state.unseal()
+    state.unlock()
     try:
         (clear_cache or _clear_verification_cache)()
     except Exception:
         pass
-    _append(ledger, LedgerEvent(kind="unseal", session_id=session_id or "", purpose="seal",
-                                tier=tier.value if tier else None, decision="unsealed", surface=surface or None,
-                                detail={"counts": counts, "was_sealed": sealed is True,
-                                        "repaired": sealed is None}))
-    if sealed is False:
-        return SealResult(True, "Not sealed; nothing to do.", counts=counts)
+    _append(ledger, LedgerEvent(kind="unlock", session_id=session_id or "", purpose="lock",
+                                tier=tier.value if tier else None, decision="unlocked", surface=surface or None,
+                                detail={"counts": counts, "was_locked": locked is True,
+                                        "repaired": locked is None}))
+    if locked is False:
+        return LockResult(True, "Not locked; nothing to do.", counts=counts)
     period = f" for {age_text(clock() - since)}" if since else ""
-    head = "Seal state was unreadable; it is now cleared (unsealed)." if sealed is None else \
-        f"Unsealed ({tier.value}). Sealed{period}:"
-    return SealResult(True, f"{head} {counts.get('refused', 0)} refusal(s) "
+    head = "Lock state was unreadable; it is now cleared (unlocked)." if locked is None else \
+        f"Unlocked ({tier.value}). Locked{period}:"
+    return LockResult(True, f"{head} {counts.get('refused', 0)} refusal(s) "
                             f"({counts.get('send_refused', 0)} model, {counts.get('tool_refused', 0)} tool), "
                             f"{counts.get('asked', 0)} ask(s), {counts.get('breach', 0)} breach(es).",
                       tier=tier, counts=counts)
@@ -419,10 +419,10 @@ def recheck(*, state, ledger, config: Mapping | None = None, session_id: str = "
             provider_lookup: Callable[[str], Any] | None = None,
             profile_base_url: Callable[[str], Any] | None = None,
             builtin_aux_tasks: Optional[Sequence[str]] = None) -> Optional[str]:
-    """None when unsealed or the sealed config is unchanged; otherwise the block message (and the
+    """None when unlocked or the locked config is unchanged; otherwise the block message (and the
     session is marked breached, ledgered once per session). Read-only, no network."""
-    sealed, tier = state.sealed()       # StateError propagates: the caller fails closed
-    if sealed is not True:
+    locked, tier = state.locked()       # StateError propagates: the caller fails closed
+    if locked is not True:
         return None
     config = _pf.load_core_config() if config is None else config
     predicate = structural_predicate(tier, config=config, provider_lookup=provider_lookup,

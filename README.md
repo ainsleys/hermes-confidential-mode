@@ -3,28 +3,30 @@
 
 confidential-mode is a plugin for Hermes Agent. It does two things.
 
-First, it shows you every place your conversation leaves your machine. It keeps a local log of
-every model call Hermes makes, with the host the call went to and how many bytes it carried. You can
-watch that log live in a terminal.
+First, it shows you every place your conversation leaves your machine. It keeps a log of every model
+call Hermes makes, with the host the call went to and how many bytes it carried. The log is a file on
+the machine that runs Hermes. You can watch that log live in a terminal.
 
-Second, it lets you seal a Hermes profile. While a profile is sealed, the plugin allows the model to
+Second, it lets you lock a Hermes profile. While a profile is locked, the plugin allows the model to
 run in only one of two kinds of place. The first kind is a host whose network address is loopback or
-in a private range. The second kind is a Tinfoil enclave whose build you have approved. Sealed mode
-refuses any other destination before Hermes sends a single byte to it.
+in a private range. The second kind is a Tinfoil enclave whose build you have approved. Locked mode
+refuses any other destination before Hermes sends a single byte to it. The plugin says "lock" and not
+"seal" because sealing already means something else in confidential computing: sealed storage and
+sealing keys belong to the enclave hardware, and this plugin does not redefine them.
 
 A private-range address is not the same thing as a machine you control. A neighbour in a cloud
 provider's private network has a private-range address too, and so does a carrier-grade NAT address.
 The plugin cannot tell those apart from your own machine.
 
-While a profile is sealed, the plugin also does the following:
+While a profile is locked, the plugin also does the following:
 
-- It refuses main model calls and fallbacks whose destination is outside the sealed tier. It does
+- It refuses main model calls and fallbacks whose destination is outside the locked tier. It does
   this before the request is sent.
 - It asks you before any tool call that would send data off the machine. If you answer `always`,
   it stops asking for that tool until you remove the grant from Hermes' `command_allowlist`.
-- It refuses to seal at all while any of Hermes' side jobs (compression, title generation, vision,
+- It refuses to lock at all while any of Hermes' side jobs (compression, title generation, vision,
   memory and others) is configured to go somewhere outside the tier.
-- It writes every send, refusal, question and answer to a local log. You can watch that log live,
+- It writes every send, refusal, question and answer to an on-host log. You can watch that log live,
   and you can turn one session's part of it into a receipt.
 
 The closest everyday comparison is Little Snitch, the macOS firewall that asks before an application
@@ -44,7 +46,7 @@ loop around a language model. It sends your messages to the model, runs the tool
 for, and sends the results back. Everything in this README happens inside the Hermes process.
 
 **Profile.** A profile is a separate Hermes home directory with its own `config.yaml`, keys, memory,
-sessions and plugin data. Sealing applies to one profile at a time. It applies to every session that
+sessions and plugin data. Locking applies to one profile at a time. It applies to every session that
 runs on that profile.
 
 **Session.** A session is one conversation with Hermes. Each session has its own session id. A
@@ -64,17 +66,23 @@ describing an image. Each side job is called an auxiliary task. Each task has it
 `auxiliary.<task>` in your config.
 
 **Tier.** A tier is a rule that decides which destinations count as acceptable. This plugin has two
-working tiers, `local-only` and `attested`, and one placeholder, `zero-retention`. A destination
+working tiers, `on-host-only` and `attested`, and one placeholder, `zero-retention`. A destination
 that satisfies the rule is "in-tier". Any other destination is "off-tier".
 
-**Seal.** To seal a profile is to lock it to one tier. While a profile is sealed, the plugin refuses
-off-tier model calls and gates off-machine tools. To unseal is to remove that lock.
+**On-host and off-host.** On-host means on the machine that runs Hermes. Off-host means anywhere
+else. An on-host tool, such as `read_file`, does its work on that machine. An off-host tool, such as
+`web_search`, sends data to another machine. The `on-host-only` tier is wider than its name: it also
+accepts private-range addresses, as the `on-host-only` section below explains.
+
+**Lock.** To lock a profile is to hold it to one tier. While a profile is locked, the plugin refuses
+off-tier model calls and gates off-host tools. To unlock is to remove that hold. The time between a
+lock and the next unlock is called a lock period.
 
 **Safe-worker mode.** Safe-worker mode is a mode for managed Hermes worker processes in which Hermes
 deliberately loads no plugins. Nothing in this plugin runs there.
 
 **Preflight.** The preflight is the check the plugin runs over your Hermes config before it will
-seal. It reads every route that can carry conversation text and gives each one a verdict. For each
+lock. It reads every route that can carry conversation text and gives each one a verdict. For each
 route that fails, it names the config key to change.
 
 **Middleware.** Middleware is code that Hermes runs around an operation. A plugin's middleware
@@ -89,17 +97,17 @@ before a tool call (`pre_tool_call`) and the moment just before an auxiliary cal
 observe, because Hermes ignores what they return.
 
 **Breach.** A breach is a ledger row that records an auxiliary call which went off-tier while the
-profile was sealed. The plugin also marks the session as breached. A breach is a record after the
+profile was locked. The plugin also marks the session as breached. A breach is a record after the
 fact. It does not mean the call was stopped.
 
-**Ledger.** The ledger is the plugin's local log. It is a SQLite file under your Hermes home. Each row
-records one event, such as a send, a refusal, a question, an answer, a seal or a verification. A row
+**Ledger.** The ledger is the plugin's on-host log. It is a SQLite file under your Hermes home. Each row
+records one event, such as a send, a refusal, a question, an answer, a lock or a verification. A row
 holds hosts, byte counts and decisions. It never holds prompt or response text.
 
 **Receipt.** A receipt is a rendering of the ledger rows for one session. It comes as text or as
 JSON.
 
-**Allowlist.** The allowlist is the table the plugin builds when you seal. It lists every tool
+**Allowlist.** The allowlist is the table the plugin builds when you lock. It lists every tool
 registered in Hermes at that moment. For each tool it says what the plugin will do: run it, ask
 first, or block it. Do not confuse it with Hermes' own `command_allowlist`, which is the list of
 approvals that Hermes remembers permanently.
@@ -180,7 +188,7 @@ access blocked. It shows whether the stored bytes still check out.
 >   main model call and for fallbacks, the plugin refuses the call before any byte is sent.
 >
 >   Auxiliary side jobs are handled differently. Hermes gives plugins no way to stop an auxiliary
->   call at the moment it is sent. The plugin therefore refuses to seal while any side job is
+>   call at the moment it is sent. The plugin therefore refuses to lock while any side job is
 >   configured to go off-tier. If a side job goes off-tier anyway, the plugin records a breach.
 > - **The vendor shipping a new enclave build without your consent.** Suppose Tinfoil's router
 >   presents fingerprints that differ from your pin. Then the plugin refuses the turn. It keeps
@@ -193,7 +201,7 @@ access blocked. It shows whether the stored bytes still check out.
 >   plugin's functions.
 > - **You editing your own ledger.** The ledger is a file on your machine. A receipt is therefore a
 >   report you make about yourself. It proves only what its attached evidence proves.
-> - **Shell and code-execution tools.** The `terminal` and `execute_code` tools run locally. The
+> - **Shell and code-execution tools.** The `terminal` and `execute_code` tools run on this host. The
 >   commands they run can open network connections. The plugin does not inspect those commands.
 > - **Tinfoil's own infrastructure.** This covers the vendor's control plane, meaning the systems
 >   Tinfoil uses to run and manage its service. It also covers the model backends that sit behind
@@ -256,10 +264,10 @@ the first one only.
 
 ## Three tiers
 
-A tier is the rule the plugin applies while sealed. The plugin has three tiers. Two of them work
+A tier is the rule the plugin applies while locked. The plugin has three tiers. Two of them work
 today.
 
-### `local-only`
+### `on-host-only`
 
 **Where the model may run.** The model's host must be one of the following:
 
@@ -268,7 +276,7 @@ today.
 - an address in `100.64.0.0/10`, the carrier-grade NAT range, which tailnets also use;
 - an IPv6 link-local address (`fe80::/10`) or unique local address (`fc00::/7`);
 - one of the names `localhost`, `localhost.localdomain`, `ip6-localhost` or `ip6-loopback`;
-- a host you list in `confidential.local.extra_hosts`.
+- a host you list in `confidential.on_host.extra_hosts`.
 
 The plugin never looks a hostname up in DNS. Any other hostname is off-tier unless you list it in
 `extra_hosts`.
@@ -281,8 +289,8 @@ the plugin that you trust that host.
 **What it costs you.** The model's quality is whatever your hardware can run. Its availability is
 your hardware's availability.
 
-Every auxiliary task needs a local route as well, and that includes vision. At 84a0301, Hermes'
-built-in local provider profiles (ollama, lmstudio and llama-cpp) report no base URL. The plugin
+Every auxiliary task needs an on-host route as well, and that includes vision. At 84a0301, Hermes'
+built-in on-host provider profiles (ollama, lmstudio and llama-cpp) report no base URL. The plugin
 therefore cannot tell where they point. You have to set `model.base_url` and each
 `auxiliary.<task>.base_url` yourself.
 
@@ -313,10 +321,10 @@ The tier is reserved for hosted providers that promise not to keep your data. Su
 policy. Nothing the plugin can observe from your machine confirms it, so the plugin offers no check
 for it yet.
 
-## Look before you seal
+## Look before you lock
 
 Two commands let you see where your conversation goes without changing anything. Both work on an
-install that has never been sealed.
+install that has never been locked.
 
 ### `hermes confidential check`
 
@@ -334,12 +342,12 @@ On a typical OpenRouter setup, an excerpt looks like this:
 confidential preflight: tier=attested FAIL (26 item(s)) fingerprint=3b1b1f8f92a4
 KEY                                      VALUE                                     VERDICT   FIX
 model.provider                           openrouter                                off_tier  set model.provider/model.base_url to an in-tier route (provider openrouter is not an attested profile)
-fallback_providers[0]                    provider=openrouter, model=deepseek/d...  off_tier  remove fallback_providers entries while sealed
+fallback_providers[0]                    provider=openrouter, model=deepseek/d...  off_tier  remove fallback_providers entries while locked
 auxiliary.vision.provider                auto                                      off_tier  set auxiliary.vision.provider (or auxiliary.vision.base_url) explicitly to an in-tier vision route; ...
 auxiliary.compression.provider           deepinfra                                 off_tier  set auxiliary.compression.provider/auxiliary.compression.base_url to an in-tier route (provider deepinfra is not an attested profile)
 auxiliary.title_generation.provider      auto -> openrouter                        off_tier  inherits the main route: fix model.provider, or pin auxiliary.title_generation.provider to an in-tier provider
 ...
-memory.provider                          honcho                                    off_tier  set memory.provider: "" (built-in local memory) while sealed
+memory.provider                          honcho                                    off_tier  set memory.provider: "" (built-in on-host memory) while locked
 plugins.isolation                        (default in_process)                      in_tier
 ```
 
@@ -350,7 +358,7 @@ hermes confidential watch
 ```
 
 This command streams the ledger to your terminal. It prints one row per send. Each row shows the
-purpose of the call, the host it went to, and its size. On an unsealed install, this is the view that
+purpose of the call, the host it went to, and its size. On an unlocked install, this is the view that
 tends to surprise people:
 
 ```
@@ -366,14 +374,14 @@ In a terminal, refusals and breaches print in red. Off-tier verdicts print in ye
 `hermes confidential watch --once` prints the latest rows and exits. `/confidential watch` shows the
 same rows inside a chat.
 
-On an unsealed install, tool calls are not written to the ledger.
+On an unlocked install, tool calls are not written to the ledger.
 
-## Sealing
+## Locking
 
 These are the commands:
 
 ```
-/confidential on attested        # or: local-only
+/confidential on attested        # or: on-host-only
 /confidential off
 /confidential status
 ```
@@ -383,27 +391,27 @@ These are the commands:
 When you run `/confidential on <tier>`, the plugin does the following, in order.
 
 1. The plugin runs the preflight for that tier over your current config.
-2. If any route fails, the plugin refuses to seal. It prints the preflight table, so you can see
+2. If any route fails, the plugin refuses to lock. It prints the preflight table, so you can see
    which keys to change. It writes a `preflight_fail` row to the ledger.
 3. If every route passes, the plugin records a fingerprint of your routing config. This fingerprint
    covers the model, the fallbacks, every auxiliary task, delegation, TTS, memory, MCP servers, and
    the `plugins.*` keys that govern how plugin hooks run.
 4. The plugin builds the tool allowlist from the tools registered in Hermes at that moment.
-5. The plugin saves the allowlist to disk, tagged with this seal's identity.
-6. The plugin prints the allowlist. The printout groups the tools into those that run locally,
+5. The plugin saves the allowlist to disk, tagged with this lock's identity.
+6. The plugin prints the allowlist. The printout groups the tools into those that run on this host,
    those that will ask you, and those that are blocked.
 
 One preflight rule concerns hooks. If `plugins.hook_callback_timeout` is set to more than 0 and less
 than 5 seconds, the preflight fails. A timeout that short would let Hermes skip this plugin's
 per-turn check.
 
-The seal survives a restart of Hermes. After a restart, the plugin rebuilds the allowlist from the
-copy it saved at seal time. It does not rebuild it from whatever happens to be registered after the
+The lock survives a restart of Hermes. After a restart, the plugin rebuilds the allowlist from the
+copy it saved at lock time. It does not rebuild it from whatever happens to be registered after the
 restart.
 
-### What happens while sealed
+### What happens while locked
 
-From the moment of sealing, the following rules apply to every session on this profile.
+From the moment of locking, the following rules apply to every session on this profile.
 
 **Off-tier model calls are refused.** Suppose a main-loop model call is aimed at a destination
 outside the tier. The plugin's middleware then returns a refusal message in place of the model's
@@ -413,30 +421,30 @@ reply. The request is never sent.
 then ends the turn with the message "attested endpoint unavailable; this turn ended; resend". It does
 this so that Hermes never reaches the point where it would switch to a fallback.
 
-**A changed config blocks every turn.** If your routing config changes after you seal, its
-fingerprint no longer matches the one recorded at seal time. Every turn is then blocked until you
-unseal and seal again.
+**A changed config blocks every turn.** If your routing config changes after you lock, its
+fingerprint no longer matches the one recorded at lock time. Every turn is then blocked until you
+unlock and lock again.
 
 **The live model runtime is checked on every turn.** Hermes can switch the model for one session
 without changing your config. `/model` does this, and so does the `--provider` flag. The plugin
-checks the live runtime at the start of every sealed turn. If the live runtime is off-tier, the plugin
+checks the live runtime at the start of every locked turn. If the live runtime is off-tier, the plugin
 ends the turn.
 
-On gateway surfaces, the plugin refuses `/model` and `/moa` outright while sealed.
+On gateway surfaces, the plugin refuses `/model` and `/moa` outright while locked.
 
 On the CLI and the TUI, the plugin cannot intercept `/model`. The per-turn check still catches the
 switch on the next turn. Between the switch and that check, however, Hermes can make auxiliary calls
 to the new runtime. The plugin can only record those calls. It cannot stop them.
 
-**Local tools run without asking.** These tools run without a prompt: `terminal`,
+**On-host tools run without asking.** These tools run without a prompt: `terminal`,
 `process_manage`, `execute_code`, `read_file`, `write_file`, `patch`, `search_files`, `skills_list`,
 `skill_view`, `skill_manage`, `todo_list`, `memory`, `clarify` and `session_search`.
 
-A tool counts as local only in its built-in form. If a plugin or an MCP server registers a tool under
-one of these names, that tool is not treated as local.
+A tool counts as on-host only in its built-in form. If a plugin or an MCP server registers a tool under
+one of these names, that tool is not treated as on-host.
 
 `terminal` can reach the network. The [Limitations](#limitations-an-upstream-roadmap) section
-explains why the plugin still treats it as local.
+explains why the plugin still treats it as on-host.
 
 **Every other tool asks you first.** Before such a tool runs, the plugin asks on Hermes' normal
 approval prompt, with a line like this:
@@ -452,7 +460,7 @@ The three answers differ in how long they last:
 
 - `once` runs the tool for this one call.
 - `session` stops the asking for this tool for the rest of the session.
-- `always` stops the asking for this tool permanently, across seals. Hermes stores the grant in
+- `always` stops the asking for this tool permanently, across locks. Hermes stores the grant in
   `command_allowlist` under the name `plugin_rule:confidential-mode:tool:<name>`. The grant stays
   there until you delete that entry. `/confidential pins` lists these grants.
 
@@ -465,24 +473,24 @@ run unasked.
 The one exception is a tool you have added with `/confidential allow`, described below. Such a tool
 runs without asking, in these contexts too.
 
-**Some tools are always blocked.** While sealed, the plugin blocks these tools outright:
+**Some tools are always blocked.** While locked, the plugin blocks these tools outright:
 
-- `cronjob_manage`. A scheduled job would run later, outside this sealed session.
+- `cronjob_manage`. A scheduled job would run later, outside this locked session.
 - Tools from an MCP server whose URL points to an off-tier host. A server whose config cannot be
   read is treated the same way.
-- Any tool that was not registered when you sealed. Any tool whose handler or toolset has changed
+- Any tool that was not registered when you locked. Any tool whose handler or toolset has changed
   since then is blocked as well. The plugin cannot vouch for a tool it did not classify.
 - `delegate_task` when the call names a route. A route is any field that would send the child agent
   somewhere else: a profile, a provider, a base URL, an ACP command, or a backend other than the
   default. (An ACP command launches an external agent through the Agent Client Protocol.)
 
-Plain delegation on the default backend is allowed. The child agent inherits the sealed profile, so
+Plain delegation on the default backend is allowed. The child agent inherits the locked profile, so
 it stays inside the tier.
 
 ### `/confidential allow <tool>`
 
 `/confidential allow <tool>` adds a tool that would normally ask to the allowlist, for the rest of
-this seal. Once the tool is added, it runs without asking.
+this lock. Once the tool is added, it runs without asking.
 
 The steps are these:
 
@@ -492,7 +500,7 @@ The steps are these:
    no.
 3. If you pick Allow, the plugin adds the tool and writes a `tool_allowed` row to the ledger.
 
-Additions last only as long as the seal. `/confidential off` deletes them. The next seal starts with
+Additions last only as long as the lock. `/confidential off` deletes them. The next lock starts with
 none.
 
 Tools that are always blocked cannot be added this way.
@@ -541,7 +549,7 @@ Setup never writes your config.
 
 The steps are these:
 
-1. On the next sealed turn, the plugin verifies the router. It finds fingerprints that differ from
+1. On the next locked turn, the plugin verifies the router. It finds fingerprints that differ from
    your pin.
 2. The plugin refuses the turn with the message "enclave build changed; run /confidential pins
    approve".
@@ -629,8 +637,8 @@ A receipt lists the following, in this order:
 8. the context compactions;
 9. a fixed closing paragraph.
 
-Some ledger rows describe the whole profile rather than one session. Seals, unseals, verifications
-and pin events are of this kind. A receipt includes those that fall within the sealed period the
+Some ledger rows describe the whole profile rather than one session. Locks, unlocks, verifications
+and pin events are of this kind. A receipt includes those that fall within the locked period the
 session belongs to.
 
 ### What a receipt never contains
@@ -642,7 +650,7 @@ removes any such key it finds.
 
 ### Clocks
 
-Every time in a receipt comes from this machine's clock. The receipt labels each one "(local clock)".
+Every time in a receipt comes from this machine's clock. The receipt labels each one "(host clock)".
 
 ### The hash chain and the chain head
 
@@ -697,12 +705,12 @@ marked "unverified entry" has no evidence, or an incomplete capture. Such a row 
 - what shell, terminal and code-execution tools sent off the machine;
 - which model backends sit behind the vendor's router;
 - any other access the vendor's operators have to the machines involved;
-- Hermes' auxiliary calls, which can leave the sealed tier while sealed (for example after a
+- Hermes' auxiliary calls, which can leave the locked tier while the profile is locked (for example after a
   runtime model switch). These are recorded after the fact. They are not prevented.
 
-The paragraph states four further limits. First, the ledger is a local file, and another plugin can
+The paragraph states four further limits. First, the ledger is a file on this host, and another plugin can
 write rows that look exactly like this plugin's own. Second, the hash chain behaves as described
-above. Third, sealed mode does not apply when Hermes runs in safe-worker mode, which loads no plugins.
+above. Third, locked mode does not apply when Hermes runs in safe-worker mode, which loads no plugins.
 Fourth, timestamps come from this machine's clock and are not attested.
 
 ### Offline replay
@@ -822,9 +830,9 @@ any of the following.
 - **That the capture time is when the capture happened.** The capture time is taken from the
   evidence itself.
 
-## Fewer hosted parties without sealing
+## Fewer hosted parties without locking
 
-Perhaps you are not going to seal. You can still reduce the number of vendors on the leak map with
+Perhaps you are not going to lock. You can still reduce the number of vendors on the leak map with
 four config changes.
 
 Each vendor that remains still sees your conversation in plaintext.
@@ -863,7 +871,7 @@ what moved.
 
 ## Limitations (an upstream roadmap)
 
-Sealed mode closes what a plugin can close. Each gap below is a place where a plugin cannot close the
+Locked mode closes what a plugin can close. Each gap below is a place where a plugin cannot close the
 road on its own. For each one, this section says four things: what the gap is, why it exists, what
 the plugin does about it today, and which change would close it. Most of the changes belong in Hermes
 core. A few belong to the vendor or to the SDK, and the item says so. The long form, with more
@@ -878,7 +886,7 @@ enters `run_llm_execution_middleware` (`hermes_cli/middleware.py:136`). The only
 function is the main loop, at `agent/turn_api_call.py:139`. The `pre_auxiliary_call` hook cannot veto
 a call either, because Hermes ignores what it returns (`agent/auxiliary_hooks.py:210-240`).
 
-**What the plugin does today.** It refuses to seal while any auxiliary task routes off-tier. If an
+**What the plugin does today.** It refuses to lock while any auxiliary task routes off-tier. If an
 auxiliary call goes off-tier anyway, it records a breach. It cannot stop the bytes. That includes the
 auxiliary calls that follow a live `/model` switch, before the next turn's check runs.
 
@@ -905,15 +913,15 @@ tool runs only on an exact `once`, `session` or `always`.
 **Why it exists.** Hermes gives a plugin the command text. It does not tell the plugin what the
 command will connect to.
 
-**What the plugin does today.** It treats these tools as local and lets them run. Every receipt says
+**What the plugin does today.** It treats these tools as on-host and lets them run. Every receipt says
 that shell and code tools are not covered.
 
 **The core change that would close it.** A network policy on the terminal backend that plugins can
 read and require. One example is the docker backend with networking switched off.
 
-#### 4. MCP servers launched as a local command are not inspected
+#### 4. MCP servers launched as a command on this host are not inspected
 
-**The gap.** An MCP server configured with `command:` runs as a local child process. That process can
+**The gap.** An MCP server configured with `command:` runs as a child process on this host. That process can
 itself be a network client, or a proxy to a hosted service.
 
 **Why it exists.** Hermes does not tell plugins what network access an MCP server has.
@@ -927,15 +935,15 @@ sandboxed launcher for each one.
 #### 5. Safe-worker mode disables hooks and middleware
 
 **The gap.** Safe-worker mode is a mode for managed Hermes worker processes in which Hermes
-deliberately loads no plugins. Sealed mode therefore does not apply there.
+deliberately loads no plugins. Locked mode therefore does not apply there.
 
 **Why it exists.** In a safe worker, Hermes skips plugin discovery (`hermes_cli/plugins.py:1206-1208`).
 Hook dispatch returns nothing (`hermes_cli/plugins_dispatch.py:285-288` and `:561-564`).
 
-**What the plugin does today.** Nothing. It discloses the gap in every seal message and in every
+**What the plugin does today.** Nothing. It discloses the gap in every lock message and in every
 receipt.
 
-**The core change that would close it.** A sealed flag that Hermes core can see and that safe workers
+**The core change that would close it.** A locked flag that Hermes core can see and that safe workers
 honour.
 
 #### 6. The trust boundary is the whole Hermes process
@@ -948,11 +956,11 @@ alternative, `plugins.isolation: host`. Under host isolation, this plugin's prov
 register in a separate child process. They become invisible to Hermes, and Hermes gives no warning
 (C0 spike 2).
 
-**What the plugin does today.** It refuses to seal unless isolation is `in_process` and its provider
-is visible to Hermes. It records each tool's handler at seal time.
+**What the plugin does today.** It refuses to lock unless isolation is `in_process` and its provider
+is visible to Hermes. It records each tool's handler at lock time.
 
 **The core change that would close it.** A policy tier for middleware that always runs outermost, and
-a switch that says "only these plugins load while sealed".
+a switch that says "only these plugins load while locked".
 
 #### 7. The vendor attests the router, not the model
 
@@ -973,8 +981,8 @@ is not in the pin.
 **Why it exists.** Tinfoil's report carries no client nonce and no signed time. This is not a Hermes
 gap.
 
-**What the plugin does today.** It labels every time "(local clock)". It makes no freshness claim
-beyond "verified at local time T".
+**What the plugin does today.** It labels every time "(host clock)". It makes no freshness claim
+beyond "verified at host-clock time T".
 
 **The change that would close it.** A client nonce in the report, and signed responses. Both are
 changes on the vendor's side.
@@ -1021,9 +1029,9 @@ the request has already gone out.
 
 **The core change that would close it.** Let a provider profile or a hook veto metadata requests.
 
-#### 12. No mixed "attested or local" tier yet (planned)
+#### 12. No mixed "attested or on-host" tier yet (planned)
 
-**The gap.** A seal is one tier. Cheap side jobs cannot run on a local model while the main model is
+**The gap.** A lock is one tier. Cheap side jobs cannot run on an on-host model while the main model is
 attested.
 
 **Why it exists.** This is a limit of the plugin, not of Hermes.
@@ -1048,7 +1056,7 @@ After installing, do the following.
 1. Set `TINFOIL_API_KEY` the way you set any provider key.
 2. Run `hermes confidential setup --model <model id>`.
 3. Leave `plugins.isolation` at its default value, `in_process`. Under host isolation, Hermes cannot
-   see the attested provider, and the preflight refuses to seal.
+   see the attested provider, and the preflight refuses to lock.
 
 ## Config
 
@@ -1064,7 +1072,7 @@ The plugin's own keys live under a top-level `confidential:` section of `config.
 | `confidential.verify_ttl_seconds` | 300 | How many seconds one verification vouches for the router. It is measured on a monotonic clock, which does not jump when the system time changes. |
 | `confidential.verify_wait_seconds` | 5 | How many seconds a turn waits for a verification before the turn is refused. |
 | `confidential.pins.auto_approve_platform_only` | `false` | When `true`, the plugin applies a new pin without asking if only the platform changed and the SDK's signed hardware check passed. That check exists for TDX only. |
-| `confidential.local.extra_hosts` | `[]` | Extra hosts that the `local-only` tier counts as local. |
+| `confidential.on_host.extra_hosts` | `[]` | Extra hosts that the `on-host-only` tier counts as on-host. |
 | `confidential.model` | Unset. | The model id that `hermes confidential setup` writes into the config block it prints. |
 
 ## Tests

@@ -2,7 +2,7 @@
 
 Written blind against the contract, then adapted to W3's public signatures and to the
 adjudications in INTERFACES.md Amendments 1 and 2:
-    LocalPredicate(extra_hosts=(), profile_base_url=None)
+    OnHostPredicate(extra_hosts=(), profile_base_url=None)
     AttestedPredicate(attested_profiles, attested_ok, profile_base_url=None)
     ZdrPredicate()
 
@@ -18,7 +18,7 @@ import pytest
 from confidential_mode import tiers  # noqa: E402  (ImportError until W3 merges is expected)
 from confidential_mode.tiers import Destination, Tier, Verdict  # noqa: E402
 
-LocalPredicate = tiers.LocalPredicate
+OnHostPredicate = tiers.OnHostPredicate
 AttestedPredicate = tiers.AttestedPredicate
 ZdrPredicate = tiers.ZdrPredicate
 host_of = tiers.host_of
@@ -64,8 +64,8 @@ def _profile_url(profiles):
     return f
 
 
-def local(monkeypatch=None, extra_hosts=(), profiles=None):
-    return LocalPredicate(extra_hosts=tuple(extra_hosts), profile_base_url=_profile_url(profiles))
+def on_host(monkeypatch=None, extra_hosts=(), profiles=None):
+    return OnHostPredicate(extra_hosts=tuple(extra_hosts), profile_base_url=_profile_url(profiles))
 
 
 def dest(base_url, provider="custom", purpose="main"):
@@ -81,9 +81,9 @@ def classify(pred, d) -> Verdict:
     return v
 
 
-# --------------------------------------------------------------------------- LOCAL: look-alikes
+# --------------------------------------------------------------------------- ON_HOST: look-alikes
 
-LOOKS_LOCAL_BUT_IS_NOT = [
+LOOKS_ON_HOST_BUT_IS_NOT = [
     "http://localhost.evil.com/v1",
     "http://localhost.evil.com:11434/v1",
     "http://127.0.0.1.nip.io/v1",
@@ -117,10 +117,10 @@ LOOKS_LOCAL_BUT_IS_NOT = [
 ]
 
 
-@pytest.mark.parametrize("url", LOOKS_LOCAL_BUT_IS_NOT)
+@pytest.mark.parametrize("url", LOOKS_ON_HOST_BUT_IS_NOT)
 def test_lookalike_is_off_tier(monkeypatch, url):
-    v = classify(local(monkeypatch), dest(url))
-    assert v.in_tier is False, f"{url!r} classified local: {v}"
+    v = classify(on_host(monkeypatch), dest(url))
+    assert v.in_tier is False, f"{url!r} classified on-host: {v}"
 
 
 # Numeric/obfuscated forms that the OS resolver maps to loopback. The contract says "host is
@@ -138,10 +138,10 @@ OBFUSCATED_LOOPBACK = [
 
 @pytest.mark.parametrize("url", OBFUSCATED_LOOPBACK)
 def test_obfuscated_loopback_fails_closed(monkeypatch, url):
-    assert classify(local(monkeypatch), dest(url)).in_tier is False
+    assert classify(on_host(monkeypatch), dest(url)).in_tier is False
 
 
-GENUINELY_LOCAL = [
+GENUINELY_ON_HOST = [
     "http://127.0.0.1:11434/v1",
     "http://127.255.255.254/v1",
     "http://localhost:11434/v1",
@@ -166,16 +166,16 @@ GENUINELY_LOCAL = [
 ]
 
 
-@pytest.mark.parametrize("url", GENUINELY_LOCAL)
-def test_genuinely_local_is_in_tier(monkeypatch, url):
-    v = classify(local(monkeypatch), dest(url))
-    assert v.in_tier is True, f"{url!r} should be local per contract: {v}"
+@pytest.mark.parametrize("url", GENUINELY_ON_HOST)
+def test_genuinely_on_host_is_in_tier(monkeypatch, url):
+    v = classify(on_host(monkeypatch), dest(url))
+    assert v.in_tier is True, f"{url!r} should be on-host per contract: {v}"
 
 
 def test_scheme_missing_fails_closed(monkeypatch):
     # "192.168.1.1:8080/v1" has no authority per RFC 3986 (urlparse reads "192.168.1.1" as the
     # scheme). The contract says "base_url host"; with no host the only safe answer is off-tier.
-    pred = local(monkeypatch)
+    pred = on_host(monkeypatch)
     for url in ("192.168.1.1:8080/v1", "192.168.1.1/v1", "localhost:11434/v1", "evil.com/v1",
                 "//evil.com/v1"):
         assert classify(pred, dest(url)).in_tier is False, url
@@ -189,7 +189,7 @@ PARSER_DISAGREEMENT = [
     "http://[::1]\\@evil.com/v1",            # urllib raises, httpx reads evil.com
     "http://127.0.0.1:11434\\@evil.com/v1",
     "http:\\\\evil.com\\@127.0.0.1/",
-    "http://127.0.0.1\\v1",                  # backslash in the path of a local URL
+    "http://127.0.0.1\\v1",                  # backslash in the path of an on-host URL
     "http://evil.com\t@127.0.0.1/v1",
     "http://evil.com\n@127.0.0.1/v1",
     "http://evil.com\r@127.0.0.1/v1",
@@ -202,19 +202,19 @@ PARSER_DISAGREEMENT = [
 
 @pytest.mark.parametrize("url", PARSER_DISAGREEMENT)
 def test_parser_disagreement_is_off_tier(monkeypatch, url):
-    assert classify(local(monkeypatch), dest(url)).in_tier is False, repr(url)
+    assert classify(on_host(monkeypatch), dest(url)).in_tier is False, repr(url)
 
 
-def test_encoded_backslash_userinfo_is_local_control(monkeypatch):
+def test_encoded_backslash_userinfo_is_on_host_control(monkeypatch):
     # All parsers agree: %5C stays inside userinfo, host is 127.0.0.1.
-    v = classify(local(monkeypatch), dest("http://evil.com%5C@127.0.0.1/v1"))
+    v = classify(on_host(monkeypatch), dest("http://evil.com%5C@127.0.0.1/v1"))
     assert v.in_tier is True and v.host == "127.0.0.1", v
 
 
 def test_trailing_dot_localhost_does_not_widen(monkeypatch):
     # "localhost." is the FQDN of localhost; either verdict is defensible (ADJUDICATE), but it must
     # not crash and must not open "localhost.<anything>".
-    pred = local(monkeypatch)
+    pred = on_host(monkeypatch)
     classify(pred, dest("http://localhost.:11434/v1"))
     assert classify(pred, dest("http://localhost.evil.:11434/v1")).in_tier is False
     assert classify(pred, dest("http://localhost..evil.com/v1")).in_tier is False
@@ -223,20 +223,20 @@ def test_trailing_dot_localhost_does_not_widen(monkeypatch):
 def test_last_at_sign_wins(monkeypatch):
     # Both urllib and WHATWG take the host after the LAST '@': this one really is loopback, and the
     # reported host must be the loopback address, not the userinfo junk.
-    v = classify(local(monkeypatch), dest("http://user:pw@evil.com@127.0.0.1/v1"))
+    v = classify(on_host(monkeypatch), dest("http://user:pw@evil.com@127.0.0.1/v1"))
     assert "evil" not in v.host
 
 
 def test_unencoded_zone_id_does_not_crash(monkeypatch):
-    classify(local(monkeypatch), dest("http://[fe80::1%en0]/v1"))
+    classify(on_host(monkeypatch), dest("http://[fe80::1%en0]/v1"))
 
 
-def test_ipv4_mapped_private_is_local(monkeypatch):
-    # Amendment 1: IPv4-mapped private/loopback IPv6 is local.
+def test_ipv4_mapped_private_is_on_host(monkeypatch):
+    # Amendment 1: IPv4-mapped private/loopback IPv6 is on-host.
     for url in ("http://[::ffff:127.0.0.1]/v1", "http://[::ffff:10.0.0.1]/v1",
                 "http://[::ffff:192.168.1.1]:8080/v1"):
-        assert classify(local(monkeypatch), dest(url)).in_tier is True, url
-    assert classify(local(monkeypatch), dest("http://[::ffff:169.254.169.254]/v1")).in_tier is False
+        assert classify(on_host(monkeypatch), dest(url)).in_tier is True, url
+    assert classify(on_host(monkeypatch), dest("http://[::ffff:169.254.169.254]/v1")).in_tier is False
 
 
 @pytest.mark.parametrize("url", [
@@ -251,28 +251,28 @@ def test_ipv4_mapped_private_is_local(monkeypatch):
     "\x00",
 ])
 def test_malformed_urls_never_raise_and_never_in_tier_unless_parseable(monkeypatch, url):
-    v = classify(local(monkeypatch), dest(url))
+    v = classify(on_host(monkeypatch), dest(url))
     if url.strip() != "http://127.0.0.1/v1":
         assert v.in_tier is False, f"malformed {url!r} classified in-tier: {v}"
 
 
-# --------------------------------------------------------------------------- LOCAL: empty base_url
+# --------------------------------------------------------------------------- ON_HOST: empty base_url
 
 def test_empty_base_url_without_profile_is_off(monkeypatch):
-    v = classify(local(monkeypatch, profiles={}), dest("", provider="ollama"))
+    v = classify(on_host(monkeypatch, profiles={}), dest("", provider="ollama"))
     assert v.in_tier is False
 
 
-def test_empty_base_url_with_local_profile_is_in(monkeypatch):
+def test_empty_base_url_with_on_host_profile_is_in(monkeypatch):
     profiles = {"ollama": FakeProfile("ollama", "http://localhost:11434/v1")}
-    v = classify(local(monkeypatch, profiles=profiles), dest("", provider="ollama"))
+    v = classify(on_host(monkeypatch, profiles=profiles), dest("", provider="ollama"))
     assert v.in_tier is True, v
 
 
 def test_empty_base_url_with_hosted_profile_is_off(monkeypatch):
     profiles = {"ollama": FakeProfile("ollama", "https://ollama.com/v1"),
                 "openrouter": FakeProfile("openrouter", "https://openrouter.ai/api/v1")}
-    pred = local(monkeypatch, profiles=profiles)
+    pred = on_host(monkeypatch, profiles=profiles)
     assert classify(pred, dest("", provider="ollama")).in_tier is False
     assert classify(pred, dest("", provider="openrouter")).in_tier is False
 
@@ -280,21 +280,21 @@ def test_empty_base_url_with_hosted_profile_is_off(monkeypatch):
 def test_empty_base_url_with_lookalike_profile_is_off(monkeypatch):
     profiles = {"x": FakeProfile("x", "http://localhost.evil.com/v1"),
                 "y": FakeProfile("y", ""), "z": FakeProfile("z", None)}
-    pred = local(monkeypatch, profiles=profiles)
+    pred = on_host(monkeypatch, profiles=profiles)
     for p in ("x", "y", "z"):
         assert classify(pred, dest("", provider=p)).in_tier is False, p
 
 
-def test_explicit_base_url_wins_over_local_profile(monkeypatch):
-    # A local profile must not launder an explicit hosted base_url.
+def test_explicit_base_url_wins_over_on_host_profile(monkeypatch):
+    # An on-host profile must not launder an explicit hosted base_url.
     profiles = {"ollama": FakeProfile("ollama", "http://localhost:11434/v1")}
-    v = classify(local(monkeypatch, profiles=profiles),
+    v = classify(on_host(monkeypatch, profiles=profiles),
                  dest("https://evil.com/v1", provider="ollama"))
     assert v.in_tier is False
 
 
 def test_provider_name_is_not_evidence(monkeypatch):
-    pred = local(monkeypatch)
+    pred = on_host(monkeypatch)
     for prov in ("local", "localhost", "ollama", "lmstudio", "llamacpp"):
         assert classify(pred, dest("https://api.evil.com/v1", provider=prov)).in_tier is False
 
@@ -302,14 +302,14 @@ def test_provider_name_is_not_evidence(monkeypatch):
 def test_profile_lookup_that_raises_fails_closed(monkeypatch):
     def bad(*a, **k):
         raise RuntimeError("registry exploded")
-    pred = LocalPredicate(profile_base_url=bad)
+    pred = OnHostPredicate(profile_base_url=bad)
     assert classify(pred, dest("", provider="ollama")).in_tier is False
 
 
-# --------------------------------------------------------------------------- LOCAL: extra_hosts
+# --------------------------------------------------------------------------- ON_HOST: extra_hosts
 
 def test_extra_hosts_exact_match_only(monkeypatch):
-    pred = local(monkeypatch, extra_hosts=["gpu-box.lan"])
+    pred = on_host(monkeypatch, extra_hosts=["gpu-box.lan"])
     assert classify(pred, dest("http://gpu-box.lan:8000/v1")).in_tier is True
     for url in ("http://gpu-box.lan.evil.com/v1", "http://evil-gpu-box.lan/v1",
                 "http://xgpu-box.lan/v1", "http://gpu-box.lan@evil.com/v1",
@@ -319,15 +319,15 @@ def test_extra_hosts_exact_match_only(monkeypatch):
 
 
 def test_extra_hosts_empty_string_does_not_match_everything(monkeypatch):
-    pred = local(monkeypatch, extra_hosts=["", " ", "."])
+    pred = on_host(monkeypatch, extra_hosts=["", " ", "."])
     assert classify(pred, dest("https://evil.com/v1")).in_tier is False
     assert classify(pred, dest("")).in_tier is False
 
 
-# --------------------------------------------------------------------------- LOCAL: no secrets
+# --------------------------------------------------------------------------- ON_HOST: no secrets
 
 def test_reason_and_host_never_carry_userinfo(monkeypatch):
-    pred = local(monkeypatch)
+    pred = on_host(monkeypatch)
     for url in ("http://alice:sk-PREDSECRET@evil.com/v1",
                 "http://alice:sk-PREDSECRET@127.0.0.1:11434/v1",
                 "http://sk-PREDSECRET@localhost/v1",
@@ -339,7 +339,7 @@ def test_reason_and_host_never_carry_userinfo(monkeypatch):
 
 
 def test_userinfo_does_not_change_host_classification(monkeypatch):
-    pred = local(monkeypatch)
+    pred = on_host(monkeypatch)
     assert classify(pred, dest("http://u:p@127.0.0.1:11434/v1")).in_tier is True
     v = classify(pred, dest("http://10.0.0.1@evil.com/v1"))
     assert v.in_tier is False
@@ -347,14 +347,14 @@ def test_userinfo_does_not_change_host_classification(monkeypatch):
 
 
 def test_verdict_is_independent_of_purpose(monkeypatch):
-    pred = local(monkeypatch)
+    pred = on_host(monkeypatch)
     for purpose in ("main", "fallback", "aux:vision", "tool:web_search", "memory", "mcp:x"):
         assert classify(pred, dest("https://evil.com/v1", purpose=purpose)).in_tier is False
         assert classify(pred, dest("http://127.0.0.1/v1", purpose=purpose)).in_tier is True
 
 
-def test_local_predicate_tier_attribute(monkeypatch):
-    assert local(monkeypatch).tier == Tier.LOCAL
+def test_on_host_predicate_tier_attribute(monkeypatch):
+    assert on_host(monkeypatch).tier == Tier.ON_HOST
 
 
 # --------------------------------------------------------------------------- host_of
@@ -453,7 +453,7 @@ def test_attested_other_registered_provider_is_off(monkeypatch):
         assert classify(pred, adest(provider=prov)).in_tier is False, prov
 
 
-def test_attested_local_url_does_not_qualify(monkeypatch):
+def test_attested_on_host_url_does_not_qualify(monkeypatch):
     pred = attested(monkeypatch, AttestRecorder(True), REGISTERED)
     assert classify(pred, adest(provider="custom", base_url="http://127.0.0.1:11434/v1")).in_tier is False
 

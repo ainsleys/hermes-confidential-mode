@@ -39,16 +39,16 @@ def _turn(agent):
     return agent.run_conversation(f"please summarise {SECRET}")
 
 
-def _gate(manager, rec, *, decide=None, tier=Tier.LOCAL, sealed=True, ledger=None, attested_ok=None):
+def _gate(manager, rec, *, decide=None, tier=Tier.ON_HOST, locked=True, ledger=None, attested_ok=None):
     pred = H.FakePredicate(decide or H.always(False), tier=tier)
     ledger = ledger if ledger is not None else H.FakeLedger()
-    if isinstance(sealed, H.Seal):
-        sealed.tier = tier
-        seal = sealed
+    if isinstance(locked, H.Lock):
+        locked.tier = tier
+        lock = locked
     else:
-        seal = H.Seal(sealed, tier=tier)
-    H.install_gate(manager, rec, predicate=pred, ledger=ledger, is_sealed=seal, attested_ok=attested_ok)
-    return pred, ledger, seal
+        lock = H.Lock(locked, tier=tier)
+    H.install_gate(manager, rec, predicate=pred, ledger=ledger, is_locked=lock, attested_ok=attested_ok)
+    return pred, ledger, lock
 
 
 def _assert_provider_answer(result, rec, n_sends=1):
@@ -63,7 +63,7 @@ def _assert_provider_answer(result, rec, n_sends=1):
 
 
 @pytest.mark.parametrize("api_mode", MODES)
-def test_sealed_in_tier_reaches_provider_exactly_once(monkeypatch, manager, api_mode):
+def test_locked_in_tier_reaches_provider_exactly_once(monkeypatch, manager, api_mode):
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, api_mode, rec)
     pred, ledger, _ = _gate(manager, rec, decide=H.always(True))
@@ -75,10 +75,10 @@ def test_sealed_in_tier_reaches_provider_exactly_once(monkeypatch, manager, api_
 
 
 @pytest.mark.parametrize("api_mode", MODES)
-def test_unsealed_passes_through_and_observes(monkeypatch, manager, api_mode):
+def test_unlocked_passes_through_and_observes(monkeypatch, manager, api_mode):
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, api_mode, rec)
-    pred, ledger, _ = _gate(manager, rec, decide=H.always(False), sealed=False)
+    pred, ledger, _ = _gate(manager, rec, decide=H.always(False), locked=False)
     result = _turn(agent)
     _assert_provider_answer(result, rec)
     assert "send_observed" in H.kinds(ledger)
@@ -92,7 +92,7 @@ def test_unsealed_passes_through_and_observes(monkeypatch, manager, api_mode):
 
 
 @pytest.mark.parametrize("api_mode", MODES)
-def test_off_tier_sealed_refuses_with_zero_provider_requests(monkeypatch, manager, api_mode):
+def test_off_tier_locked_refuses_with_zero_provider_requests(monkeypatch, manager, api_mode):
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, api_mode, rec)
     pred, ledger, _ = _gate(manager, rec, decide=H.always(False, "off-tier host"))
@@ -367,15 +367,15 @@ def test_ledger_append_raising_only_on_refusal_rows_still_refuses(monkeypatch, m
     H.assert_refused_clean(_turn(agent), rec, agent)
 
 
-@pytest.mark.parametrize("sealed,decide", [(False, H.always(False)), (True, H.always(True))],
-                         ids=["unsealed", "sealed-in-tier"])
-def test_ledger_append_raising_never_double_sends(monkeypatch, manager, sealed, decide):
+@pytest.mark.parametrize("locked,decide", [(False, H.always(False)), (True, H.always(True))],
+                         ids=["unlocked", "locked-in-tier"])
+def test_ledger_append_raising_never_double_sends(monkeypatch, manager, locked, decide):
     """Ledger failure on an allowed send. Ruling (C2): the ledger is best effort and never changes
     a decision, so the turn passes through exactly once (a gate that retries next_call, or raises
     so Hermes re-runs the chain, would send twice; one that refuses changed the decision)."""
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec)
-    _gate(manager, rec, decide=decide, sealed=sealed, ledger=H.FakeLedger(fail=OSError("disk full")))
+    _gate(manager, rec, decide=decide, locked=locked, ledger=H.FakeLedger(fail=OSError("disk full")))
     result = _turn(agent)
     assert len(rec.provider_calls) == 1, f"provider received {len(rec.provider_calls)} requests"
     assert rec.fallback_calls == []
@@ -484,7 +484,7 @@ def test_missing_or_odd_context_fields_never_fail_open(monkeypatch, manager, mut
 ], ids=["userinfo", "userinfo-port", "path-ip", "path-localhost", "suffix", "query", "fragment"])
 def test_base_url_with_userinfo_or_trailing_path_reaches_predicate_verbatim(monkeypatch, manager, url, allowed):
     """The gate must hand the predicate base_url exactly as Hermes passed it; any 'helpful'
-    normalisation (strip userinfo, take the last path segment) lets a crafted URL pass as local."""
+    normalisation (strip userinfo, take the last path segment) lets a crafted URL pass as on-host."""
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec, base_url=url)
     pred, ledger, _ = _gate(manager, rec, decide=H.by_host(allowed))
@@ -497,12 +497,12 @@ def test_base_url_with_userinfo_or_trailing_path_reaches_predicate_verbatim(monk
 
 @pytest.mark.parametrize("url", ["http://127.0.0.1@evil.example/v1", "https://evil.example/v1/127.0.0.1",
                                  "http://localhost.evil.example/v1"], ids=["userinfo", "path-ip", "suffix"])
-def test_unsealed_watch_view_host_is_the_real_host(monkeypatch, manager, url):
+def test_unlocked_watch_view_host_is_the_real_host(monkeypatch, manager, url):
     """send_observed feeds the watch view; a naive host parse would show '127.0.0.1' for a send
     that actually went to evil.example."""
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec, base_url=url)
-    _, ledger, _ = _gate(manager, rec, decide=H.always(False), sealed=False)
+    _, ledger, _ = _gate(manager, rec, decide=H.always(False), locked=False)
     _turn(agent)
     obs = [e for e in ledger.events if H.ev_field(e, "kind") == "send_observed"]
     assert len(obs) == 1
@@ -516,10 +516,10 @@ def test_unsealed_watch_view_host_is_the_real_host(monkeypatch, manager, url):
 # =============================================================================================
 
 
-def test_unsealed_send_observed_records_byte_size_not_prompt(monkeypatch, manager):
+def test_unlocked_send_observed_records_byte_size_not_prompt(monkeypatch, manager):
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec)
-    _, ledger, _ = _gate(manager, rec, sealed=False)
+    _, ledger, _ = _gate(manager, rec, locked=False)
     _turn(agent)
     obs = [e for e in ledger.events if H.ev_field(e, "kind") == "send_observed"]
     assert len(obs) == 1
@@ -544,18 +544,18 @@ def _circular(request):
 
 
 @pytest.mark.parametrize("mutate", [_unserialisable, _circular], ids=["unserialisable", "circular"])
-def test_non_json_request_unsealed_still_sends_exactly_once(monkeypatch, manager, mutate):
+def test_non_json_request_unlocked_still_sends_exactly_once(monkeypatch, manager, mutate):
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec)
     H.install_outer_payload_mutator(manager, mutate)
-    _, ledger, _ = _gate(manager, rec, sealed=False)
+    _, ledger, _ = _gate(manager, rec, locked=False)
     _assert_provider_answer(_turn(agent), rec)
     assert "send_observed" in H.kinds(ledger)
     H.assert_no_secret_in_ledger(ledger)
 
 
 @pytest.mark.parametrize("mutate", [_unserialisable, _circular], ids=["unserialisable", "circular"])
-def test_non_json_request_sealed_in_tier_still_sends_exactly_once(monkeypatch, manager, mutate):
+def test_non_json_request_locked_in_tier_still_sends_exactly_once(monkeypatch, manager, mutate):
     """Byte-size computation raising would be converted into a refusal of a legitimate turn."""
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec)
@@ -565,7 +565,7 @@ def test_non_json_request_sealed_in_tier_still_sends_exactly_once(monkeypatch, m
 
 
 @pytest.mark.parametrize("mutate", [_unserialisable, _circular], ids=["unserialisable", "circular"])
-def test_non_json_request_sealed_off_tier_refuses_with_zero_sends(monkeypatch, manager, mutate):
+def test_non_json_request_locked_off_tier_refuses_with_zero_sends(monkeypatch, manager, mutate):
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec)
     H.install_outer_payload_mutator(manager, mutate)
@@ -592,7 +592,7 @@ def test_provider_error_echoing_prompt_is_not_shown_or_ledgered(monkeypatch, man
 
 
 # =============================================================================================
-# Fallback re-entry and seal flips within one turn
+# Fallback re-entry and lock flips within one turn
 # =============================================================================================
 
 
@@ -634,27 +634,27 @@ def test_fallback_reentry_attested_tier_asks_attested_ok_for_new_provider(monkey
     assert rec.sends_to(H.host_of(H.OFF_TIER_URL)) == []
 
 
-def test_is_sealed_flip_after_first_read_does_not_open_gate(monkeypatch, manager):
-    """is_sealed answers True once, then False. A gate that reads it more than once per call
-    (e.g. once to decide, again inside a helper) can take the unsealed branch for a sealed call."""
+def test_is_locked_flip_after_first_read_does_not_open_gate(monkeypatch, manager):
+    """is_locked answers True once, then False. A gate that reads it more than once per call
+    (e.g. once to decide, again inside a helper) can take the unlocked branch for a locked call."""
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec)
-    seal = H.Seal([True, False])
-    _gate(manager, rec, decide=H.always(False), sealed=seal)
+    lock = H.Lock([True, False])
+    _gate(manager, rec, decide=H.always(False), locked=lock)
     H.assert_refused_clean(_turn(agent), rec, agent)
-    assert seal.calls >= 1
+    assert lock.calls >= 1
 
 
-def test_seal_engaged_mid_turn_refuses_the_retry(monkeypatch, manager):
-    """Unsealed first call returns an invalid response; the user seals; Hermes' retry re-enters
-    the gate. The seal must be read per call, not cached per gate or per turn."""
+def test_lock_engaged_mid_turn_refuses_the_retry(monkeypatch, manager):
+    """Unlocked first call returns an invalid response; the user locks; Hermes' retry re-enters
+    the gate. The lock must be read per call, not cached per gate or per turn."""
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec, respond=lambda n, kw, a: None)
-    seal = H.Seal([False, True])
-    _, ledger, _ = _gate(manager, rec, decide=H.always(False), sealed=seal)
+    lock = H.Lock([False, True])
+    _, ledger, _ = _gate(manager, rec, decide=H.always(False), locked=lock)
     result = _turn(agent)
     assert len(rec.middleware_calls) >= 2 or rec.provider_calls == [], "premise: Hermes retried through the gate"
-    assert len(rec.provider_calls) <= 1, "LEAK: a call after the seal reached the provider"
+    assert len(rec.provider_calls) <= 1, "LEAK: a call after the lock reached the provider"
     assert "send_refused" in H.kinds(ledger)
     assert result.get("final_response") != H.PROVIDER_TEXT
 
@@ -682,7 +682,7 @@ def test_in_tier_turn_then_off_tier_turn_is_refused_no_cached_verdict(monkeypatc
     rec.middleware_calls.clear()
     rec.provider_calls.clear()
     H.assert_refused_clean(_turn(agent), rec, agent)
-    assert len(pred.seen) == 2, "the predicate must be consulted on every sealed call"
+    assert len(pred.seen) == 2, "the predicate must be consulted on every locked call"
 
 
 def test_in_tier_500_then_next_turn_still_classified_fresh(monkeypatch, manager):
@@ -808,13 +808,13 @@ def test_base_exception_from_provider_is_not_converted_to_refusal(monkeypatch, m
 
 
 # =============================================================================================
-# 429 / 500 under seal: no sleep, no cooldown, no fallback
+# 429 / 500 under lock: no sleep, no cooldown, no fallback
 # =============================================================================================
 
 
 @pytest.mark.parametrize("retry_after", ["30", "0", "86400", "garbage"])
 @pytest.mark.parametrize("api_mode", MODES)
-def test_sealed_429_retry_after_no_sleep_no_cooldown_no_fallback(monkeypatch, manager, api_mode, retry_after):
+def test_locked_429_retry_after_no_sleep_no_cooldown_no_fallback(monkeypatch, manager, api_mode, retry_after):
     rec = H.Rec()
 
     def respond(n, kw, agent):
@@ -842,7 +842,7 @@ def test_sealed_429_retry_after_no_sleep_no_cooldown_no_fallback(monkeypatch, ma
     lambda: RuntimeError("SDK bug"),
     lambda: ConnectionResetError("peer reset"),
 ], ids=["500", "connection", "timeout", "401", "400-context", "RuntimeError", "ConnectionReset"])
-def test_sealed_in_tier_any_provider_error_refuses_once_without_failover(monkeypatch, manager, make_exc):
+def test_locked_in_tier_any_provider_error_refuses_once_without_failover(monkeypatch, manager, make_exc):
     """Every error class Hermes would recover from by retry/compress/rotate/fallback must end the
     turn instead (each of those recoveries can re-send the conversation)."""
     rec = H.Rec()
@@ -892,7 +892,7 @@ def test_request_scoped_client_path_in_tier_one_wire_request(monkeypatch, manage
 
 
 @pytest.mark.parametrize("status,headers", [(429, {"retry-after": "30"}), (500, {}), (503, {"retry-after": "5"})])
-def test_request_scoped_client_path_sealed_http_error_one_wire_request(monkeypatch, manager, status, headers):
+def test_request_scoped_client_path_locked_http_error_one_wire_request(monkeypatch, manager, status, headers):
     rec = H.Rec()
     agent, wire = _wire_agent(monkeypatch, rec, respond=lambda req, n: httpx.Response(
         status, headers=headers, json={"error": {"message": f"echo {SECRET}"}}))
@@ -946,7 +946,7 @@ def test_concurrent_turns_share_gate_without_cross_talk(monkeypatch, manager, or
     pred = H.FakePredicate(decide)
     ledger = H.FakeLedger()
     shared_rec = H.Rec()
-    H.install_gate(manager, shared_rec, predicate=pred, ledger=ledger, is_sealed=H.Seal(True))
+    H.install_gate(manager, shared_rec, predicate=pred, ledger=ledger, is_locked=H.Lock(True))
 
     box_a, box_b = {}, {}
     ta = threading.Thread(target=lambda: box_a.update(r=_turn(agent_a)), daemon=True)
@@ -981,7 +981,7 @@ def test_concurrent_many_turns_off_tier_never_leak(monkeypatch, manager):
         agent = H.build_agent(monkeypatch, "chat_completions", rec, base_url=f"https://{host}/v1")
         pairs.append((host, rec, agent))
     H.install_gate(manager, H.Rec(), predicate=H.FakePredicate(H.by_host(in_host)), ledger=H.FakeLedger(),
-                   is_sealed=H.Seal(True))
+                   is_locked=H.Lock(True))
     start = threading.Barrier(len(pairs))
     results: dict[int, dict] = {}
 

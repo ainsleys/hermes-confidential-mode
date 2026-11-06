@@ -409,7 +409,7 @@ class TinfoilAdapter:
         return VerificationResult(
             vendor=VENDOR, router_repo=self.router_repo, enclave_host=doc.enclave_host,
             code_fingerprint=doc.code_fingerprint, enclave_fingerprint=doc.enclave_fingerprint,
-            release_tag=doc.release_tag, verifier=verifier_s, verified_at_local=now,
+            release_tag=doc.release_tag, verifier=verifier_s, verified_at_host_clock=now,
             evidence=evidence,
         )
 

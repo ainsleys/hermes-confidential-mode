@@ -1,3 +1,5 @@
+> Note: the plugin's vocabulary was renamed after this review: seal became lock (sealed became locked, unseal became unlock), and local became on-host (the `local-only` tier became `on-host-only`). The text below keeps the original words.
+
 # Adversarial review of docs/WORKSTREAM-independent-verification.md (2026-11-07)
 
 Fresh reviewer, SDK source (tinfoil 0.14.2, ehbp, sigstore-python 4.5.1) read, nothing run. [unverified] marks points not confirmable offline.

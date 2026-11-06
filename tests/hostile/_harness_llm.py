@@ -10,7 +10,7 @@ tests/spikes/test_refusal_shape.py, extended to record WHERE each provider call 
 
 The gate is built through the public W1 name only:
 
-    confidential_mode.gate_llm.build_middleware(ledger=..., is_sealed=..., predicate_for=..., attested_ok=...)
+    confidential_mode.gate_llm.build_middleware(ledger=..., is_locked=..., predicate_for=..., attested_ok=...)
 
 ``HOSTILE_GATE_MODULE`` overrides the module path (used to run this suite against a reference
 gate and its mutants while W1 does not exist yet).
@@ -115,7 +115,7 @@ def rate_limit_429(retry_after: str = "30"):
 class FakePredicate:
     """TierPredicate fake. ``decide(dest) -> Verdict`` (or raise). Records every Destination."""
 
-    def __init__(self, decide: Callable[[Destination], Any], tier: Tier = Tier.LOCAL):
+    def __init__(self, decide: Callable[[Destination], Any], tier: Tier = Tier.ON_HOST):
         self.tier = tier
         self._decide = decide
         self.seen: list[Destination] = []
@@ -204,11 +204,11 @@ def ledger_text(ledger: FakeLedger) -> str:
     return "\n".join(out)
 
 
-class Seal:
-    """is_sealed fake returning W1's ``(sealed: bool, tier: Tier | None)``. ``values`` is a bool or a
-    list of bools consumed per invocation (last repeats); ``tier`` is reported while sealed."""
+class Lock:
+    """is_locked fake returning W1's ``(locked: bool, tier: Tier | None)``. ``values`` is a bool or a
+    list of bools consumed per invocation (last repeats); ``tier`` is reported while locked."""
 
-    def __init__(self, values, tier: Tier = Tier.LOCAL):
+    def __init__(self, values, tier: Tier = Tier.ON_HOST):
         self._values = values if isinstance(values, list) else [values]
         self.tier = tier
         self.calls = 0
@@ -218,8 +218,8 @@ class Seal:
         with self.lock:
             i = min(self.calls, len(self._values) - 1)
             self.calls += 1
-            sealed = self._values[i]
-            return (sealed, self.tier if sealed else None)
+            locked = self._values[i]
+            return (locked, self.tier if locked else None)
 
 
 class AttestedOk:
@@ -420,20 +420,20 @@ def gate_module():
     return importlib.import_module(GATE_MODULE)
 
 
-def build_gate(*, predicate, ledger, is_sealed, attested_ok=None):
-    """W1 signature: build_middleware(*, ledger, is_sealed, predicate_for, attested_ok, pin_pending=None, ...)."""
+def build_gate(*, predicate, ledger, is_locked, attested_ok=None):
+    """W1 signature: build_middleware(*, ledger, is_locked, predicate_for, attested_ok, pin_pending=None, ...)."""
     mod = gate_module()
     if attested_ok is None:
         attested_ok = AttestedOk(lambda p: Verdict(in_tier=True, reason="fresh", host=""))
-    return mod.build_middleware(ledger=ledger, is_sealed=is_sealed, predicate_for=lambda tier: predicate,
+    return mod.build_middleware(ledger=ledger, is_locked=is_locked, predicate_for=lambda tier: predicate,
                                 attested_ok=attested_ok)
 
 
-def install_gate(manager, rec: Rec, *, predicate, ledger, is_sealed, attested_ok=None):
+def install_gate(manager, rec: Rec, *, predicate, ledger, is_locked, attested_ok=None):
     """Build the gate via the public W1 name and register it with the real PluginContext.
     A thin counting shim records each middleware entry; exceptions and returns pass through
     unchanged, so Hermes' fail-open semantics apply to the gate exactly as registered."""
-    gate = build_gate(predicate=predicate, ledger=ledger, is_sealed=is_sealed, attested_ok=attested_ok)
+    gate = build_gate(predicate=predicate, ledger=ledger, is_locked=is_locked, attested_ok=attested_ok)
 
     def llm_execution(request, next_call, **context):
         with rec.lock:

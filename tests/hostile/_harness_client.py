@@ -211,7 +211,7 @@ def make_result(cm, *, code: str = FP_CODE, enclave: str = FP_ENCLAVE, vendor: s
     return cm.VerificationResult(
         vendor=vendor, router_repo=router_repo, enclave_host=host, code_fingerprint=code,
         enclave_fingerprint=enclave, release_tag=release_tag, verifier="hostile-stub/0",
-        verified_at_local=_real_time.time() if verified_at is None else verified_at,
+        verified_at_host_clock=_real_time.time() if verified_at is None else verified_at,
         evidence={"stub": True, "code": code, "enclave": enclave})
 
 

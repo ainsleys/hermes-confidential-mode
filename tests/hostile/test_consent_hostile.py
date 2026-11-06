@@ -91,7 +91,7 @@ def _result(code="ffee99887766aabb", enclave="1122334455667788", tag="v0.4.2"):
     return VerificationResult(vendor="tinfoil", router_repo="tinfoilsh/confidential-model-router",
                               enclave_host="router.inf.tinfoil.sh", code_fingerprint=code,
                               enclave_fingerprint=enclave, release_tag=tag, verifier="tinfoil-0.14.2",
-                              verified_at_local=1_700_000_000.0, evidence={"t4": True})
+                              verified_at_host_clock=1_700_000_000.0, evidence={"t4": True})
 
 
 @dataclass(frozen=True)

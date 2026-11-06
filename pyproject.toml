@@ -1,7 +1,7 @@
 [project]
 name = "hermes-confidential-mode"
 version = "0.1.0"
-description = "Attested inference provider and sealed mode for Hermes Agent"
+description = "Attested inference provider and locked mode for Hermes Agent"
 requires-python = ">=3.11"
 dependencies = [
     # Exact: 0.15.0 requires openai>=3.26 and Hermes pins openai 2.54.0 (docs/C0-spikes.md, spike 2).

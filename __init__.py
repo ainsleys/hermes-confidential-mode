@@ -1,14 +1,14 @@
-"""hermes-confidential-mode: attested inference provider plus sealed mode for Hermes Agent.
+"""hermes-confidential-mode: attested inference provider plus locked mode for Hermes Agent.
 
 ``register(ctx)`` wires one Ledger, one ConfidentialState and one ApprovalDecisions into:
 
-- llm_execution middleware (gate_llm): every main-loop provider call is checked against the sealed
-  tier; the predicate also refuses everything if the routing config changed since seal;
+- llm_execution middleware (gate_llm): every main-loop provider call is checked against the locked
+  tier; the predicate also refuses everything if the routing config changed since lock;
 - tool_execution middleware + pre_tool_call + post_approval_response (gate_tools), sharing ONE
   ApprovalDecisions (the hook asks, the middleware enforces on the recorded exact answer);
-- pre_llm_call: sealed note into the model's context, and the per-turn config recheck (block);
+- pre_llm_call: locked note into the model's context, and the per-turn config recheck (block);
 - pre_api_request / pre_auxiliary_call / post_auxiliary_call: ledger ``send_observed`` with host and
-  bytes; an off-tier auxiliary destination while sealed is a breach (aux calls cannot be blocked);
+  bytes; an off-tier auxiliary destination while locked is a breach (aux calls cannot be blocked);
 - on_session_start / on_session_end / post_compaction: receipt rows;
 - the 'attested-tinfoil' provider profile (no network at register);
 - ``/confidential`` and ``hermes confidential``.
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 HOOKS = ("pre_tool_call", "post_approval_response", "pre_llm_call", "pre_api_request", "pre_auxiliary_call",
          "post_auxiliary_call", "on_session_start", "on_session_end", "post_compaction", "pre_gateway_dispatch")
 # Gateway slash commands that switch the session's live model runtime (Amendment 4 F1(c)); refused while
-# sealed. The CLI/TUI never fire pre_gateway_dispatch: there the per-turn live-runtime check ends the turn.
+# locked. The CLI/TUI never fire pre_gateway_dispatch: there the per-turn live-runtime check ends the turn.
 RUNTIME_SWITCH_COMMANDS = frozenset({"model", "moa"})
 MIDDLEWARE = ("llm_execution", "tool_execution")
 NO_SESSION = "(no session)"
@@ -74,10 +74,10 @@ class Runtime:
     def load_config(self) -> dict:
         return _cm("preflight").load_core_config()
 
-    def is_sealed(self):
+    def is_locked(self):
         if self.state is None:
             raise _cm("state").StateError("confidential state is unavailable")
-        return self.state.sealed()
+        return self.state.locked()
 
     def set_allowlist(self, allowlist: Any) -> None:
         with self._lock:
@@ -85,7 +85,7 @@ class Runtime:
             self._allowlist_stamp = self._file_stamp()
 
     def _file_stamp(self):
-        """(mtime_ns, size) of the persisted allowlist, or None. A seal, unseal or allow from ANOTHER
+        """(mtime_ns, size) of the persisted allowlist, or None. A lock, unlock or allow from ANOTHER
         process (the `hermes confidential` CLI next to a running gateway) changes it."""
         try:
             st = os.stat(self.allowlist_path)
@@ -94,54 +94,54 @@ class Runtime:
             return None
 
     def allowlist(self):
-        """The allowlist for the CURRENT seal. The seal lives in ctx.state (re-read from disk on every
-        call), so another process may have sealed, unsealed or resealed since this one cached its
-        allowlist: the cache is used only while its seal_id matches the persisted seal, and additions
-        another process approved (allowlist.yaml changed, same seal) are merged in. After a restart, or a
-        seal made by another process, it is rebuilt from the identities persisted at that seal and ledgered."""
+        """The allowlist for the CURRENT lock. The lock lives in ctx.state (re-read from disk on every
+        call), so another process may have locked, unlocked or relocked since this one cached its
+        allowlist: the cache is used only while its lock_id matches the persisted lock, and additions
+        another process approved (allowlist.yaml changed, same lock) are merged in. After a restart, or a
+        lock made by another process, it is rebuilt from the identities persisted at that lock and ledgered."""
         gt = _cm("gate_tools")
         try:
-            sealed, tier = self.is_sealed()
+            locked, tier = self.is_locked()
         except Exception:  # noqa: BLE001
-            sealed, tier = False, None
-        if sealed is not True:
+            locked, tier = False, None
+        if locked is not True:
             with self._lock:
                 self._allowlist = None
             return gt.Allowlist(tools={})
-        seal_id = gt.seal_id_for(self.state)
+        lock_id = gt.lock_id_for(self.state)
         stamp = self._file_stamp()
         with self._lock:
             cached = self._allowlist
-            if cached is not None and getattr(cached, "seal_id", "") == seal_id:
+            if cached is not None and getattr(cached, "lock_id", "") == lock_id:
                 if stamp != self._allowlist_stamp:
-                    _merge_added(cached, self.allowlist_path, seal_id)
+                    _merge_added(cached, self.allowlist_path, lock_id)
                     self._allowlist_stamp = stamp
                 return cached
         from tools.registry import registry
-        predicate = _cm("sealing").predicate_for(tier, config=self.load_config())
-        # Amendment 4 F5 (W4): rebuild from the identities persisted at THIS seal; anything registered
-        # after the seal, changed, or a missing/other-seal file is unclassified until a reseal.
-        allowlist = gt.Allowlist.load_persisted(self.allowlist_path, registry, predicate=predicate, seal_id=seal_id)
+        predicate = _cm("locking").predicate_for(tier, config=self.load_config())
+        # Amendment 4 F5 (W4): rebuild from the identities persisted at THIS lock; anything registered
+        # after the lock, changed, or a missing/other-lock file is unclassified until a relock.
+        allowlist = gt.Allowlist.load_persisted(self.allowlist_path, registry, predicate=predicate, lock_id=lock_id)
         with self._lock:
             current = self._allowlist
-            if current is None or getattr(current, "seal_id", "") != seal_id:
+            if current is None or getattr(current, "lock_id", "") != lock_id:
                 self._allowlist, self._allowlist_stamp = allowlist, stamp
             allowlist = self._allowlist
-        # Not kind "seal": receipts open a sealed period at every seal row (Amendment 4 F7).
-        self.append({"kind": "session_start", "purpose": "seal", "tier": tier.value, "decision": "allowlist_rebuilt",
+        # Not kind "lock": receipts open a locked period at every lock row (Amendment 4 F7).
+        self.append({"kind": "session_start", "purpose": "lock", "tier": tier.value, "decision": "allowlist_rebuilt",
                      "detail": {"tools": len(allowlist.tools)}})
         return allowlist
 
     def predicate_for(self, tier):
-        """The sealed tier's predicate for the llm gate. If the routing config no longer matches the
-        fingerprint recorded at seal, every destination is off-tier (second line behind pre_llm_call,
+        """The locked tier's predicate for the llm gate. If the routing config no longer matches the
+        fingerprint recorded at lock, every destination is off-tier (second line behind pre_llm_call,
         which Hermes skips for agents with persistence disabled: agent/turn_context.py:860)."""
-        sealing, pf = _cm("sealing"), _cm("preflight")
+        locking, pf = _cm("locking"), _cm("preflight")
         config = self.load_config()
-        current = pf.config_fingerprint(config, plugin_aux_tasks=sealing._plugin_aux(None))
+        current = pf.config_fingerprint(config, plugin_aux_tasks=locking._plugin_aux(None))
         if current != self.state.config_fingerprint():
             return _ChangedConfigPredicate(_cm("tiers").Tier(tier))
-        return sealing.predicate_for(tier, config=config)
+        return locking.predicate_for(tier, config=config)
 
     def pin_pending(self) -> bool:
         return self.pins is not None and self.pins.pending() is not None
@@ -154,15 +154,15 @@ class Runtime:
             logger.warning("confidential-mode ledger append failed: %s", type(exc).__name__)
 
 
-def _merge_added(allowlist: Any, path: Any, seal_id: str) -> None:
-    """Pull human-approved additions another process persisted for the SAME seal into ``allowlist``.
-    Only names still on the ask route count; a file for another seal adds nothing."""
+def _merge_added(allowlist: Any, path: Any, lock_id: str) -> None:
+    """Pull human-approved additions another process persisted for the SAME lock into ``allowlist``.
+    Only names still on the ask route count; a file for another lock adds nothing."""
     import json
     try:
         data = json.loads(open(path, encoding="utf-8").read())
     except Exception:  # noqa: BLE001
         return
-    if not isinstance(data, dict) or data.get("seal_id") != seal_id or not isinstance(data.get("allowed"), list):
+    if not isinstance(data, dict) or data.get("lock_id") != lock_id or not isinstance(data.get("allowed"), list):
         return
     route_ask = _cm("gate_tools").Route.ASK
     names = {n for n in data["allowed"] if isinstance(n, str)
@@ -172,7 +172,7 @@ def _merge_added(allowlist: Any, path: Any, seal_id: str) -> None:
 
 
 class _ChangedConfigPredicate:
-    REASON = "routing config changed since seal; run /confidential off and seal again"
+    REASON = "routing config changed since lock; run /confidential off and lock again"
 
     def __init__(self, tier):
         self.tier = tier
@@ -254,7 +254,7 @@ def _register(rt: Runtime) -> None:
     # -- llm gate -----------------------------------------------------------------------------
     def llm():
         provider = _cm("provider")
-        mw = _cm("gate_llm").build_middleware(ledger=rt.ledger, is_sealed=rt.is_sealed,
+        mw = _cm("gate_llm").build_middleware(ledger=rt.ledger, is_locked=rt.is_locked,
                                                predicate_for=rt.predicate_for, attested_ok=provider.attested_ok,
                                                pin_pending=rt.pin_pending)
         _middleware(rt, "llm_execution", mw)
@@ -263,19 +263,19 @@ def _register(rt: Runtime) -> None:
     # -- tool gate: one ApprovalDecisions shared by all three (gate_tools.build_pre_tool_call doc) ---
     def tool_mw():
         gt = _cm("gate_tools")
-        _middleware(rt, "tool_execution", gt.build_tool_execution(rt.is_sealed, rt.allowlist, rt.ledger,
+        _middleware(rt, "tool_execution", gt.build_tool_execution(rt.is_locked, rt.allowlist, rt.ledger,
                                                                   rt.decisions))
     _step(rt, "tool_execution", tool_mw)
 
     def pre_tool():
         gt = _cm("gate_tools")
-        _hook(rt, "pre_tool_call", gt.build_pre_tool_call(rt.is_sealed, rt.allowlist, rt.ledger,
+        _hook(rt, "pre_tool_call", gt.build_pre_tool_call(rt.is_locked, rt.allowlist, rt.ledger,
                                                            decisions=rt.decisions))
     _step(rt, "pre_tool_call", pre_tool)
 
     def post_approval():
         gt = _cm("gate_tools")
-        _hook(rt, "post_approval_response", gt.build_post_approval_response(rt.is_sealed, rt.ledger, rt.decisions))
+        _hook(rt, "post_approval_response", gt.build_post_approval_response(rt.is_locked, rt.ledger, rt.decisions))
     _step(rt, "post_approval_response", post_approval)
 
     for name, builder in (("pre_llm_call", _pre_llm_call), ("pre_api_request", _pre_api_request),
@@ -302,42 +302,42 @@ def _register(rt: Runtime) -> None:
 def _pre_llm_call(rt: Runtime):
     def pre_llm_call(session_id: str = "", **_kw: Any):
         try:
-            gate_llm, sealing = _cm("gate_llm"), _cm("sealing")
+            gate_llm, locking = _cm("gate_llm"), _cm("locking")
         except Exception:  # noqa: BLE001
             return {"action": "block", "message": "Confidential mode: the plugin failed to load; turn not sent."}
         try:
-            sealed, tier = rt.is_sealed()
-        except Exception:  # noqa: BLE001 - unreadable seal state blocks (Amendment 2)
+            locked, tier = rt.is_locked()
+        except Exception:  # noqa: BLE001 - unreadable lock state blocks (Amendment 2)
             return {"action": "block", "message": gate_llm.TEXT_STATE_UNREADABLE}
-        if sealed is not True:
+        if locked is not True:
             return None
         try:
-            message = sealing.recheck(state=rt.state, ledger=rt.ledger, config=rt.load_config(),
+            message = locking.recheck(state=rt.state, ledger=rt.ledger, config=rt.load_config(),
                                       session_id=session_id or "")
         except Exception as exc:  # noqa: BLE001
-            message = (f"Confidential mode: the sealed-config recheck failed ({type(exc).__name__}), so this turn "
+            message = (f"Confidential mode: the locked-config recheck failed ({type(exc).__name__}), so this turn "
                        "was not sent. Run /confidential check.")
         if message:
             return {"action": "block", "message": message}
         try:
-            message = _live_runtime_check(rt, sealing, tier, session_id or "")
+            message = _live_runtime_check(rt, locking, tier, session_id or "")
         except Exception as exc:  # noqa: BLE001
             message = (f"Confidential mode: the live-runtime check failed ({type(exc).__name__}), so this turn "
                        "was not sent. Run /confidential status.")
         if message:
             return {"action": "block", "message": message}
-        return {"context": sealing.SEALED_NOTE.format(tier=tier.value)}
+        return {"context": locking.LOCKED_NOTE.format(tier=tier.value)}
     return pre_llm_call
 
 
-def _live_runtime_check(rt: Runtime, sealing: Any, tier: Any, session_id: str) -> Optional[str]:
+def _live_runtime_check(rt: Runtime, locking: Any, tier: Any, session_id: str) -> Optional[str]:
     """Amendment 4 F1(a): the live main runtime (what "auto" aux tasks and the main call use) must be in-tier.
     It is published at agent/turn_context.py:1140, before this hook (:1236); turn-start compaction (:1245),
     memory prefetch (:1264) and titling (:1271) all run after it and are skipped when it blocks."""
-    runtime = sealing.live_main_runtime()
+    runtime = locking.live_main_runtime()
     if not runtime:
         return None
-    v = sealing.classify_live_runtime(tier, runtime, config=rt.load_config())
+    v = locking.classify_live_runtime(tier, runtime, config=rt.load_config())
     rt.last_live = {"provider": runtime.get("provider"), "model": runtime.get("model"), "host": v.host,
                     "in_tier": v.in_tier is True, "reason": v.reason}
     if v.in_tier is True:
@@ -359,12 +359,12 @@ def _live_runtime_check(rt: Runtime, sealing: Any, tier: Any, session_id: str) -
         rt.append({"kind": "breach", "session_id": session_id, "purpose": "main:live_runtime", "provider": provider,
                    "host": v.host, "tier": tier.value, "verdict": "off_tier", "decision": "live_runtime_off_tier",
                    "detail": {"reason": v.reason}})
-    return sealing.live_runtime_text(tier, provider, v.host, v.reason)
+    return locking.live_runtime_text(tier, provider, v.host, v.reason)
 
 
 def _pre_gateway_dispatch(rt: Runtime):
     def pre_gateway_dispatch(event: Any = None, **_kw: Any):
-        """While sealed, a gateway /model (or /moa) is rewritten to /confidential blocked <cmd>, which
+        """While locked, a gateway /model (or /moa) is rewritten to /confidential blocked <cmd>, which
         replies with the refusal: the session's live runtime cannot be switched off-tier from chat."""
         try:
             text = getattr(event, "text", None)
@@ -382,10 +382,10 @@ def _pre_gateway_dispatch(rt: Runtime):
             if canonical not in RUNTIME_SWITCH_COMMANDS:
                 return None
             try:
-                sealed, _tier = rt.is_sealed()
+                locked, _tier = rt.is_locked()
             except Exception:  # noqa: BLE001
-                sealed = True                      # unreadable seal state: refuse (fail closed)
-            if sealed is False:
+                locked = True                      # unreadable lock state: refuse (fail closed)
+            if locked is False:
                 return None
             rt.append({"kind": "tool_refused", "purpose": f"command:{canonical}", "decision": "runtime_switch",
                        "surface": "gateway", "detail": {"command": canonical}})
@@ -405,21 +405,21 @@ def _bytes_of(request: Any, chars: Any) -> Optional[int]:
 def _observe(rt: Runtime, *, purpose: str, provider: Any, base_url: Any, model: Any, api_mode: Any,
              session_id: Any, request: Any, chars: Any, platform: Any, decision: str, source: str,
              breach_on_off_tier: bool) -> None:
-    tiers, sealing = _cm("tiers"), _cm("sealing")
+    tiers, locking = _cm("tiers"), _cm("locking")
     dest = tiers.Destination(provider=str(provider or ""), base_url=str(base_url or ""), model=str(model or ""),
                              api_mode=str(api_mode or ""), purpose=purpose)
     host = tiers.host_of(dest.base_url)
     tier_value = verdict_label = reason = None
     off = False
     try:
-        sealed, tier = rt.is_sealed()
+        locked, tier = rt.is_locked()
     except Exception:  # noqa: BLE001
-        sealed, tier = None, None
-        verdict_label, reason, off = "error", "seal state unreadable", True
-    if sealed is True:
+        locked, tier = None, None
+        verdict_label, reason, off = "error", "lock state unreadable", True
+    if locked is True:
         tier_value = tier.value
         try:
-            v = sealing.structural_predicate(tier, config=rt.load_config()).classify(dest)
+            v = locking.structural_predicate(tier, config=rt.load_config()).classify(dest)
             off, reason = not (v.in_tier is True), v.reason
             host = v.host or host
         except Exception as exc:  # noqa: BLE001
@@ -431,7 +431,7 @@ def _observe(rt: Runtime, *, purpose: str, provider: Any, base_url: Any, model: 
                "host": host, "model": dest.model, "bytes": nbytes, "tier": tier_value,
                "verdict": verdict_label, "decision": decision, "surface": str(platform or "") or None,
                "detail": {"source": source, **({"reason": reason} if reason else {})}})
-    if breach_on_off_tier and sealed is not False and off:
+    if breach_on_off_tier and locked is not False and off:
         try:
             rt.state.mark_breached(sid or NO_SESSION)
         except Exception:  # noqa: BLE001
@@ -489,14 +489,14 @@ def _session_marker(decision: str):
     def build(rt: Runtime):
         def marker(session_id: str = "", platform: str = "", **_kw: Any) -> None:
             try:
-                sealed, tier = rt.is_sealed()
+                locked, tier = rt.is_locked()
             except Exception:  # noqa: BLE001
-                sealed, tier = None, None
-            if sealed is False:
+                locked, tier = None, None
+            if locked is False:
                 return None
             rt.append({"kind": decision, "session_id": str(session_id or ""), "purpose": "session",
                        "tier": tier.value if tier else None, "decision": decision,
-                       "surface": str(platform or "") or None, "detail": {"sealed": sealed is True}})
+                       "surface": str(platform or "") or None, "detail": {"locked": locked is True}})
             return None
         marker.__name__ = f"on_{decision}"
         return marker
@@ -508,11 +508,11 @@ def _post_compaction(rt: Runtime):
                         before_tokens: Any = None, after_tokens: Any = None, messages_removed: Any = None,
                         **_kw: Any) -> None:
         try:
-            sealed, tier = rt.is_sealed()
+            locked, tier = rt.is_locked()
         except Exception:  # noqa: BLE001
-            sealed, tier = None, None
+            locked, tier = None, None
         rt.append({"kind": "compaction", "session_id": str(session_id or ""), "purpose": "compaction",
-                   "tier": tier.value if sealed is True else None, "decision": str(kind or "") or None,
+                   "tier": tier.value if locked is True else None, "decision": str(kind or "") or None,
                    "detail": {"old_session_id": str(old_session_id or ""), "reason": str(reason or ""),
                               "before_tokens": before_tokens if isinstance(before_tokens, int) else None,
                               "after_tokens": after_tokens if isinstance(after_tokens, int) else None,

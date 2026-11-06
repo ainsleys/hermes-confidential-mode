@@ -59,7 +59,7 @@ Tinfoil's transport. It encrypts each request body with HPKE to the enclave's ke
 
 **Evidence, replay and receipt.** Evidence is the raw bytes the plugin captures during one
 verification. A replay re-runs that verification later, offline, from the evidence. A receipt is the
-plugin's rendering of its local log (the ledger) for one session.
+plugin's rendering of its on-host log (the ledger) for one session.
 
 **Pin.** A pin is the user's recorded approval of one router build's code and enclave fingerprints.
 

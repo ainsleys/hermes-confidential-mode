@@ -3,7 +3,7 @@
 Reuses, rather than rebuilds:
   * tests/seam/test_register.py ``plugin`` fixture: the worktree copied into a temp HERMES_HOME/plugins,
     loaded by the REAL ``PluginManager.discover_and_load``; ``plugin.slash`` drives ``/confidential``;
-  * tests/scenario/_fakes.py ``MockNet`` (local / enclave / openrouter recorders) and ``patch_hermes_http``
+  * tests/scenario/_fakes.py ``MockNet`` (on-host / enclave / openrouter recorders) and ``patch_hermes_http``
     (Hermes' keepalive httpx builder -> MockNet, so real openai clients Hermes builds send real HTTP into
     the mock);
   * tests/seam/_harness.py ``Rec`` / ``provider_ok`` (the C0 recording terminal for the main call).
@@ -34,11 +34,11 @@ from hermes_cli.plugins import PluginContext
 from hermes_cli.plugins_manifest import PluginManifest
 
 from tests.scenario._fakes import (  # noqa: F401  (re-exported for the tests)
-    ENCLAVE, ENCLAVE_URL, LOCAL_URL as NET_LOCAL_URL, OPENROUTER_HOST, OPENROUTER_URL, REPO, MockNet,
+    ENCLAVE, ENCLAVE_URL, ON_HOST_URL as NET_ON_HOST_URL, OPENROUTER_HOST, OPENROUTER_URL, REPO, MockNet,
     patch_hermes_http,
 )
 from tests.seam._harness import Rec, no_lazy_installs, provider_ok  # noqa: F401  (fixture)
-from tests.seam.test_register import BASE_CONFIG, LOCAL_URL, SK, plugin  # noqa: F401  (fixture)
+from tests.seam.test_register import BASE_CONFIG, ON_HOST_URL, SK, plugin  # noqa: F401  (fixture)
 
 SECRET = "MERGER-TERMS-7731-CONFIDENTIAL"
 
@@ -85,7 +85,7 @@ def bytes_seen(router) -> int:
     return len(router.requests)
 
 
-def make_agent(monkeypatch, rec: Rec, *, provider: str = "custom", base_url: str = LOCAL_URL,
+def make_agent(monkeypatch, rec: Rec, *, provider: str = "custom", base_url: str = ON_HOST_URL,
                model: str = "llama3", api_key: str = "sk-test", session_db=None, max_iterations: int = 4,
                terminal: bool = True):
     """test_register.build_agent with the live runtime chosen by the test. ``terminal`` replaces the main
@@ -191,7 +191,7 @@ class PluginFakeAdapter:
         return self._base.VerificationResult(
             vendor=self.vendor, router_repo=REPO, enclave_host=ENCLAVE, code_fingerprint=self.code,
             enclave_fingerprint=self.enclave, release_tag=self.release, verifier="fake-tinfoil/0.14.2",
-            verified_at_local=time.time(), evidence=ev)
+            verified_at_host_clock=time.time(), evidence=ev)
 
     def hold(self, reason):
         self.held = reason

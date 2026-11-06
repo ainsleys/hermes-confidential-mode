@@ -19,7 +19,7 @@ from confidential_mode.tiers import Tier  # noqa: E402
 FROZEN_COLUMNS = ["id", "ts", "session_id", "kind", "purpose", "provider", "host", "model", "bytes",
                   "tier", "verdict", "decision", "surface", "detail"]
 FROZEN_KINDS = {"send_observed", "send_refused", "verify_ok", "verify_fail", "tool_asked", "tool_allowed",
-                "tool_refused", "pin_staged", "pin_applied", "pin_denied", "seal", "unseal", "preflight_fail",
+                "tool_refused", "pin_staged", "pin_applied", "pin_denied", "lock", "unlock", "preflight_fail",
                 "breach", "compaction",
                 "session_start", "session_end"}   # Amendment 4 F7
 
@@ -32,7 +32,7 @@ def ledger(tmp_path):
 
 
 def test_schema_matches_contract(ledger, tmp_path):
-    ledger.append(LedgerEvent(kind="seal"))
+    ledger.append(LedgerEvent(kind="lock"))
     conn = sqlite3.connect(tmp_path / "ledger.sqlite")
     cols = conn.execute("PRAGMA table_info(events)").fetchall()
     assert [c[1] for c in cols] == FROZEN_COLUMNS
@@ -48,14 +48,14 @@ def test_append_tail_session_roundtrip(ledger):
     a = ledger.append(LedgerEvent(kind="send_observed", session_id="s1", purpose="main", provider="custom",
                                   host="h.test", model="m", bytes=123, decision="observed",
                                   detail={"k": 1}))
-    b = ledger.append(LedgerEvent(kind="send_refused", session_id="s2", tier="local-only", verdict="off_tier"))
-    c = ledger.append(LedgerEvent(kind="seal", session_id="s1", tier="local-only"))
+    b = ledger.append(LedgerEvent(kind="send_refused", session_id="s2", tier="on-host-only", verdict="off_tier"))
+    c = ledger.append(LedgerEvent(kind="lock", session_id="s1", tier="on-host-only"))
     assert a < b < c
     assert [e.id for e in ledger.tail(0)] == [a, b, c]
     assert [e.id for e in ledger.tail(a)] == [b, c]
     assert ledger.tail(c) == []
     s1 = ledger.session("s1")
-    assert [e.kind for e in s1] == ["send_observed", "seal"]
+    assert [e.kind for e in s1] == ["send_observed", "lock"]
     e = s1[0]
     assert (e.ts, e.purpose, e.provider, e.host, e.model, e.bytes, e.decision, e.detail) == \
         (1000.0, "main", "custom", "h.test", "m", 123, "observed", {"k": 1})
@@ -64,7 +64,7 @@ def test_append_tail_session_roundtrip(ledger):
 
 def test_mutant_twin_tail_is_strictly_after_since_id(ledger):
     """Twin of the roundtrip: a >= comparison would return the since_id row again."""
-    a = ledger.append(LedgerEvent(kind="seal"))
+    a = ledger.append(LedgerEvent(kind="lock"))
     assert a not in [e.id for e in ledger.tail(a)]
 
 
@@ -98,8 +98,8 @@ def test_non_int_bytes_rejected(ledger):
 
 def test_persists_across_instances(tmp_path):
     p = tmp_path / "l.sqlite"
-    Ledger(p).append(LedgerEvent(kind="seal", session_id="x"))
-    assert [e.kind for e in Ledger(p).session("x")] == ["seal"]
+    Ledger(p).append(LedgerEvent(kind="lock", session_id="x"))
+    assert [e.kind for e in Ledger(p).session("x")] == ["lock"]
 
 
 def test_concurrent_appends(ledger):
@@ -117,8 +117,8 @@ def test_concurrent_appends(ledger):
 def test_injectable_connect(tmp_path):
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     led = Ledger(connect=lambda: conn)
-    led.append(LedgerEvent(kind="seal"))
-    assert conn.execute("SELECT kind FROM events").fetchall() == [("seal",)]
+    led.append(LedgerEvent(kind="lock"))
+    assert conn.execute("SELECT kind FROM events").fetchall() == [("lock",)]
     with pytest.raises(ValueError):
         Ledger(tmp_path / "a", connect=lambda: conn)
 
@@ -127,7 +127,7 @@ def test_default_uses_hermes_plugin_storage(tmp_path, monkeypatch):
     pytest.importorskip("plugins.plugin_storage")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     led = Ledger()
-    led.append(LedgerEvent(kind="seal"))
+    led.append(LedgerEvent(kind="lock"))
     led.close()
     from confidential_mode.ledger import default_ledger_path
     assert default_ledger_path() == tmp_path / "plugin-data" / "confidential-mode" / "ledger.sqlite"
@@ -137,28 +137,28 @@ def test_default_uses_hermes_plugin_storage(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- state
 
 
-def test_state_unsealed_by_default():
+def test_state_unlocked_by_default():
     st = ConfidentialState(InMemoryState())
-    assert st.sealed() == (False, None)
+    assert st.locked() == (False, None)
     assert st.breached_sessions() == []
 
 
-def test_state_seal_unseal_roundtrip():
+def test_state_lock_unlock_roundtrip():
     store = InMemoryState()
     st = ConfidentialState(store, clock=lambda: 42.0)
-    st.seal(Tier.ATTESTED, "abc")
-    assert st.sealed() == (True, Tier.ATTESTED)
-    assert store.get("sealed") is True and store.get("sealed_tier") == "attested"
-    assert st.sealed_since() == 42.0 and st.config_fingerprint() == "abc"
-    st.unseal()
-    assert st.sealed() == (False, None)
+    st.lock(Tier.ATTESTED, "abc")
+    assert st.locked() == (True, Tier.ATTESTED)
+    assert store.get("locked") is True and store.get("locked_tier") == "attested"
+    assert st.locked_since() == 42.0 and st.config_fingerprint() == "abc"
+    st.unlock()
+    assert st.locked() == (False, None)
 
 
-@pytest.mark.parametrize("sealed,tier", [("yes", "local-only"), (1, "local-only"), (True, "bogus"), (True, None)])
-def test_state_malformed_raises(sealed, tier):
-    st = ConfidentialState(InMemoryState({"sealed": sealed, "sealed_tier": tier}))
+@pytest.mark.parametrize("locked,tier", [("yes", "on-host-only"), (1, "on-host-only"), (True, "bogus"), (True, None)])
+def test_state_malformed_raises(locked, tier):
+    st = ConfidentialState(InMemoryState({"locked": locked, "locked_tier": tier}))
     with pytest.raises(StateError):
-        st.sealed()
+        st.locked()
 
 
 def test_state_breached_sessions():
@@ -177,10 +177,10 @@ def test_state_over_real_plugin_state(tmp_path, monkeypatch):
     mod = pytest.importorskip("hermes_cli.plugins_state")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     st = ConfidentialState(mod.PluginState("confidential-mode"))
-    st.seal(Tier.LOCAL, "fp")
+    st.lock(Tier.ON_HOST, "fp")
     st.mark_breached("sess")
     again = ConfidentialState(mod.PluginState("confidential-mode"))
-    assert again.sealed() == (True, Tier.LOCAL) and again.breached_sessions() == ["sess"]
+    assert again.locked() == (True, Tier.ON_HOST) and again.breached_sessions() == ["sess"]
 
 
 # --------------------------------------------------------------------------- dict events (Amendment 2)
@@ -221,9 +221,9 @@ def test_dict_and_dataclass_store_identically(ledger):
 
 
 def test_minimal_dict_and_none_detail(ledger):
-    ledger.append({"kind": "unseal", "detail": None, "id": 999})
+    ledger.append({"kind": "unlock", "detail": None, "id": 999})
     [row] = ledger.tail(0)
-    assert row.kind == "unseal" and row.detail == {} and row.id != 999 and row.ts == 1000.0
+    assert row.kind == "unlock" and row.detail == {} and row.id != 999 and row.ts == 1000.0
 
 
 @pytest.mark.parametrize("bad", [

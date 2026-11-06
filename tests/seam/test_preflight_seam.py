@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from confidential_mode import preflight as pf
-from confidential_mode.tiers import LocalPredicate, Tier
+from confidential_mode.tiers import OnHostPredicate, Tier
 
 CONFIG_YAML = """\
 model:
@@ -87,28 +87,28 @@ def test_plugin_registered_aux_task_appears_in_report(hermes_home, plugin_task):
     assert "w3seam_task" in names and "w3seam_inherit" in names
     cfg = pf.load_core_config()
     report = pf.run_preflight(
-        Tier.LOCAL, LocalPredicate(profile_base_url=pf.profile_base_url), cfg,
+        Tier.ON_HOST, OnHostPredicate(profile_base_url=pf.profile_base_url), cfg,
         plugin_aux_tasks=pf.plugin_aux_task_entries(), isolation=pf.plugin_isolation(cfg),
         provider_lookup=pf.provider_lookup, attested_profile=None)
     by_key = {i.key: i for i in report.items}
     text = pf.format_report(report)
 
-    assert by_key["model.provider"].verdict == "local"
-    assert by_key["auxiliary.vision.provider"].verdict == "local"
-    assert by_key["auxiliary.compression.provider"].verdict == "local"  # auto -> main
+    assert by_key["model.provider"].verdict == "on_host"
+    assert by_key["auxiliary.vision.provider"].verdict == "on_host"
+    assert by_key["auxiliary.compression.provider"].verdict == "on_host"  # auto -> main
     seam = by_key["auxiliary.w3seam_task.provider"]
     assert seam.verdict == "off_tier" and "auxiliary.w3seam_task.provider" in seam.fix
-    assert by_key["auxiliary.w3seam_inherit.provider"].verdict == "local"  # follows vision
-    assert by_key["mcp_servers.fs.command"].verdict == "local"
+    assert by_key["auxiliary.w3seam_inherit.provider"].verdict == "on_host"  # follows vision
+    assert by_key["mcp_servers.fs.command"].verdict == "on_host"
     assert by_key["mcp_servers.remote.url"].verdict == "off_tier"
-    assert by_key["plugins.isolation"].verdict == "local"
-    # Hermes' merged default tts.provider is "edge" (hosted); delegation unset inherits the local main.
+    assert by_key["plugins.isolation"].verdict == "on_host"
+    # Hermes' merged default tts.provider is "edge" (hosted); delegation unset inherits the on-host main.
     from hermes_cli.config_defaults import DEFAULT_CONFIG
     assert DEFAULT_CONFIG["tts"]["provider"] == "edge" and "enabled" not in DEFAULT_CONFIG["tts"]
     # (Hermes has no tts.enabled key; per the coordinator ruling an unset flag counts as disabled.)
     assert by_key["tts.provider"].value_redacted == "(edge, disabled)"
     assert by_key["tts.provider"].verdict == "disabled"
-    assert by_key["delegation.provider"].verdict == "local"
+    assert by_key["delegation.provider"].verdict == "on_host"
     assert "auxiliary.w3seam_task.provider" in text
     assert not report.ok
     for task in pf.builtin_aux_task_names():

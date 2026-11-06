@@ -7,15 +7,15 @@ none, and every row is scanned again here for the ledger's content-shaped keys
 
 Which rows a session's receipt covers:
   * every row whose ``session_id`` is the session;
-  * profile-wide rows (seal, unseal, verification and pin events, preflight failures), whatever their
-    session_id, from the end of the sealed period before the session's first row (the last unseal
-    before it) up to the session's last row, plus the unseal that closes the period. Seal is
+  * profile-wide rows (lock, unlock, verification and pin events, preflight failures), whatever their
+    session_id, from the end of the locked period before the session's first row (the last unlock
+    before it) up to the session's last row, plus the unlock that closes the period. Lock is
     profile-wide in the MVP and verification has no session context, so these rows are usually
     written with another session id or none.
 
 The text form lists, in order: header, trust roots, verification events, sends, refusals, asks and
 answers, breaches, compactions, and CLOSING_PARAGRAPH, a module constant that is never templated.
-Every timestamp is the local clock and is labelled so.
+Every timestamp is the host clock and is labelled so.
 
 The JSON form carries the same, the raw ``evidence`` blobs of verify rows, and a SHA-256 hash chain over
 the rows: ``hash_i = sha256(hash_{i-1} + canonical_json(row_i))`` with ``hash_0 = CHAIN_GENESIS``, where
@@ -25,7 +25,7 @@ without its ``hash`` field. The head is in the header. ``verify_chain`` recomput
 What the chain is: a checksum over this document that anyone holding the file can recompute (so can
 anyone editing it). It detects edits only when compared with a chain head recorded somewhere else at
 render time, which is why the text form prints the head at the top with that instruction. It says
-nothing about whether the ledger was complete or its rows genuine (the ledger is a local SQLite file,
+nothing about whether the ledger was complete or its rows genuine (the ledger is a SQLite file on this host,
 writable by any code in the Hermes process).
 
 Each attested send is matched to the latest verify_ok row before it and that row's TTL window
@@ -47,10 +47,10 @@ RECEIPT_FORMAT = "confidential-mode-receipt"
 RECEIPT_VERSION = 1
 CHAIN_GENESIS = "0" * 64
 CHAIN_ALGORITHM = "sha256(prev_hash + canonical_row_json)"
-CLOCK_LABEL = "(local clock)"
+CLOCK_LABEL = "(host clock)"
 
 # Kinds that describe the profile, not one session: included in every session receipt they overlap.
-PROFILE_KINDS = frozenset({"seal", "unseal", "verify_ok", "verify_fail", "pin_staged", "pin_applied",
+PROFILE_KINDS = frozenset({"lock", "unlock", "verify_ok", "verify_fail", "pin_staged", "pin_applied",
                            "pin_denied", "preflight_fail"})
 VERIFICATION_KINDS = ("verify_ok", "verify_fail", "pin_staged", "pin_applied", "pin_denied")
 REFUSAL_KINDS = ("send_refused", "tool_refused", "preflight_fail")
@@ -60,14 +60,14 @@ SESSION_MARKERS = frozenset({"session_start", "session_end"})
 
 
 def is_session_marker(row: Any) -> bool:
-    """Session start/end markers are not seals, whatever kind they were written under (Amendment 4 F7:
-    W5 moves them to kinds session_start/session_end; older builds wrote kind "seal" with that decision)."""
+    """Session start/end markers are not locks, whatever kind they were written under (Amendment 4 F7:
+    W5 moves them to kinds session_start/session_end; older builds wrote kind "lock" with that decision)."""
     kind = _get(row, "kind")
-    return kind in SESSION_MARKERS or (kind == "seal" and _get(row, "decision") in SESSION_MARKERS)
+    return kind in SESSION_MARKERS or (kind == "lock" and _get(row, "decision") in SESSION_MARKERS)
 
 
-def _is_seal(row: Any) -> bool:
-    return _get(row, "kind") == "seal" and not is_session_marker(row)
+def _is_lock(row: Any) -> bool:
+    return _get(row, "kind") == "lock" and not is_session_marker(row)
 
 
 _ROW_FIELDS = ("id", "ts", "session_id", "kind", "purpose", "provider", "host", "model", "bytes", "tier",
@@ -91,20 +91,20 @@ CLOSING_PARAGRAPH = (
     "each send recorded and whether its response decrypted (the plugin's own observations); that the "
     "attested build was the vendor's latest release at the time; whether the build or its key was revoked "
     "after the evidence was captured; what shell, terminal and code-execution tools sent off the machine "
-    "(they run locally and can reach the network); which model backends sit behind the vendor's router; "
-    "any other access the vendor's operators have to the machines involved; and Hermes' auxiliary calls "
-    "(title generation, compaction, memory prefetch, vision, and plugin auxiliary tasks), which can leave "
-    "the sealed tier while sealed, for example after a runtime model or provider switch, and are recorded "
-    "here after the fact, not prevented. The ledger is a local file and is not protected against code "
-    "running in the same Hermes process: another plugin can write rows that look exactly like this "
+    "(they run on this host and can reach the network); which model backends sit behind the vendor's "
+    "router; any other access the vendor's operators have to the machines involved; and Hermes' auxiliary "
+    "calls (title generation, compaction, memory prefetch, vision, and plugin auxiliary tasks), which can "
+    "leave the locked tier while the profile is locked, for example after a runtime model or provider "
+    "switch, and are recorded here after the fact, not prevented. The ledger is a file on this host and is "
+    "not protected against code running in the same Hermes process: another plugin can write rows that look exactly like this "
     "plugin's own. The hash chain is a checksum over this document that anyone holding the file can "
     "recompute; it detects edits only when compared with a chain head recorded somewhere else when the "
     "receipt was rendered, and it says nothing about whether the ledger was complete or its rows genuine. "
-    "Sealed mode does not apply when Hermes runs in safe-worker mode, which loads no plugins. Timestamps "
+    "Locked mode does not apply when Hermes runs in safe-worker mode, which loads no plugins. Timestamps "
     "come from this machine's clock and are not attested."
 )
 
-SELF_REPORT_NOTE = ("This receipt is a self-report by the plugin from its local ledger. Only the attached evidence "
+SELF_REPORT_NOTE = ("This receipt is a self-report by the plugin from its ledger on this host. Only the attached evidence "
                     "blobs (JSON form) can be checked by a third party, by replaying them offline.")
 CHAIN_HEAD_NOTE = ("Record this chain head somewhere other than this machine now; later edits to this receipt are "
                    "detectable only against a copy kept elsewhere.")
@@ -139,15 +139,15 @@ def collect_rows(ledger, session_id: str, *, include_profile_rows: bool = True) 
         return list(own)
     rows = _all_rows(ledger)
     first, last = own[0].id, own[-1].id
-    # Profile-wide rows count from the end of the previous sealed period: the seal in force, and the
+    # Profile-wide rows count from the end of the previous locked period: the lock in force, and the
     # preflight failures and verifications that led up to it, are part of this session's story.
-    unseal_before = [r for r in rows if r.kind == "unseal" and r.id < first]
-    start = unseal_before[-1].id + 1 if unseal_before else 0
+    unlock_before = [r for r in rows if r.kind == "unlock" and r.id < first]
+    start = unlock_before[-1].id + 1 if unlock_before else 0
     picked = [r for r in rows if start <= r.id <= last
               and (r.session_id == session_id or (r.kind in PROFILE_KINDS and not is_session_marker(r)))]
-    # The unseal that closes the period, if it came after the session's last row.
-    after = [r for r in rows if r.id > last and (r.kind == "unseal" or _is_seal(r))]
-    if after and after[0].kind == "unseal":
+    # The unlock that closes the period, if it came after the session's last row.
+    after = [r for r in rows if r.id > last and (r.kind == "unlock" or _is_lock(r))]
+    if after and after[0].kind == "unlock":
         picked.append(after[0])
     return picked
 
@@ -240,36 +240,36 @@ _PIN_FIELDS = ("vendor", "router_repo", "code_fingerprint", "enclave_fingerprint
                "previous_enclave_fingerprint")
 
 
-_LOCAL_RULE = "loopback, RFC1918, 100.64.0.0/10, fe80::/10, fc00::/7, localhost, plus confidential.local.extra_hosts"
+_ON_HOST_RULE = "loopback, RFC1918, 100.64.0.0/10, fe80::/10, fc00::/7, localhost, plus confidential.on_host.extra_hosts"
 
 
-def _local_hosts_used(rows: Iterable[dict]) -> list[str]:
+def _on_host_endpoints_used(rows: Iterable[dict]) -> list[str]:
     return sorted({r["host"] for r in rows
-                   if r["kind"] == "send_observed" and r.get("tier") == "local-only" and r["host"]})
+                   if r["kind"] == "send_observed" and r.get("tier") == "on-host-only" and r["host"]})
 
 
-def _trust_roots(seal: dict, rows: list[dict], pins: Any, local_hosts: Iterable[str]) -> dict:
-    """Trust roots for every sealed period (Amendment 4 F11), plus the union at the top level."""
-    tier = seal["tier"]
-    periods = seal["periods"]
+def _trust_roots(lock: dict, rows: list[dict], pins: Any, on_host_extra_hosts: Iterable[str]) -> dict:
+    """Trust roots for every locked period (Amendment 4 F11), plus the union at the top level."""
+    tier = lock["tier"]
+    periods = lock["periods"]
     roots: dict[str, Any] = {"tier": tier}
     per_period = []
     for p in periods:
-        window = [r for r in rows if p["seal_row"] <= r["id"] <= p["end_row"]]
-        entry: dict[str, Any] = {"seal_row": p["seal_row"], "tier": p["tier"], "since": p["since"], "until": p["until"]}
-        if p["tier"] == "local-only":
-            entry["local_hosts_used"] = _local_hosts_used(window)
+        window = [r for r in rows if p["lock_row"] <= r["id"] <= p["end_row"]]
+        entry: dict[str, Any] = {"lock_row": p["lock_row"], "tier": p["tier"], "since": p["since"], "until": p["until"]}
+        if p["tier"] == "on-host-only":
+            entry["on_host_endpoints_used"] = _on_host_endpoints_used(window)
         elif p["tier"] == "attested":
             consents = [r for r in rows if r["kind"] == "pin_applied" and r["id"] <= p["end_row"]]
-            before = [r["id"] for r in consents if r["id"] < p["seal_row"]][-1:]
-            entry["pin_consent_rows"] = before + [r["id"] for r in consents if r["id"] >= p["seal_row"]]
+            before = [r["id"] for r in consents if r["id"] < p["lock_row"]][-1:]
+            entry["pin_consent_rows"] = before + [r["id"] for r in consents if r["id"] >= p["lock_row"]]
         per_period.append(entry)
     tiers = {p["tier"] for p in periods} or {tier}
-    if tiers & {None, "local-only"}:
-        local_rows = rows if not periods else [r for p in periods if p["tier"] == "local-only"
-                                               for r in rows if p["seal_row"] <= r["id"] <= p["end_row"]]
-        roots["local"] = {"rule": _LOCAL_RULE, "extra_hosts": sorted({str(h) for h in local_hosts}),
-                          "hosts_used": _local_hosts_used(local_rows)}
+    if tiers & {None, "on-host-only"}:
+        on_host_rows = rows if not periods else [r for p in periods if p["tier"] == "on-host-only"
+                                               for r in rows if p["lock_row"] <= r["id"] <= p["end_row"]]
+        roots["on_host"] = {"rule": _ON_HOST_RULE, "extra_hosts": sorted({str(h) for h in on_host_extra_hosts}),
+                          "hosts_used": _on_host_endpoints_used(on_host_rows)}
     if tiers & {None, "attested"} or pins is not None:
         roots["pins"] = [{f: (list(v) if isinstance(v := _get(p, f), tuple) else v) for f in _PIN_FIELDS}
                          for p in _pin_records(pins)]
@@ -309,7 +309,7 @@ def _sections(rows: list[dict]) -> dict:
         asks.append({"ask": r["id"], "answers": answers})
     unprompted = [r["id"] for r in rows if r["kind"] == "tool_allowed" and r["id"] not in answered]
     return {
-        "seal": [r["id"] for r in rows if _is_seal(r) or r["kind"] == "unseal"],
+        "lock": [r["id"] for r in rows if _is_lock(r) or r["kind"] == "unlock"],
         "verification": by_kind(VERIFICATION_KINDS),
         "unverified_entries": [r["id"] for r in rows if is_unverified_entry(r)],
         "sends": by_kind(("send_observed",)),
@@ -321,18 +321,18 @@ def _sections(rows: list[dict]) -> dict:
     }
 
 
-def _seal_info(rows: list[dict]) -> dict:
-    """Every seal period the rows show (seal .. next unseal), the last one's tier as the sealed tier."""
+def _lock_info(rows: list[dict]) -> dict:
+    """Every lock period the rows show (lock .. next unlock), the last one's tier as the locked tier."""
     periods: list[dict] = []
     for r in rows:
-        if _is_seal(r):
+        if _is_lock(r):
             if periods and periods[-1]["until"] is None:
-                periods[-1]["until"] = r["ts"]          # resealed without an unseal row
+                periods[-1]["until"] = r["ts"]          # relocked without an unlock row
             if periods and periods[-1]["end_row"] is None:
                 periods[-1]["end_row"] = r["id"] - 1
             periods.append({"tier": r.get("tier") or r["detail"].get("tier"), "since": r["ts"], "until": None,
-                            "seal_row": r["id"], "end_row": None})
-        elif r["kind"] == "unseal" and periods and periods[-1]["until"] is None:
+                            "lock_row": r["id"], "end_row": None})
+        elif r["kind"] == "unlock" and periods and periods[-1]["until"] is None:
             periods[-1]["until"] = r["ts"]
             periods[-1]["end_row"] = r["id"]
     for p in periods:
@@ -340,7 +340,7 @@ def _seal_info(rows: list[dict]) -> dict:
             p["end_row"] = rows[-1]["id"]
     if periods:
         last = periods[-1]
-        return {"tier": last["tier"], "since": last["since"], "until": last["until"], "source": "seal row",
+        return {"tier": last["tier"], "since": last["since"], "until": last["until"], "source": "lock row",
                 "periods": periods}
     tiers = [r.get("tier") for r in rows if r.get("tier")]
     tier = tiers[0] if tiers else None
@@ -459,19 +459,19 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
     return out
 
 
-def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Iterable[str] = (),
+def build_receipt(ledger, session_id: str, *, pins: Any = None, on_host_extra_hosts: Iterable[str] = (),
                   include_profile_rows: bool = True, ttl_seconds: float | None = None) -> dict:
     """The JSON receipt as a dict (``render(fmt="json")`` serialises this). ``ttl_seconds``: the
     verification TTL in force (``confidential.verify_ttl_seconds``); default 300 s, labelled as a default."""
     rows = [_row_dict(e) for e in collect_rows(ledger, session_id, include_profile_rows=include_profile_rows)]
     head = _chain(rows)
-    seal = _seal_info(rows)
+    lock = _lock_info(rows)
     ttl_source = "config" if ttl_seconds is not None else "default (the ledger does not record the TTL)"
     ttl = float(ttl_seconds) if ttl_seconds is not None else DEFAULT_TTL_SECONDS
     checker_id = policy_checker_id()
     sdk_versions = sorted({f for r in rows if r["kind"] in ("verify_ok", "verify_fail")
                            if (f := verify_facts(r)["sdk_version"])})
-    trust = _trust_roots(seal, rows, pins, local_hosts)
+    trust = _trust_roots(lock, rows, pins, on_host_extra_hosts)
     sends = [r for r in rows if r["kind"] in ("send_observed", "send_refused")]
     providers = sorted({(r["provider"], r["model"]) for r in sends if r["provider"] or r["model"]})
     enclave_hosts = [{"row_id": r["id"], "host": r["host"]} for r in rows
@@ -495,10 +495,10 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Ite
             "policy_checker": checker_id,
             "gating": GATING_NOTE,
             "hpke_mismatches": [],
-            "sealed_tier": seal["tier"],
-            "sealed_period": {"since": seal["since"], "until": seal["until"], "source": seal["source"]},
-            "sealed_periods": seal["periods"],
-            "clock": "local (timestamps are this machine's clock, not attested)",
+            "locked_tier": lock["tier"],
+            "locked_period": {"since": lock["since"], "until": lock["until"], "source": lock["source"]},
+            "locked_periods": lock["periods"],
+            "clock": "host (timestamps are this host's clock, not attested)",
             "providers": [{"provider": p, "model": m} for p, m in providers],
             "enclave_hosts": enclave_hosts,
             "unverified_entries": [r["id"] for r in rows if is_unverified_entry(r)],
@@ -575,7 +575,7 @@ def _p(value: Any) -> str:
 
 def _reason(row: Mapping) -> str:
     d = row["detail"]
-    # An in-tier verdict's reason ("local host ...") is not why the row was refused.
+    # An in-tier verdict's reason ("on-host endpoint ...") is not why the row was refused.
     reason = d.get("reason") if row.get("verdict") != "in_tier" else None
     parts = [_p(x) for x in (d.get("reason_code"), reason) if x]
     if d.get("status_code") is not None:
@@ -666,7 +666,7 @@ def render_text(doc: Mapping) -> str:
     out: list[str] = []
     add = out.append
 
-    period = h["sealed_period"]
+    period = h["locked_period"]
     add(f"Confidential mode receipt for session {_p(sid)}")
     add(f"CHAIN HEAD: {h['chain_head']}")
     add(f"  {CHAIN_HEAD_NOTE}")
@@ -676,13 +676,13 @@ def render_text(doc: Mapping) -> str:
     add(f"Restated policy checker: {_p(h['policy_checker'])}; {GATING_NOTE}.")
     if h.get("hpke_mismatches"):
         add("HPKE KEY MISMATCH on sends: " + ", ".join(f"#{i}" for i in h["hpke_mismatches"]))
-    add(f"Sealed tier: {_p(h['sealed_tier']) or '(not sealed / unknown)'}  (from {period['source']})")
+    add(f"Locked tier: {_p(h['locked_tier']) or '(not locked / unknown)'}  (from {period['source']})")
     if period["since"] is not None:
-        for p in h["sealed_periods"]:
-            until = ts_text(p["until"]) if p["until"] is not None else "still sealed at the last row"
-            add(f"Sealed period: {_p(p['tier']) or '?'} from {ts_text(p['since'])} to {until}  (seal row #{p['seal_row']})")
+        for p in h["locked_periods"]:
+            until = ts_text(p["until"]) if p["until"] is not None else "still locked at the last row"
+            add(f"Locked period: {_p(p['tier']) or '?'} from {ts_text(p['since'])} to {until}  (lock row #{p['lock_row']})")
     else:
-        add("Sealed period: no seal row covers this session")
+        add("Locked period: no lock row covers this session")
     if h["providers"]:
         add("Provider / model: " + ", ".join(f"{_p(p['provider']) or '?'} / {_p(p['model']) or '?'}"
                                              for p in h["providers"]))
@@ -702,11 +702,11 @@ def render_text(doc: Mapping) -> str:
     add("")
     add("Trust roots in force")
     tr = doc["trust_roots"]
-    if "local" in tr:
-        loc = tr["local"]
-        add(f"  Local endpoint set: {loc['rule']}")
-        add(f"  Extra local hosts: {', '.join(_p(x) for x in loc['extra_hosts']) or '(none)'}")
-        add(f"  Local hosts used: {', '.join(_p(x) for x in loc['hosts_used']) or '(none)'}")
+    if "on_host" in tr:
+        loc = tr["on_host"]
+        add(f"  On-host endpoint set: {loc['rule']}")
+        add(f"  Extra on-host names: {', '.join(_p(x) for x in loc['extra_hosts']) or '(none)'}")
+        add(f"  On-host endpoints used: {', '.join(_p(x) for x in loc['hosts_used']) or '(none)'}")
     if "pins" in tr:
         if not tr["pins"]:
             add("  Pins: (none)")
@@ -717,9 +717,9 @@ def render_text(doc: Mapping) -> str:
                 f"(rule {_p(p['approval_rule_key'])}); replaced {_p(p['previous']) or '(nothing)'}")
         add(f"  ({tr.get('pins_note', '')})")
     for p in tr.get("periods", []):
-        head = f"  Period {_p(p['tier']) or '?'} from {ts_text(p['since'])} (seal row #{p['seal_row']}): "
-        if "local_hosts_used" in p:
-            add(head + "local hosts used: " + (", ".join(_p(x) for x in p["local_hosts_used"]) or "(none)"))
+        head = f"  Period {_p(p['tier']) or '?'} from {ts_text(p['since'])} (lock row #{p['lock_row']}): "
+        if "on_host_endpoints_used" in p:
+            add(head + "on-host endpoints used: " + (", ".join(_p(x) for x in p["on_host_endpoints_used"]) or "(none)"))
         elif "pin_consent_rows" in p:
             add(head + "pin consent rows: " + (", ".join(f"#{i}" for i in p["pin_consent_rows"]) or "(none)"))
         else:
@@ -787,13 +787,13 @@ def render_text(doc: Mapping) -> str:
     return "\n".join(out) + "\n"
 
 
-def render(ledger, session_id: str, *, pins: Any = None, fmt: str = "text", local_hosts: Iterable[str] = (),
+def render(ledger, session_id: str, *, pins: Any = None, fmt: str = "text", on_host_extra_hosts: Iterable[str] = (),
            include_profile_rows: bool = True, ttl_seconds: float | None = None) -> str:
     """Render the receipt for ``session_id``. ``pins``: a PinStore, a mapping or iterable of PinRecord,
     or None. ``fmt``: "text" or "json"."""
     if fmt not in ("text", "json"):
         raise ValueError(f"fmt must be 'text' or 'json', not {fmt!r}")
-    doc = build_receipt(ledger, session_id, pins=pins, local_hosts=local_hosts,
+    doc = build_receipt(ledger, session_id, pins=pins, on_host_extra_hosts=on_host_extra_hosts,
                         include_profile_rows=include_profile_rows, ttl_seconds=ttl_seconds)
     if fmt == "json":
         return json.dumps(doc, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False)

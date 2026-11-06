@@ -3,15 +3,15 @@
 Slash (``ctx.register_command``; the handler is a plain ``def``, so the gateway runs it on an executor
 thread, which consent.py's ask_choice needs):
 
-    /confidential on <local-only|attested|zero-retention>   seal (preflight first; refuses with the report)
-    /confidential off                                       unseal (also repairs unreadable seal state)
-    /confidential status                                    tier, route, enclave, pins, verification, breaches
-    /confidential check [tier]                              the preflight table
-    /confidential pins                                      pins, pending pin, approval history, tool grants
-    /confidential pins approve                              approve the staged pin (ask_choice)
-    /confidential receipts [session]                        receipt (confidential_mode.receipts, when present)
-    /confidential allow <tool>                              add an off-machine tool for this seal (ask_choice)
-    /confidential watch                                     the latest ledger rows
+    /confidential on <on-host-only|attested|zero-retention>   lock (preflight first; refuses with the report)
+    /confidential off                                         unlock (also repairs unreadable lock state)
+    /confidential status                                      tier, route, enclave, pins, verification, breaches
+    /confidential check [tier]                                the preflight table
+    /confidential pins                                        pins, pending pin, approval history, tool grants
+    /confidential pins approve                                approve the staged pin (ask_choice)
+    /confidential receipts [session]                          receipt (confidential_mode.receipts, when present)
+    /confidential allow <tool>                                add an off-host tool for this lock (ask_choice)
+    /confidential watch                                       the latest ledger rows
 
 CLI (``ctx.register_cli_command``): ``hermes confidential setup|check|watch|status``.
 
@@ -30,11 +30,11 @@ import time
 from typing import Any, Callable, Optional
 
 from . import preflight as _pf
-from . import sealing as _sealing
+from . import locking as _locking
 from .tiers import Tier
 
-PROFILE_NAME = _sealing.PROFILE_NAME
-USAGE = ("Usage: /confidential on <local-only|attested>|off|status|check [tier]|pins [approve]|"
+PROFILE_NAME = _locking.PROFILE_NAME
+USAGE = ("Usage: /confidential on <on-host-only|attested>|off|status|check [tier]|pins [approve]|"
          "receipts [session]|allow <tool>|watch")
 RECEIPTS_PLACEHOLDER = ("Receipts are not available in this build yet (confidential_mode.receipts is missing). "
                         "The raw ledger is visible with /confidential watch or `hermes confidential watch`.")
@@ -55,12 +55,12 @@ def _verification_line(rt: Any, clock: Callable[[], float] = time.time) -> str:
     result = cache.result(PROFILE_NAME)
     error = cache.last_error(PROFILE_NAME)
     if result is not None:
-        return (f"Last verification: {_sealing.age_text(clock() - result.verified_at_local)} ago (local clock), "
+        return (f"Last verification: {_locking.age_text(clock() - result.verified_at_host_clock)} ago (host clock), "
                 f"code {_short(result.code_fingerprint)} enclave {_short(result.enclave_fingerprint)}"
                 f"{' release ' + result.release_tag if result.release_tag else ''}")
     if error:
         return f"Last verification: failed ({error[:120]})"
-    return "Last verification: never in this process (local clock)"
+    return "Last verification: never in this process (host clock)"
 
 
 def _provider_module(rt: Any):
@@ -129,7 +129,7 @@ def _grant_lines(rt: Any, session_key: str) -> list[str]:
 
 
 def _main_route_line(config: dict) -> str:
-    provider, model, base_url = _sealing._main_route(config)
+    provider, model, base_url = _locking._main_route(config)
     from .tiers import host_of
     return f"Provider/model: {provider or '(unset)'} / {model or '(unset)'}" + \
         (f" at {host_of(base_url)}" if base_url else "")
@@ -150,17 +150,17 @@ def _enclave_line(rt: Any) -> str:
 
 def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = time.time) -> str:
     lines: list[str] = []
-    sealed = tier = None
+    locked = tier = None
     try:
-        sealed, tier = rt.is_sealed()
-        if sealed:
-            since = rt.state.sealed_since()
-            lines.append(f"Confidential mode: SEALED ({tier.value}) for "
-                         f"{_sealing.age_text(clock() - since) if since else '?'} (local clock)")
+        locked, tier = rt.is_locked()
+        if locked:
+            since = rt.state.locked_since()
+            lines.append(f"Confidential mode: LOCKED ({tier.value}) for "
+                         f"{_locking.age_text(clock() - since) if since else '?'} (host clock)")
         else:
-            lines.append("Confidential mode: not sealed (observing only)")
+            lines.append("Confidential mode: not locked (observing only)")
     except Exception as exc:  # noqa: BLE001
-        lines.append(f"Confidential mode: seal state UNREADABLE ({type(exc).__name__}); every send and tool is "
+        lines.append(f"Confidential mode: lock state UNREADABLE ({type(exc).__name__}); every send and tool is "
                      "refused. Run /confidential off to repair it.")
     try:
         config = rt.load_config()
@@ -171,12 +171,12 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
     lines.append(_enclave_line(rt))
     lines.extend(_pin_lines(rt))
     lines.append(_verification_line(rt, clock))
-    if sealed is True:
+    if locked is True:
         try:
-            report = _sealing.run_tier_preflight(
-                tier, config=config, predicate=_sealing.structural_predicate(tier, config=config))
+            report = _locking.run_tier_preflight(
+                tier, config=config, predicate=_locking.structural_predicate(tier, config=config))
             recorded = rt.state.config_fingerprint()
-            fp_note = "unchanged since seal" if report.fingerprint == recorded else "CHANGED since seal"
+            fp_note = "unchanged since lock" if report.fingerprint == recorded else "CHANGED since lock"
             summary = "PASS" if report.ok else f"FAIL ({', '.join(i.key for i in report.failures()[:5])})"
             lines.append(f"Preflight ({tier.value}, routing config): {summary}; config {fp_note}")
         except Exception as exc:  # noqa: BLE001
@@ -185,12 +185,12 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
         lines.append("Preflight: run /confidential check <tier>")
     try:
         breached = rt.state.breached_sessions()
-        since = rt.state.sealed_since() if sealed else None
-        counts = _sealing.period_counts(rt.ledger, since) if sealed else {}
-        flag = "BREACHED" if (sealed and counts.get("breach")) else ("none this seal" if sealed else "-")
+        since = rt.state.locked_since() if locked else None
+        counts = _locking.period_counts(rt.ledger, since) if locked else {}
+        flag = "BREACHED" if (locked and counts.get("breach")) else ("none this lock" if locked else "-")
         lines.append(f"Breach: {flag}" + (f"; sessions ever breached: {', '.join(breached[-5:])}" if breached else ""))
-        if sealed:
-            lines.append(f"This seal: {counts.get('refused', 0)} refusal(s), {counts.get('asked', 0)} ask(s), "
+        if locked:
+            lines.append(f"This lock: {counts.get('refused', 0)} refusal(s), {counts.get('asked', 0)} ask(s), "
                          f"{counts.get('allowed', 0)} allowed")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"Breach: unknown ({type(exc).__name__})")
@@ -198,14 +198,14 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
     for step, err in getattr(rt, "errors", [])[:5]:
         lines.append(f"Plugin registration problem: {step}: {err}")
     lines.append(plugin_identity())
-    lines.append(f"Tools: {_sealing.TOOLS_TEXT}")
-    lines.append(f"Limits: {_sealing.AUX_TEXT} {_sealing.SAFE_WORKER_TEXT}")
+    lines.append(f"Tools: {_locking.TOOLS_TEXT}")
+    lines.append(f"Limits: {_locking.AUX_TEXT} {_locking.SAFE_WORKER_TEXT}")
     return "\n".join(lines)
 
 
 def _live_runtime_line(rt: Any) -> str:
-    """The live main runtime (Amendment 4 F1): what the last sealed turn ran on, or this context's binding."""
-    live = _sealing.live_main_runtime()
+    """The live main runtime (Amendment 4 F1): what the last locked turn ran on, or this context's binding."""
+    live = _locking.live_main_runtime()
     if live:
         from .tiers import host_of
         return (f"Live runtime (this context): {live.get('provider') or '?'} / {live.get('model') or '?'}"
@@ -213,9 +213,9 @@ def _live_runtime_line(rt: Any) -> str:
     last = getattr(rt, "last_live", None)
     if last:
         verdict = "in tier" if last.get("in_tier") else f"OFF-TIER ({last.get('reason')})"
-        return (f"Live runtime (last sealed turn): {last.get('provider') or '?'} / {last.get('model') or '?'} at "
+        return (f"Live runtime (last locked turn): {last.get('provider') or '?'} / {last.get('model') or '?'} at "
                 f"{last.get('host') or '(no host)'}: {verdict}")
-    return "Live runtime: not seen yet (checked at the start of each sealed turn)"
+    return "Live runtime: not seen yet (checked at the start of each locked turn)"
 
 
 def pins_text(rt: Any, *, session_key: str = "") -> str:
@@ -260,17 +260,17 @@ def interactive_attested_ok(rt: Any, wait_seconds: float = INTERACTIVE_VERIFY_WA
 
 def check_text(rt: Any, tier: Optional[str]) -> str:
     try:
-        sealed, sealed_tier = rt.is_sealed()
+        locked, locked_tier = rt.is_locked()
     except Exception:  # noqa: BLE001
-        sealed, sealed_tier = False, None
-    chosen = tier or (sealed_tier.value if sealed and sealed_tier else Tier.ATTESTED.value)
+        locked, locked_tier = False, None
+    chosen = tier or (locked_tier.value if locked and locked_tier else Tier.ATTESTED.value)
     try:
         t = Tier(chosen)
     except ValueError:
         return f"Unknown tier {chosen!r} (one of: {', '.join(x.value for x in Tier)})."
     if t is Tier.ZDR:
-        return f"zero-retention: {_sealing.ZDR_REASON}."
-    report = _sealing.run_tier_preflight(t, config=rt.load_config(), attested_ok=interactive_attested_ok(rt))
+        return f"zero-retention: {_locking.ZDR_REASON}."
+    report = _locking.run_tier_preflight(t, config=rt.load_config(), attested_ok=interactive_attested_ok(rt))
     return _pf.format_report(report)
 
 
@@ -299,8 +299,8 @@ def receipts_text(rt: Any, session: str, *, fmt: str = "text") -> str:
         config = rt.load_config()
     except Exception:  # noqa: BLE001
         config = {}
-    if "local_hosts" in params:
-        kwargs["local_hosts"] = _sealing.extra_hosts(config)
+    if "on_host_extra_hosts" in params:
+        kwargs["on_host_extra_hosts"] = _locking.extra_hosts(config)
     if "ttl_seconds" in params:
         ttl = verify_ttl_seconds(config)
         if ttl is not None:
@@ -316,7 +316,7 @@ class _AcceptsAll:
 def verify_ttl_seconds(config: Any) -> Optional[float]:
     """``confidential.verify_ttl_seconds`` as the provider reads it, or None when unset/unusable (the
     receipt then states its own default)."""
-    raw = _sealing._cfg(config or {}, "confidential", "verify_ttl_seconds")
+    raw = _locking._cfg(config or {}, "confidential", "verify_ttl_seconds")
     if raw is None or isinstance(raw, bool):
         return None
     try:
@@ -353,10 +353,10 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
         return USAGE
     cmd, rest = argv[0].lower(), argv[1:]
     sid, skey, surface = session_id or "", session_key or session_id or "", platform or ""
-    if cmd in ("on", "seal"):
+    if cmd in ("on", "lock"):
         if len(rest) != 1:
-            return "Usage: /confidential on <local-only|attested>"
-        result = _sealing.seal(rest[0], state=rt.state, ledger=rt.ledger, config=rt.load_config(),
+            return "Usage: /confidential on <on-host-only|attested>"
+        result = _locking.lock(rest[0], state=rt.state, ledger=rt.ledger, config=rt.load_config(),
                                allowlist_path=rt.allowlist_path, session_id=sid, surface=surface,
                                attested_ok=interactive_attested_ok(rt))
         if result.ok:
@@ -364,11 +364,11 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
             if show_report and result.report is not None:
                 return result.message + "\n\nPreflight:\n" + _pf.format_report(result.report)
         return result.message
-    if cmd in ("off", "unseal"):
-        result = _sealing.unseal(state=rt.state, ledger=rt.ledger, session_id=sid, surface=surface,
+    if cmd in ("off", "unlock"):
+        result = _locking.unlock(state=rt.state, ledger=rt.ledger, session_id=sid, surface=surface,
                                  clear_cache=lambda: _provider_module(rt).verification_cache.invalidate(PROFILE_NAME))
         rt.set_allowlist(None)
-        try:   # Amendment 4 F6 (W4): allow grants are scoped to the seal
+        try:   # Amendment 4 F6 (W4): allow grants are scoped to the lock
             from .gate_tools import clear_persisted
             clear_persisted(rt.allowlist_path)
         except Exception:  # noqa: BLE001
@@ -399,22 +399,22 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
         if len(rest) != 1:
             return "Usage: /confidential allow <tool>"
         try:
-            sealed, _ = rt.is_sealed()
+            locked, _ = rt.is_locked()
         except Exception:  # noqa: BLE001
-            return "Seal state is unreadable; run /confidential off first."
-        if sealed is not True:
-            return "Not sealed: every tool runs without asking. Seal first with /confidential on <tier>."
+            return "Lock state is unreadable; run /confidential off first."
+        if locked is not True:
+            return "Not locked: every tool runs without asking. Lock first with /confidential on <tier>."
         from .consent import ConsentContextError, allow_tool
         try:
             return allow_tool(asker, rt.allowlist(), rt.ledger, rest[0], session_key=skey, session_id=sid,
                               platform=surface)
         except ConsentContextError as exc:
             return f"Not asked: {exc}"
-    if cmd == "blocked":       # pre_gateway_dispatch rewrites a sealed /model (or /moa) to this
+    if cmd == "blocked":       # pre_gateway_dispatch rewrites a locked /model (or /moa) to this
         what = rest[0] if rest else "that command"
-        return (f"Refused while sealed: /{what} switches this session's live model runtime, and Hermes routes "
+        return (f"Refused while locked: /{what} switches this session's live model runtime, and Hermes routes "
                 "auxiliary calls (titles, compression, vision) to the live runtime. Run /confidential off first, "
-                "switch, then seal again.")
+                "switch, then lock again.")
     if cmd == "watch":
         return watch_text(rt) + "\n(live view: `hermes confidential watch` in a terminal)"
     return USAGE
@@ -431,7 +431,7 @@ def register_slash(ctx: Any, rt: Any) -> None:
             return f"confidential: error ({type(exc).__name__}: {exc})"
 
     ctx.register_command("confidential", confidential,
-                         description="Confidential mode: seal, unseal, status, pins, receipts, allow, watch",
+                         description="Confidential mode: lock, unlock, status, pins, receipts, allow, watch",
                          args_hint="on <tier>|off|status|check|pins [approve]|receipts|allow <tool>|watch")
 
 
@@ -485,10 +485,10 @@ def config_block(rt: Any, model: str, *, vision_model: str = DEFAULT_VISION_MODE
                  aux_model: str = DEFAULT_AUX_MODEL, enclave: Optional[str] = None) -> str:
     try:
         tasks = list(dict.fromkeys(_pf.builtin_aux_task_names()
-                                   + [e if isinstance(e, str) else e.get("key") for e in _sealing._plugin_aux(None)]))
+                                   + [e if isinstance(e, str) else e.get("key") for e in _locking._plugin_aux(None)]))
     except Exception:  # noqa: BLE001
         tasks = list(_pf.BUILTIN_AUX_TASKS_SNAPSHOT)
-    tasks = [t for t in tasks if t and not t.startswith("moa")]   # moa is refused while sealed
+    tasks = [t for t in tasks if t and not t.startswith("moa")]   # moa is refused while locked
     groups = {"vision": [t for t in tasks if t == "vision"],
               "cheap": [t for t in tasks if t in CHEAP_AUX_TASKS],
               "main": [t for t in tasks if t != "vision" and t not in CHEAP_AUX_TASKS]}
@@ -513,7 +513,7 @@ def config_block(rt: Any, model: str, *, vision_model: str = DEFAULT_VISION_MODE
 
 def cli_setup(rt: Any, args: Any, out=None) -> int:
     out = out or sys.stdout
-    model = getattr(args, "model", None) or _sealing._cfg(rt.load_config(), "confidential", "model") or "<model>"
+    model = getattr(args, "model", None) or _locking._cfg(rt.load_config(), "confidential", "model") or "<model>"
     out.write(f"TINFOIL_API_KEY: {'set' if _provider_module(rt).tinfoil_api_key() else 'NOT set (hermes auth / .env)'}\n")
     if not getattr(args, "no_verify", False):
         if rt.adapter is None:
@@ -537,7 +537,7 @@ def cli_setup(rt: Any, args: Any, out=None) -> int:
             return 1
         out.write(f"Verified {result.enclave_host}: code {_short(result.code_fingerprint, 16)} enclave "
                   f"{_short(result.enclave_fingerprint, 16)} release {result.release_tag or '(untagged)'} "
-                  f"(verified_at is the local clock)\n")
+                  f"(verified_at is the host clock)\n")
         if rt.pins.match(result):
             out.write("This build is already pinned.\n")
         else:
@@ -792,12 +792,12 @@ CLI_VERBS = ("on", "off", "receipts", "pins", "allow")
 
 def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> int:
     """`hermes confidential on|off|receipts|pins|allow`: the slash verbs on the same ctx.state, ledger,
-    pins and allowlist files as a running gateway (state is re-read from disk on every gate call, so a seal
-    or unseal here takes effect on the gateway's next turn). Consent uses the exact-match TerminalAsker."""
+    pins and allowlist files as a running gateway (state is re-read from disk on every gate call, so a lock
+    or unlock here takes effect on the gateway's next turn). Consent uses the exact-match TerminalAsker."""
     out = out or sys.stdout
     asker = asker if asker is not None else TerminalAsker()
     if action == "on":
-        raw, ok_prefix = f"on {args.tier}", "Sealed"
+        raw, ok_prefix = f"on {args.tier}", "Locked"
     elif action == "off":
         raw, ok_prefix = "off", ""
     elif action == "receipts":
@@ -814,7 +814,7 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
                         show_report=(action == "on"))
     out.write(text.rstrip() + "\n")
     if action == "allow":
-        return 0 if text.endswith("added to the allowlist for this seal.") or text.endswith("is already allowed.") else 1
+        return 0 if text.endswith("added to the allowlist for this lock.") or text.endswith("is already allowed.") else 1
     if ok_prefix:
         return 0 if text.startswith(ok_prefix) else 1
     if action == "receipts" and text.startswith(("Receipts are not available", "Usage")):
@@ -832,21 +832,21 @@ def register_cli(ctx: Any, rt: Any) -> None:
         p.add_argument("--aux-model", default=None,
                        help=f"cheaper model for short auxiliary jobs (default {DEFAULT_AUX_MODEL})")
         p.add_argument("--no-verify", action="store_true", help="only print the config block")
-        p = sub.add_parser("check", help="run the seal preflight and print the table")
+        p = sub.add_parser("check", help="run the lock preflight and print the table")
         p.add_argument("--tier", default=None, choices=[t.value for t in Tier])
-        p = sub.add_parser("watch", help="stream the ledger (works unsealed)")
+        p = sub.add_parser("watch", help="stream the ledger (works unlocked)")
         from . import watch
         watch.setup_parser(p)
-        sub.add_parser("status", help="seal state, pins, verification, breaches")
-        p = sub.add_parser("on", help="seal this profile (same path as /confidential on)")
+        sub.add_parser("status", help="lock state, pins, verification, breaches")
+        p = sub.add_parser("on", help="lock this profile (same path as /confidential on)")
         p.add_argument("tier", choices=[t.value for t in Tier])
-        sub.add_parser("off", help="unseal this profile and print the seal period's counts")
+        sub.add_parser("off", help="unlock this profile and print the lock period's counts")
         p = sub.add_parser("receipts", help="render a session receipt")
         p.add_argument("session", nargs="?", default=None, help="session id")
         p.add_argument("--json", action="store_true", help="hash-chained JSON form")
         p = sub.add_parser("pins", help="list pins; 'approve' approves the staged pin on this terminal")
         p.add_argument("pins_action", nargs="?", choices=["approve"], default=None)
-        p = sub.add_parser("allow", help="allow an off-machine tool for this seal (asks on this terminal)")
+        p = sub.add_parser("allow", help="allow an off-host tool for this lock (asks on this terminal)")
         p.add_argument("tool")
         p = sub.add_parser("replay", help="replay a receipt's attestation evidence offline")
         p.add_argument("receipt", help="receipt JSON (/confidential receipts <session> --json)")
@@ -893,4 +893,4 @@ def register_cli(ctx: Any, rt: Any) -> None:
             return 1
 
     ctx.register_cli_command("confidential", "Confidential mode: setup, check, watch, status", setup_fn, handler,
-                             description="Attested inference and sealed mode")
+                             description="Attested inference and locked mode")

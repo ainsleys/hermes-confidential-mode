@@ -25,7 +25,7 @@ SID = "sess-A"
 SECRET = "the merger closes on friday"   # stands in for prompt text; must never appear
 # Golden digest of the closing paragraph: editing the claims split must be a deliberate change here.
 CLOSING_SHA256 = hashlib.sha256(CLOSING_PARAGRAPH.encode("utf-8")).hexdigest()
-CLOSING_SHA256_PINNED = "a956bfc7d687a9ae3e2496821c1f5364d19b954d5b1901a0232f1dc03405762d"
+CLOSING_SHA256_PINNED = "5a788ff013a8bb32b388e45dbfbbefc8369a7841902905b9519a6f568a5a18d6"
 
 
 class Clock:
@@ -54,9 +54,9 @@ EVIDENCE = {"format": "tinfoil-attestation", "body": "eyJyZXBvcnQiOiAiZmFrZSJ9",
 
 def fill_every_kind(led: Ledger, sid: str = SID) -> None:
     """One session that exercises every ledger kind, in demo order."""
-    led.append(_ev("preflight_fail", session_id="", purpose="seal", tier="attested",
+    led.append(_ev("preflight_fail", session_id="", purpose="lock", tier="attested",
                    detail={"reason": "fallback_providers[0].provider off_tier", "failures": 1}))
-    led.append(_ev("seal", session_id="", tier="attested", decision="sealed", detail={"tier": "attested"}))
+    led.append(_ev("lock", session_id="", tier="attested", decision="locked", detail={"tier": "attested"}))
     led.append(_ev("verify_ok", session_id="", provider="attested-tinfoil", host="r1.tinfoil.invalid",
                    detail={"vendor": "tinfoil", "enclave_host": "r1.tinfoil.invalid", "code_fingerprint": "c1" * 32,
                            "enclave_fingerprint": "e1" * 32, "release_tag": "v1.0.0", "evidence": EVIDENCE}))
@@ -86,8 +86,8 @@ def fill_every_kind(led: Ledger, sid: str = SID) -> None:
                    detail={"reason": "compression summary sent off-tier"}))
     led.append(_ev("compaction", purpose="compaction", provider="attested-tinfoil", host="r1.tinfoil.invalid",
                    model="tf-model"))
-    led.append(_ev("unseal", session_id="", decision="unsealed"))
-    # Session markers (W5): never open or close a sealed period; appended last so earlier row ids hold.
+    led.append(_ev("unlock", session_id="", decision="unlocked"))
+    # Session markers (W5): never open or close a locked period; appended last so earlier row ids hold.
     led.append(_ev("session_start", decision="session_start", detail={"platform": "cli"}))
     led.append(_ev("session_end", decision="session_end", detail={"platform": "cli"}))
 
@@ -99,7 +99,7 @@ def _pins(tmp_path) -> PinStore:
     r = VerificationResult(vendor="tinfoil", router_repo="tinfoilsh/confidential-model-router",
                            enclave_host="r1.tinfoil.invalid", code_fingerprint="c1" * 32,
                            enclave_fingerprint="e1" * 32, release_tag="v1.0.0", verifier="tinfoil/0.14.2",
-                           verified_at_local=0.0)
+                           verified_at_host_clock=0.0)
     store.apply(store.stage(r), approved_via="telegram", approved_at="2026-11-06T10:00:00Z")
     return store
 
@@ -143,7 +143,7 @@ def test_every_kind_is_rendered_in_order(ledger, tmp_path):
               "Compactions", CLOSING_PARAGRAPH]
     positions = [text.index(t) for t in titles]
     assert positions == sorted(positions)
-    assert "Sealed tier: attested" in text and "to " in text.split("Sealed period:")[1].splitlines()[0]
+    assert "Locked tier: attested" in text and "to " in text.split("Locked period:")[1].splitlines()[0]
     assert "Provider / model: attested-tinfoil / tf-model" in text
     assert "Enclave host per request:\n  #4 r1.tinfoil.invalid" in text
     # trust roots: the pin with its approval metadata
@@ -166,12 +166,12 @@ def test_every_kind_is_rendered_in_order(ledger, tmp_path):
     assert "[profile]" in text
 
 
-def test_every_timestamp_is_labelled_local_clock(ledger, tmp_path):
+def test_every_timestamp_is_labelled_host_clock(ledger, tmp_path):
     fill_every_kind(ledger)
     text = render(ledger, SID, pins=_pins(tmp_path))
     import re
-    stamps = re.findall(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z( \(local clock\))?", text)
-    assert stamps and all(s == " (local clock)" for s in stamps), stamps
+    stamps = re.findall(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z( \(host clock\))?", text)
+    assert stamps and all(s == " (host clock)" for s in stamps), stamps
 
 
 def test_json_carries_evidence_and_sections(ledger, tmp_path):
@@ -182,31 +182,31 @@ def test_json_carries_evidence_and_sections(ledger, tmp_path):
     sec = doc["sections"]
     assert sec["asks"][0] == {"ask": 6, "answers": [7]} and sec["asks"][1]["answers"] == [9]
     assert sec["allowed_without_prompt"] == [10]
-    assert doc["header"]["sealed_tier"] == "attested"
-    assert doc["header"]["sealed_period"]["until"] is not None
+    assert doc["header"]["locked_tier"] == "attested"
+    assert doc["header"]["locked_period"]["until"] is not None
     assert doc["trust_roots"]["pins"][0]["approved_via"] == "telegram"
     assert verify_chain(json.dumps(doc)) is True
 
 
-def test_local_tier_trust_roots(ledger):
-    ledger.append(_ev("seal", tier="local-only"))
+def test_on_host_tier_trust_roots(ledger):
+    ledger.append(_ev("lock", tier="on-host-only"))
     ledger.append(_ev("send_observed", purpose="main", provider="custom", host="127.0.0.1", bytes=10,
-                      tier="local-only", decision="allowed"))
-    text = render(ledger, SID, pins=None, local_hosts=["gpu-box.lan"])
-    assert "Local endpoint set: loopback, RFC1918" in text
-    assert "Extra local hosts: gpu-box.lan" in text and "Local hosts used: 127.0.0.1" in text
+                      tier="on-host-only", decision="allowed"))
+    text = render(ledger, SID, pins=None, on_host_extra_hosts=["gpu-box.lan"])
+    assert "On-host endpoint set: loopback, RFC1918" in text
+    assert "Extra on-host names: gpu-box.lan" in text and "On-host endpoints used: 127.0.0.1" in text
     assert "Pin " not in text
 
 
-def test_profile_rows_window_runs_from_the_previous_unseal(ledger):
+def test_profile_rows_window_runs_from_the_previous_unlock(ledger):
     ledger.append(_ev("verify_ok", session_id="", detail={"vendor": "old"}))        # previous period: excluded
-    ledger.append(_ev("unseal", session_id="cli"))
-    ledger.append(_ev("seal", session_id="cli", tier="local-only"))
-    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))
+    ledger.append(_ev("unlock", session_id="cli"))
+    ledger.append(_ev("lock", session_id="cli", tier="on-host-only"))
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="on-host-only"))
     ledger.append(_ev("verify_ok", session_id="", detail={"vendor": "late"}))       # after last row: excluded
     doc = build_receipt(ledger, SID)
-    assert [r["kind"] for r in doc["rows"]] == ["seal", "send_observed"]
-    assert doc["header"]["sealed_period"]["source"] == "seal row"
+    assert [r["kind"] for r in doc["rows"]] == ["lock", "send_observed"]
+    assert doc["header"]["locked_period"]["source"] == "lock row"
 
 
 # ── redaction ───────────────────────────────────────────────────────────────────────────────────
@@ -221,7 +221,7 @@ def _raw_insert(path, detail: dict, kind="send_observed", sid=SID):
 
 
 def test_content_keys_written_behind_the_ledger_are_redacted(ledger, tmp_path):
-    ledger.append(_ev("seal", tier="local-only"))   # creates the schema
+    ledger.append(_ev("lock", tier="on-host-only"))   # creates the schema
     _raw_insert(tmp_path / "ledger.sqlite", {"messages": [{"role": "user", "content": SECRET}],
                                              "nested": {"Prompt": SECRET, "ok": 1}, "list": [{"input": SECRET}]})
     for fmt in ("text", "json"):
@@ -342,28 +342,28 @@ def test_closing_paragraph_states_the_claims_split():
 def test_closing_paragraph_is_identical_across_receipts(ledger, tmp_path):
     fill_every_kind(ledger)
     outs = [render(ledger, SID, pins=_pins(tmp_path)), render(ledger, "nobody"),
-            render(ledger, SID, pins=None, local_hosts=["x"])]
+            render(ledger, SID, pins=None, on_host_extra_hosts=["x"])]
     for out in outs:
         assert out.endswith("\n\n" + CLOSING_PARAGRAPH + "\n")
     for fmt_out in (render(ledger, SID, fmt="json"), render(ledger, "nobody", fmt="json")):
         assert json.loads(fmt_out)["closing"] == CLOSING_PARAGRAPH
 
 
-def test_every_seal_period_is_listed(ledger):
-    ledger.append(_ev("seal", tier="local-only"))
-    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))
-    ledger.append(_ev("unseal"))
-    ledger.append(_ev("seal", tier="attested"))
+def test_every_lock_period_is_listed(ledger):
+    ledger.append(_ev("lock", tier="on-host-only"))
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="on-host-only"))
+    ledger.append(_ev("unlock"))
+    ledger.append(_ev("lock", tier="attested"))
     ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
     doc = build_receipt(ledger, SID)
-    periods = doc["header"]["sealed_periods"]
-    assert [(p["tier"], p["until"] is None, p["seal_row"]) for p in periods] == [
-        ("local-only", False, 1), ("attested", True, 4)]
+    periods = doc["header"]["locked_periods"]
+    assert [(p["tier"], p["until"] is None, p["lock_row"]) for p in periods] == [
+        ("on-host-only", False, 1), ("attested", True, 4)]
     text = render(ledger, SID)
-    lines = [ln for ln in text.splitlines() if ln.startswith("Sealed period:")]
-    assert lines[0].startswith("Sealed period: local-only from ") and "(local clock) to 20" in lines[0]
-    assert lines[1].startswith("Sealed period: attested from ") and "still sealed at the last row" in lines[1]
-    assert doc["header"]["sealed_tier"] == "attested"
+    lines = [ln for ln in text.splitlines() if ln.startswith("Locked period:")]
+    assert lines[0].startswith("Locked period: on-host-only from ") and "(host clock) to 20" in lines[0]
+    assert lines[1].startswith("Locked period: attested from ") and "still locked at the last row" in lines[1]
+    assert doc["header"]["locked_tier"] == "attested"
 
 
 # ── Amendment 4: unverified entries (F9), per-period trust roots (F11), session markers (F7) ─────
@@ -376,9 +376,9 @@ def test_every_seal_period_is_listed(ledger):
     {"vendor": "tinfoil", "evidence": {"format": "x", "capture_complete": "true"}},  # not exactly True
 ])
 def test_verify_ok_without_complete_evidence_is_an_unverified_entry(ledger, detail):
-    ledger.append(_ev("seal", tier="local-only"))
+    ledger.append(_ev("lock", tier="on-host-only"))
     vid = ledger.append(_ev("verify_ok", session_id="", provider="attested-tinfoil", detail=detail))
-    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="on-host-only"))
     doc = json.loads(render(ledger, SID, fmt="json"))
     assert doc["header"]["unverified_entries"] == [vid] and doc["sections"]["unverified_entries"] == [vid]
     assert all(e["unverified_entry"] is True for e in doc["evidence"])
@@ -390,53 +390,53 @@ def test_verify_ok_without_complete_evidence_is_an_unverified_entry(ledger, deta
 
 
 def test_complete_evidence_is_not_flagged(ledger):
-    ledger.append(_ev("seal", tier="attested"))
+    ledger.append(_ev("lock", tier="attested"))
     ledger.append(_ev("verify_ok", session_id="", detail={"evidence": EVIDENCE}))
     ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
     assert "UNVERIFIED" not in render(ledger, SID)
     assert build_receipt(ledger, SID)["header"]["unverified_entries"] == []
 
 
-def test_trust_roots_per_period_across_a_reseal(ledger, tmp_path):
-    ledger.append(_ev("seal", tier="local-only"))                                                     # 1
-    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))          # 2
-    ledger.append(_ev("unseal"))                                                                      # 3
+def test_trust_roots_per_period_across_a_relock(ledger, tmp_path):
+    ledger.append(_ev("lock", tier="on-host-only"))                                                     # 1
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="on-host-only"))          # 2
+    ledger.append(_ev("unlock"))                                                                      # 3
     ledger.append(_ev("pin_applied", provider="tinfoil", decision="approve", detail={"vendor": "tinfoil"}))  # 4
-    ledger.append(_ev("seal", tier="attested"))                                                       # 5
+    ledger.append(_ev("lock", tier="attested"))                                                       # 5
     ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))   # 6
     ledger.append(_ev("pin_applied", provider="tinfoil", decision="approve", detail={"vendor": "tinfoil"}))  # 7
     doc = build_receipt(ledger, SID, pins=_pins(tmp_path))
     tr = doc["trust_roots"]
     assert tr["tier"] == "attested"
-    assert tr["local"]["hosts_used"] == ["127.0.0.1"] and tr["pins"]
-    assert [(p["tier"], p["seal_row"]) for p in tr["periods"]] == [("local-only", 1), ("attested", 5)]
-    assert tr["periods"][0]["local_hosts_used"] == ["127.0.0.1"]
+    assert tr["on_host"]["hosts_used"] == ["127.0.0.1"] and tr["pins"]
+    assert [(p["tier"], p["lock_row"]) for p in tr["periods"]] == [("on-host-only", 1), ("attested", 5)]
+    assert tr["periods"][0]["on_host_endpoints_used"] == ["127.0.0.1"]
     assert tr["periods"][1]["pin_consent_rows"] == [4, 7]
     text = render(ledger, SID, pins=_pins(tmp_path))
-    assert "Period local-only from " in text and "(seal row #1): local hosts used: 127.0.0.1" in text
-    assert "(seal row #5): pin consent rows: #4, #7" in text
-    assert "Local endpoint set:" in text and "Pin tinfoil" in text
+    assert "Period on-host-only from " in text and "(lock row #1): on-host endpoints used: 127.0.0.1" in text
+    assert "(lock row #5): pin consent rows: #4, #7" in text
+    assert "On-host endpoint set:" in text and "Pin tinfoil" in text
 
 
 @pytest.mark.parametrize("marker", [
-    {"kind": "seal", "decision": "session_start"}, {"kind": "seal", "decision": "session_end"},
+    {"kind": "lock", "decision": "session_start"}, {"kind": "lock", "decision": "session_end"},
 ])
-def test_session_markers_are_not_seal_periods(ledger, marker):
-    sid_seal = ledger.append(_ev("seal", session_id="cli", tier="local-only", decision="sealed"))
-    ledger.append(_ev(marker["kind"], decision=marker["decision"], tier="local-only"))
-    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))
-    ledger.append(_ev("seal", decision="session_end", tier="local-only"))
+def test_session_markers_are_not_lock_periods(ledger, marker):
+    sid_lock = ledger.append(_ev("lock", session_id="cli", tier="on-host-only", decision="locked"))
+    ledger.append(_ev(marker["kind"], decision=marker["decision"], tier="on-host-only"))
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="on-host-only"))
+    ledger.append(_ev("lock", decision="session_end", tier="on-host-only"))
     doc = build_receipt(ledger, SID)
-    periods = doc["header"]["sealed_periods"]
-    assert [p["seal_row"] for p in periods] == [sid_seal]
-    assert doc["header"]["sealed_period"]["since"] == doc["rows"][0]["ts"]
-    assert doc["sections"]["seal"] == [sid_seal]
+    periods = doc["header"]["locked_periods"]
+    assert [p["lock_row"] for p in periods] == [sid_lock]
+    assert doc["header"]["locked_period"]["since"] == doc["rows"][0]["ts"]
+    assert doc["sections"]["lock"] == [sid_lock]
 
 
 def test_closing_paragraph_discloses_the_in_process_and_aux_limits():
     text = CLOSING_PARAGRAPH
     rec = text.index("RECORD ONLY")
-    assert "local file" in text and "same Hermes process" in text
+    assert "file on this host" in text and "same Hermes process" in text
     assert "replay offline" in text[:rec] and "confidential_mode.verify.replay" in text[:rec]
     assert "hermes confidential replay <receipt.json>" in text[:rec] and '"unverified entry"' in text[:rec]
     assert "self-report" in text[:rec]
@@ -470,7 +470,7 @@ def test_plugin_commit_comes_from_version_module(ledger, monkeypatch):
     from confidential_mode import _version
     assert receipts.PLUGIN_COMMIT is _version.PLUGIN_COMMIT
     monkeypatch.setattr(receipts, "PLUGIN_COMMIT", "abc1234")
-    ledger.append(_ev("seal", tier="local-only"))
+    ledger.append(_ev("lock", tier="on-host-only"))
     assert "(commit abc1234)" in render(ledger, SID)
 
 
@@ -482,7 +482,7 @@ FULL_EVIDENCE = {"schema": 1, "vendor": "tinfoil", "repo": "tinfoilsh/confidenti
 
 
 def test_verification_row_shows_repo_platform_host_and_committed_keys(ledger):
-    ledger.append(_ev("seal", tier="attested"))
+    ledger.append(_ev("lock", tier="attested"))
     ledger.append(_ev("verify_ok", session_id="", host="r1.tinfoil.invalid", detail={"vendor": "tinfoil",
                                                                                      "evidence": FULL_EVIDENCE}))
     ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
@@ -499,7 +499,7 @@ def test_verification_row_shows_repo_platform_host_and_committed_keys(ledger):
 
 def _attested_sends(ledger, gaps, **verify_detail):
     clock = ledger._clock
-    ledger.append(_ev("seal", tier="attested"))
+    ledger.append(_ev("lock", tier="attested"))
     vid = ledger.append(_ev("verify_ok", session_id="", host="r1.tinfoil.invalid",
                             detail={"evidence": FULL_EVIDENCE, **verify_detail}))
     ids = []
@@ -521,7 +521,7 @@ def test_each_attested_send_names_its_verify_row_and_ttl_window(ledger):
     assert cov[outside]["verify"] == vid and cov[outside]["covered"] is False
     text = render(ledger, SID)
     send_lines = [ln for ln in text.splitlines() if "main  host=r1.tinfoil.invalid" in ln]
-    assert f"covered by verify #{vid}, TTL 300 s (default" in send_lines[0] and "(local clock) to " in send_lines[0]
+    assert f"covered by verify #{vid}, TTL 300 s (default" in send_lines[0] and "(host clock) to " in send_lines[0]
     assert f"NOT covered: outside the TTL window of verify #{vid}" in send_lines[1]
     assert doc["header"]["verify_ttl_seconds"] == 300.0
 
@@ -539,7 +539,7 @@ def test_ttl_from_argument_and_from_the_verify_row(ledger, tmp_path):
 
 
 def test_attested_send_with_no_verify_row_is_not_covered(ledger):
-    ledger.append(_ev("seal", tier="attested"))
+    ledger.append(_ev("lock", tier="attested"))
     sid_send = ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
     c = build_receipt(ledger, SID)["sections"]["send_coverage"]
     assert c == [{"send": sid_send, "verify": None, "ttl_seconds": 300.0, "ttl_source": c[0]["ttl_source"],
@@ -548,22 +548,22 @@ def test_attested_send_with_no_verify_row_is_not_covered(ledger):
 
 
 def test_coverage_by_an_unverified_entry_is_flagged(ledger):
-    ledger.append(_ev("seal", tier="attested"))
+    ledger.append(_ev("lock", tier="attested"))
     vid = ledger.append(_ev("verify_ok", session_id="", host="r1.tinfoil.invalid", detail={"vendor": "x"}))
     ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
     assert f"covered by verify #{vid} (an unverified entry)" in render(ledger, SID)
 
 
-def test_local_sends_have_no_coverage_entry(ledger):
-    ledger.append(_ev("seal", tier="local-only"))
-    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))
+def test_on_host_sends_have_no_coverage_entry(ledger):
+    ledger.append(_ev("lock", tier="on-host-only"))
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="on-host-only"))
     assert build_receipt(ledger, SID)["sections"]["send_coverage"] == []
 
 
 # ── plan review finding 7 / item 5: replay status, capturer-asserted fields, per-send HPKE ────────
 
 def _one_verify(ledger, kind="verify_ok", **detail):
-    ledger.append(_ev("seal", tier="attested"))
+    ledger.append(_ev("lock", tier="attested"))
     vid = ledger.append(_ev(kind, session_id="", host="r1.tinfoil.invalid",
                             detail={"vendor": "tinfoil", "evidence": FULL_EVIDENCE, **detail}))
     return vid
@@ -613,7 +613,7 @@ def test_policy_checker_hash_is_computed_at_render_time(monkeypatch, tmp_path):
 
 
 def test_replay_status_for_failed_and_unverified_rows(ledger):
-    ledger.append(_ev("seal", tier="attested"))
+    ledger.append(_ev("lock", tier="attested"))
     fail = ledger.append(_ev("verify_fail", session_id="", detail={"evidence": FULL_EVIDENCE, "error": "x"}))
     bare = ledger.append(_ev("verify_ok", session_id="", detail={"vendor": "tinfoil"}))
     ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))

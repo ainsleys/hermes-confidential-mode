@@ -36,7 +36,7 @@ PIN_CHOICES = [
     {"value": "deny", "label": "Deny", "description": "keep the current pin"},
 ]
 TOOL_CHOICES = [
-    {"value": "approve", "label": "Allow", "description": "let this tool run while sealed without asking each call"},
+    {"value": "approve", "label": "Allow", "description": "let this tool run while locked without asking each call"},
     {"value": "deny", "label": "Deny", "description": "keep asking (or blocking) for this tool"},
 ]
 
@@ -280,21 +280,21 @@ def _apply(store: Any, pending: Any, surface: str) -> Any:
 
 def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key: str = "",
                session_id: str = "", platform: str = "") -> str:
-    """Ask the human to add an off-machine tool to the sealed allowlist (no per-call prompt after).
+    """Ask the human to add an off-host tool to the locked allowlist (no per-call prompt after).
     Hard-blocked tools (cronjob_manage, delegate_task routing, MCP-by-URL) cannot be added."""
     _refuse_on_event_loop("allow_tool")
     info = allowlist.get(name)
     if info is None:
-        return f"Unknown tool {name!r}; it was not registered when the session was sealed."
-    if info.route is Route.LOCAL:
-        return f"{name} is local and already runs without asking."
+        return f"Unknown tool {name!r}; it was not registered when the session was locked."
+    if info.route is Route.ON_HOST:
+        return f"{name} is on-host and already runs without asking."
     if info.route is not Route.ASK:
-        return f"{name} cannot be allowed while sealed ({info.route.value})."
+        return f"{name} cannot be allowed while locked ({info.route.value})."
     if allowlist.is_added(name):
         return f"{name} is already allowed."
-    question = (f"Allow {name} while sealed?\n"
+    question = (f"Allow {name} while locked?\n"
                 f"It sends data off this machine (toolset {info.toolset}, origin {info.origin.value}).\n"
-                "Once allowed, it runs without asking for the rest of this seal.")
+                "Once allowed, it runs without asking for the rest of this lock.")
     raw, error = _ask(ctx, question, TOOL_CHOICES)
     detail = {"tool": name, "raw_pick": raw, "session_key": session_key or "", "change": "allowlist_add"}
     if error:
@@ -306,4 +306,4 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
     allowlist.add(name)
     _ledger(ledger, _event("tool_allowed", session_id=session_id, platform=platform, purpose=f"tool:{name}",
                          decision="allowlist_add", detail=detail))
-    return f"{name} added to the allowlist for this seal."
+    return f"{name} added to the allowlist for this lock."

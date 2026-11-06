@@ -174,7 +174,7 @@ def env(tmp_path, monkeypatch):
         from confidential_mode.verify.base import VerificationResult
         r = VerificationResult(vendor="tinfoil", router_repo=REPO, enclave_host=ENCLAVE,
                                code_fingerprint=sdk_state["code"], enclave_fingerprint=sdk_state["enclave"],
-                               release_tag="v1.0.0", verifier="tinfoil/0.14.2", verified_at_local=0.0)
+                               release_tag="v1.0.0", verifier="tinfoil/0.14.2", verified_at_host_clock=0.0)
         pins.apply(pins.stage(r), approved_via="test", approval_rule_key="confidential-mode:pin:tinfoil")
 
     approve_current()

@@ -9,7 +9,7 @@
 #   - `hermes confidential setup --model <id>` prints the auxiliary block that matches your Hermes
 #     version.
 #   - `hermes confidential check --tier attested` runs the preflight and tells you what still fails.
-#     The preflight is the check the plugin runs over your config before it will seal a profile.
+#     The preflight is the check the plugin runs over your config before it will lock a profile.
 #
 # The model ids below are Tinfoil's (https://docs.tinfoil.sh/models/chat.md, read 2026-11-06). This
 # example uses kimi-k3-1-pro because that model accepts images. Vision can therefore stay on the same
@@ -73,10 +73,10 @@ confidential:
     # higher value is not safe.
     context_length: 256000
 
-  local:
-    # Extra hostnames or IP addresses that the local-only tier counts as local.
+  on_host:
+    # Extra hostnames or IP addresses that the on-host-only tier counts as on-host.
     #
-    # Without this list, the local-only tier accepts loopback addresses, the RFC 1918 private ranges,
+    # Without this list, the on-host-only tier accepts loopback addresses, the RFC 1918 private ranges,
     # 100.64/10, fe80::/10, fc00::/7 and localhost. The plugin never looks a hostname up in DNS, so
     # any other hostname is off-tier unless it is listed here. Default [].
     extra_hosts: []
@@ -87,7 +87,7 @@ model:
   default: kimi-k3-1-pro           # Hermes also accepts model.model as another name for this key.
   # base_url: leave it unset. A base_url whose host differs from the attested enclave is off-tier.
 
-fallback_providers: []             # Must be empty while sealed.
+fallback_providers: []             # Must be empty while locked.
 # fallback_model:                  # Older key for the same purpose. Must be absent or empty.
 
 auxiliary:
@@ -121,11 +121,11 @@ auxiliary:
   # Auxiliary tasks registered by other plugins are checked as well.
 
 memory:
-  # Use the built-in local memory. The values "", builtin, local and none all mean that. A hosted
+  # Use the built-in on-host memory. The values "", builtin, local and none all mean that. A hosted
   # memory provider is off-tier.
   provider: ""
 
-delegation: {}                     # Leave provider and base_url unset, so child agents inherit the sealed route.
+delegation: {}                     # Leave provider and base_url unset, so child agents inherit the locked route.
 
 voice:
   # Keep this false. When it is true and tts.provider is unset, Hermes speaks replies through edge,
@@ -133,7 +133,7 @@ voice:
   auto_tts: false
 
 # tts:
-#   provider: piper                # Local engines pass: piper, kittentts, neutts, or a providers.<name> command.
+#   provider: piper                # On-host engines pass: piper, kittentts, neutts, or a providers.<name> command.
 
 # mcp_servers:
 #   # A server configured with a URL must point at an in-tier host, or set enabled: false.
@@ -142,8 +142,8 @@ voice:
 
 plugins:
   # Keep Hermes' default. Under host isolation, the attested provider is invisible to Hermes, and the
-  # preflight refuses to seal.
+  # preflight refuses to lock.
   isolation: in_process
   # hook_callback_timeout: leave it unset, or set it to 5 seconds or more. A shorter timeout lets
   #   Hermes skip the plugin's per-turn check. Every plugins.* key that governs hooks is part of the
-  #   seal fingerprint, so changing one after sealing blocks every turn until you seal again.
+  #   lock fingerprint, so changing one after locking blocks every turn until you lock again.

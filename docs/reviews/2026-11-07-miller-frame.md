@@ -1,3 +1,5 @@
+> Note: the plugin's vocabulary was renamed after this review: seal became lock (sealed became locked, unseal became unlock), and local became on-host (the `local-only` tier became `on-host-only`). The text below keeps the original words.
+
 # Review in Andrew Miller's frame (2026-11-07)
 
 Produced by a fresh reviewer agent applying the public standards of the "Is private inference real yet?" registry (six axes: hardware, session, code, operator access, downstream, updates) to this plugin as built at commit 14b8f6f. Not written by Andrew Miller; no quotes are his. [V] = verified in code at the cited line; [I] = inferred.

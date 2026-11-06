@@ -12,7 +12,7 @@ Fakes sit only at the network, SDK and human boundaries:
 ``Plugin`` is SCENARIO GLUE, standing in for W5's register(ctx) and /confidential commands, which are
 being written concurrently: it calls the real builders (build_middleware, build_pre_tool_call,
 build_tool_execution, build_post_approval_response, run_preflight, PinStore, provider.make_profile,
-consent.approve_pending_pin) the way the seam tests do. It writes seal, unseal and preflight_fail rows the
+consent.approve_pending_pin) the way the seam tests do. It writes lock, unlock and preflight_fail rows the
 way W5's commands do; verification and pin rows come from the real VerificationCache and consent.
 """
 from __future__ import annotations
@@ -35,12 +35,12 @@ from confidential_mode.gate_tools import (
 from confidential_mode.ledger import Ledger
 from confidential_mode.pins import PinStore
 from confidential_mode.state import ConfidentialState, InMemoryState
-from confidential_mode.tiers import AttestedPredicate, LocalPredicate, Tier
+from confidential_mode.tiers import AttestedPredicate, OnHostPredicate, Tier
 from confidential_mode.verify.base import VerificationResult, VerifyError
 
-LOCAL_HOST = "127.0.0.1"
-LOCAL_URL = f"http://{LOCAL_HOST}:11434/v1"
-LOCAL_MODEL = "qwen3:8b"
+ON_HOST_ADDR = "127.0.0.1"
+ON_HOST_URL = f"http://{ON_HOST_ADDR}:11434/v1"
+ON_HOST_MODEL = "qwen3:8b"
 ENCLAVE = "router.tinfoil.invalid"
 ENCLAVE_URL = f"https://{ENCLAVE}/v1"
 ATTESTED_MODEL = "tf-main-model"
@@ -96,10 +96,10 @@ class MockNet:
     """Every host the scenario can reach. An unknown host is recorded and answered 599."""
 
     def __init__(self):
-        self.local = Router("local-router")
+        self.on_host = Router("on-host-router")
         self.enclave = Router("enclave-router", text="ATTESTED-" + REPLY)
         self.openrouter = Router("openrouter")
-        self.routes = {LOCAL_HOST: self.local, ENCLAVE: self.enclave, OPENROUTER_HOST: self.openrouter}
+        self.routes = {ON_HOST_ADDR: self.on_host, ENCLAVE: self.enclave, OPENROUTER_HOST: self.openrouter}
         self.unknown: list = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -151,7 +151,7 @@ class FakeVendorAdapter:
         return VerificationResult(
             vendor=self.vendor, router_repo=REPO, enclave_host=ENCLAVE, code_fingerprint=self.code,
             enclave_fingerprint=self.enclave, release_tag=self.release, verifier="fake-tinfoil/0.14.2",
-            verified_at_local=time.time(),
+            verified_at_host_clock=time.time(),
             evidence={"schema": "fake-attestation", "vendor": self.vendor, "repo": REPO, "platform": "sev-snp",
                       "enclave_host": ENCLAVE, "sdk_version": "0.14.2", "captured_at_unix": time.time(),
                       "attestation_number": self.attestation_count, "capture_complete": True,
@@ -188,10 +188,10 @@ class FakeCtx:
 
 # ── config dicts ────────────────────────────────────────────────────────────────────────────────
 
-def local_config(*, leftover_fallback: bool) -> dict:
-    cfg = {"model": {"provider": "custom", "default": LOCAL_MODEL, "base_url": LOCAL_URL},
+def on_host_config(*, leftover_fallback: bool) -> dict:
+    cfg = {"model": {"provider": "custom", "default": ON_HOST_MODEL, "base_url": ON_HOST_URL},
            "fallback_providers": [],
-           "auxiliary": {"vision": {"provider": "custom", "base_url": LOCAL_URL, "model": "llava"}},
+           "auxiliary": {"vision": {"provider": "custom", "base_url": ON_HOST_URL, "model": "llava"}},
            "memory": {"provider": ""}}
     if leftover_fallback:
         cfg["fallback_providers"] = [{"provider": "openrouter", "model": "anthropic/claude-sonnet-4.5"}]
@@ -221,7 +221,7 @@ class Plugin:
         self.decisions = ApprovalDecisions()
         self.allowlist = None
         self.profile = None
-        self.local_predicate = LocalPredicate(profile_base_url=pf.profile_base_url)
+        self.on_host_predicate = OnHostPredicate(profile_base_url=pf.profile_base_url)
         self.attested_predicate = AttestedPredicate([PROFILE], self.attested_ok, pf.profile_base_url)
         self.handles = []
 
@@ -237,7 +237,7 @@ class Plugin:
             return None
 
     def predicate_for(self, tier: Tier):
-        return {Tier.LOCAL: self.local_predicate, Tier.ATTESTED: self.attested_predicate}[Tier(tier)]
+        return {Tier.ON_HOST: self.on_host_predicate, Tier.ATTESTED: self.attested_predicate}[Tier(tier)]
 
     def register_attested_profile(self, ttl: float = 300.0):
         import providers
@@ -248,40 +248,40 @@ class Plugin:
 
     def register(self):
         """What register(ctx) wires: llm gate + the three tool-gate callbacks, sharing one decisions."""
-        sealed = self.state.sealed
-        allowlist = lambda: self.allowlist  # noqa: E731  (built at seal)
+        locked = self.state.locked
+        allowlist = lambda: self.allowlist  # noqa: E731  (built at lock)
         self.handles.append(self.ctx.register_middleware("llm_execution", build_middleware(
-            ledger=self.ledger, is_sealed=sealed, predicate_for=self.predicate_for, attested_ok=self.attested_ok,
+            ledger=self.ledger, is_locked=locked, predicate_for=self.predicate_for, attested_ok=self.attested_ok,
             pin_pending=lambda: self._pending() is not None)))
         self.handles.append(self.ctx.register_hook("pre_tool_call", build_pre_tool_call(
-            sealed, allowlist, self.ledger, decisions=self.decisions)))
+            locked, allowlist, self.ledger, decisions=self.decisions)))
         self.handles.append(self.ctx.register_hook("post_approval_response", build_post_approval_response(
-            sealed, self.ledger, self.decisions)))
+            locked, self.ledger, self.decisions)))
         self.handles.append(self.ctx.register_middleware("tool_execution", build_tool_execution(
-            sealed, allowlist, self.ledger, self.decisions)))
+            locked, allowlist, self.ledger, self.decisions)))
 
-    def seal(self, tier: Tier, config: dict, *, session_id: str) -> tuple[bool, str]:
-        """/confidential on <tier>: preflight, then seal and print the allowlist; or refuse with the report."""
+    def lock(self, tier: Tier, config: dict, *, session_id: str) -> tuple[bool, str]:
+        """/confidential on <tier>: preflight, then lock and print the allowlist; or refuse with the report."""
         from tools.registry import registry
         report = pf.run_preflight(Tier(tier), self.predicate_for(tier), config, plugin_aux_tasks=[],
                                   isolation=pf.plugin_isolation(config), provider_lookup=pf.provider_lookup,
                                   attested_profile=PROFILE if Tier(tier) is Tier.ATTESTED else None)
         text = pf.format_report(report)
         if not report.ok:
-            self.ledger.append({"kind": "preflight_fail", "session_id": session_id, "purpose": "seal",
+            self.ledger.append({"kind": "preflight_fail", "session_id": session_id, "purpose": "lock",
                                 "tier": Tier(tier).value,
                                 "detail": {"reason": "; ".join(f"{i.key} {i.verdict}" for i in report.failures()),
                                            "failed_keys": [i.key for i in report.failures()]}})
             return False, text
         self.allowlist = build_allowlist(registry)
-        self.state.seal(Tier(tier), report.fingerprint)
-        self.ledger.append({"kind": "seal", "session_id": session_id, "tier": Tier(tier).value,
-                            "decision": "sealed", "detail": {"config_fingerprint": report.fingerprint}})
+        self.state.lock(Tier(tier), report.fingerprint)
+        self.ledger.append({"kind": "lock", "session_id": session_id, "tier": Tier(tier).value,
+                            "decision": "locked", "detail": {"config_fingerprint": report.fingerprint}})
         return True, text + "\n\n" + format_allowlist(self.allowlist)
 
-    def unseal(self, *, session_id: str) -> None:
-        self.state.unseal()
-        self.ledger.append({"kind": "unseal", "session_id": session_id, "decision": "unsealed"})
+    def unlock(self, *, session_id: str) -> None:
+        self.state.unlock()
+        self.ledger.append({"kind": "unlock", "session_id": session_id, "decision": "unlocked"})
 
     def events(self, since: int = 0) -> list[tuple]:
         return [(e.kind, e.decision) for e in self.ledger.tail(since)]
