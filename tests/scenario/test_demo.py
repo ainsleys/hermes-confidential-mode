@@ -284,7 +284,7 @@ def test_demo(world, monkeypatch):
     # consent: ask_choice scripted "approve" applies the pin; the next turn passes
     ctx = FakeCtx("approve")
     reply = approve_pending_pin(ctx, plugin.pins, plugin.ledger, session_key=SK, session_id=SID, platform="telegram")
-    assert len(ctx.questions) == 1 and "New code fingerprint: c0de2c0de2c0de2c" in ctx.questions[0][0]
+    assert len(ctx.questions) == 1 and "Code fingerprint new: " + "c0de2" * 8 in ctx.questions[0][0]
     assert reply.startswith("Pinned tinfoil build v1.1.0")
     assert plugin.pins.pending() is None
     assert plugin.pins.get("tinfoil", pending.router_repo).code_fingerprint == "c0de2" * 8

@@ -207,7 +207,7 @@ def pin_cmd(hermes, store, ledger, replies, **kw):
         hermes, "cm-pin",
         lambda sk, platform: approve_pending_pin(hermes.ctx, store, ledger, session_key=sk or "",
                                                  session_id="sess-1", platform=platform or ""),
-        "New code fingerprint", replies, **kw)
+        "Code fingerprint new", replies, **kw)
 
 
 # ---- approve_pending_pin ------------------------------------------------------------------------
@@ -219,11 +219,21 @@ def test_pin_applied_on_explicit_approve(hermes, answer):
     assert r.blocked is True and r.thread != threading.main_thread().name
     assert r.prompt == (
         "❓ Approve confidential pin update?\n"
+        "CODE CHANGED\n"
         "Vendor: tinfoil\n"
         "Release: v0.4.2 (tinfoilsh/confidential-model-router)\n"
-        "Old fingerprint: ab12cd34ef56\n"
-        f"New code fingerprint: {'c0de' * 4}\n"
-        f"New enclave fingerprint: {'e1c1' * 4}\n\n"
+        "Release URL: https://github.com/tinfoilsh/confidential-model-router/releases/tag/v0.4.2\n"
+        "Compare: unknown\n"
+        "Rekor log index: unknown\n"
+        "release age: unknown (no published timestamp)\n"
+        "Enclave host: unknown\n"
+        "Platform: old unknown, new unknown\n"
+        "Code fingerprint old: ab12cd34ef56\n"
+        f"Code fingerprint new: {'c0de' * 8}\n"
+        "Enclave fingerprint old: unknown\n"
+        f"Enclave fingerprint new: {'e1c1' * 8}\n"
+        "independent observations: none configured\n"
+        "Approving means trusting this build until it changes again.\n\n"
         "  1. Approve — pin the new enclave measurement\n"
         "  2. Deny — keep the current pin\n\n"
         "Reply with the number, the option text, or your own answer."
@@ -422,3 +432,87 @@ def test_same_fingerprints_different_release_tag_is_a_swap(hermes):
     store, ledger = FakeStore(PIN), Ledger()
     pin_cmd(hermes, store, ledger, ["1"], during_wait=lambda: store.swap(replace(PIN, release_tag="v9")))
     assert store.applied == [] and ledger.events[0]["decision"] == "stale"
+
+
+# ---- the pin question (Miller-frame review, "Pin prompt") -------------------------------------------
+
+from confidential_mode.consent import pin_question  # noqa: E402
+
+NOW = 1_800_000_000.0
+
+
+def _w2_pending(**kw):
+    base = dict(vendor="tinfoil", router_repo="tinfoilsh/confidential-model-router",
+                code_fingerprint="c" * 64, enclave_fingerprint="e" * 64, release_tag="v0.5.0",
+                previous="b" * 64, previous_enclave_fingerprint="d" * 64, previous_release_tag="v0.4.2",
+                enclave_host="router.inf.tinfoil.sh", platform="tdx", previous_platform="sev-snp",
+                release_published_at=NOW - 5 * 3600, rekor_log_index=123456, code_changed=True)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_question_shows_full_context_for_a_code_change():
+    q = pin_question(_w2_pending(), now=NOW)
+    lines = q.splitlines()
+    assert lines[0] == "Approve confidential pin update?" and lines[1] == "CODE CHANGED"
+    for want in ("Code fingerprint old: " + "b" * 64, "Code fingerprint new: " + "c" * 64,
+                 "Enclave fingerprint old: " + "d" * 64, "Enclave fingerprint new: " + "e" * 64,
+                 "Platform: old sev-snp, new tdx", "Enclave host: router.inf.tinfoil.sh",
+                 "Release URL: https://github.com/tinfoilsh/confidential-model-router/releases/tag/v0.5.0",
+                 "Compare: https://github.com/tinfoilsh/confidential-model-router/compare/v0.4.2...v0.5.0",
+                 "Rekor log index: 123456", "released 5 hours ago",
+                 "independent observations: none configured"):
+        assert want in lines, (want, q)
+    assert lines[-1] == "Approving means trusting this build until it changes again."
+
+
+def test_question_platform_only_change_and_tofu():
+    q = pin_question(_w2_pending(code_changed=False, code_fingerprint="b" * 64), now=NOW)
+    assert q.splitlines()[1] == "code unchanged; platform changed from sev-snp to tdx"
+    # without W2's code_changed field it is computed from the fingerprints
+    q = pin_question(_w2_pending(code_changed=None, code_fingerprint="b" * 64), now=NOW)
+    assert q.splitlines()[1] == "code unchanged; platform changed from sev-snp to tdx"
+    q = pin_question(_w2_pending(previous=None, previous_enclave_fingerprint=None, previous_platform=None), now=NOW)
+    assert "\nTRUST ON FIRST USE: no prior pin to compare against\n" in q
+    assert "CODE CHANGED" not in q
+
+
+def test_question_uses_w2_helpers_and_ages():
+    p = _w2_pending(release_url=lambda: "https://x/rel", compare_url=lambda: "https://x/cmp",
+                    release_published_at="2027-01-14T00:00:00Z")
+    q = pin_question(p, now=_iso("2027-01-17T12:00:00Z"))
+    assert "Release URL: https://x/rel" in q and "Compare: https://x/cmp" in q and "released 3 days ago" in q
+    assert "released 1 hour ago" in pin_question(_w2_pending(release_published_at=NOW - 3700), now=NOW)
+    assert "in the future" in pin_question(_w2_pending(release_published_at=NOW + 3600), now=NOW)
+    assert "release age: unknown" in pin_question(_w2_pending(release_published_at="garbage"), now=NOW)
+
+
+def _iso(s):
+    from datetime import datetime
+    return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+
+
+def test_question_observers_are_pluggable_and_cannot_break_the_prompt():
+    def seen(p):
+        return "registry: first seen 4 days ago"
+
+    def silent(p):
+        return None
+
+    def broken(p):
+        raise RuntimeError("down")
+    q = pin_question(_w2_pending(), observers=[seen, silent, broken], now=NOW)
+    assert "independent observation: registry: first seen 4 days ago" in q
+    assert "independent observation: observer broken failed (RuntimeError)" in q
+    assert "none configured" not in q
+    assert "none reported (1 configured)" in pin_question(_w2_pending(), observers=[silent], now=NOW)
+
+
+def test_observers_reach_the_prompt_through_approve_pending_pin(hermes):
+    from hermes_cli.plugin_choices import bind_asker
+    asked = []
+    with bind_asker(lambda q, labels: asked.append((q, labels)) or "Deny"):
+        approve_pending_pin(hermes.ctx, FakeStore(PIN), Ledger(), session_key="k", session_id="s", platform="cli",
+                            observers=[lambda p: "transparency log agrees"])
+    assert "independent observation: transparency log agrees" in asked[0][0]
+    assert asked[0][1] == ["Approve — pin the new enclave measurement", "Deny — keep the current pin"]
