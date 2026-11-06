@@ -3,7 +3,13 @@ name = "hermes-confidential-mode"
 version = "0.0.1"
 description = "Attested inference provider and sealed mode for Hermes Agent"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    # Exact: 0.15.0 requires openai>=3.26 and Hermes pins openai 2.54.0 (docs/C0-spikes.md, spike 2).
+    "tinfoil==0.14.2",
+    # Provided by Hermes' own environment (httpx 0.28.1; hermes_yaml stands in for PyYAML there).
+    "httpx",
+    "pyyaml",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
