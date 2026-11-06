@@ -43,7 +43,13 @@ BUILTIN_AUX_TASKS_SNAPSHOT = (
 _AUTO = frozenset({"", "auto"})
 _MOA = "moa"
 _CODEX = frozenset({"openai-codex", "codex"})
-_VISION_OFF = frozenset({"none", "off", "disabled"})
+_LOCAL_TTS = frozenset({"neutts", "kittentts", "piper", "none"})
+#: Hermes resolves an unset/empty tts.provider to "edge" (tools/tts_tool.py:105,145-148), a hosted service.
+_TTS_DEFAULT = "edge"
+_VISION_FIX = ("set {p}.provider (or {p}.base_url) explicitly to an in-tier vision route; Hermes describes "
+               "gateway inbound images through vision even without a tool call, and 'auto' walks "
+               "openrouter -> nous -> deepinfra when the main model cannot take images")
+_ABSENT = object()
 _LOCAL_MEMORY = frozenset({"", "builtin", "built-in", "local", "none"})
 _AUX_ROUTE_KEYS = frozenset({"provider", "model", "base_url", "api_key", "api_mode", "key_env",
                              "api_key_env", "reasoning_effort"})
@@ -227,12 +233,14 @@ def _route_item_verdict(ctx: _Ctx, cfg: Mapping, purpose: str) -> tuple[str, str
 
 
 def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plugin_aux_tasks: Sequence[Any],
-                  isolation: str | None, provider_lookup: Callable[[str], object | None],
+                  isolation: Any = _ABSENT, provider_lookup: Callable[[str], object | None],
                   attested_profile: str | None, builtin_aux_tasks: Sequence[str] | None = None) -> PreflightReport:
     """Classify every route in ``config`` for ``tier``. Never mutates ``config``.
 
     ``plugin_aux_tasks``: plugin task names, or the registration dicts from
     ``get_plugin_auxiliary_tasks()`` (then their ``defaults``/``inherit_from`` are honoured).
+    ``isolation``: the ``plugins.isolation`` value; omitted => read from ``config``. ``None`` means the
+    key is absent (Hermes default in_process, passing); ``""`` or anything but "in_process" fails.
     ``builtin_aux_tasks`` defaults to :func:`builtin_aux_task_names`.
     """
     config = config if isinstance(config, Mapping) else {}
@@ -260,7 +268,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
 
     # fallbacks: must be empty (both keys feed get_fallback_chain)
     fb = config.get("fallback_providers")
-    fb_list = fb if isinstance(fb, list) else ([fb] if isinstance(fb, Mapping) else [])
+    fb_list = fb if isinstance(fb, list) else ([] if fb in (None, "", {}) else [fb])
     if not fb_list:
         add("fallback_providers", [], DISABLED)
     for i, entry in enumerate(fb_list):
@@ -279,12 +287,12 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
         provider = _s(cfg.get("provider")).lower()
         base_url = _s(cfg.get("base_url"))
         purpose = f"aux:{task}"
-        if task == "vision" and provider in _VISION_OFF and not base_url:
-            add(f"{prefix}.provider", cfg.get("provider"), DISABLED)
-        elif task == "vision" and provider in _AUTO and not base_url:
-            add(f"{prefix}.provider", cfg.get("provider") or "auto", OFF_TIER,
-                f"set {prefix}.provider (or {prefix}.base_url) to an in-tier vision route, or {prefix}.provider: none; "
-                "'auto' walks openrouter -> nous -> deepinfra when the main model cannot take images")
+        raw_block = _aux_section(config).get(task, _ABSENT)
+        if raw_block is not _ABSENT and raw_block is not None and not isinstance(raw_block, Mapping):
+            # Hermes ignores a non-dict block (treats it as auto); never let junk pass silently.
+            add(f"{prefix}", raw_block, OFF_TIER, f"{prefix} must be a mapping with provider/model/base_url")
+        if task == "vision" and provider in _AUTO and not base_url:
+            add(f"{prefix}.provider", cfg.get("provider") or "auto", OFF_TIER, _VISION_FIX.format(p=prefix))
         elif (provider in _AUTO or provider == "main") and not base_url:
             # "auto"/"" resolve to the main route (text tasks); "main" is the main route for every task.
             shown = f"{cfg.get('provider') or 'auto'} -> {main_provider or 'auto'}"
@@ -299,6 +307,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             if base_url:
                 add(f"{prefix}.base_url", base_url, v, fix)
         chain = cfg.get("fallback_chain")
+        if chain not in (None, []) and not isinstance(chain, list):
+            add(f"{prefix}.fallback_chain", chain, OFF_TIER, f"{prefix}.fallback_chain must be a list; remove it")
         for i, entry in enumerate(chain if isinstance(chain, list) else []):
             key = f"{prefix}.fallback_chain[{i}]"
             if not isinstance(entry, Mapping):
@@ -311,15 +321,63 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             v, reason = _route_item_verdict(ctx, entry, f"{purpose}:fallback")
             add(key, entry, v, f"remove {key} or point it at an in-tier route ({reason})")
 
+    # delegation (delegate_task children; tools/delegate_tool.py resolves these like a main route)
+    deleg = config.get("delegation")
+    deleg = deleg if isinstance(deleg, Mapping) else {}
+    d_provider = _s(deleg.get("provider")).lower()
+    d_base = _s(deleg.get("base_url"))
+    d_fix = "clear delegation.provider/delegation.base_url (inherit the sealed main route) or point them in-tier"
+    if d_provider in _AUTO and not d_base:
+        d_verdict = main_verdict
+        shown = f"(inherit) -> {main_provider or 'auto'}"
+        d_fix = "delegation inherits the main route: fix model.provider"
+    else:
+        d_cfg = {"provider": d_provider or "custom", "base_url": d_base, "model": deleg.get("model"),
+                 "api_mode": deleg.get("api_mode")}
+        if d_provider in _CODEX:
+            d_verdict, d_reason = OFF_TIER, "openai-codex runtime bypasses the middleware"
+        else:
+            d_verdict, d_reason = _route_item_verdict(ctx, d_cfg, "delegation")
+        shown = deleg.get("provider") or "custom"
+        d_fix = f"{d_fix} ({d_reason})"
+    add("delegation.provider", shown, d_verdict, d_fix)
+    add("delegation.model", _s(deleg.get("model")) or "(inherit)", d_verdict, d_fix)
+    if d_base:
+        add("delegation.base_url", d_base, d_verdict, d_fix)
+    d_fb = deleg.get("fallback_providers")
+    if d_fb not in (None, [], "", {}):
+        add("delegation.fallback_providers", d_fb, OFF_TIER, "set delegation.fallback_providers: [] while sealed")
+
+    # tts (assistant text is conversation content)
+    tts = config.get("tts")
+    tts = tts if isinstance(tts, Mapping) else {}
+    tts_provider = _s(tts.get("provider")).lower() or _TTS_DEFAULT
+    named = tts.get("providers") if isinstance(tts.get("providers"), Mapping) else {}
+    named_cfg = named.get(tts_provider) if isinstance(named.get(tts_provider), Mapping) else None
+    tts_local = tts_provider in _LOCAL_TTS or (named_cfg is not None and "command" in named_cfg)
+    add("tts.provider", tts.get("provider") or f"(default {_TTS_DEFAULT})", LOCAL if tts_local else OFF_TIER,
+        "set tts.provider to a local engine (piper, kittentts, neutts) or a tts.providers.<name> command "
+        "while sealed; unset means edge (hosted)")
+
     # memory
-    mem = config.get("memory")
-    mem_provider = _s(mem.get("provider")) if isinstance(mem, Mapping) else ""
-    add("memory.provider", mem_provider or "(built-in)",
-        LOCAL if mem_provider.lower() in _LOCAL_MEMORY else OFF_TIER,
-        'set memory.provider: "" (built-in local memory) while sealed')
+    mem = config.get("memory", _ABSENT)
+    if mem is _ABSENT or mem is None:
+        mem_provider, mem_ok_shape = "", True
+    elif isinstance(mem, Mapping):
+        mem_provider, mem_ok_shape = _s(mem.get("provider")), True
+    else:
+        mem_provider, mem_ok_shape = "", False
+    if not mem_ok_shape:
+        add("memory", mem, OFF_TIER, "memory must be a mapping; set memory.provider: \"\" (built-in)")
+    else:
+        add("memory.provider", mem_provider or "(built-in)",
+            LOCAL if mem_provider.lower() in _LOCAL_MEMORY else OFF_TIER,
+            'set memory.provider: "" (built-in local memory) while sealed')
 
     # MCP servers
     servers = config.get("mcp_servers")
+    if servers not in (None, {}, [], "") and not isinstance(servers, Mapping):
+        add("mcp_servers", servers, OFF_TIER, "mcp_servers must be a mapping of name -> {command|url}")
     for name, scfg in (servers.items() if isinstance(servers, Mapping) else ()):
         key = f"mcp_servers.{name}"
         if not isinstance(scfg, Mapping):
@@ -328,19 +386,28 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
         enabled = scfg.get("enabled", True)
         off = enabled is False or (isinstance(enabled, str) and enabled.strip().lower() in {"false", "0", "no", "off"})
         if "url" in scfg:
-            add(f"{key}.url", scfg.get("url"), DISABLED if off else OFF_TIER,
-                f"set {key}.enabled: false (remote MCP server) while sealed")
+            if off:
+                add(f"{key}.url", scfg.get("url"), DISABLED)
+            else:
+                url = scfg.get("url")
+                v, reason = ctx.classify("mcp", url if isinstance(url, str) else "", "", "", f"mcp:{name}")
+                if not (isinstance(url, str) and url.strip()):
+                    v, reason = OFF_TIER, "url is empty or not a string"
+                add(f"{key}.url", url, v, f"set {key}.enabled: false or point {key}.url at an in-tier host ({reason})")
         elif "command" in scfg:
             add(f"{key}.command", scfg.get("command"), DISABLED if off else LOCAL)
         else:
             add(key, "", MISSING, f"{key} has neither url nor command")
 
     # plugin isolation
-    iso = _s(isolation)
-    if iso == "in_process":
-        add("plugins.isolation", iso, ctx.pass_verdict)
+    iso = plugin_isolation(config) if isolation is _ABSENT else isolation
+    iso_fix_key = "plugins.isolation"
+    if iso is None:
+        add(iso_fix_key, "(default in_process)", ctx.pass_verdict)
+    elif iso == "in_process":
+        add(iso_fix_key, iso, ctx.pass_verdict)
     else:
-        add("plugins.isolation", iso, MISSING if not iso else OFF_TIER,
+        add(iso_fix_key, iso if isinstance(iso, str) else repr(iso), MISSING if iso == "" else OFF_TIER,
             "set plugins.isolation: in_process; under host isolation the plugin's provider and middleware "
             "register in the plugin-host child and are invisible to Hermes")
 
@@ -390,8 +457,12 @@ def config_fingerprint(config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
     for task in tasks:
         cfg = _effective_aux(config, task, plugins)
         chain = cfg.get("fallback_chain")
+        raw = _aux_section(config).get(task)
         aux_view[task] = {"provider": cfg.get("provider"), "base_url": cfg.get("base_url"),
-                          "fallback_chain": [_route_view(e) for e in chain] if isinstance(chain, list) else chain}
+                          "fallback_chain": [_route_view(e) for e in chain] if isinstance(chain, list) else chain,
+                          "raw": None if isinstance(raw, Mapping) else raw}
+    deleg = config.get("delegation")
+    tts = config.get("tts")
     mem = config.get("memory")
     servers = config.get("mcp_servers")
     plugins_cfg = config.get("plugins")
@@ -402,11 +473,19 @@ def config_fingerprint(config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
         if isinstance(config.get("fallback_providers"), list) else _route_view(config.get("fallback_providers")),
         "fallback_model": _route_view(config.get("fallback_model")),
         "auxiliary": aux_view,
-        "memory.provider": mem.get("provider") if isinstance(mem, Mapping) else None,
+        "delegation": ({k: _route_view(deleg.get(k)) if k == "fallback_providers" and isinstance(deleg.get(k), Mapping)
+                        else ([_route_view(e) for e in deleg[k]] if k == "fallback_providers"
+                              and isinstance(deleg.get(k), list) else deleg.get(k))
+                        for k in ("provider", "model", "base_url", "api_mode", "fallback_providers")}
+                       if isinstance(deleg, Mapping) else deleg),
+        "tts.provider": tts.get("provider") if isinstance(tts, Mapping) else tts,
+        "memory.provider": mem.get("provider") if isinstance(mem, Mapping) else mem,
         "mcp_servers": {n: ({k: s.get(k) for k in ("url", "command", "enabled") if k in s}
                             if isinstance(s, Mapping) else s)
-                        for n, s in (servers.items() if isinstance(servers, Mapping) else ())},
-        "plugins.isolation": plugins_cfg.get("isolation") if isinstance(plugins_cfg, Mapping) else None,
+                        for n, s in (servers.items() if isinstance(servers, Mapping) else ())}
+        if isinstance(servers, Mapping) or servers is None else servers,
+        "plugins.isolation": plugins_cfg.get("isolation", "<absent>") if isinstance(plugins_cfg, Mapping)
+        else plugins_cfg,
     }
     blob = json.dumps(view, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -482,6 +561,20 @@ def profile_base_url(provider: str) -> str:
     return url if isinstance(url, str) else ""
 
 
-def plugin_isolation(config: Mapping) -> str:
+def plugin_isolation(config: Mapping) -> Any:
+    """Raw ``plugins.isolation``: None when the key (or ``plugins:``) is absent, else the value as written.
+
+    Hermes itself (hermes_cli/plugin_isolation.py:96-106) maps null, "", and unknown values to in_process;
+    preflight is stricter and only lets a truly absent key (or "in_process") pass.
+
+    A non-mapping ``plugins:`` block yields a marker string so it fails the in_process check.
+    """
     plugins_cfg = config.get("plugins") if isinstance(config, Mapping) else None
-    return _s(plugins_cfg.get("isolation")) if isinstance(plugins_cfg, Mapping) else ""
+    if plugins_cfg is None:
+        return None
+    if not isinstance(plugins_cfg, Mapping):
+        return f"<plugins block is a {type(plugins_cfg).__name__}>"
+    if "isolation" not in plugins_cfg:
+        return None
+    value = plugins_cfg["isolation"]
+    return "" if value is None else value  # explicit null is treated like "" (missing), not as absent
