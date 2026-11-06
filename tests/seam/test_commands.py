@@ -283,8 +283,8 @@ def test_cli_replay_runs_the_real_replay_and_fails_on_scenario_evidence(plugin, 
     out = capsys.readouterr().out
     replay = _sub(plugin, "verify.replay")
     assert "hash chain intact" in out and "Row #" in out and ": FAIL" in out
-    assert "  hardware_signature: fail: evidence:" in out                  # not schema-v1 evidence
-    assert "is not the expected tinfoilsh/confidential-model-router" in out
+    assert f"  hardware_signature: fail: evidence: schema is not {replay.EVIDENCE_SCHEMA}" in out
+    assert "repo: tinfoilsh/confidential-model-router  host: router.tinfoil.invalid" in out
     assert "Expected repo: tinfoilsh/confidential-model-router" in out
     assert "not independent" in out                                     # trust root and as_of sources named
     for line in replay.NOT_ESTABLISHED:
@@ -323,8 +323,12 @@ def test_cli_replay_passes_identity_arguments_and_exits_zero_only_when_all_match
         return ok_result()
     args.trusted_root = None
     out = io.StringIO()
-    assert commands.cli_replay(args, out=out, replay_fn=old_replay) == 1   # scenario evidence carries no repo
-    assert "is not the expected tinfoilsh/confidential-model-router" in out.getvalue()
+    assert commands.cli_replay(args, out=out, replay_fn=old_replay) == 0, out.getvalue()  # repo + fps match
+    args.expected_repo = "someone/else"
+    out = io.StringIO()
+    assert commands.cli_replay(args, out=out, replay_fn=old_replay) == 1
+    assert "is not the expected someone/else" in out.getvalue()
+    args.expected_repo = "tinfoilsh/confidential-model-router"
     out = io.StringIO()
     wrong = lambda evidence, *, as_of=None, trust_root_dir=None: ok_result(code_fingerprint="0" * 64)  # noqa: E731
     assert commands.cli_replay(args, out=out, replay_fn=wrong) == 1
@@ -333,3 +337,50 @@ def test_cli_replay_passes_identity_arguments_and_exits_zero_only_when_all_match
     assert commands.cli_replay(args, out=io.StringIO(), replay_fn=lambda e, **k: ok_result(ok=False)) == 1
     args.receipt = str(tmp_path / "missing.json")
     assert commands.cli_replay(args, out=io.StringIO(), replay_fn=new_replay) == 2
+
+
+def test_receipt_states_the_configured_ttl_and_status_shows_the_plugin_commit(plugin, monkeypatch):
+    receipts = _sub(plugin, "receipts")
+    seen = {}
+    real = receipts.render
+
+    def spy(ledger, session_id, **kw):
+        seen.update(kw)
+        return real(ledger, session_id, **kw)
+    monkeypatch.setattr(receipts, "render", spy)
+    plugin.cfg.write_text(BASE_CONFIG + "confidential:\n  verify_ttl_seconds: 120\n")
+    plugin.rt.ledger.append({"kind": "send_observed", "session_id": "sess-ttl", "purpose": "main", "host": "127.0.0.1"})
+    plugin.slash("receipts sess-ttl --json")
+    assert seen["ttl_seconds"] == 120.0
+    plugin.cfg.write_text(BASE_CONFIG)
+    seen.clear()
+    plugin.slash("receipts sess-ttl")
+    assert "ttl_seconds" not in seen                       # unset: the receipt states its own default
+    version = _sub(plugin, "_version")
+    monkeypatch.setattr(version, "PLUGIN_COMMIT", "abc1234")
+    assert f"Plugin: confidential-mode {version.PLUGIN_VERSION} (commit abc1234)" in plugin.slash("status")
+
+
+def test_stamp_version_script_round_trips(tmp_path):
+    import shutil
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    work = tmp_path / "repo"
+    (work / "confidential_mode").mkdir(parents=True)
+    (work / "scripts").mkdir()
+    shutil.copy(root / "scripts" / "stamp_version.py", work / "scripts")
+    shutil.copy(root / "confidential_mode" / "_version.py", work / "confidential_mode")
+    git = lambda *a: subprocess.run(["git", *a], cwd=work, check=True, capture_output=True, text=True).stdout.strip()  # noqa: E731
+    git("init", "-q")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "add", ".")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "x")
+    sha = git("rev-parse", "--short", "HEAD")
+    run = lambda *a: subprocess.run([sys.executable, str(work / "scripts" / "stamp_version.py"), *a], check=True)  # noqa: E731
+    run()
+    assert f'PLUGIN_COMMIT = "{sha}"' in (work / "confidential_mode" / "_version.py").read_text()
+    (work / "other.txt").write_text("x")
+    run()
+    assert f'PLUGIN_COMMIT = "{sha}-dirty"' in (work / "confidential_mode" / "_version.py").read_text()
+    run("--reset")
+    assert 'PLUGIN_COMMIT = "unpackaged"' in (work / "confidential_mode" / "_version.py").read_text()
