@@ -43,7 +43,7 @@ fetch points, which call through and record the bytes:
                                                <data_dir>/trust-roots/<sha256>.json
 Layout: schema, vendor, captured_at (SDK verifiedAt), captured_at_unix, sdk_version, repo, enclave_host,
 enclave_source, platform ("sev-snp"|"tdx"), attestation, sev, tdx, release, sigstore_bundle,
-hardware_measurements, trusted_root {sha256, path}, tls_cert_pem (always None on the ehbp path),
+hardware_measurements, trusted_root {sha256, path}, tls_cert_pem + tls_observation (TLS spike, below),
 claims {code_fingerprint, enclave_fingerprint, release_tag, tls_public_key_fp, hpke_public_key},
 verification_document (SDK to_dict), capture_complete, capture_missing[, capture_errors]. Every blob is
 a string, so the dict is JSON-serialisable and passes the ledger's content-key filter.
@@ -61,6 +61,15 @@ Sizes measured from a stubbed SEV capture (tests/unit/test_replay.py, real SDK c
   trusted_root.json     6787 B (real file, sigstore-python 4.5.1 embedded root; stored once, not per verify)
   evidence JSON total   6404 chars for that capture (without the trust root)
 TDX sizes were not measured (no format-faithful quote or Intel collateral can be produced offline).
+
+TLS spike (confidential.tinfoil.tls_probe, default on): after each explicit verify the adapter sends
+one bodyless GET of /.well-known/tinfoil-attestation over the VERIFIED EHBP pool and reads the peer
+certificate from response.extensions["network_stream"].get_extra_info("ssl_object") (httpcore exposes it;
+ehbp passes extensions through). tls_observation = {captured, spki_sha256, matches_report_tls_key,
+san_binding (the SDK's verify_certificate: host, HPKE key, report hash in SANs), issuer, subject, serial,
+not_before, not_after, verdict}. verdict "TLS terminates in the attested enclave ..." vs "TLS terminated
+by a non-enclave key" is what a live run against Tinfoil will tell us; it is recorded, never enforced.
+Per request, the views record the peer SPKI too (send records, below).
 
 SDK on-disk caches: tinfoil 0.14.2 fixes platformdirs paths at import (default macOS
 ~/Library/Caches/tinfoil, Linux ~/.cache/tinfoil: Sigstore bundles, VCEKs, Intel collateral) and
@@ -141,7 +150,8 @@ class _SyncView(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self._adapter._check_not_held()
-        return self._adapter._current_sync_transport().handle_request(request)
+        response = self._adapter._current_sync_transport().handle_request(request)
+        return self._adapter._observe_send(request, response)
 
     def close(self) -> None:
         pass
@@ -156,7 +166,8 @@ class _AsyncView(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self._adapter._check_not_held()
         pool = self._adapter._async_pool_for_running_loop()
-        return await pool._transport.handle_async_request(request)
+        response = await pool._transport.handle_async_request(request)
+        return self._adapter._observe_send(request, response)
 
     async def aclose(self) -> None:
         pass
@@ -169,7 +180,7 @@ class TinfoilAdapter:
 
     def __init__(self, *, data_dir: Path | str, enclave: str | None = None, repo: str = ROUTER_REPO,
                  transport: str = "ehbp", router_discovery: Callable[[], str] | None = None,
-                 hold_until_accepted: bool = True):
+                 hold_until_accepted: bool = True, tls_probe: bool = True):
         if not repo:
             raise ValueError("repo is required: pinned-measurement mode is not supported")
         self.data_dir = Path(data_dir)
@@ -194,6 +205,12 @@ class TinfoilAdapter:
         self.async_attestation_count = 0
         self._counter_bucket = threading.local()
         self._capture_local = threading.local()
+        # TLS spike: after each explicit verify, one bodyless GET of the attestation document over the
+        # VERIFIED EHBP pool records the TLS peer certificate (evidence.tls_cert_pem/tls_observation).
+        self.tls_probe = bool(tls_probe)
+        self.verified_mono: float | None = None
+        self.event_sink: Callable[[dict], None] | None = None  # set by provider: ledger verify rows it cannot see
+        self._spki_cache: dict[bytes, str] = {}
         self.sdk_cache_paths: dict[str, str] = {}
         # Transport-level hold: while set, every view (sync and async) raises before sending. verify()
         # sets it (when hold_until_accepted) atomically with the pool swap; the provider releases it
@@ -261,16 +278,109 @@ class TinfoilAdapter:
             ground_truth = type(sc).verify(sc)
         self._capture_local.sink = sink
         if not getattr(self._explicit, "active", False):
-            # Re-verification outside verify(): the SDK is about to rebind a transport. Only allow
-            # it if the enclave is still the build we accepted.
+            # Re-verification outside verify(): the SDK is about to rebind a transport (key/cert
+            # rotation: "silent_reattest"; or a new per-loop async pool: "async_pool"). Only allow it
+            # if the enclave is still the build we accepted, and LEDGER it: the keys it binds are the
+            # keys later sends use, so every key in use has a verify row (review finding 9).
             accepted = self._accepted
             if accepted is None:
                 raise VerifyError("re-verification before any accepted verification")
-            got = self._result_from_document(sc)
+            got = self._result_from_document(sc, sink)
             if (got.code_fingerprint, got.enclave_fingerprint) != (accepted.code_fingerprint,
                                                                   accepted.enclave_fingerprint):
                 raise VerifyError("enclave fingerprints changed during re-verification; refusing to rebind")
+            self._accepted = got  # accepted keys follow the rotation (same build)
+            self._emit_verify_row(got, source="async_pool" if bucket == "async" else "silent_reattest")
         return ground_truth
+
+    # ── key observation (warn-only) and ledger hooks ─────────────────────────────────────────────
+    KEY_OBSERVATIONS_FILE = "key-observations.json"
+
+    def observe_key(self, host: str, tls_fp: str | None, hpke: str | None) -> dict:
+        """First-seen time per (host, T, H), persisted under the data dir. Warn-only: a key never seen
+        before on a host that had other keys is logged, nothing is refused, there is no maximum age."""
+        import json as _json
+        key = f"{host}|{tls_fp or ''}|{hpke or ''}"
+        path = self.data_dir / self.KEY_OBSERVATIONS_FILE
+        with self._lock:
+            try:
+                seen = _json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(seen, dict):
+                    seen = {}
+            except (FileNotFoundError, ValueError):
+                seen = {}
+            new = key not in seen
+            if new:
+                seen[key] = _iso_now()
+                try:
+                    self.data_dir.mkdir(parents=True, exist_ok=True)
+                    fd, tmp = tempfile.mkstemp(prefix=".key-observations.", dir=str(self.data_dir))
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        _json.dump(seen, fh, sort_keys=True)
+                    os.replace(tmp, path)
+                except OSError:
+                    pass
+            others = sum(1 for k in seen if k.startswith(f"{host}|") and k != key)
+        if new and others:
+            import logging
+            logging.getLogger(__name__).warning(
+                "confidential-mode: new enclave key pair on %s (T %s..., H %s...); %d other pair(s) seen before",
+                host, (tls_fp or "")[:16], (hpke or "")[:16], others)
+        return {"host": host, "tls_key_fp": tls_fp, "hpke_public_key": hpke, "first_seen": seen[key],
+                "new": new, "other_keys_for_host": others}
+
+    def _emit_verify_row(self, result: VerificationResult, *, source: str) -> None:
+        sink = self.event_sink
+        if sink is None:
+            return
+        try:
+            claims = (result.evidence or {}).get("claims") or {}
+            sink({"kind": "verify_ok", "purpose": "verify", "host": result.enclave_host,
+                  "detail": {"vendor": result.vendor, "source": source,
+                             "code_fingerprint": result.code_fingerprint,
+                             "enclave_fingerprint": result.enclave_fingerprint,
+                             "release_tag": result.release_tag, "enclave_host": result.enclave_host,
+                             "verifier": result.verifier,
+                             "key_first_seen": self.observe_key(result.enclave_host, claims.get("tls_public_key_fp"),
+                                                                claims.get("hpke_public_key")),
+                             "evidence": result.evidence}})
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("confidential-mode: could not ledger a %s verification", source,
+                                                exc_info=True)
+
+    def current_hpke_key(self) -> str | None:
+        """Hex HPKE public key the SDK's transports currently encrypt to (the latest attested H)."""
+        gt = getattr(self._sc, "ground_truth", None) if self._sc is not None else None
+        key = getattr(gt, "hpke_public_key", None)
+        if key:
+            return key
+        acc = self._accepted
+        return ((acc.evidence or {}).get("claims") or {}).get("hpke_public_key") if acc else None
+
+    def _observe_send(self, request, response):
+        """Per-request send record (hpke_key_used, response_decrypted, TLS peer SPKI); see capture_sends."""
+        try:
+            rec: dict = {"host": request.url.host, "path": request.url.path,
+                         "hpke_key_used": self.current_hpke_key(),
+                         "encrypted": ENCAPSULATED_KEY_HEADER in request.headers or _has_body(request),
+                         "response_decrypted": None, "tls_spki_sha256": None, "tls_matches_report": None}
+            der = peer_certificate_der(response)
+            if der is not None:
+                spki = self._spki_cache.get(der)
+                if spki is None:
+                    spki = self._spki_cache[der] = spki_sha256(der)
+                    if len(self._spki_cache) > 16:
+                        self._spki_cache.pop(next(iter(self._spki_cache)))
+                acc = self._accepted
+                tls_fp = ((acc.evidence or {}).get("claims") or {}).get("tls_public_key_fp") if acc else None
+                rec["tls_spki_sha256"], rec["tls_matches_report"] = spki, (spki == tls_fp) if tls_fp else None
+            if RESPONSE_NONCE_HEADER in response.headers:
+                _wrap_stream_for_decryption_flag(response, rec)
+            _record_send(rec)
+        except Exception:
+            pass
+        return response
 
     # ── verification ─────────────────────────────────────────────────────────────────────────
     def _result_from_document(self, sc, capture: dict | None = None) -> VerificationResult:
@@ -333,13 +443,37 @@ class TinfoilAdapter:
                         _close_quietly(stale)
                     self._retired_sync = [old]
                 self._accepted = result
+                self.verified_mono = time.monotonic()  # lets the provider adopt this instead of re-attesting
                 if self._hold_until_accepted:
                     self.held_reason = "verification not yet accepted against pins"
+                if self.tls_probe:
+                    self._probe_tls(http, result)
                 return result
         except VerifyError:
             raise
         except Exception as exc:
             raise VerifyError(f"attestation failed: {type(exc).__name__}: {exc}") from exc
+
+    def _probe_tls(self, http, result) -> None:
+        """Observation only (never fails a verify): which key terminated TLS on the EHBP connection?"""
+        ev = result.evidence if isinstance(result.evidence, dict) else None
+        if ev is None:
+            return
+        url = f"https://{result.enclave_host}/.well-known/tinfoil-attestation"
+        try:
+            with http.stream("GET", url) as resp:
+                der = peer_certificate_der(resp)
+        except Exception as exc:
+            ev["tls_observation"] = {"captured": False, "reason": f"probe failed: {type(exc).__name__}: {exc}"[:300]}
+            return
+        if der is None:
+            ev["tls_observation"] = {"captured": False, "reason": "transport exposes no TLS peer certificate"}
+            return
+        claims = ev.get("claims") or {}
+        obs = tls_observation(der, host=result.enclave_host, attestation=ev.get("attestation") or {},
+                              tls_fp=claims.get("tls_public_key_fp"), hpke=claims.get("hpke_public_key"))
+        ev["tls_cert_pem"] = obs.pop("cert_pem")
+        ev["tls_observation"] = obs
 
     def hold(self, reason: str) -> None:
         self.held_reason = reason or "held"
@@ -408,6 +542,92 @@ class TinfoilAdapter:
                     _close_quietly(http)
             self._sync_http, self._retired_sync = None, []
             self._async_pools.clear()
+
+
+ENCAPSULATED_KEY_HEADER = "Ehbp-Encapsulated-Key"  # ehbp.protocol
+RESPONSE_NONCE_HEADER = "Ehbp-Response-Nonce"     # ehbp.protocol
+
+
+def _iso_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _has_body(request) -> bool:
+    try:
+        return bool(request.headers.get("content-length", "0") not in ("", "0"))
+    except Exception:
+        return False
+
+
+# ── per-send records ────────────────────────────────────────────────────────────────────────────
+import contextvars as _contextvars  # noqa: E402
+
+_SEND_RECORDS: "_contextvars.ContextVar[list | None]" = _contextvars.ContextVar("confidential_send_records",
+                                                                                default=None)
+_LAST_SEND: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar("confidential_last_send", default=None)
+
+
+def _record_send(rec: dict) -> None:
+    _LAST_SEND.set(rec)
+    bucket = _SEND_RECORDS.get()
+    if bucket is not None:
+        bucket.append(rec)
+
+
+def last_send_record() -> dict | None:
+    """The most recent send record in this context (dict, updated in place when a streamed response
+    finishes decrypting)."""
+    return _LAST_SEND.get()
+
+
+class capture_sends:
+    """``with capture_sends() as records: next_call(...)`` collects every attested send in this context.
+    Each record: host, path, hpke_key_used (hex, same encoding as evidence.claims.hpke_public_key),
+    encrypted (request body sealed with EHBP), response_decrypted (True once an EHBP response body was
+    read to the end and every AEAD frame verified; False if decryption failed; None while a stream is
+    unread or when the response was not EHBP-encrypted), tls_spki_sha256, tls_matches_report."""
+
+    def __enter__(self) -> list:
+        self._records: list = []
+        self._token = _SEND_RECORDS.set(self._records)
+        return self._records
+
+    def __exit__(self, *exc) -> None:
+        _SEND_RECORDS.reset(self._token)
+
+
+def _wrap_stream_for_decryption_flag(response, rec: dict) -> None:
+    inner = response.stream
+
+    if isinstance(inner, httpx.AsyncByteStream):
+        class _A(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                try:
+                    async for chunk in inner:
+                        yield chunk
+                except Exception:
+                    rec["response_decrypted"] = False
+                    raise
+                rec["response_decrypted"] = True
+
+            async def aclose(self):
+                await inner.aclose()
+        response.stream = _A()
+    else:
+        class _S(httpx.SyncByteStream):
+            def __iter__(self):
+                try:
+                    for chunk in inner:
+                        yield chunk
+                except Exception:
+                    rec["response_decrypted"] = False
+                    raise
+                rec["response_decrypted"] = True
+
+            def close(self):
+                inner.close()
+        response.stream = _S()
 
 
 def _close_quietly(http) -> None:
@@ -497,6 +717,63 @@ def _capture_hooks() -> dict:
     return hooks
 
 
+# ── TLS peer certificate on the EHBP connection ─────────────────────────────────────────────────
+
+def peer_certificate_der(response) -> bytes | None:
+    """The TLS peer certificate of the connection that carried ``response`` (httpcore exposes the
+    stream as response.extensions["network_stream"]; ehbp passes extensions through)."""
+    ns = (getattr(response, "extensions", None) or {}).get("network_stream")
+    if ns is None:
+        return None
+    get = getattr(ns, "get_extra_info", None)
+    ssl_obj = get("ssl_object") if callable(get) else None
+    if ssl_obj is None:
+        return None
+    der = ssl_obj.getpeercert(binary_form=True)
+    return der or None
+
+
+def spki_sha256(der: bytes) -> str:
+    """SHA-256 of the SubjectPublicKeyInfo: the TLS key fingerprint the report carries (T)."""
+    import hashlib
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    cert = x509.load_der_x509_certificate(der)
+    spki = cert.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return hashlib.sha256(spki).hexdigest()
+
+
+def tls_observation(der: bytes, *, host: str, attestation: dict, tls_fp: str | None, hpke: str | None) -> dict:
+    """Compare the peer certificate with the report: SPKI SHA-256 == T, and the SDK's SAN binding
+    (verify_certificate: host, HPKE key and attestation-document hash encoded in SANs)."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    cert = x509.load_der_x509_certificate(der)
+    spki = spki_sha256(der)
+    obs = {"captured": True, "spki_sha256": spki, "matches_report_tls_key": bool(tls_fp) and spki == tls_fp,
+           "issuer": cert.issuer.rfc4514_string(), "subject": cert.subject.rfc4514_string(),
+           "serial": format(cert.serial_number, "x"),
+           "not_before": cert.not_valid_before_utc.isoformat(), "not_after": cert.not_valid_after_utc.isoformat(),
+           "cert_pem": cert.public_bytes(serialization.Encoding.PEM).decode("ascii")}
+    try:
+        from tinfoil.attestation import Document
+        from tinfoil.attestation.bundle import verify_certificate
+        from tinfoil.attestation.types import PredicateType
+        doc = Document(format=PredicateType(attestation["format"]), body=attestation["body"])
+        verify_certificate(obs["cert_pem"], host, doc, hpke or "")
+        obs["san_binding"] = True
+    except Exception as exc:
+        obs["san_binding"] = f"fail: {type(exc).__name__}: {exc}"[:300]
+    if obs["matches_report_tls_key"] and obs["san_binding"] is True:
+        obs["verdict"] = "TLS terminates in the attested enclave (SPKI == report TLS key, SAN binding ok)"
+    elif not obs["matches_report_tls_key"]:
+        obs["verdict"] = "TLS terminated by a non-enclave key"
+    else:
+        obs["verdict"] = "SPKI matches the report but the SAN binding failed"
+    return obs
+
+
 def _release_with_metadata(inner):
     """Run fetch_latest_release with a thread-scoped spy on requests.Session.request that records the
     GitHub release JSON's published_at / html_url (the SDK parses then discards them)."""
@@ -582,7 +859,8 @@ def build_evidence(capture: dict, doc, *, repo: str, enclave_source: str | None,
         "sigstore_bundle": capture.get("sigstore_bundle"),
         "hardware_measurements": hw if hw and hw.get("bundle") else None,
         "trusted_root": trusted_root,
-        "tls_cert_pem": None,  # never fetched on the default ehbp path
+        "tls_cert_pem": None,       # filled by the TLS probe after verify (TinfoilAdapter._probe_tls)
+        "tls_observation": None,
         "claims": {
             "code_fingerprint": doc.code_fingerprint,
             "enclave_fingerprint": doc.enclave_fingerprint,

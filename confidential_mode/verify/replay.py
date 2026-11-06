@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import _sdkpatch
+from . import _sdkpatch, policy_check, sev_check
 
 EVIDENCE_SCHEMA = "confidential-mode/tinfoil-evidence/v1"
 HARDWARE_MEASUREMENTS_REPO = "tinfoilsh/hardware-measurements"
@@ -33,12 +33,15 @@ TINFOIL_ROUTER_REPO = "tinfoilsh/confidential-model-router"
 
 CHECK_KEYS = (
     "repo_match",                   # evidence repo == expected_repo (identity, not just validity)
+    "repo_identity",                # Fulcio cert: "name+id" | "name only (ids not supplied)" | "fail: ..."
     "trust_root_source",            # INFORMATIONAL: "supplied" or "from_evidence" (not independent)
     "hardware_signature",           # report / quote signature by the CPU vendor key
     "cert_chain",                   # VCEK -> AMD ARK/ASK, or PCK -> Intel root, collateral signatures, revocation
     "tcb_policy",                   # SDK policy: guest policy, minimum TCB/firmware, TDX module / QE identity
     "collateral_fresh_at_capture",  # TDX: TCB info / QE identity not expired at as_of (n/a for SEV)
     "code_signature",               # Sigstore DSSE + Rekor + GitHub workflow policy for the release digest
+    "policy_check",                 # second column: verify/policy_check.py (no tinfoil code) on the same bundle(s)
+    "sev_check",                    # second column: verify/sev_check.py (no tinfoil code) on the SEV report (n/a TDX)
     "measurement_match",            # signed code measurement == enclave measurement; fingerprints == claims
     "hardware_platform_match",      # TDX: MRTD/RTMR0 match a signed hardware-measurements entry (n/a for SEV)
     "report_data_keys",             # report_data (TLS key fp || HPKE key) == the keys the client used
@@ -56,6 +59,7 @@ NOT_ESTABLISHED = (
     "that captured_at is when the capture happened (it is taken from the evidence itself)",
 )
 INFORMATIONAL_CHECKS = ("trust_root_source",)
+REPO_IDENTITY_PASSING = ("name+id", "name only (ids not supplied)")
 
 
 @dataclass(frozen=True)
@@ -70,10 +74,30 @@ class ReplayResult:
     as_of: str
     sdk_version: str
     repo: str | None = None
-    enclave_host: str | None = None
+    enclave_host_asserted: str | None = None   # capturer-asserted: the evidence says so, nothing proves it
     platform: str | None = None
-    captured_at: str | None = None
+    captured_at_asserted: str | None = None    # capturer-asserted (see NOT_ESTABLISHED)
+    # From the release bundle's Fulcio certificate and tlog entry (after code_signature passed):
+    source_repo_id: str | None = None
+    source_owner_id: str | None = None
+    build_signer_uri: str | None = None        # workflow path, e.g. https://github.com/o/r/.github/workflows/x.yml@refs/tags/v1
+    source_commit: str | None = None
+    log_index: int | None = None
+    integrated_time: int | None = None
+    sev_checker_sha256: str | None = None      # identifies the independent SEV checker (file hash)
+    policy_checker_sha256: str | None = None
     not_established: tuple[str, ...] = field(default=NOT_ESTABLISHED)
+    # Older spellings, kept in sync with the *_asserted fields (same capturer-asserted values).
+    enclave_host: str | None = None
+    captured_at: str | None = None
+
+    def __post_init__(self):
+        for new, old in (("enclave_host_asserted", "enclave_host"), ("captured_at_asserted", "captured_at")):
+            a, b = getattr(self, new), getattr(self, old)
+            if a is None and b is not None:
+                object.__setattr__(self, new, b)
+            elif b is None and a is not None:
+                object.__setattr__(self, old, a)
 
 
 class _Checks:
@@ -121,6 +145,13 @@ def _as_datetime(value) -> datetime:
     if isinstance(value, str):
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
     raise ValueError(f"unusable time {value!r}")
+
+
+def _file_sha256(path) -> str:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except Exception:
+        return ""
 
 
 def _b64d(s: str) -> bytes:
@@ -295,6 +326,7 @@ def _sigstore_verifier_override(trusted_root_bytes: bytes) -> dict:
 # ── replay ───────────────────────────────────────────────────────────────────────────────────
 
 def replay(evidence: dict, *, expected_repo: str | None = TINFOIL_ROUTER_REPO,
+           expected_repo_id: str | int | None = None, expected_owner_id: str | int | None = None,
            expected_fingerprints: tuple[str, str] | None = None, trusted_root: Path | str | bytes | None = None,
            as_of=None, trust_root_dir: Path | str | None = None) -> ReplayResult:
     """Re-run the captured verification offline, checking IDENTITY as well as validity: the Sigstore
@@ -306,10 +338,11 @@ def replay(evidence: dict, *, expected_repo: str | None = TINFOIL_ROUTER_REPO,
     ev = evidence if isinstance(evidence, dict) else {}
     out: dict[str, Any] = {"code_fingerprint": None, "enclave_fingerprint": None, "release_tag": None,
                            "tls_key_fp": None, "hpke_public_key": None, "repo": ev.get("repo"),
-                           "enclave_host": ev.get("enclave_host"), "platform": ev.get("platform"),
-                           "captured_at": ev.get("captured_at")}
+                           "enclave_host_asserted": ev.get("enclave_host"), "platform": ev.get("platform"),
+                           "captured_at_asserted": ev.get("captured_at")}
     opts = {"expected_repo": expected_repo, "expected_fingerprints": expected_fingerprints,
-            "trusted_root": trusted_root}
+            "trusted_root": trusted_root, "expected_repo_id": expected_repo_id,
+            "expected_owner_id": expected_owner_id}
     try:
         when = _as_datetime(as_of if as_of is not None else (evidence.get("captured_at")
                                                              or evidence.get("captured_at_unix")))
@@ -329,10 +362,45 @@ def replay(evidence: dict, *, expected_repo: str | None = TINFOIL_ROUTER_REPO,
 
 def _result(checks: _Checks, out: dict, when: datetime) -> ReplayResult:
     vals = dict(checks.values)
-    ok = all(v is True or (isinstance(v, str) and v.startswith("n/a:"))
+    ok = all(v is True or (isinstance(v, str) and (v.startswith("n/a:") or v in REPO_IDENTITY_PASSING))
              for k, v in vals.items() if k not in INFORMATIONAL_CHECKS)
     return ReplayResult(ok=ok, checks=vals, as_of=when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
                         sdk_version=_sdk_version(), **out)
+
+
+def _repo_identity(checks: _Checks, out: dict, bundle: bytes, opts: dict, evidence_repo: str) -> None:
+    """Bind the release signature to the repository by NUMERIC id, not only by name (names can be
+    renamed or transferred): Fulcio's Source Repository Identifier (1.15) and Owner Identifier (1.17)."""
+    try:
+        ident = policy_check.fulcio_identity(bundle)
+    except Exception as exc:
+        checks.failed("repo_identity", f"cannot read the signing certificate: {type(exc).__name__}: {exc}")
+        return
+    for k in ("build_signer_uri", "source_commit", "log_index", "integrated_time"):
+        out[k] = ident.get(k)
+    out["source_repo_id"], out["source_owner_id"] = ident.get("repo_id"), ident.get("owner_id")
+    expected_repo = opts.get("expected_repo")
+    name = ident.get("repository") or evidence_repo
+    if expected_repo and name != expected_repo:
+        checks.failed("repo_identity", f"certificate repository {name or '(none)'} is not the expected {expected_repo}")
+        return
+    want = {"repo_id": opts.get("expected_repo_id"), "owner_id": opts.get("expected_owner_id")}
+    if all(v is None for v in want.values()):
+        checks.values["repo_identity"] = "name only (ids not supplied)"
+        checks._touched.add("repo_identity")
+        return
+    if not ident.get("has_certificate"):
+        checks.failed("repo_identity", "bundle carries no signing certificate to read repository ids from")
+        return
+    for key, expected in want.items():
+        if expected is None:
+            continue
+        got = ident.get(key)
+        if got is None or str(got) != str(expected):
+            checks.failed("repo_identity", f"certificate {key} {got or '(absent)'} is not the expected {expected}")
+            return
+    checks.values["repo_identity"] = "name+id"
+    checks._touched.add("repo_identity")
 
 
 def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir: Path | None,
@@ -369,6 +437,23 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
         checks.failed("hardware_signature", f"evidence: attestation unusable: {exc}")
         return
     is_tdx = doc.format == PredicateType.TDX_GUEST_V2
+    out["sev_checker_sha256"] = sev_check.checker_sha256()
+    out["policy_checker_sha256"] = _file_sha256(policy_check.__file__)
+    indep = None
+    if is_tdx:
+        checks.na("sev_check", "TDX: no independent checker")
+    else:
+        sev = ev.get("sev") or {}
+        try:
+            vcek = _b64d(sev.get("vcek_der_b64") or "")
+        except Exception:
+            vcek = b""
+        indep = sev_check.check(doc.body, vcek, as_of=when)
+        if not indep.ok:
+            checks.failed("sev_check", indep.reason)
+        elif (indep.tls_key_fp, indep.hpke_public_key) != (claims.get("tls_public_key_fp"), claims.get("hpke_public_key")):
+            checks.failed("sev_check", "report_data keys differ from the keys recorded at capture")
+            indep = None
 
     base = _network_ban(attempts)
     stages = _tdx_stages(checks, ev) if is_tdx else _sev_stages(checks)
@@ -407,13 +492,22 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
         # 3) TLS certificate binding (only if captured)
         pem = ev.get("tls_cert_pem")
         if not pem:
-            checks.na("tls_cert_binding", "TLS certificate not captured on the ehbp path")
+            checks.na("tls_cert_binding", "TLS certificate not captured")
         else:
             try:
-                verify_certificate(pem, ev.get("enclave_host") or "", doc, enclave.hpke_public_key or "")
-                checks.passed("tls_cert_binding")
+                from cryptography import x509 as _x509
+                from cryptography.hazmat.primitives import serialization as _ser
+                cert = _x509.load_pem_x509_certificate(pem.encode())
+                spki = hashlib.sha256(cert.public_key().public_bytes(
+                    _ser.Encoding.DER, _ser.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+                if spki != enclave.public_key_fp:
+                    # Recorded, not failed: EHBP bodies are sealed to H whoever terminates TLS.
+                    checks.na("tls_cert_binding", "TLS terminated by a non-enclave key (SPKI != report TLS key)")
+                else:
+                    verify_certificate(pem, ev.get("enclave_host") or "", doc, enclave.hpke_public_key or "")
+                    checks.passed("tls_cert_binding")
             except Exception as exc:
-                checks.failed("tls_cert_binding", exc)
+                checks.failed("tls_cert_binding", f"{type(exc).__name__}: {exc}")
 
         # 4) code signature from the stored trust root
         try:
@@ -433,6 +527,28 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
                 checks.failed("code_signature", exc)
                 return
             out["code_fingerprint"] = code.fingerprint()
+            _repo_identity(checks, out, bundle, opts, repo)
+            pc = policy_check.check_bundle(bundle, digest=release.get("digest") or "", repo=policy_repo,
+                                           tag=release.get("tag"), trusted_root=root,
+                                           expected_repo_id=opts.get("expected_repo_id"),
+                                           expected_owner_id=opts.get("expected_owner_id"))
+            if pc.ok:
+                checks.passed("policy_check")
+                for k_out, k_pc in (("log_index", "log_index"), ("integrated_time", "integrated_time"),
+                                    ("source_repo_id", "repo_id"), ("source_owner_id", "owner_id"),
+                                    ("build_signer_uri", "workflow"), ("source_commit", "commit")):
+                    out[k_out] = getattr(pc, k_pc)
+            else:
+                checks.failed("policy_check", f"code bundle: {pc.reason}")
+            if indep is not None and indep.ok:
+                # Compare the independently parsed measurement with the SIGNED release predicate, as read
+                # by the independent policy checker when it passed (else by the SDK's verifier).
+                pred = ((pc.statement or {}).get("predicate") or {}) if pc.ok else {}
+                expected_m = pred.get("snp_measurement") or (code.registers[0] if code.registers else None)
+                if indep.measurement != expected_m:
+                    checks.failed("sev_check", "report measurement is not the signed release's snp_measurement")
+                else:
+                    checks.passed("sev_check")
 
             # 5) measurement match + the fingerprints recorded at capture
             try:
@@ -458,5 +574,10 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
                     checks.passed("hardware_platform_match")
                 except Exception as exc:
                     checks.failed("hardware_platform_match", f"{type(exc).__name__}: {exc}")
+                hpc = policy_check.check_bundle((hw.get("bundle") or "").encode("utf-8"), digest=hw.get("digest") or "",
+                                                repo=HARDWARE_MEASUREMENTS_REPO, tag=None, trusted_root=root,
+                                                predicate_type=policy_check.PREDICATE_HARDWARE)
+                if not hpc.ok:
+                    checks.failed("policy_check", f"hardware-measurements bundle: {hpc.reason}")
     if attempts:  # belt and braces: a banned call that was swallowed somewhere still fails the replay
         checks.failed("hardware_signature", f"network access attempted during replay: {attempts[0]}")

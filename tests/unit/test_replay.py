@@ -140,6 +140,15 @@ def amd():
 def amd_anchor(amd, monkeypatch):
     monkeypatch.setattr(verify_sev, "ARK_CERT", amd.ark.public_bytes(serialization.Encoding.PEM))
     monkeypatch.setattr(verify_sev, "ASK_CERT", amd.ask.public_bytes(serialization.Encoding.PEM))
+    # The independent checker pins the REAL AMD ARK by hash; for synthetic reports substitute the test
+    # anchor there too, and the SDK's lower TCB floor (the synthetic report uses it).
+    from confidential_mode.verify import sev_check
+    der = lambda c: c.public_bytes(serialization.Encoding.DER)  # noqa: E731
+    monkeypatch.setattr(sev_check, "ARK_PEM", amd.ark.public_bytes(serialization.Encoding.PEM).decode())
+    monkeypatch.setattr(sev_check, "ASK_PEM", amd.ask.public_bytes(serialization.Encoding.PEM).decode())
+    monkeypatch.setattr(sev_check, "ARK_SHA256", hashlib.sha256(der(amd.ark)).hexdigest())
+    monkeypatch.setattr(sev_check, "ASK_SHA256", hashlib.sha256(der(amd.ask)).hexdigest())
+    monkeypatch.setattr(sev_check, "MIN_TCB", {"bl": 7, "tee": 0, "snp": 0x0E, "ucode": 0x48})
     return amd
 
 
@@ -179,10 +188,49 @@ def sev_report(amd, *, tls_fp, hpke, measurement=SNP, build=21, sign_key=None, t
 
 # ── Sigstore stand-in ─────────────────────────────────────────────────────────────────────────
 
-def signed_bundle(statement: dict, *, repo: str, tag: str | None) -> dict:
+REPO_ID, OWNER_ID = "800001", "700001"
+COMMIT = "1f" * 20
+
+
+def _der_utf8(text: str) -> bytes:
+    b = text.encode()
+    assert len(b) < 128
+    return bytes([0x0C, len(b)]) + b
+
+
+def fulcio_cert_der(repo: str, tag: str | None, *, repo_id=REPO_ID, owner_id=OWNER_ID) -> bytes:
+    """A stand-in Fulcio leaf carrying the GitHub Actions identity extensions (DER UTF8String values)."""
+    from cryptography.x509 import ObjectIdentifier as O
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "sigstore-intermediate")])
+    ref = f"refs/tags/{tag or 'v0'}"
+    raw_v1 = {"1.3.6.1.4.1.57264.1.5": repo, "1.3.6.1.4.1.57264.1.6": ref}  # v1 extensions: raw bytes
+    exts = {"1.3.6.1.4.1.57264.1.8": "https://token.actions.githubusercontent.com",
+            "1.3.6.1.4.1.57264.1.9": f"https://github.com/{repo}/.github/workflows/release.yml@{ref}",
+            "1.3.6.1.4.1.57264.1.12": f"https://github.com/{repo}",
+            "1.3.6.1.4.1.57264.1.13": COMMIT,
+            "1.3.6.1.4.1.57264.1.14": ref}
+    if repo_id is not None:
+        exts["1.3.6.1.4.1.57264.1.15"] = str(repo_id)
+    if owner_id is not None:
+        exts["1.3.6.1.4.1.57264.1.17"] = str(owner_id)
+    b = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+         .serial_number(1).not_valid_before(CAPTURED_AT - timedelta(days=1))
+         .not_valid_after(CAPTURED_AT + timedelta(minutes=10)))
+    for oid, val in exts.items():
+        b = b.add_extension(x509.UnrecognizedExtension(O(oid), _der_utf8(val)), critical=False)
+    for oid, val in raw_v1.items():
+        b = b.add_extension(x509.UnrecognizedExtension(O(oid), val.encode()), critical=False)
+    return b.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER)
+
+
+def signed_bundle(statement: dict, *, repo: str, tag: str | None, cert_repo: str | None = None,
+                  repo_id=REPO_ID, owner_id=OWNER_ID) -> dict:
     payload = json.dumps({"statement": statement, "repo": repo, "tag": tag}).encode()
+    cert = fulcio_cert_der(cert_repo or repo, tag, repo_id=repo_id, owner_id=owner_id)
     return {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
-            "verificationMaterial": {"tlogEntries": [{"logIndex": "123456789"}]},
+            "verificationMaterial": {"certificate": {"rawBytes": base64.b64encode(cert).decode()},
+                                     "tlogEntries": [{"logIndex": "123456789", "integratedTime": "1762400000"}]},
             "testEnvelope": {"payload": base64.b64encode(payload).decode(),
                              "mac": hmac.new(FIXTURE_KEY, payload, "sha256").hexdigest()}}
 
@@ -213,6 +261,35 @@ def fake_sigstore(monkeypatch):
             raise ValueError(f"Digest mismatch: expected {digest}")
         return st
     monkeypatch.setattr(tf_sigstore, "_verify_dsse_bundle", fake)
+
+    # The standalone policy checker's sigstore-python calls get the same stand-in; its own policy
+    # object still runs against the bundle's (stand-in) Fulcio certificate.
+    from confidential_mode.verify import policy_check as pc
+
+    class _FakeBundle:
+        def __init__(self, raw):
+            self.raw = json.loads(raw)
+            der = pc.bundle_certificate_der(self.raw)
+            if der is None:
+                raise VerificationError("bundle has no certificate")
+            self.signing_certificate = x509.load_der_x509_certificate(der)
+
+    class _FakeVerifier:
+        def __init__(self, root):
+            from sigstore.models import TrustedRoot
+            from sigstore_models.trustroot.v1 import TrustedRoot as _Inner
+            TrustedRoot(_Inner.from_json(root))  # the stored root must at least parse
+            used.append("policy_check")
+
+        def verify_dsse(self, bundle, policy):
+            policy.verify(bundle.signing_certificate)
+            env = bundle.raw["testEnvelope"]
+            payload = base64.b64decode(env["payload"])
+            if not hmac.compare_digest(env["mac"], hmac.new(FIXTURE_KEY, payload, "sha256").hexdigest()):
+                raise VerificationError("bundle signature invalid")
+            return "application/vnd.in-toto+json", json.dumps(json.loads(payload)["statement"]).encode()
+    monkeypatch.setattr(pc, "_load_bundle", _FakeBundle)
+    monkeypatch.setattr(pc, "_make_verifier", _FakeVerifier)
     return used
 
 
@@ -231,12 +308,57 @@ class _Resp:
             raise httpx.HTTPError("status")
 
 
-@pytest.fixture
-def captured(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch):
-    """Run TinfoilAdapter.verify() for real against a faked network leaf; return (adapter, evidence)."""
+class _FakeSSL:
+    def __init__(self, der):
+        self.der = der
+
+    def getpeercert(self, binary_form=False):
+        return self.der
+
+
+class _FakeStream:
+    def __init__(self, der):
+        self.ssl = _FakeSSL(der)
+
+    def get_extra_info(self, name):
+        return self.ssl if name == "ssl_object" else None
+
+
+def _tls_server_cert(key, host, hpke: bytes, attestation_hash: str) -> bytes:
+    """What a Tinfoil router presents if TLS terminates in the enclave: SANs carry the HPKE key and the
+    attestation document hash (dcode-encoded, as tinfoil.attestation.bundle._decode_domains reads)."""
+    def dcode(data, prefix):
+        enc = base64.b32encode(data).decode().rstrip("=").lower()
+        return [f"{i:02d}{enc[j:j + 50]}.{prefix}.{host}" for i, j in enumerate(range(0, len(enc), 50))]
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+    sans = [host] + dcode(hpke, "hpke") + dcode(attestation_hash.encode(), "hatt")
+    return (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(7).not_valid_before(CAPTURED_AT - timedelta(days=1))
+            .not_valid_after(CAPTURED_AT + timedelta(days=90))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(s) for s in sans]), critical=False)
+            .sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER))
+
+
+def _capture(amd_anchor, tmp_path, monkeypatch, *, tls: str | None = None):
+    """Run TinfoilAdapter.verify() for real against a faked network leaf. tls: None (the stub transport
+    shows no certificate), "enclave" (peer cert key == report TLS key, SANs bind H and the report) or
+    "proxy" (a different key terminates TLS)."""
     import requests
-    tls_fp, hpke = _keys()
+    from tinfoil.attestation import Document
+    tls_key = ec.generate_private_key(ec.SECP256R1())
+    spki = tls_key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    _, hpke = _keys()
+    tls_fp = hashlib.sha256(spki).digest()
     body = sev_report(amd_anchor, tls_fp=tls_fp, hpke=hpke)
+    if tls is not None:
+        att_hash = Document(PredicateType.SEV_GUEST_V2, body).hash()
+        key = tls_key if tls == "enclave" else ec.generate_private_key(ec.SECP256R1())
+        der = _tls_server_cert(key, ENCLAVE, hpke, att_hash)
+
+        def fake_inner(self, request):  # the HTTPTransport under ehbp: a stubbed TLS server
+            return httpx.Response(200, json={"format": "x", "body": "y"},
+                                  extensions={"network_stream": _FakeStream(der)})
+        monkeypatch.setattr(httpx.HTTPTransport, "handle_request", fake_inner)
     bundle = signed_bundle(code_statement(), repo=REPO, tag=TAG)
     vcek_der = amd_anchor.vcek.public_bytes(serialization.Encoding.DER)
     urls = []
@@ -255,10 +377,16 @@ def captured(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch):
             return _Resp(vcek_der)
         raise AssertionError(f"unexpected fetch {url}")
     monkeypatch.setattr(requests.Session, "request", fake_request)
-    ad = TinfoilAdapter(data_dir=tmp_path / "plugin-data", enclave=ENCLAVE, hold_until_accepted=False)
+    ad = TinfoilAdapter(data_dir=tmp_path / "plugin-data", enclave=ENCLAVE, hold_until_accepted=False,
+                        tls_probe=tls is not None)
     res = ad.verify()
     return SimpleNamespace(adapter=ad, result=res, evidence=res.evidence, urls=urls, tls_fp=tls_fp, hpke=hpke,
                            data_dir=tmp_path / "plugin-data", vcek_der=vcek_der)
+
+
+@pytest.fixture
+def captured(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch):
+    return _capture(amd_anchor, tmp_path, monkeypatch)
 
 
 def test_capture_records_every_input_under_the_v1_schema(captured, offline):
@@ -319,11 +447,11 @@ def test_sdk_caches_are_redirected_under_the_plugin_data_dir(captured, tmp_path)
 
 # ── replay: SEV passes on synthetic bytes, tampering fails the right check ────────────────────
 
-def _expect(result, failed: str):
+def _expect(result, failed: str, also: tuple = ()):
     assert result.ok is False
     assert isinstance(result.checks[failed], str) and result.checks[failed].startswith("fail:"), result.checks
     for key, value in result.checks.items():
-        if key != failed:
+        if key != failed and key not in also:
             assert not (isinstance(value, str) and value.startswith("fail:")), (key, value)
 
 
@@ -331,23 +459,26 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
     fake_sigstore.clear()
     r = replay(captured.evidence)
     assert r.ok is True, r.checks
-    assert r.checks == {"repo_match": True, "trust_root_source": "from_evidence", "hardware_signature": True, "cert_chain": True, "tcb_policy": True,
+    assert r.checks == {"repo_match": True, "repo_identity": "name only (ids not supplied)",
+                        "trust_root_source": "from_evidence", "hardware_signature": True, "cert_chain": True, "tcb_policy": True,
                         "collateral_fresh_at_capture": "n/a: SEV-SNP has no Intel collateral",
-                        "code_signature": True, "measurement_match": True,
+                        "code_signature": True, "policy_check": True, "sev_check": True,
+                        "measurement_match": True,
                         "hardware_platform_match": "n/a: SEV-SNP", "report_data_keys": True,
-                        "tls_cert_binding": "n/a: TLS certificate not captured on the ehbp path"}
+                        "tls_cert_binding": "n/a: TLS certificate not captured"}
     assert set(r.checks) == set(CHECK_KEYS)
     assert r.code_fingerprint == captured.result.code_fingerprint
     assert r.enclave_fingerprint == captured.result.enclave_fingerprint == SNP.hex()
     assert r.hpke_public_key == captured.hpke.hex() and r.tls_key_fp == captured.tls_fp.hex()
     assert r.release_tag == TAG and r.sdk_version == "0.14.2"
-    assert (r.repo, r.enclave_host, r.platform, r.captured_at) == (REPO, ENCLAVE, "sev-snp",
+    assert (r.repo, r.enclave_host_asserted, r.platform, r.captured_at_asserted) == (REPO, ENCLAVE, "sev-snp",
                                                                    captured.evidence["captured_at"])
     assert r.as_of == captured.evidence["captured_at"]
     assert r.not_established == NOT_ESTABLISHED and len(NOT_ESTABLISHED) == 5
     assert any("captured_at is when the capture happened" in x for x in NOT_ESTABLISHED)
     assert any("binds the release tag" in x and "latest" in x for x in NOT_ESTABLISHED)
-    assert fake_sigstore == ["Verifier"]  # Verifier.production() was served from the stored root
+    assert fake_sigstore == ["Verifier", "policy_check"]  # SDK path from the stored root + second column
+    assert (r.log_index, r.integrated_time) == (123456789, 1762400000)
     assert offline == []
 
 
@@ -408,7 +539,7 @@ def test_tampering_fails_the_right_check(captured, amd_anchor, offline, tmp_path
         ev["claims"]["hpke_public_key"] = "00" * 32
     r = replay(ev)
     print("TAMPER", case, r.checks[failed][:160])
-    _expect(r, failed)
+    _expect(r, failed, also=("sev_check", "policy_check"))  # the independent columns may (should) agree
     assert offline == []
 
 
@@ -539,6 +670,7 @@ def test_tdx_replay_at_capture_time_passes(tdx_world, offline):
     r = replay(tdx_world)
     assert r.ok is True, r.checks
     assert r.checks["collateral_fresh_at_capture"] is True and r.checks["hardware_platform_match"] is True
+    assert r.checks["sev_check"] == "n/a: TDX: no independent checker"
     assert r.as_of == tdx_world["captured_at"]
     assert offline == []
 
@@ -657,3 +789,108 @@ def test_override_applies_once_even_when_the_attribute_is_wrapped_twice():
     with _sdkpatch.overrides({(mod, "f"): ov}):
         assert mod.f(1) == 20
     assert calls == [1] and mod.f(1) == 2
+
+
+# ── repository identity by numeric id (Fulcio 1.15 / 1.17) ────────────────────────────────────
+
+def _with_bundle(captured, **kw):
+    ev = copy.deepcopy(captured.evidence)
+    ev["sigstore_bundle"] = json.dumps(signed_bundle(code_statement(), repo=REPO, tag=TAG, **kw))
+    return ev
+
+
+def test_repo_identity_right_name_and_ids(captured, offline):
+    r = replay(_with_bundle(captured), expected_repo_id=REPO_ID, expected_owner_id=OWNER_ID)
+    assert r.ok is True and r.checks["repo_identity"] == "name+id", r.checks
+    assert (r.source_repo_id, r.source_owner_id, r.source_commit) == (REPO_ID, OWNER_ID, COMMIT)
+    assert r.build_signer_uri == f"https://github.com/{REPO}/.github/workflows/release.yml@refs/tags/{TAG}"
+    assert (r.log_index, r.integrated_time) == (123456789, 1762400000)
+
+
+def test_repo_identity_wrong_repo_id_with_the_right_name_fails(captured, offline):
+    """A deleted-and-recreated (or transferred) repository keeps the name but not the numeric id."""
+    r = replay(_with_bundle(captured, repo_id="999999"), expected_repo_id=REPO_ID, expected_owner_id=OWNER_ID)
+    _expect(r, "repo_identity", also=("policy_check",))
+    assert "repo_id 999999" in r.checks["repo_identity"] and r.checks["policy_check"].startswith("fail:")
+    r = replay(_with_bundle(captured, owner_id="1"), expected_repo_id=REPO_ID, expected_owner_id=OWNER_ID)
+    _expect(r, "repo_identity", also=("policy_check",))
+
+
+def test_repo_identity_wrong_repo_name_in_the_certificate_fails(captured, offline):
+    r = replay(_with_bundle(captured, cert_repo="attacker/router"))
+    _expect(r, "repo_identity", also=("policy_check",))
+    assert "attacker/router" in r.checks["repo_identity"]
+
+
+def test_repo_identity_ids_requested_but_absent_from_the_certificate(captured, offline):
+    r = replay(_with_bundle(captured, repo_id=None, owner_id=None), expected_repo_id=REPO_ID)
+    _expect(r, "repo_identity", also=("policy_check",))
+
+
+def test_policy_check_module_has_no_tinfoil_import_and_runs_isolated(captured, tmp_path):
+    import subprocess
+    from confidential_mode.verify import policy_check
+    src = Path(policy_check.__file__).read_text()
+    import re
+    assert not re.search(r"^\s*(import|from)\s+(tinfoil|confidential_mode|\.)", src, re.M)
+    p = tmp_path / "bundle.json"
+    p.write_text(json.dumps(signed_bundle(code_statement(), repo=REPO, tag=TAG)))
+    done = subprocess.run([sys.executable, "-I", policy_check.__file__, "--bundle", str(p), "--identity-only"], capture_output=True, text=True,
+                          timeout=60)
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["repo_id"] == REPO_ID and out["repository"] == REPO and out["log_index"] == 123456789
+
+
+def test_verify_time_policy_check_detail(captured):
+    """What provider.py puts in verify_ok detail.policy_check for a captured verification."""
+    from confidential_mode import provider as provider_mod
+    d = provider_mod._policy_check_detail(captured.evidence)
+    assert d["ok"] is True and d["repo_id"] == REPO_ID, d
+    assert provider_mod._tlog_fields(captured.evidence) == {"log_index": 123456789, "integrated_time": 1762400000}
+    bad = copy.deepcopy(captured.evidence)
+    bad["release"]["tag"] = "v0.0.0"
+    assert provider_mod._policy_check_detail(bad)["ok"] is False
+    assert provider_mod._policy_check_detail({})["ok"] is False
+
+
+# ── TLS certificate on the EHBP connection (stubbed TLS server) ───────────────────────────────
+
+@pytest.mark.parametrize("mode", ["enclave", "proxy"])
+def test_tls_probe_records_who_terminates_tls(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch, mode):
+    c = _capture(amd_anchor, tmp_path, monkeypatch, tls=mode)
+    obs = c.evidence["tls_observation"]
+    assert obs["captured"] is True and c.evidence["tls_cert_pem"].startswith("-----BEGIN CERTIFICATE-----")
+    assert obs["spki_sha256"] != "" and obs["issuer"] and obs["not_after"]
+    r = replay(c.evidence)
+    if mode == "enclave":
+        assert obs["matches_report_tls_key"] is True and obs["san_binding"] is True
+        assert obs["verdict"].startswith("TLS terminates in the attested enclave")
+        assert r.checks["tls_cert_binding"] is True and r.ok is True, r.checks
+    else:
+        assert obs["matches_report_tls_key"] is False
+        assert obs["verdict"] == "TLS terminated by a non-enclave key"
+        assert r.checks["tls_cert_binding"].startswith("n/a: TLS terminated by a non-enclave key")
+        assert r.ok is True  # recorded, not failed: bodies are still sealed to H
+    assert offline == []
+
+
+def test_tls_probe_without_a_visible_certificate_is_recorded(offline, amd_anchor, fake_sigstore, tmp_path,
+                                                            monkeypatch):
+    def plain(self, request):
+        return httpx.Response(200, json={})
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", plain)
+    c = _capture(amd_anchor, tmp_path, monkeypatch)
+    c.adapter.tls_probe = True
+    ev = c.adapter.verify().evidence
+    assert ev["tls_observation"] == {"captured": False, "reason": "transport exposes no TLS peer certificate"}
+    assert ev["tls_cert_pem"] is None
+
+
+def test_tampered_tls_cert_binding_fails_replay(offline, amd_anchor, fake_sigstore, tmp_path, monkeypatch):
+    c = _capture(amd_anchor, tmp_path, monkeypatch, tls="enclave")
+    ev = copy.deepcopy(c.evidence)
+    ev["claims"]["hpke_public_key"] = c.evidence["claims"]["hpke_public_key"]
+    ev["enclave_host"] = "other.tinfoil.invalid"  # SAN binding is to the host the capture named
+    r = replay(ev)
+    assert r.checks["tls_cert_binding"].startswith("fail:"), r.checks

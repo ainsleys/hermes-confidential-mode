@@ -151,7 +151,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(provider_mod, "verification_cache", provider_mod.VerificationCache())
 
     cfg = {"model": {"provider": PROFILE, "default": "tf-main-model", "base_url": BASE_URL},
-           "confidential": {"tinfoil": {"enclave": ENCLAVE}, "verify_ttl_seconds": 300},
+           "confidential": {"tinfoil": {"enclave": ENCLAVE, "tls_probe": False}, "verify_ttl_seconds": 300},
            "auxiliary": {"compression": {"provider": PROFILE, "model": "tf-aux-model"},
                          "title_generation": {"provider": PROFILE, "model": "tf-aux-model"},
                          "vision": {"provider": PROFILE, "model": "tf-vision-model"}}}
@@ -425,6 +425,7 @@ def test_register_without_network_or_configured_enclave_then_lazy_router_discove
     attempts = _block_network(monkeypatch)
     monkeypatch.setattr(tinfoil_client, "get_router_address", _REAL_GET_ROUTER_ADDRESS)  # the real SDK call
     cfg = {k: v for k, v in env["cfg"].items() if k != "confidential"}  # no confidential.tinfoil.enclave
+    cfg["confidential"] = {"tinfoil": {"tls_probe": False}}
 
     # Fresh import + register: no network, no attestation, placeholder endpoint.
     for name in [m for m in sys.modules if m.startswith("confidential_mode")]:
@@ -610,3 +611,52 @@ def test_api_key_comes_from_secret_scope_not_the_environment(env, monkeypatch):
     assert provider_mod.tinfoil_api_key() == ""  # no direct os.environ fallback
     import inspect
     assert "os.environ" not in inspect.getsource(provider_mod).replace("never os.environ directly", "")
+
+
+def test_verify_rows_carry_source_and_key_first_seen_and_silent_reattest_reaches_the_ledger(env):
+    events = []
+    profile = env["register"](on_event=events.append)
+    profile.create_client(api_key="tf-key", base_url=BASE_URL)
+    (ok,) = events
+    assert ok["detail"]["source"] == "verify" and ok["detail"]["key_first_seen"]["new"] is True
+    assert set(ok["detail"]) >= {"log_index", "integrated_time", "policy_check", "ttl_seconds"}
+    ad = provider_mod.adapter_for(PROFILE)
+    assert ad is profile._confidential_adapter
+    ad._sc.verify()  # an SDK-internal re-attestation (key rotation path)
+    assert [e["detail"]["source"] for e in events] == ["verify", "silent_reattest"]
+    assert events[1]["provider"] == PROFILE and events[1]["detail"]["key_first_seen"]["new"] is False
+
+
+def test_cache_adopts_a_fresh_adapter_verification_instead_of_attesting_twice(env):
+    events = []
+    profile = env["register"](on_event=events.append)
+    ad = profile._confidential_adapter
+    ad.verify()  # e.g. `hermes confidential setup` or a script verifying directly
+    assert env["sdk"]["verify_calls"] == 1
+    v = provider_mod.attested_ok(PROFILE)
+    assert v.in_tier is True  # adopted; pins match (no consent ledger configured with ctx=None)
+    assert env["sdk"]["verify_calls"] == 1, "the cold cache attested again"
+    assert [e["kind"] for e in events] == ["verify_ok"]  # the adopted verification is ledgered once
+
+
+def test_verification_pending_is_distinguishable_and_the_wait_can_be_extended(env):
+    import threading
+    gate = threading.Event()
+    real = tinfoil_client.SecureClient.verify
+
+    def slow(self):
+        gate.wait(5)
+        return real(self)
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(tinfoil_client.SecureClient, "verify", slow)
+    try:
+        profile = env["register"]()
+        v = provider_mod.attested_ok(PROFILE, wait_seconds=0.2)
+        assert v.in_tier is False and provider_mod.is_verification_pending(v.reason)
+        assert provider_mod.DEFAULT_VERIFY_WAIT_SECONDS == 20.0
+        gate.set()
+        assert provider_mod.attested_ok(PROFILE, wait_seconds=10).in_tier is True
+    finally:
+        gate.set()
+        mp.undo()
