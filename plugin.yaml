@@ -1,7 +1,22 @@
 name: confidential-mode
-version: 0.0.1
-description: Attested inference provider plus sealed mode for Hermes Agent. Pre-C0 scaffold, not yet functional.
+version: 0.1.0
+description: Attested inference provider (Tinfoil) plus a sealed mode that refuses every route that would carry the conversation off-tier, with human-approved enclave pins and a local receipt ledger.
 author: ainsleys
 kind: standalone
+requires_hermes: ">=0.22.7"
+requires_env:
+  - TINFOIL_API_KEY
 provides_tools: []
-provides_hooks: []
+provides_hooks:
+  - pre_tool_call
+  - post_approval_response
+  - pre_llm_call
+  - pre_api_request
+  - pre_auxiliary_call
+  - post_auxiliary_call
+  - on_session_start
+  - on_session_end
+  - post_compaction
+provides_middleware:
+  - llm_execution
+  - tool_execution
