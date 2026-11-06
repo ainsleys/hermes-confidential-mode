@@ -232,6 +232,16 @@ def _route_item_verdict(ctx: _Ctx, cfg: Mapping, purpose: str) -> tuple[str, str
     return ctx.classify(provider, base_url, _s(cfg.get("model")), _s(cfg.get("api_mode")), purpose)
 
 
+def _truthy(value: Any) -> bool:
+    return value is True or (isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "on"}) \
+        or (isinstance(value, int) and not isinstance(value, bool) and value != 0)
+
+
+def _falsy(value: Any) -> bool:
+    return value is False or (isinstance(value, str) and value.strip().lower() in {"false", "0", "no", "off"}) \
+        or (isinstance(value, int) and not isinstance(value, bool) and value == 0)
+
+
 def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plugin_aux_tasks: Sequence[Any],
                   isolation: Any = _ABSENT, provider_lookup: Callable[[str], object | None],
                   attested_profile: str | None, builtin_aux_tasks: Sequence[str] | None = None) -> PreflightReport:
@@ -348,16 +358,36 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     if d_fb not in (None, [], "", {}):
         add("delegation.fallback_providers", d_fb, OFF_TIER, "set delegation.fallback_providers: [] while sealed")
 
-    # tts (assistant text is conversation content)
+    # tts (assistant text is conversation content). Coordinator ruling (Amendment 3 addendum): the enabled
+    # flag applies first; unset/false => disabled; enabled true + hosted (or unset provider, which Hermes
+    # resolves to edge: tools/tts_tool.py:105,145-148) => off_tier; local engine or command provider =>
+    # local. NOTE: Hermes 84a0301 has no tts.enabled key at all (DEFAULT_CONFIG["tts"]), so the flag is a
+    # plugin-side convention. Fail-closed guard: when voice.auto_tts is on, Hermes speaks replies
+    # automatically through tts.provider, so a non-local provider is off_tier whatever tts.enabled says.
     tts = config.get("tts")
     tts = tts if isinstance(tts, Mapping) else {}
-    tts_provider = _s(tts.get("provider")).lower() or _TTS_DEFAULT
+    voice = config.get("voice")
+    auto_tts = isinstance(voice, Mapping) and _truthy(voice.get("auto_tts"))
+    raw_provider = _s(tts.get("provider")).lower()
+    effective = raw_provider or _TTS_DEFAULT
     named = tts.get("providers") if isinstance(tts.get("providers"), Mapping) else {}
-    named_cfg = named.get(tts_provider) if isinstance(named.get(tts_provider), Mapping) else None
-    tts_local = tts_provider in _LOCAL_TTS or (named_cfg is not None and "command" in named_cfg)
-    add("tts.provider", tts.get("provider") or f"(default {_TTS_DEFAULT})", LOCAL if tts_local else OFF_TIER,
-        "set tts.provider to a local engine (piper, kittentts, neutts) or a tts.providers.<name> command "
-        "while sealed; unset means edge (hosted)")
+    named_cfg = named.get(raw_provider) if isinstance(named.get(raw_provider), Mapping) else None
+    engine_local = raw_provider in _LOCAL_TTS or (named_cfg is not None and "command" in named_cfg)
+    enabled_raw = tts.get("enabled", _ABSENT)
+    enabled = enabled_raw is not _ABSENT and _truthy(enabled_raw)
+    tts_fix = ("set tts.provider to a local engine (piper, kittentts, neutts) or a tts.providers.<name> command, "
+               "or tts.enabled: false with voice.auto_tts: false, while sealed")
+    if engine_local:
+        tts_verdict, tts_value = LOCAL, raw_provider
+    elif auto_tts:
+        tts_verdict, tts_value = OFF_TIER, effective
+        tts_fix += f"; voice.auto_tts is on and the provider resolves to {effective} (hosted)"
+    elif enabled:
+        tts_verdict, tts_value = OFF_TIER, effective
+    else:
+        tts_verdict = DISABLED
+        tts_value = f"({'default ' if not raw_provider else ''}{effective}, disabled)"
+    add("tts.provider", tts_value, tts_verdict, tts_fix)
 
     # memory
     mem = config.get("memory", _ABSENT)
@@ -479,6 +509,9 @@ def config_fingerprint(config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
                         for k in ("provider", "model", "base_url", "api_mode", "fallback_providers")}
                        if isinstance(deleg, Mapping) else deleg),
         "tts.provider": tts.get("provider") if isinstance(tts, Mapping) else tts,
+        "tts.enabled": tts.get("enabled", "<absent>") if isinstance(tts, Mapping) else None,
+        "voice.auto_tts": (config.get("voice") or {}).get("auto_tts") if isinstance(config.get("voice"), Mapping)
+        else config.get("voice"),
         "memory.provider": mem.get("provider") if isinstance(mem, Mapping) else mem,
         "mcp_servers": {n: ({k: s.get(k) for k in ("url", "command", "enabled") if k in s}
                             if isinstance(s, Mapping) else s)
