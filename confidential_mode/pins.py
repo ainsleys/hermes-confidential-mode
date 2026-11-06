@@ -135,11 +135,26 @@ class PinStore:
             pending = _record_from_dict(PendingPin, pending_raw) if pending_raw else None
             return pins, pending
 
-    def save(self, pins: dict[tuple[str, str], PinRecord], pending: PendingPin | None) -> None:
+    def _last_applied(self) -> tuple[PendingPin] | None:
+        try:
+            data = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
+        except FileNotFoundError:
+            return None
+        raw = data.get("last_applied") if isinstance(data, dict) else None
+        return (_record_from_dict(PendingPin, raw),) if raw else None
+
+    def save(self, pins: dict[tuple[str, str], PinRecord], pending: PendingPin | None, *,
+             applied: PendingPin | None | bool = False) -> None:
+        """Atomic write. ``applied`` records the pending pin apply() just promoted (False keeps the
+        stored value), which makes a repeated apply() of the same pending a no-op."""
         with self._lock:
+            if applied is False:
+                last = self._last_applied() if self.path.exists() else None
+                applied = last[0] if last else None
             data = {"version": SCHEMA_VERSION,
                     "pins": [_record_to_dict(p) for _, p in sorted(pins.items())],
-                    "pending": _record_to_dict(pending) if pending else None}
+                    "pending": _record_to_dict(pending) if pending else None,
+                    "last_applied": _record_to_dict(applied) if applied else None}
             text = yaml.safe_dump(data, sort_keys=False)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
@@ -171,14 +186,17 @@ class PinStore:
 
     # ── mutations ────────────────────────────────────────────────────────────────────────────
     def stage(self, result: VerificationResult, *, model: str | None = None) -> PendingPin:
-        """Record ``result`` as the pending pin (replacing any other pending). Idempotent for the same
-        fingerprints: re-staging returns the existing PendingPin unchanged (so a consent prompt's
-        equality re-check is not invalidated by a repeat stage)."""
+        """Record ``result`` as the pending pin (replacing any other pending). Idempotent for an identical
+        build (fingerprints, release tag, host): re-staging returns the existing PendingPin unchanged, so a
+        consent prompt's equality re-check survives repeat stages. Anything else, including the same
+        fingerprints under a different release tag, is a new PendingPin (a swap, Amendment 3)."""
         with self._lock:
             pins, pending = self.load()
             if (pending is not None and pending.key == (result.vendor, result.router_repo)
                     and pending.code_fingerprint == result.code_fingerprint
-                    and pending.enclave_fingerprint == result.enclave_fingerprint):
+                    and pending.enclave_fingerprint == result.enclave_fingerprint
+                    and pending.release_tag == result.release_tag
+                    and pending.enclave_host == result.enclave_host):
                 return pending
             current = pins.get((result.vendor, result.router_repo))
             new = PendingPin(
@@ -199,9 +217,12 @@ class PinStore:
         """Promote ``pending`` to the pin for its key. Raises PinStoreError if ``pending`` is no longer
         the stored pending pin. Keeps the replaced pin's fingerprints in ``previous*``."""
         with self._lock:
-            pins, stored = self.load()
             if not approved_via:
                 raise ValueError("approved_via (the approval surface) is required")
+            pins, stored = self.load()
+            last = self._last_applied()
+            if stored is None and last is not None and last[0] == pending and pending.key in pins:
+                return pins[pending.key]  # idempotent: this exact pending was already applied once
             if stored != pending:
                 raise PinStoreError("pending pin changed since it was shown; not applied")
             current = pins.get(pending.key)
@@ -216,7 +237,7 @@ class PinStore:
                 previous_enclave_fingerprint=current.enclave_fingerprint if current else None,
             )
             pins[rec.key] = rec
-            self.save(pins, None)
+            self.save(pins, None, applied=pending)
             return rec
 
     def clear_pending(self) -> None:

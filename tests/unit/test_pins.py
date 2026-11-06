@@ -173,3 +173,25 @@ def test_apply_requires_surface_and_defaults_rule_key(tmp_path):
         store.apply(pending, approved_via="")
     rec = store.apply(pending, approved_via="slack")
     assert rec.approved_via == "slack" and rec.approval_rule_key == pins_mod.DEFAULT_APPROVAL_RULE_KEY
+
+
+def test_restage_same_fingerprints_different_release_tag_is_a_swap(tmp_path):
+    store = PinStore(tmp_path / "pins.yaml")
+    shown = store.stage(_result(tag="v1"))
+    swapped = store.stage(_result(tag="v1-relabelled"))
+    assert swapped != shown and store.pending() == swapped
+    with pytest.raises(PinStoreError):
+        store.apply(shown, approved_via="cli")
+
+
+def test_apply_is_idempotent_per_pending(tmp_path):
+    store = PinStore(tmp_path / "pins.yaml")
+    _approve(store, store.stage(_result()))
+    pending = store.stage(_result(code="c2"))
+    first = store.apply(pending, approved_via="cli")
+    again = store.apply(pending, approved_via="cli")
+    assert again == first and again.previous == "c1"  # not re-applied (previous would become c2)
+    assert PinStore(tmp_path / "pins.yaml").get("tinfoil", REPO) == first
+    # A different, never-staged pending is still refused.
+    with pytest.raises(PinStoreError):
+        store.apply(replace(pending, code_fingerprint="c3"), approved_via="cli")
