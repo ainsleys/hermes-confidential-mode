@@ -42,7 +42,11 @@ def _turn(agent):
 def _gate(manager, rec, *, decide=None, tier=Tier.LOCAL, sealed=True, ledger=None, attested_ok=None):
     pred = H.FakePredicate(decide or H.always(False), tier=tier)
     ledger = ledger if ledger is not None else H.FakeLedger()
-    seal = sealed if isinstance(sealed, H.Seal) else H.Seal(sealed)
+    if isinstance(sealed, H.Seal):
+        sealed.tier = tier
+        seal = sealed
+    else:
+        seal = H.Seal(sealed, tier=tier)
     H.install_gate(manager, rec, predicate=pred, ledger=ledger, is_sealed=seal, attested_ok=attested_ok)
     return pred, ledger, seal
 
@@ -366,18 +370,17 @@ def test_ledger_append_raising_only_on_refusal_rows_still_refuses(monkeypatch, m
 @pytest.mark.parametrize("sealed,decide", [(False, H.always(False)), (True, H.always(True))],
                          ids=["unsealed", "sealed-in-tier"])
 def test_ledger_append_raising_never_double_sends(monkeypatch, manager, sealed, decide):
-    """Ledger failure on an allowed send: whatever the gate does, the provider sees at most one
-    request (a gate that retries next_call, or raises so Hermes re-runs the chain, would send twice)
-    and the turn never fails over to a fallback."""
+    """Ledger failure on an allowed send. Ruling (C2): the ledger is best effort and never changes
+    a decision, so the turn passes through exactly once (a gate that retries next_call, or raises
+    so Hermes re-runs the chain, would send twice; one that refuses changed the decision)."""
     rec = H.Rec()
     agent = H.build_agent(monkeypatch, "chat_completions", rec)
     _gate(manager, rec, decide=decide, sealed=sealed, ledger=H.FakeLedger(fail=OSError("disk full")))
     result = _turn(agent)
-    assert len(rec.provider_calls) <= 1, f"provider received {len(rec.provider_calls)} requests"
+    assert len(rec.provider_calls) == 1, f"provider received {len(rec.provider_calls)} requests"
     assert rec.fallback_calls == []
     assert result.get("completed") is True and not result.get("failed"), result
-    if rec.provider_calls:
-        assert result["final_response"] == H.PROVIDER_TEXT
+    assert result["final_response"] == H.PROVIDER_TEXT
 
 
 # =============================================================================================
