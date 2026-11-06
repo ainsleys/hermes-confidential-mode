@@ -9,8 +9,9 @@ Which rows a session's receipt covers:
   * every row whose ``session_id`` is the session;
   * profile-wide rows (seal, unseal, verification and pin events, preflight failures), whatever their
     session_id, from the end of the sealed period before the session's first row (the last unseal
-    before it) up to the session's last row, plus the unseal that closes the period. Seal is profile-wide in the MVP and verification has no session context, so these rows
-    are usually written with another session id or none.
+    before it) up to the session's last row, plus the unseal that closes the period. Seal is
+    profile-wide in the MVP and verification has no session context, so these rows are usually
+    written with another session id or none.
 
 The text form lists, in order: header, trust roots, verification events, sends, refusals, asks and
 answers, breaches, compactions, and CLOSING_PARAGRAPH, a module constant that is never templated.
@@ -21,10 +22,15 @@ the rows: ``hash_i = sha256(hash_{i-1} + canonical_json(row_i))`` with ``hash_0 
 canonical_json is ``json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`` of the row
 without its ``hash`` field. The head is in the header. ``verify_chain`` recomputes it.
 
-What the chain shows: the receipt has not been edited since it was rendered, relative to its own head.
-It does not show that the ledger itself was not edited before rendering (the ledger is a local SQLite
-file the user controls); a head published or sent elsewhere at render time is what makes later edits
-detectable.
+What the chain is: a checksum over this document that anyone holding the file can recompute (so can
+anyone editing it). It detects edits only when compared with a chain head recorded somewhere else at
+render time, which is why the text form prints the head at the top with that instruction. It says
+nothing about whether the ledger was complete or its rows genuine (the ledger is a local SQLite file,
+writable by any code in the Hermes process).
+
+Each attested send is matched to the latest verify_ok row before it and that row's TTL window
+(``sections.send_coverage``); the TTL comes from the verify row's ``detail.ttl_seconds`` when present,
+else the ``ttl_seconds`` argument, else the 300 s default, and the receipt says which.
 """
 from __future__ import annotations
 
@@ -33,6 +39,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
+from ._version import PLUGIN_COMMIT, PLUGIN_VERSION
 from .ledger import FORBIDDEN_DETAIL_KEYS
 
 RECEIPT_FORMAT = "confidential-mode-receipt"
@@ -66,26 +73,36 @@ _ROW_FIELDS = ("id", "ts", "session_id", "kind", "purpose", "provider", "host", 
                "verdict", "decision", "surface", "detail")
 
 CLOSING_PARAGRAPH = (
-    "What this receipt proves and what it only records. EVIDENCE: a verification row with evidence attached "
-    "says the plugin checked that enclave build's hardware-signed attestation against the vendor's published "
-    "code measurement and bound the session key to it. That claim holds only to the extent the attached "
-    "bytes replay offline (confidential_mode.verify.replay, the hermes confidential replay command); a row "
-    "marked \"unverified entry\" (no evidence, or an incomplete capture) proves nothing. The ledger is a "
-    "local file on this machine and is not protected against code running in the same Hermes process: "
-    "another plugin can write rows that look exactly like this plugin's own. The hash chain covers the "
-    "rows as the ledger held them when this receipt was rendered, so a passing chain shows only that the "
-    "receipt was not edited afterwards, not that the ledger was complete or that its rows are genuine. "
-    "RECORD ONLY, not proven by anything in this receipt: that this session's requests actually went to "
-    "that enclave; that request bodies were encrypted to that key; that the verified build was the "
+    "What this receipt proves and what it only records. This receipt is a self-report written by the "
+    "plugin from a ledger on this machine; the only part a third party can check independently is the "
+    "attached verification evidence. EVIDENCE: attached evidence bytes that replay offline "
+    "(confidential_mode.verify.replay, or hermes confidential replay <receipt.json>) show that an enclave "
+    "whose hardware report commits to TLS key fingerprint T and HPKE public key H ran code with measurement "
+    "M, signed by repository R at release tag G, as of the capture time the file claims. T and H are the "
+    "enclave's long-lived keys, not a per-session key. A row marked \"unverified entry\" (no evidence, or "
+    "an incomplete capture) shows nothing. RECORD ONLY, not proven by anything in this receipt: that the "
+    "plugin itself checked that evidence during this session; that this session's requests actually went "
+    "to that enclave; that request bodies were encrypted to that key; that the verified build was the "
     "vendor's latest release at the time; whether the build or its key was revoked after the evidence was "
     "captured; what shell, terminal and code-execution tools sent off the machine (they run locally and "
     "can reach the network); which model backends sit behind the vendor's router; any other access the "
     "vendor's operators have to the machines involved; and Hermes' auxiliary calls (title generation, "
     "compaction, memory prefetch, vision, and plugin auxiliary tasks), which can leave the sealed tier "
     "while sealed, for example after a runtime model or provider switch, and are recorded here after the "
-    "fact, not prevented. Sealed mode does not apply when Hermes runs in safe-worker mode, which loads no "
-    "plugins. Timestamps come from this machine's clock and are not attested."
+    "fact, not prevented. The ledger is a local file and is not protected against code running in the "
+    "same Hermes process: another plugin can write rows that look exactly like this plugin's own. The hash "
+    "chain is a checksum over this document that anyone holding the file can recompute; it detects edits "
+    "only when compared with a chain head recorded somewhere else when the receipt was rendered, and it "
+    "says nothing about whether the ledger was complete or its rows genuine. Sealed mode does not apply "
+    "when Hermes runs in safe-worker mode, which loads no plugins. Timestamps come from this machine's "
+    "clock and are not attested."
 )
+
+SELF_REPORT_NOTE = ("This receipt is a self-report by the plugin from its local ledger. Only the attached evidence "
+                    "blobs (JSON form) can be checked by a third party, by replaying them offline.")
+CHAIN_HEAD_NOTE = ("Record this chain head somewhere other than this machine now; later edits to this receipt are "
+                   "detectable only against a copy kept elsewhere.")
+DEFAULT_TTL_SECONDS = 300.0   # provider.DEFAULT_TTL_SECONDS; the ledger does not record the TTL in force
 
 
 class ReceiptError(ValueError):
@@ -321,12 +338,67 @@ def _seal_info(rows: list[dict]) -> dict:
     return {"tier": tier, "since": None, "until": None, "source": "send rows" if tier else "none", "periods": []}
 
 
+def verify_facts(row: Mapping) -> dict:
+    """Repo, platform, enclave host, fingerprints and committed keys of a verify row, from its detail and
+    (preferred) its evidence blob. Missing values are None."""
+    d = row.get("detail") if isinstance(row.get("detail"), Mapping) else {}
+    ev = d.get("evidence") if isinstance(d.get("evidence"), Mapping) else {}
+    claims = ev.get("claims") if isinstance(ev.get("claims"), Mapping) else {}
+    pick = lambda *vals: next((v for v in vals if v not in (None, "")), None)  # noqa: E731
+    return {
+        "repo": pick(ev.get("repo"), d.get("router_repo"), d.get("repo")),
+        "platform": pick(ev.get("platform"), d.get("platform")),
+        "enclave_host": pick(ev.get("enclave_host"), d.get("enclave_host"), row.get("host")),
+        "code_fingerprint": pick(claims.get("code_fingerprint"), d.get("code_fingerprint")),
+        "enclave_fingerprint": pick(claims.get("enclave_fingerprint"), d.get("enclave_fingerprint")),
+        "release_tag": pick(claims.get("release_tag"), d.get("release_tag")),
+        "tls_public_key_fp": pick(claims.get("tls_public_key_fp")),
+        "hpke_public_key": pick(claims.get("hpke_public_key")),
+        "sdk_version": pick(ev.get("sdk_version")),
+        "captured_at": pick(ev.get("captured_at")),
+    }
+
+
+def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> list[dict]:
+    """For every attested send: the latest verify_ok before it (same enclave host when both are known)
+    and whether the send fell inside that row's TTL window. Wall-clock ledger times; the gate's own TTL
+    is monotonic, so this is the record's view, not the gate's."""
+    out = []
+    verifies: list[dict] = []
+    for r in rows:
+        if r["kind"] == "verify_ok":
+            verifies.append(r)
+            continue
+        if r["kind"] != "send_observed" or r.get("tier") != "attested":
+            continue
+        cands = [v for v in verifies
+                 if not (r["host"] and verify_facts(v)["enclave_host"]) or verify_facts(v)["enclave_host"] == r["host"]]
+        v = cands[-1] if cands else None
+        entry = {"send": r["id"], "verify": None, "ttl_seconds": ttl_seconds, "ttl_source": ttl_source,
+                 "window_start": None, "window_end": None, "covered": False, "verify_unverified_entry": None}
+        if v is not None:
+            row_ttl = v["detail"].get("ttl_seconds")
+            from_row = isinstance(row_ttl, (int, float)) and not isinstance(row_ttl, bool)
+            ttl = float(row_ttl) if from_row else ttl_seconds
+            entry.update(verify=v["id"], ttl_seconds=ttl, ttl_source="verify row" if from_row else ttl_source,
+                         window_start=v["ts"], window_end=v["ts"] + ttl,
+                         covered=bool(v["ts"] <= r["ts"] <= v["ts"] + ttl),
+                         verify_unverified_entry=is_unverified_entry(v))
+        out.append(entry)
+    return out
+
+
 def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Iterable[str] = (),
-                  include_profile_rows: bool = True) -> dict:
-    """The JSON receipt as a dict (``render(fmt="json")`` serialises this)."""
+                  include_profile_rows: bool = True, ttl_seconds: float | None = None) -> dict:
+    """The JSON receipt as a dict (``render(fmt="json")`` serialises this). ``ttl_seconds``: the
+    verification TTL in force (``confidential.verify_ttl_seconds``); default 300 s, labelled as a default."""
     rows = [_row_dict(e) for e in collect_rows(ledger, session_id, include_profile_rows=include_profile_rows)]
     head = _chain(rows)
     seal = _seal_info(rows)
+    ttl_source = "config" if ttl_seconds is not None else "default (the ledger does not record the TTL)"
+    ttl = float(ttl_seconds) if ttl_seconds is not None else DEFAULT_TTL_SECONDS
+    sdk_versions = sorted({f for r in rows if r["kind"] in ("verify_ok", "verify_fail")
+                           if (f := verify_facts(r)["sdk_version"])})
     trust = _trust_roots(seal, rows, pins, local_hosts)
     sends = [r for r in rows if r["kind"] in ("send_observed", "send_refused")]
     providers = sorted({(r["provider"], r["model"]) for r in sends if r["provider"] or r["model"]})
@@ -340,6 +412,14 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Ite
         "version": RECEIPT_VERSION,
         "header": {
             "session_id": session_id,
+            "nature": SELF_REPORT_NOTE,
+            "chain_head": head,
+            "chain_head_note": CHAIN_HEAD_NOTE,
+            "plugin_version": PLUGIN_VERSION,
+            "plugin_commit": PLUGIN_COMMIT,
+            "sdk_versions": sdk_versions,
+            "verify_ttl_seconds": ttl,
+            "verify_ttl_source": ttl_source,
             "sealed_tier": seal["tier"],
             "sealed_period": {"since": seal["since"], "until": seal["until"], "source": seal["source"]},
             "sealed_periods": seal["periods"],
@@ -350,11 +430,10 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Ite
             "row_count": len(rows),
             "chain_algorithm": CHAIN_ALGORITHM,
             "chain_genesis": CHAIN_GENESIS,
-            "chain_head": head,
             "trust_roots_sha256": hashlib.sha256(canonical_json(trust).encode("utf-8")).hexdigest(),
         },
         "trust_roots": trust,
-        "sections": _sections(rows),
+        "sections": {**_sections(rows), "send_coverage": _send_coverage(rows, ttl, ttl_source)},
         "rows": rows,
         "evidence": evidence,
         "closing": CLOSING_PARAGRAPH,
@@ -443,17 +522,24 @@ def _send_body(r: Mapping) -> str:
 def _verify_body(r: Mapping) -> str:
     d = r["detail"]
     k = r["kind"]
-    fp = lambda key: _p(d.get(key))[:16] or "?"  # noqa: E731
+    full = lambda v: _p(v) or "?"  # noqa: E731
     if k in ("verify_ok", "verify_fail"):
+        f = verify_facts(r)
         bits = ["UNVERIFIED ENTRY (no evidence or incomplete capture; proves nothing)"] if is_unverified_entry(r) else []
-        bits += [k, f"vendor={_p(d.get('vendor') or r['provider']) or '?'}",
-                f"enclave={_p(d.get('enclave_host') or r['host']) or '?'}"]
-        if d.get("code_fingerprint"):
-            bits.append(f"code={fp('code_fingerprint')}")
-        if d.get("enclave_fingerprint"):
-            bits.append(f"measurement={fp('enclave_fingerprint')}")
-        if d.get("release_tag"):
-            bits.append(f"release={_p(d['release_tag'])}")
+        bits += [k, f"vendor={_p(d.get('vendor') or r['provider']) or '?'}", f"repo={full(f['repo'])}",
+                 f"platform={full(f['platform'])}", f"enclave={full(f['enclave_host'])}"]
+        if f["code_fingerprint"]:
+            bits.append(f"code={full(f['code_fingerprint'])}")
+        if f["enclave_fingerprint"]:
+            bits.append(f"measurement={full(f['enclave_fingerprint'])}")
+        if f["release_tag"]:
+            bits.append(f"release={full(f['release_tag'])}")
+        if f["tls_public_key_fp"]:
+            bits.append(f"tls_key_fp={full(f['tls_public_key_fp'])}")
+        if f["hpke_public_key"]:
+            bits.append(f"hpke_key={full(f['hpke_public_key'])}")
+        if f["captured_at"]:
+            bits.append(f"capture claims {full(f['captured_at'])}")
         if k == "verify_fail":
             bits.append(f"reason: {_p(d.get('error') or d.get('reason')) or '(none)'}")
         if isinstance(d.get("evidence"), Mapping):
@@ -464,9 +550,9 @@ def _verify_body(r: Mapping) -> str:
         return "  ".join(bits)
     bits = [k, f"vendor={_p(d.get('vendor') or r['provider']) or '?'}"]
     if d.get("code_fingerprint"):
-        bits.append(f"code={fp('code_fingerprint')}")
+        bits.append(f"code={full(d.get('code_fingerprint'))}")
     if d.get("enclave_fingerprint"):
-        bits.append(f"measurement={fp('enclave_fingerprint')}")
+        bits.append(f"measurement={full(d.get('enclave_fingerprint'))}")
     if r.get("decision"):
         bits.append(f"decision={_p(r['decision'])}")
     if r.get("surface"):
@@ -484,6 +570,11 @@ def render_text(doc: Mapping) -> str:
 
     period = h["sealed_period"]
     add(f"Confidential mode receipt for session {_p(sid)}")
+    add(f"CHAIN HEAD: {h['chain_head']}")
+    add(f"  {CHAIN_HEAD_NOTE}")
+    add(SELF_REPORT_NOTE)
+    add(f"Plugin: {_p(h['plugin_version'])} (commit {_p(h['plugin_commit'])})  verifier SDK: "
+        f"{', '.join(_p(v) for v in h['sdk_versions']) or '(no verification in this receipt)'}")
     add(f"Sealed tier: {_p(h['sealed_tier']) or '(not sealed / unknown)'}  (from {period['source']})")
     if period["since"] is not None:
         for p in h["sealed_periods"]:
@@ -500,7 +591,7 @@ def render_text(doc: Mapping) -> str:
         add("Enclave host per request:")
         for e in h["enclave_hosts"]:
             add(f"  #{e['row_id']} {_p(e['host'])}")
-    add(f"Rows: {h['row_count']}  chain head: {h['chain_head']}")
+    add(f"Rows: {h['row_count']}")
     if h["unverified_entries"]:
         add("Unverified entries (verify_ok rows without complete evidence): "
             + ", ".join(f"#{i}" for i in h["unverified_entries"]))
@@ -542,7 +633,21 @@ def render_text(doc: Mapping) -> str:
             add(_line(rows[i], sid, body(rows[i])))
 
     section("Verification events", sec["verification"], _verify_body)
-    section("Sends (purpose, host, bytes; never text)", sec["sends"], _send_body)
+    coverage = {c["send"]: c for c in sec.get("send_coverage", [])}
+
+    def send_line(r: Mapping) -> str:
+        body = _send_body(r)
+        c = coverage.get(r["id"])
+        if c is None:
+            return body
+        if c["verify"] is None:
+            return body + f"  NOT covered: no verify_ok row before this send (TTL {c['ttl_seconds']:g} s)"
+        state = "covered by" if c["covered"] else "NOT covered: outside the TTL window of"
+        flag = " (an unverified entry)" if c["verify_unverified_entry"] else ""
+        return (body + f"  {state} verify #{c['verify']}{flag}, TTL {c['ttl_seconds']:g} s ({c['ttl_source']}), "
+                f"window {ts_text(c['window_start'])} to {ts_text(c['window_end'])}")
+
+    section("Sends (purpose, host, bytes; never text)", sec["sends"], send_line)
     section("Refusals", sec["refusals"],
             lambda r: f"{r['kind']}  {_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  "
                       f"reason: {_reason(r)}")
@@ -579,13 +684,13 @@ def render_text(doc: Mapping) -> str:
 
 
 def render(ledger, session_id: str, *, pins: Any = None, fmt: str = "text", local_hosts: Iterable[str] = (),
-           include_profile_rows: bool = True) -> str:
+           include_profile_rows: bool = True, ttl_seconds: float | None = None) -> str:
     """Render the receipt for ``session_id``. ``pins``: a PinStore, a mapping or iterable of PinRecord,
     or None. ``fmt``: "text" or "json"."""
     if fmt not in ("text", "json"):
         raise ValueError(f"fmt must be 'text' or 'json', not {fmt!r}")
     doc = build_receipt(ledger, session_id, pins=pins, local_hosts=local_hosts,
-                        include_profile_rows=include_profile_rows)
+                        include_profile_rows=include_profile_rows, ttl_seconds=ttl_seconds)
     if fmt == "json":
         return json.dumps(doc, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False)
     return render_text(doc)
