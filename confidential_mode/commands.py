@@ -197,6 +197,7 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
     lines.extend(_grant_lines(rt, session_key))
     for step, err in getattr(rt, "errors", [])[:5]:
         lines.append(f"Plugin registration problem: {step}: {err}")
+    lines.append(plugin_identity())
     lines.append(f"Tools: {_sealing.TOOLS_TEXT}")
     lines.append(f"Limits: {_sealing.AUX_TEXT} {_sealing.SAFE_WORKER_TEXT}")
     return "\n".join(lines)
@@ -266,20 +267,50 @@ def receipts_text(rt: Any, session: str, *, fmt: str = "text") -> str:
         return "Usage: /confidential receipts <session id> [--json] (no current session id here)"
     import inspect
     try:
-        params = inspect.signature(render).parameters
+        sig_params = inspect.signature(render).parameters
     except (TypeError, ValueError):
-        params = {}
+        sig_params = {}
+    accepts_any = any(p.kind is p.VAR_KEYWORD for p in sig_params.values())
+    params = _AcceptsAll() if accepts_any else sig_params
     kwargs: dict = {}
     if "pins" in params:
         kwargs["pins"] = rt.pins
     if "fmt" in params:
         kwargs["fmt"] = fmt
+    try:
+        config = rt.load_config()
+    except Exception:  # noqa: BLE001
+        config = {}
     if "local_hosts" in params:
-        try:
-            kwargs["local_hosts"] = _sealing.extra_hosts(rt.load_config())
-        except Exception:  # noqa: BLE001
-            pass
+        kwargs["local_hosts"] = _sealing.extra_hosts(config)
+    if "ttl_seconds" in params:
+        ttl = verify_ttl_seconds(config)
+        if ttl is not None:
+            kwargs["ttl_seconds"] = ttl
     return str(render(rt.ledger, session, **kwargs))
+
+
+class _AcceptsAll:
+    def __contains__(self, name: object) -> bool:
+        return True
+
+
+def verify_ttl_seconds(config: Any) -> Optional[float]:
+    """``confidential.verify_ttl_seconds`` as the provider reads it, or None when unset/unusable (the
+    receipt then states its own default)."""
+    raw = _sealing._cfg(config or {}, "confidential", "verify_ttl_seconds")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        ttl = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return ttl if ttl > 0 else None
+
+
+def plugin_identity() -> str:
+    from . import _version
+    return f"Plugin: confidential-mode {_version.PLUGIN_VERSION} (commit {_version.PLUGIN_COMMIT})"
 
 
 def watch_text(rt: Any, limit: int = 20) -> str:
