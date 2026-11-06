@@ -136,3 +136,17 @@ Tiers (W3 corrections accepted, plus):
 - Pending (awaiting a product decision): a `terminal.backend` / `terminal.docker_network` item classifying commands as contained (docker, network off) or uncontained, and a three-mode rule for terminal/execute_code in the tool gate (ask on network-looking commands / allow all / block).
 
 Tool gate (W4/T4): MCP tools are blocked when their server has a URL whose host is off-tier under the active predicate, not merely because a URL exists. delegate_task: a child on the default in-process backend inherits the sealed profile and is allowed; any route selecting another profile, an ACP command, or a non-default backend is blocked; W4 reads the real field names from tools/delegate_tool.py and lists them in its report.
+
+## Amendment 2 (2026-11-06, after W1/W4): adjudications
+
+- Backslash URLs: T3 corrected its claim; httpx reads `http://evil.com\@127.0.0.1/v1` as 127.0.0.1 (urllib3 reads evil.com). The ruling stands as fail-closed on parser disagreement: any backslash, tab, CR, LF or NUL in a URL is off_tier. Encoded `%5C` userinfo is a control case and stays local when all parsers agree.
+- Fallback purpose: the middleware context carries no fallback indicator at 84a0301; purpose is "main" and classification is by the destination fields, which already describe the fallback provider. Accepted.
+- Corrupt seal state: the gate refuses every send until `/confidential status` or `off` repairs it. Fail closed, accepted; the refusal text must name the command.
+- Bedrock refusal is a dict by design; the "never a dict" rule applies to the other three modes.
+- `pin_pending` callable and `predicate_for(tier)` are accepted W1 interfaces. `is_sealed() -> (bool, Tier | None)` is canonical.
+- Ledger: `Ledger.append` must accept both `LedgerEvent` and a plain dict with the column names (W4 emits dicts). W1 adds the adapter.
+- Remembered grants on the plugin's own tool rule keys (`plugin_rule:confidential-mode:tool:<name>`) are NOT bypass states: a human chose once/session/always on the allow-once prompt, so the gate honours Hermes' remembered answer and ledgers the call as tool_allowed with decision "remembered". Yolo, approvals off, and unattended approve modes remain bypass => block. `/confidential pins` lists remembered tool grants alongside pins, revocable there.
+- Tools absent from the registry at seal (memory-provider tools, context-engine tools, lazily connected MCP servers) are blocked as unclassified with a message that names a reseal. Accepted.
+- The hook-thread versus agent-thread timing window for a yolo toggle is accepted and disclosed.
+- `allow_tool(ctx, allowlist, ledger, name, *, session_key, session_id, platform)` is the canonical signature.
+- `PendingPin` must be a frozen dataclass with value equality (W2). `apply(pending, *, approved_via: str)` gains the surface argument (W2) and consent passes it.
