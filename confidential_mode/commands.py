@@ -428,7 +428,7 @@ def config_block(rt: Any, model: str) -> str:
 def cli_setup(rt: Any, args: Any, out=None) -> int:
     out = out or sys.stdout
     model = getattr(args, "model", None) or _sealing._cfg(rt.load_config(), "confidential", "model") or "<model>"
-    out.write(f"TINFOIL_API_KEY: {'set' if os.environ.get('TINFOIL_API_KEY') else 'NOT set (hermes auth / .env)'}\n")
+    out.write(f"TINFOIL_API_KEY: {'set' if _provider_module(rt).tinfoil_api_key() else 'NOT set (hermes auth / .env)'}\n")
     if not getattr(args, "no_verify", False):
         if rt.adapter is None:
             out.write("The attested provider is not registered; see `hermes confidential status`.\n")

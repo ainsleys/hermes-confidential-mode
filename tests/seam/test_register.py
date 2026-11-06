@@ -387,3 +387,26 @@ def test_plugins_doctor_ci_passes(tmp_path):
     assert "OK: runtime discovery, manifest parsing, import, and registration passed" in proc.stdout
     assert "ERROR" not in proc.stdout and "registration adds" not in proc.stdout
     assert "10 hook(s)" in proc.stdout
+
+
+def test_live_verification_is_ledgered_with_evidence(plugin):
+    """Amendment 4 F4: register(ctx) hands the plugin's ledger to the provider, so a verification writes
+    verify_ok with the evidence attached (only the vendor adapter is faked: no network)."""
+    provider = importlib.import_module(plugin.mod.__name__ + ".confidential_mode.provider")
+    base = importlib.import_module(plugin.mod.__name__ + ".confidential_mode.verify.base")
+    evidence = {"format": "test-attestation", "body": "eyJmYWtlIjogdHJ1ZX0="}
+
+    class Adapter:
+        vendor, enclave_host, base_url = "tinfoil", "router.tinfoil.invalid", "https://router.tinfoil.invalid/v1"
+
+        def verify(self):
+            return base.VerificationResult(vendor="tinfoil", router_repo="tinfoilsh/confidential-model-router",
+                                           enclave_host=self.enclave_host, code_fingerprint="c" * 64,
+                                           enclave_fingerprint="e" * 64, release_tag="v9", verifier="test",
+                                           verified_at_local=time.time(), evidence=evidence)
+
+    entry = provider.verification_cache.entry(provider.PROFILE_NAME)
+    entry.adapter = Adapter()
+    provider.verification_cache.refresh(provider.PROFILE_NAME)
+    rows = [e for e in plugin.rt.ledger.tail(0) if e.kind == "verify_ok"]
+    assert rows and rows[-1].detail["evidence"] == evidence and rows[-1].host == "router.tinfoil.invalid"
