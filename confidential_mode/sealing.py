@@ -28,8 +28,18 @@ from .tiers import AttestedPredicate, LocalPredicate, Tier, TierPredicate, Verdi
 PROFILE_NAME = "attested-tinfoil"   # provider.PROFILE_NAME; repeated so this module imports no SDK code
 ZDR_REASON = "zero-retention tier not implemented"
 
-SEAL_TAIL = ("Web, browser, messaging, media and remote MCP tools are off. "
-             "Memory: local. Fallbacks: none.")
+# User-facing disclosures (Amendment 4 F1(d), F12; must agree with the tool gate and the README).
+TOOLS_TEXT = ("Tools that send data off this machine (web, browser, messaging, media and other non-local tools) "
+              "ask you first, each call; under yolo, approvals off or an unattended run those asks become "
+              "blocks. Off-tier remote MCP servers, scheduled jobs and routed delegation are blocked.")
+AUX_TEXT = ("Not prevented, only recorded after the fact: Hermes' auxiliary model calls (session titles, "
+            "compression, memory prefetch, vision, smart approvals, MCP sampling, background review) cannot be "
+            "stopped by a plugin. The plugin checks the configured and live model runtime before each turn and "
+            "ends the turn when either is off-tier, but an auxiliary call that runs anyway (outside a turn, "
+            "mid-turn after a switch, or when Hermes skips the check) is recorded as a breach, not refused.")
+SAFE_WORKER_TEXT = ("Sealed mode does not apply when Hermes runs in safe-worker mode: plugins are not loaded there, "
+                    "so nothing is checked, refused or recorded.")
+SEAL_TAIL = (f"{TOOLS_TEXT} Memory: local. Fallbacks: none. {AUX_TEXT} {SAFE_WORKER_TEXT}")
 CONFIG_CHANGED_TEXT = (
     "Confidential mode: the routing config changed after this profile was sealed, so this turn was not "
     "sent to any model. Run /confidential check to see what changed, then /confidential off and "
@@ -39,10 +49,21 @@ STRUCTURE_FAILED_TEXT = (
     "sent to any model. Run /confidential check, fix the listed keys, then /confidential off and "
     "/confidential on <tier>.")
 SEALED_NOTE = (
-    "[confidential mode] This profile is sealed ({tier}). Web, browser, messaging, media and remote MCP "
-    "tools are off; any other tool that sends data off this machine asks the user first, each call. If a "
-    "tool is blocked or refused, tell the user what was blocked and ask them to unseal if they need it; "
-    "do not retry it or look for a workaround.")
+    "[confidential mode] This profile is sealed ({tier}). Tools that send data off this machine ask the user "
+    "first, each call (blocked outright under yolo or approvals off); off-tier remote MCP servers, scheduled "
+    "jobs and routed delegation are blocked. If a tool is blocked or refused, tell the user what was blocked "
+    "and ask them to unseal if they need it; do not retry it or look for a workaround. Disclosure for the "
+    "user if asked: auxiliary model calls (titles, compression, vision) are recorded, not prevented, and "
+    "sealed mode does not apply in Hermes safe-worker mode.")
+
+
+def live_runtime_text(tier: Tier, provider: str, host: str, reason: str) -> str:
+    """Starts like the llm gate's off-tier refusal (gate_llm.off_tier_text)."""
+    return (f"Confidential mode: sealed to {Tier(tier).value}; this request was not sent. The session's live "
+            f"model runtime is {provider or '(unknown)'} at {host or '(no host)'}, which is off-tier ({reason}), "
+            "so this turn was ended before any model or auxiliary call. Switch the session back to the sealed "
+            "model (/model), or run /confidential off.")
+
 
 REFUSAL_KINDS = frozenset({"send_refused", "tool_refused"})
 ASK_KINDS = frozenset({"tool_asked"})
@@ -197,6 +218,41 @@ def seal_message(tier: Tier, config: Mapping, *, verification: Any = None,
     return f"{head} {SEAL_TAIL}"
 
 
+# ── live main runtime (Amendment 4 F1) ───────────────────────────────────────────────────────────
+
+def live_main_runtime() -> Optional[dict]:
+    """The live main runtime Hermes published for this context (agent/turn_context.py
+    _publish_runtime_main -> agent.auxiliary_client.set_runtime_main, a ContextVar; hook workers run on a
+    copied context, so pre_llm_call sees the turn's value). "auto" auxiliary tasks resolve to THIS, not to
+    config. None when unbound (slash commands outside a turn, other threads)."""
+    try:
+        from agent.auxiliary_client import _RUNTIME_MAIN_CONTEXT
+        runtime = _RUNTIME_MAIN_CONTEXT.get()
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(runtime, dict) or not (runtime.get("provider") or runtime.get("base_url")):
+        return None
+    return {k: runtime.get(k) or "" for k in ("provider", "model", "base_url", "api_mode", "requested_provider")}
+
+
+def classify_live_runtime(tier: Tier | str, runtime: Mapping, *, config: Mapping | None = None,
+                          provider_lookup: Callable[[str], Any] | None = None,
+                          profile_base_url: Callable[[str], Any] | None = None) -> Verdict:
+    """Structural verdict (no network) for the live main runtime under ``tier``."""
+    from .tiers import Destination
+    dest = Destination(provider=str(runtime.get("provider") or ""), base_url=str(runtime.get("base_url") or ""),
+                       model=str(runtime.get("model") or ""), api_mode=str(runtime.get("api_mode") or ""),
+                       purpose="main")
+    try:
+        v = structural_predicate(tier, config=config, provider_lookup=provider_lookup,
+                                 profile_base_url=profile_base_url).classify(dest)
+    except Exception as exc:  # noqa: BLE001
+        return Verdict(False, f"tier check failed ({type(exc).__name__})", host_of(dest.base_url))
+    if not isinstance(v, Verdict) or v.in_tier is not True:
+        return Verdict(False, getattr(v, "reason", "") or "off-tier", getattr(v, "host", "") or host_of(dest.base_url))
+    return v
+
+
 # ── seal / unseal ────────────────────────────────────────────────────────────────────────────────
 
 def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, registry: Any = None,
@@ -207,6 +263,7 @@ def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
          builtin_aux_tasks: Optional[Sequence[str]] = None,
          allowlist_builder: Callable[..., Any] | None = None, allowlist_path: Any = None,
          verification: Callable[[str], Any] | None = None, session_id: str = "", surface: str = "",
+         live_runtime: Callable[[], Optional[dict]] | None = None,
          clock: Callable[[], float] = time.time) -> SealResult:
     """Seal the profile to ``tier`` or refuse with the reason. Never raises for a refusal."""
     try:
@@ -240,6 +297,18 @@ def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
             detail={"failures": [i.key for i in report.failures()][:100], "fingerprint": report.fingerprint}, **base))
         return SealResult(False, "Not sealed: the preflight found routes that would leave the tier.\n"
                           + _pf.format_report(report), tier=tier, report=report, fingerprint=report.fingerprint)
+
+    runtime = (live_runtime or live_main_runtime)()
+    if runtime:
+        lv = classify_live_runtime(tier, runtime, config=config, provider_lookup=provider_lookup,
+                                   profile_base_url=profile_base_url)
+        if lv.in_tier is not True:
+            _append(ledger, LedgerEvent(
+                kind="preflight_fail", purpose="seal:live_runtime", provider=str(runtime.get("provider") or ""),
+                host=lv.host, verdict="off_tier", decision="refused", detail={"reason": lv.reason}, **base))
+            return SealResult(False, f"Not sealed: this session's live model runtime ({runtime.get('provider')} at "
+                              f"{lv.host or '(no host)'}) is off-tier ({lv.reason}), although the config passes. "
+                              "Switch the session to the configured model (/model) first.", tier=tier, report=report)
 
     if registry is None:
         from tools.registry import registry as _registry

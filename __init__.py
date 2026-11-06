@@ -28,7 +28,10 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 HOOKS = ("pre_tool_call", "post_approval_response", "pre_llm_call", "pre_api_request", "pre_auxiliary_call",
-         "post_auxiliary_call", "on_session_start", "on_session_end", "post_compaction")
+         "post_auxiliary_call", "on_session_start", "on_session_end", "post_compaction", "pre_gateway_dispatch")
+# Gateway slash commands that switch the session's live model runtime (Amendment 4 F1(c)); refused while
+# sealed. The CLI/TUI never fire pre_gateway_dispatch: there the per-turn live-runtime check ends the turn.
+RUNTIME_SWITCH_COMMANDS = frozenset({"model", "moa"})
 MIDDLEWARE = ("llm_execution", "tool_execution")
 NO_SESSION = "(no session)"
 
@@ -60,6 +63,7 @@ class Runtime:
         self._allowlist: Any = None
         self._lock = threading.Lock()
         self._aux_seen: deque = deque(maxlen=512)
+        self.last_live: Optional[dict] = None      # last live main runtime seen by pre_llm_call (status)
 
     # ── shared collaborators ──────────────────────────────────────────────────────────────────
     def module(self, name: str):
@@ -100,7 +104,8 @@ class Runtime:
             if self._allowlist is None:
                 self._allowlist = allowlist
             allowlist = self._allowlist
-        self.append({"kind": "seal", "purpose": "seal", "tier": tier.value, "decision": "allowlist_rebuilt",
+        # Not kind "seal": receipts open a sealed period at every seal row (Amendment 4 F7).
+        self.append({"kind": "session_start", "purpose": "seal", "tier": tier.value, "decision": "allowlist_rebuilt",
                      "detail": {"tools": len(allowlist.tools)}})
         return allowlist
 
@@ -194,7 +199,8 @@ def _register(rt: Runtime) -> None:
 
     def provider_profile():
         provider = _cm("provider")
-        profile = provider.register_provider_profile(ctx, config=rt.load_config())
+        # ledger= : the verification cache ledgers verify_ok/verify_fail/pin_staged (Amendment 4 F4).
+        profile = provider.register_provider_profile(ctx, config=rt.load_config(), ledger=rt.ledger)
         rt.profile = profile
         rt.pins = getattr(profile, "_confidential_pins", None)
         rt.adapter = getattr(profile, "_confidential_adapter", None)
@@ -237,7 +243,7 @@ def _register(rt: Runtime) -> None:
                           ("post_auxiliary_call", _post_auxiliary_call),
                           ("on_session_start", _session_marker("session_start")),
                           ("on_session_end", _session_marker("session_end")),
-                          ("post_compaction", _post_compaction)):
+                          ("post_compaction", _post_compaction), ("pre_gateway_dispatch", _pre_gateway_dispatch)):
         _step(rt, name, lambda name=name, builder=builder: _hook(rt, name, builder(rt)))
 
     def slash():
@@ -273,8 +279,80 @@ def _pre_llm_call(rt: Runtime):
                        "was not sent. Run /confidential check.")
         if message:
             return {"action": "block", "message": message}
+        try:
+            message = _live_runtime_check(rt, sealing, tier, session_id or "")
+        except Exception as exc:  # noqa: BLE001
+            message = (f"Confidential mode: the live-runtime check failed ({type(exc).__name__}), so this turn "
+                       "was not sent. Run /confidential status.")
+        if message:
+            return {"action": "block", "message": message}
         return {"context": sealing.SEALED_NOTE.format(tier=tier.value)}
     return pre_llm_call
+
+
+def _live_runtime_check(rt: Runtime, sealing: Any, tier: Any, session_id: str) -> Optional[str]:
+    """Amendment 4 F1(a): the live main runtime (what "auto" aux tasks and the main call use) must be in-tier.
+    It is published at agent/turn_context.py:1140, before this hook (:1236); turn-start compaction (:1245),
+    memory prefetch (:1264) and titling (:1271) all run after it and are skipped when it blocks."""
+    runtime = sealing.live_main_runtime()
+    if not runtime:
+        return None
+    v = sealing.classify_live_runtime(tier, runtime, config=rt.load_config())
+    rt.last_live = {"provider": runtime.get("provider"), "model": runtime.get("model"), "host": v.host,
+                    "in_tier": v.in_tier is True, "reason": v.reason}
+    if v.in_tier is True:
+        return None
+    provider = str(runtime.get("provider") or "")
+    rt.append({"kind": "send_refused", "session_id": session_id, "purpose": "main", "provider": provider,
+               "host": v.host, "model": str(runtime.get("model") or ""), "tier": tier.value, "verdict": "off_tier",
+               "decision": "refused", "detail": {"reason_code": "live_runtime_off_tier", "reason": v.reason}})
+    try:
+        already = rt.state.is_breached(session_id or NO_SESSION)
+    except Exception:  # noqa: BLE001
+        already = False
+    if not already:
+        # The runtime drifted before this turn: auxiliary work between turns may already have used it.
+        try:
+            rt.state.mark_breached(session_id or NO_SESSION)
+        except Exception:  # noqa: BLE001
+            pass
+        rt.append({"kind": "breach", "session_id": session_id, "purpose": "main:live_runtime", "provider": provider,
+                   "host": v.host, "tier": tier.value, "verdict": "off_tier", "decision": "live_runtime_off_tier",
+                   "detail": {"reason": v.reason}})
+    return sealing.live_runtime_text(tier, provider, v.host, v.reason)
+
+
+def _pre_gateway_dispatch(rt: Runtime):
+    def pre_gateway_dispatch(event: Any = None, **_kw: Any):
+        """While sealed, a gateway /model (or /moa) is rewritten to /confidential blocked <cmd>, which
+        replies with the refusal: the session's live runtime cannot be switched off-tier from chat."""
+        try:
+            text = getattr(event, "text", None)
+            if not isinstance(text, str) or not text.lstrip().startswith("/"):
+                return None
+            word = text.strip()[1:].split(None, 1)[0] if text.strip()[1:] else ""
+            name = word.split("@", 1)[0].lower()
+            canonical = name
+            try:
+                from hermes_cli.commands import resolve_command
+                found = resolve_command(name)
+                canonical = str(getattr(found, "name", None) or name).lower()
+            except Exception:  # noqa: BLE001
+                pass
+            if canonical not in RUNTIME_SWITCH_COMMANDS:
+                return None
+            try:
+                sealed, _tier = rt.is_sealed()
+            except Exception:  # noqa: BLE001
+                sealed = True                      # unreadable seal state: refuse (fail closed)
+            if sealed is False:
+                return None
+            rt.append({"kind": "tool_refused", "purpose": f"command:{canonical}", "decision": "runtime_switch",
+                       "surface": "gateway", "detail": {"command": canonical}})
+            return {"action": "rewrite", "text": f"/confidential blocked {canonical}"}
+        except Exception:  # noqa: BLE001
+            return None
+    return pre_gateway_dispatch
 
 
 def _bytes_of(request: Any, chars: Any) -> Optional[int]:
@@ -376,7 +454,7 @@ def _session_marker(decision: str):
                 sealed, tier = None, None
             if sealed is False:
                 return None
-            rt.append({"kind": "seal", "session_id": str(session_id or ""), "purpose": "session",
+            rt.append({"kind": decision, "session_id": str(session_id or ""), "purpose": "session",
                        "tier": tier.value if tier else None, "decision": decision,
                        "surface": str(platform or "") or None, "detail": {"sealed": sealed is True}})
             return None
