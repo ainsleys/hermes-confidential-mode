@@ -20,6 +20,7 @@ SK = "cm:gate:seam"
 OFF = "_cm_probe_web"          # an off-machine built-in-like tool
 MCP_URL = "_cm_probe_mcp_url"  # from an MCP server configured with url:
 MCP_STDIO = "_cm_probe_mcp_stdio"
+MCP_LH = "_cm_probe_mcp_localhost"
 
 
 class Ledger:
@@ -58,7 +59,8 @@ def hermes(monkeypatch):
     cfg.parent.mkdir(parents=True, exist_ok=True)
     base_cfg = ("mcp_servers:\n"
                 "  cm-remote:\n    url: https://mcp.example.com/mcp\n"
-                "  cm-local:\n    command: /bin/echo\n")
+                "  cm-local:\n    command: /bin/echo\n"
+                "  cm-lh:\n    url: http://127.0.0.1:8765/mcp\n")
     cfg.write_text(base_cfg)
     _reset_permanent_state()
     approval.clear_session(SK)
@@ -74,7 +76,7 @@ def hermes(monkeypatch):
 
     registry.register(name=OFF, toolset="web", schema={"name": OFF, "description": "p",
                       "parameters": {"type": "object", "properties": {}}}, handler=recorder(OFF))
-    for name, server in ((MCP_URL, "cm-remote"), (MCP_STDIO, "cm-local")):
+    for name, server in ((MCP_URL, "cm-remote"), (MCP_STDIO, "cm-local"), (MCP_LH, "cm-lh")):
         registry.register(name=name, toolset=f"mcp-{server}", schema={"name": name, "description": "p",
                           "parameters": {"type": "object", "properties": {}}}, handler=recorder(name))
         with mcp_core._lock:
@@ -110,7 +112,7 @@ def hermes(monkeypatch):
     finally:
         for h in handles:
             h.dispose()
-        for name in (OFF, MCP_URL, MCP_STDIO):
+        for name in (OFF, MCP_URL, MCP_STDIO, MCP_LH):
             registry.deregister(name)
             with mcp_core._lock:
                 mcp_core._mcp_tool_server_names.pop(name, None)
@@ -123,7 +125,7 @@ def hermes(monkeypatch):
 
 def test_allowlist_from_the_live_registry(hermes):
     al = hermes.allowlist
-    assert set(al.local) == LOCAL_TOOLS                     # every local tool is registered at 84a0301
+    assert set(al.local) - {MCP_LH} == LOCAL_TOOLS          # every local tool is registered at 84a0301
     assert al.get("cronjob_manage").route is Route.BLOCK_CRON
     assert al.get("delegate_task").route is Route.DELEGATE
     assert al.get("web_search").route is Route.ASK and al.get("web_search").origin is Origin.BUILTIN
@@ -133,6 +135,8 @@ def test_allowlist_from_the_live_registry(hermes):
                                                                           "cm-remote", "url")
     stdio = al.get(MCP_STDIO)
     assert (stdio.route, stdio.mcp_transport) == (Route.ASK, "stdio")
+    lh = al.get(MCP_LH)
+    assert (lh.route, lh.mcp_host) == (Route.LOCAL, "127.0.0.1")
 
 
 def test_blocked_tools_never_run_their_handler_and_nobody_is_asked(hermes, monkeypatch):
@@ -147,6 +151,9 @@ def test_blocked_tools_never_run_their_handler_and_nobody_is_asked(hermes, monke
     # Local tool runs untouched.
     hermes.call("read_file", {"path": "/dev/null"})
     assert hermes.ran == {"read_file": [{"path": "/dev/null"}]} and hermes.prompts == []
+    # localhost-URL MCP server counts as local (Amendment 1).
+    hermes.call(MCP_LH, {"q": "x"})
+    assert hermes.ran[MCP_LH] == [{"q": "x"}] and hermes.prompts == []
 
 
 def test_off_machine_tool_prompts_with_our_message_and_runs_only_on_approve(hermes, monkeypatch):
@@ -209,15 +216,26 @@ def test_unattended_approve_mode_blocks_where_hermes_would_auto_approve(hermes, 
     assert OFF not in hermes.ran and "bypassed" in out
 
 
-def test_remembered_session_grant_counts_as_bypass(hermes, monkeypatch):
+def test_remembered_session_grant_allows_second_call_without_prompt(hermes, monkeypatch):
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     hermes.human("session")
-    hermes.call(OFF, {})
-    assert hermes.ran[OFF] == [{}] and len(hermes.prompts) == 1
+    hermes.call(OFF, {"n": 1})
+    assert hermes.ran[OFF] == [{"n": 1}] and len(hermes.prompts) == 1
     assert approval.is_approved(SK, f"plugin_rule:{rule_key_for(OFF)}")   # prefixed key
     assert not approval.is_approved(SK, rule_key_for(OFF))                # the trap
-    out = hermes.call(OFF, {})
-    assert hermes.ran[OFF] == [{}] and len(hermes.prompts) == 1 and "bypassed" in out
+    hermes.human("deny")                                                   # would refuse if asked
+    out = hermes.call(OFF, {"n": 2})
+    assert hermes.ran[OFF] == [{"n": 1}, {"n": 2}] and json.loads(out) == {"ok": OFF}
+    assert len(hermes.prompts) == 1                                        # no second prompt
+    assert hermes.ledger.kinds() == ["tool_asked", "tool_allowed", "tool_allowed"]
+    assert [e["decision"] for e in hermes.ledger.events] == ["ask", "session", "remembered"]
+    # yolo still blocks even with the grant.
+    approval.enable_session_yolo(SK)
+    try:
+        out = hermes.call(OFF, {"n": 3})
+    finally:
+        approval.disable_session_yolo(SK)
+    assert len(hermes.ran[OFF]) == 2 and "bypassed" in out
 
 
 def test_delegate_task_default_route_allowed_profile_and_backend_routes_blocked(hermes, monkeypatch):

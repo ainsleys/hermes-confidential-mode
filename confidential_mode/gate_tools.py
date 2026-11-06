@@ -23,10 +23,11 @@ Hermes facts this module relies on (pinned checkout 84a0301):
   ``plugin_rule:<rule_key>`` (hermes_cli/plugins.py:1907-2016, tools/approval.py:1208-1230). A hook
   that raises or times out fails CLOSED with a block (hermes_cli/plugins_dispatch.py:60, :301-322).
 * The approval gate auto-approves WITHOUT asking anybody under: yolo (``_yolo_active``: --yolo,
-  session /yolo, ``hermes -z`` unattended turns), ``approvals.mode: off``, a remembered
-  session/always grant for the same ``plugin_rule:`` key, and cron / unattended-platform /
-  single-query contexts whose mode is ``approve`` (tools/approval.py:1071-1113). Sealed mode must
-  BLOCK in all of those instead of returning the approve directive (docs/C0-spikes.md, spike 3).
+  session /yolo, ``hermes -z`` unattended turns), ``approvals.mode: off``, and cron /
+  unattended-platform / single-query contexts whose mode is ``approve`` (tools/approval.py:1071-1113).
+  Sealed mode BLOCKS in those instead of returning the approve directive (docs/C0-spikes.md, spike 3).
+  A remembered once/session/always grant on OUR rule key is a human's answer to our own prompt and is
+  honoured (INTERFACES.md Amendment 2): ledgered as tool_allowed, decision "remembered".
 """
 from __future__ import annotations
 
@@ -49,7 +50,7 @@ CRON_TOOL = "cronjob_manage"
 DELEGATE_TOOL = "delegate_task"
 
 # Our approve directive's rule_key. Hermes prefixes it with ``plugin_rule:`` (tools/approval.py:1226);
-# the remembered-grant check MUST use the prefixed key (see hermes_bypass_active).
+# the remembered-grant check MUST use the prefixed key (see hermes_remembered_grant).
 RULE_KEY_PREFIX = "confidential-mode:tool:"
 PATTERN_KEY_PREFIX = "plugin_rule:" + RULE_KEY_PREFIX
 
@@ -69,7 +70,14 @@ class Route(str, Enum):
     ASK = "ask"                     # off-machine: per-call human approval (block under bypass)
     DELEGATE = "delegate"           # allowed only via delegation_ok
     BLOCK_CRON = "block-cron"       # cronjob_manage: always blocked
-    BLOCK_MCP_URL = "block-mcp-url"  # tool from an MCP server configured with a URL: always blocked
+    BLOCK_MCP_URL = "block-mcp-url"  # MCP server whose URL host is off-tier (or unreadable config): blocked
+
+
+# Tools that will get a per-tool "mode" (pending product decision, INTERFACES.md Amendment 1:
+# ask on network-looking commands / allow all / block). Today they are plain LOCAL with mode None;
+# the decision hook is _local_decision() in build_pre_tool_call, so adding modes touches only
+# ToolInfo.mode, build_allowlist's mode argument and that function.
+MODE_TOOLS: frozenset[str] = frozenset({"terminal", "execute_code"})
 
 
 @dataclass(frozen=True)
@@ -80,6 +88,9 @@ class ToolInfo:
     route: Route
     mcp_server: Optional[str] = None   # raw server name for MCP tools
     mcp_transport: Optional[str] = None  # "url" | "stdio" | "unknown" for MCP tools
+    mcp_host: Optional[str] = None       # host_of(url) for URL servers
+    reason: str = ""                     # why this route (verdict reason for MCP URL servers)
+    mode: Optional[str] = None           # reserved for MODE_TOOLS (see above); None = plain route
 
 
 @dataclass
@@ -191,13 +202,41 @@ def _mcp_transport(cfg: Optional[Mapping[str, Any]]) -> str:
     return "unknown"
 
 
+def _mcp_url_route(server: str, url: Any, predicate: Any) -> tuple[Route, str, str]:
+    """(route, host, reason) for a URL MCP server. Local host (LocalPredicate, plus the active
+    predicate's extra_hosts when it is a LocalPredicate) -> LOCAL; in-tier under the active
+    predicate -> ASK; anything else, or any error -> BLOCK_MCP_URL."""
+    from .tiers import Destination, LocalPredicate, host_of
+    try:
+        if not isinstance(url, str) or not url.strip():
+            return Route.BLOCK_MCP_URL, "", "url is empty or not a string"
+        dest = Destination(provider="", base_url=url, model="", api_mode="", purpose=f"mcp:{server}")
+        local = predicate if isinstance(predicate, LocalPredicate) else LocalPredicate()
+        v = local.classify(dest)
+        if v.in_tier:
+            return Route.LOCAL, v.host or host_of(url), v.reason
+        if predicate is not None and not isinstance(predicate, LocalPredicate):
+            pv = predicate.classify(dest)
+            if pv.in_tier:
+                return Route.ASK, pv.host or host_of(url), pv.reason
+            return Route.BLOCK_MCP_URL, pv.host or v.host or host_of(url), pv.reason
+        return Route.BLOCK_MCP_URL, v.host or host_of(url), v.reason
+    except Exception as exc:
+        return Route.BLOCK_MCP_URL, "", f"could not classify url ({type(exc).__name__})"
+
+
 def classify_tool(name: str, toolset: str, *, origin: Origin, mcp_server: Optional[str] = None,
-                  mcp_config: Optional[Mapping[str, Any]] = None) -> ToolInfo:
+                  mcp_config: Optional[Mapping[str, Any]] = None, predicate: Any = None) -> ToolInfo:
     if origin is Origin.MCP:
         transport = _mcp_transport(mcp_config)
-        # A URL server, or one whose transport we cannot establish, is blocked (fail closed).
-        route = Route.ASK if transport == "stdio" else Route.BLOCK_MCP_URL
-        return ToolInfo(name, toolset, origin, route, mcp_server, transport)
+        if transport == "url":
+            route, host, reason = _mcp_url_route(mcp_server or "", mcp_config.get("url"), predicate)
+            return ToolInfo(name, toolset, origin, route, mcp_server, transport, host, reason)
+        if transport == "stdio":   # a local child process: off-machine by contract default, ask
+            return ToolInfo(name, toolset, origin, Route.ASK, mcp_server, transport, None, "stdio server")
+        # config unreadable / neither url nor command: fail closed
+        return ToolInfo(name, toolset, origin, Route.BLOCK_MCP_URL, mcp_server, transport, None,
+                        "server config not found")
     if name in LOCAL_TOOLS and origin is Origin.BUILTIN:
         route = Route.LOCAL
     elif name == CRON_TOOL:
@@ -211,9 +250,10 @@ def classify_tool(name: str, toolset: str, *, origin: Origin, mcp_server: Option
 
 def build_allowlist(registry: Any, *, mcp_configs: Optional[Mapping[str, Mapping[str, Any]]] = None,
                     mcp_tool_servers: Optional[Mapping[str, str]] = None,
-                    plugin_tool_names: Optional[Iterable[str]] = None) -> Allowlist:
+                    plugin_tool_names: Optional[Iterable[str]] = None, predicate: Any = None) -> Allowlist:
     """Classify every tool in ``registry.get_all_entries()``. The keyword arguments default to Hermes'
-    live state (see the module docstring); tests pass fakes.
+    live state (see the module docstring); tests pass fakes. ``predicate`` is the active
+    TierPredicate (confidential_mode.tiers); it classifies MCP server URLs. None = LocalPredicate().
 
     A LOCAL-set name re-registered by a plugin (``override=True``) or by an MCP server is NOT local:
     locality is a property of the built-in implementation, not of the name."""
@@ -228,7 +268,7 @@ def build_allowlist(registry: Any, *, mcp_configs: Optional[Mapping[str, Mapping
         if toolset.startswith("mcp-"):
             server = mcp_tool_servers.get(name) or toolset[len("mcp-"):]
             tools[name] = classify_tool(name, toolset, origin=Origin.MCP, mcp_server=server,
-                                        mcp_config=mcp_configs.get(server))
+                                        mcp_config=mcp_configs.get(server), predicate=predicate)
             continue
         is_plugin = name in plugin_names or _handler_module(getattr(entry, "handler", None)).startswith(
             "hermes_plugins.")
@@ -241,7 +281,7 @@ _ROUTE_TITLES = (
     (Route.ASK, "off-machine (asks each call; blocked under yolo/approvals off/unattended)"),
     (Route.DELEGATE, "delegation (default backend only, no profile/ACP)"),
     (Route.BLOCK_CRON, "blocked (scheduled jobs)"),
-    (Route.BLOCK_MCP_URL, "blocked (MCP server reached by URL)"),
+    (Route.BLOCK_MCP_URL, "blocked (MCP server URL off-tier or unreadable)"),
 )
 
 
@@ -254,7 +294,8 @@ def format_allowlist(allowlist: Allowlist) -> str:
         for info in infos:
             extra = [info.origin.value]
             if info.mcp_server is not None:
-                extra.append(f"server={info.mcp_server}, transport={info.mcp_transport}")
+                extra.append(f"server={info.mcp_server}, transport={info.mcp_transport}"
+                             + (f", host={info.mcp_host}" if info.mcp_host else ""))
             if info.name in allowlist.added:
                 extra.append("allowed by you")
             lines.append(f"  {info.name}  [{info.toolset}; {'; '.join(extra)}]")
@@ -273,13 +314,9 @@ def hermes_bypass_active(tool_name: str) -> bool:
     """True when Hermes' approval gate would NOT put our approve directive in front of a human.
     Mirrors ``_run_approval_gate`` (tools/approval.py:1071-1113) in order. Any error -> True (block)."""
     try:
-        from tools.approval import _presence, _yolo_active, is_approved
-        from tools.approval_context import _get_approval_mode, get_current_session_key
+        from tools.approval import _presence, _yolo_active
+        from tools.approval_context import _get_approval_mode
         if _yolo_active() or _get_approval_mode() == "off":
-            return True
-        # The plugin_rule: prefix trap: the remembered grant is stored under the PREFIXED key;
-        # is_approved(sk, rule_key) without it is always False (tests/spikes/test_approval_gate.py:384).
-        if is_approved(get_current_session_key(), f"plugin_rule:{rule_key_for(tool_name)}"):
             return True
         _cb, is_cli, is_gateway, is_ask = _presence(None)
         # Nobody to ask: Hermes either blocks or (cron/unattended/single_query mode approve) auto-approves.
@@ -287,6 +324,25 @@ def hermes_bypass_active(tool_name: str) -> bool:
         return not (is_cli or is_gateway or is_ask)
     except Exception:
         return True
+
+
+def hermes_remembered_grant(tool_name: str) -> bool:
+    """True when Hermes holds a session/always grant for our rule key in this session.
+    The plugin_rule: prefix trap: the grant is stored under the PREFIXED key; is_approved(sk, rule_key)
+    without it is always False (tests/spikes/test_approval_gate.py:384). Any error -> False (ask)."""
+    try:
+        from tools.approval import is_approved
+        from tools.approval_context import get_current_session_key
+        return bool(is_approved(get_current_session_key(), f"plugin_rule:{rule_key_for(tool_name)}"))
+    except Exception:
+        return False
+
+
+def _sealed_flag(value: Any) -> bool:
+    """is_sealed() is canonically (bool, Tier | None) (Amendment 2); a bare bool is also accepted."""
+    if isinstance(value, tuple):
+        return bool(value[0]) if value else False
+    return bool(value)
 
 
 def bypass_active_for(tool_name: str) -> Callable[[], bool]:
@@ -380,11 +436,13 @@ def _block(message: str) -> dict:
 
 def build_pre_tool_call(is_sealed: Callable[[], bool], allowlist: Allowlist | Callable[[], Allowlist],
                         ledger: Any, bypass_active: Callable[[str], bool] = hermes_bypass_active,
-                        delegation_ok: Callable[[dict], bool] = default_delegation_ok) -> Callable[..., Optional[dict]]:
+                        delegation_ok: Callable[[dict], bool] = default_delegation_ok,
+                        remembered: Callable[[str], bool] = hermes_remembered_grant) -> Callable[..., Optional[dict]]:
     """Return the ``pre_tool_call`` callback.
 
     ``bypass_active(tool_name) -> bool`` (the contract's zero-arg ``Callable[[], bool]`` is also
-    accepted) and ``delegation_ok(args) -> bool`` are injectable. ``allowlist`` may be a zero-arg
+    accepted), ``delegation_ok(args) -> bool`` and ``remembered(tool_name) -> bool`` are injectable.
+    ``is_sealed()`` may return ``(bool, Tier | None)`` or a bool. ``allowlist`` may be a zero-arg
     callable so a reseal can swap it. Every non-local decision is ledgered; a ledger failure blocks
     (the hook raising is a fail-closed block in Hermes anyway; we make the message explicit)."""
 
@@ -399,7 +457,7 @@ def build_pre_tool_call(is_sealed: Callable[[], bool], allowlist: Allowlist | Ca
     def pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
                       tool_call_id: str = "", **_kw: Any) -> Optional[dict]:
         try:
-            if not is_sealed():
+            if not _sealed_flag(is_sealed()):
                 return None
         except Exception:
             pass  # cannot tell -> treat as sealed
@@ -424,14 +482,14 @@ def build_pre_tool_call(is_sealed: Callable[[], bool], allowlist: Allowlist | Ca
                           f"confidential mode: {tool_name} was registered after sealing and is not classified; "
                           "it is blocked. Unseal and seal again to classify it.")
         if info.route is Route.LOCAL:
-            return None
+            return _local_decision(info, args)
         if info.route is Route.BLOCK_CRON:
             return refuse("cron", "confidential mode: scheduled jobs (cronjob_manage) are blocked while sealed; "
                                   "a job would run later outside this sealed session.")
         if info.route is Route.BLOCK_MCP_URL:
             return refuse("mcp_url",
-                          f"confidential mode: {tool_name} belongs to MCP server '{info.mcp_server}', "
-                          f"which is reached over the network (transport: {info.mcp_transport}); blocked while sealed.")
+                          f"confidential mode: {tool_name} belongs to MCP server '{info.mcp_server}' "
+                          f"({info.mcp_host or 'host unknown'}: {info.reason}); blocked while sealed.")
         if info.route is Route.DELEGATE:
             if delegation_ok(args):
                 ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id,
@@ -449,14 +507,26 @@ def build_pre_tool_call(is_sealed: Callable[[], bool], allowlist: Allowlist | Ca
         if _bypass(tool_name):
             return refuse("bypass_active",
                           f"confidential mode: {tool_name} sends data off the machine and needs your approval, "
-                          "but approvals are bypassed here (yolo, approvals.mode off, a remembered "
-                          "session/always answer, or no one to ask). Blocked. Answer 'once' when asked, "
-                          "or add it with /confidential allow-tool.")
+                          "but approvals are bypassed here (yolo, approvals.mode off, or an unattended "
+                          "context with no one to ask). Blocked. Turn the bypass off, or add the tool with "
+                          "/confidential allow-tool.")
         n = args_kb(args)
         message = f"{tool_name} wants to send ~{n} KB of this conversation off the machine"
+        directive = {"action": "approve", "message": message, "rule_key": rule_key_for(tool_name)}
+        if remembered(tool_name):
+            # Hermes will honour the remembered answer without prompting or firing approval hooks;
+            # we still hand it the directive so its own grant check stays authoritative.
+            ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id, decision="remembered",
+                                 nbytes=nbytes, surface="gate", detail={**base, "kb": n}))
+            return directive
         ledger.append(_event("tool_asked", tool_name=tool_name, session_id=session_id, decision="ask",
                              nbytes=nbytes, surface="gate", detail={**base, "kb": n, "message": message}))
-        return {"action": "approve", "message": message, "rule_key": rule_key_for(tool_name)}
+        return directive
+
+    def _local_decision(info: ToolInfo, args: dict) -> Optional[dict]:
+        # Extension point for MODE_TOOLS (terminal / execute_code three-mode rule, pending).
+        # mode None -> run. A future mode returns None, a block, or the approve directive here.
+        return None
 
     return pre_tool_call
 
@@ -476,9 +546,6 @@ def build_post_approval_response(is_sealed: Callable[[], bool], ledger: Any) -> 
             allowed = pick in _ALLOW_CHOICES
             detail = {"tool": tool_name, "choice": pick, "tool_call_id": tool_call_id or "",
                       "session_key": session_key or "", "sealed": _safe(is_sealed)}
-            if allowed and pick in ("session", "always"):
-                detail["note"] = ("remembered grants count as a bypass while sealed: later calls of this tool "
-                                  "are blocked, not auto-approved")
             ledger.append(_event("tool_allowed" if allowed else "tool_refused", tool_name=tool_name,
                                  session_id=session_id or "", decision=pick or "unknown",
                                  surface=surface or None, detail=detail))
@@ -499,6 +566,6 @@ def _accepts_positional(fn: Callable[..., Any]) -> bool:
 
 def _safe(fn: Callable[[], Any]) -> Any:
     try:
-        return bool(fn())
+        return _sealed_flag(fn())
     except Exception:
         return None

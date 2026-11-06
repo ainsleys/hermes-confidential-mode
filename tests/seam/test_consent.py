@@ -47,9 +47,10 @@ class FakeStore:
         with self._lock:
             self._pending = pending
 
-    def apply(self, pending):
+    def apply(self, pending, *, approved_via):
         with self._lock:
             self.applied.append(pending)
+            self.via = approved_via
             self._pending = None
         return SimpleNamespace(release_tag=pending.release_tag, approved_at="2026-11-06T00:00:00Z")
 
@@ -227,7 +228,7 @@ def test_pin_applied_on_explicit_approve(hermes, answer):
         "  2. Deny — keep the current pin\n\n"
         "Reply with the number, the option text, or your own answer."
     )
-    assert store.applied == [PIN]
+    assert store.applied == [PIN] and store.via == "telegram"
     assert ledger.kinds() == ["pin_applied"]
     e = ledger.events[0]
     assert e["detail"]["raw_pick"] == "approve" and e["surface"] == "telegram" and e["session_id"] == "sess-1"
@@ -365,3 +366,16 @@ def test_allow_tool_refuses_hard_blocked_and_local_without_asking(hermes):
         assert "already runs without asking" in allow_tool(hermes.ctx, al, ledger, "read_file")
         assert "Unknown tool" in allow_tool(hermes.ctx, al, ledger, "nope")
     assert asked == [] and ledger.events == []
+
+
+def test_legacy_store_without_approved_via_still_applies(hermes):
+    from hermes_cli.plugin_choices import bind_asker
+
+    class Legacy(FakeStore):
+        def apply(self, pending):
+            self.applied.append(pending)
+            return SimpleNamespace(release_tag=pending.release_tag, approved_at="t")
+    store, ledger = Legacy(PIN), Ledger()
+    with bind_asker(lambda q, labels: "Approve"):
+        approve_pending_pin(hermes.ctx, store, ledger, session_key="k", session_id="s", platform="cli")
+    assert store.applied == [PIN] and ledger.kinds() == ["pin_applied"]

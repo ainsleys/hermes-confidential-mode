@@ -17,7 +17,8 @@ the gateway runs it on an executor thread (tests/spikes/test_ask_choice.py::test
 
 Interfaces used (duck-typed, W1/W2 own the real ones):
   ledger.append(event: dict)
-  store.pending() -> PendingPin | None ; store.apply(pending) -> PinRecord
+  store.pending() -> PendingPin | None ; store.apply(pending, *, approved_via=surface) -> PinRecord
+  (approved_via is being added by W2, Amendment 2; older stores without it get apply(pending))
   allowlist.get(name) -> ToolInfo | None ; allowlist.add(name) ; allowlist.is_added(name)
 """
 from __future__ import annotations
@@ -132,13 +133,25 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
         return ("The pending pin changed while you were deciding, so nothing was applied. "
                 "Run /confidential pins approve again to review the new one.")
 
-    record = store.apply(pending)
+    record = _apply(store, pending, platform or "unknown")
     detail["approved_at"] = str(_field(record, "approved_at", "") or "")
     ledger.append(_event("pin_applied", session_id=session_id, platform=platform, provider=vendor,
                          decision="approve", detail=detail))
     return (f"Pinned {vendor or 'enclave'} build "
             f"{_field(record, 'release_tag', None) or _field(pending, 'release_tag', None) or ''}".rstrip()
             + f" (code {_short(base['code_fingerprint'])}, enclave {_short(base['enclave_fingerprint'])}).")
+
+
+def _apply(store: Any, pending: Any, surface: str) -> Any:
+    """store.apply(pending, approved_via=surface) when the store takes it, else store.apply(pending).
+    Decided by signature, not by catching TypeError, so an error inside apply is never retried."""
+    import inspect
+    try:
+        params = inspect.signature(store.apply).parameters
+        takes = "approved_via" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        takes = False
+    return store.apply(pending, approved_via=surface) if takes else store.apply(pending)
 
 
 def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key: str = "",
