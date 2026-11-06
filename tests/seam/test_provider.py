@@ -543,3 +543,69 @@ def test_ledger_kwarg_is_a_shortcut_for_on_event(env, tmp_path):
     profile = env["register"](ledger=led)
     profile.create_client(api_key="tf-key", base_url=BASE_URL)
     assert [r.kind for r in led.tail()] == ["verify_ok"]
+
+
+# ── F8: a pin in force needs a consent record ─────────────────────────────────────────────────
+
+def _consent_row(led, code="c1", enclave="e1", decision="approve"):
+    led.append({"kind": "pin_applied", "provider": "tinfoil", "decision": decision,
+                "detail": {"vendor": "tinfoil", "code_fingerprint": code, "enclave_fingerprint": enclave}})
+
+
+def test_pin_without_consent_record_refuses_and_stages_nothing(env, tmp_path):
+    from confidential_mode.ledger import Ledger
+    led = Ledger(tmp_path / "ledger.sqlite")
+    profile = env["register"](ledger=led)  # the fixture pinned c1/e1 straight through PinStore.apply
+    client = profile.create_client(api_key="tf-key", base_url=BASE_URL)
+    assert isinstance(client, RefusingClient) and client.reason == "pin has no consent record"
+    v = provider_mod.attested_ok(PROFILE)
+    assert v.in_tier is False and v.reason == "pin has no consent record"
+    assert env["pins"].pending() is None and env["rec"].requests == []
+    _consent_row(led, decision="deny")
+    _consent_row(led, code="other")
+    assert provider_mod.attested_ok(PROFILE).in_tier is False  # neither row vouches for c1/e1
+    _consent_row(led)
+    assert provider_mod.attested_ok(PROFILE).in_tier is True
+    assert isinstance(profile.create_client(api_key="tf-key", base_url=BASE_URL), ConfidentialClient)
+
+
+def test_unreadable_consent_ledger_refuses(env):
+    class Broken:
+        def append(self, ev):
+            pass
+
+        def tail(self, *a, **k):
+            raise RuntimeError("sqlite locked")
+    profile = env["register"](ledger=Broken())
+    assert profile.create_client(api_key="tf-key", base_url=BASE_URL).reason == "pin has no consent record"
+
+
+def test_register_with_ctx_defaults_to_the_plugin_ledger(env, monkeypatch, tmp_path):
+    import confidential_mode.ledger as ledger_mod
+    from confidential_mode.ledger import Ledger
+    monkeypatch.setattr(ledger_mod, "default_ledger_path", lambda: tmp_path / "default.sqlite")
+    made = []
+    real_init = Ledger.__init__
+
+    def init(self, path=None, **kw):
+        made.append(path)
+        real_init(self, path if path is not None else tmp_path / "default.sqlite", **kw)
+    monkeypatch.setattr(Ledger, "__init__", init)
+    profile = provider_mod.register_provider_profile(object(), config=env["cfg"], data_dir=tmp_path / "pd")
+    assert made == [None]  # Ledger() with its default path, like the plugin's own
+    assert provider_mod.verification_cache.entry(PROFILE).consent_ledger is not None
+
+
+# ── catalog rule 11: the API key comes from Hermes' secret scope ──────────────────────────────
+
+def test_api_key_comes_from_secret_scope_not_the_environment(env, monkeypatch):
+    import agent.secret_scope as secret_scope
+    monkeypatch.setenv("TINFOIL_API_KEY", "ENV-KEY-MUST-NOT-BE-READ-DIRECTLY")
+    monkeypatch.setattr(secret_scope, "get_secret", lambda name, default=None: "scoped-key"
+                        if name == "TINFOIL_API_KEY" else default)
+    profile = env["register"]()
+    assert profile.create_client(base_url=BASE_URL).api_key == "scoped-key"
+    monkeypatch.setattr(secret_scope, "get_secret", lambda name, default=None: None)
+    assert provider_mod.tinfoil_api_key() == ""  # no direct os.environ fallback
+    import inspect
+    assert "os.environ" not in inspect.getsource(provider_mod).replace("never os.environ directly", "")
