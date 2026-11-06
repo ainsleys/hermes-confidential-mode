@@ -637,3 +637,23 @@ def test_pending_pin_from_a_captured_result_carries_the_prompt_context(captured,
     assert p.code_changed is True and p.previous is None and p.previous_platform is None
     assert p.hardware_measurements_verified is False  # SEV-SNP: the SDK runs no hardware-measurements check
     assert p.release_url == f"https://github.com/{REPO}/releases/tag/{TAG}" and p.compare_url is None
+
+
+def test_override_applies_once_even_when_the_attribute_is_wrapped_twice():
+    """A second copy of the plugin (Hermes loads it under another package name) or a re-wrap over a
+    monkeypatch leaves two dispatching wrappers stacked; the override must still run exactly once."""
+    import types
+    mod = types.ModuleType("dummy_sdk")
+    mod.f = lambda x: x + 1
+    _sdkpatch.install(mod, "f")
+    inner = mod.f
+    mod.f = lambda x: inner(x)       # something else wraps our wrapper...
+    _sdkpatch.install(mod, "f")      # ...and we wrap again on top
+    calls = []
+
+    def ov(orig, x):
+        calls.append(x)
+        return orig(x) * 10
+    with _sdkpatch.overrides({(mod, "f"): ov}):
+        assert mod.f(1) == 20
+    assert calls == [1] and mod.f(1) == 2

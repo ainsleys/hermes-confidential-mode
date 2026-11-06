@@ -337,6 +337,14 @@ def _result(checks: _Checks, out: dict, when: datetime) -> ReplayResult:
 
 def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir: Path | None,
             opts: dict) -> None:
+    expected_repo = opts.get("expected_repo")
+    repo = (ev.get("repo") if isinstance(ev, dict) else None) or ""
+    if expected_repo is None:
+        checks.na("repo_match", "no expected_repo given")
+    elif repo == expected_repo:
+        checks.passed("repo_match")
+    else:
+        checks.failed("repo_match", f"repo {repo or '(none)'} is not the expected {expected_repo}")
     if not isinstance(ev, dict) or ev.get("schema") != EVIDENCE_SCHEMA:
         checks.failed("hardware_signature", f"evidence: schema is not {EVIDENCE_SCHEMA}")
         return
@@ -352,15 +360,7 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
     claims = ev.get("claims") or {}
     att = ev.get("attestation") or {}
     release = ev.get("release") or {}
-    repo = ev.get("repo") or ""
     out["release_tag"] = release.get("tag")
-    expected_repo = opts.get("expected_repo")
-    if expected_repo is None:
-        checks.na("repo_match", "no expected_repo given")
-    elif repo == expected_repo:
-        checks.passed("repo_match")
-    else:
-        checks.failed("repo_match", f"evidence is for {repo!r}, expected {expected_repo!r}")
     policy_repo = expected_repo or repo  # Sigstore identity policy uses the EXPECTED repo
 
     try:
