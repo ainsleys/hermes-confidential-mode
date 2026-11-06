@@ -142,14 +142,21 @@ def test_check_prints_the_preflight_table(plugin):
     assert plugin.slash("check zero-retention").startswith("zero-retention: zero-retention tier not implemented")
 
 
-def test_receipts_placeholder_then_delegates(plugin, monkeypatch):
-    assert plugin.slash("receipts sess-1").startswith("Receipts are not available")
+def test_receipts_delegate_to_w6_render(plugin, monkeypatch):
+    assert plugin.slash("on local-only").startswith("Sealed")
+    plugin.rt.ledger.append({"kind": "tool_refused", "session_id": "sess-1", "purpose": "tool:web_search",
+                             "decision": "cron"})
+    text = plugin.slash("receipts sess-1")
+    assert "sess-1" in text and "local clock" in text
+    receipts = _sub(plugin, "receipts")
+    doc = json.loads(plugin.slash("receipts sess-1 --json"))
+    assert receipts.verify_chain(doc)
     fake = types.ModuleType("receipts")
-    calls = []
-    fake.render = lambda ledger, session: calls.append(session) or f"RECEIPT {session}"
+    fake.render = lambda ledger, session: f"RECEIPT {session}"          # an older two-argument render
     monkeypatch.setitem(sys.modules, f"{plugin.mod.__name__}.confidential_mode.receipts", fake)
-    assert plugin.slash("receipts sess-1") == "RECEIPT sess-1"
     assert plugin.slash("receipts", session_id="sess-cur") == "RECEIPT sess-cur"
+    monkeypatch.setitem(sys.modules, f"{plugin.mod.__name__}.confidential_mode.receipts", None)   # absent
+    assert plugin.slash("receipts sess-1").startswith("Receipts are not available")
 
 
 def test_slash_watch_shows_the_ledger(plugin):

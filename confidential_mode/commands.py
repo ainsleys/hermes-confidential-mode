@@ -236,13 +236,31 @@ def check_text(rt: Any, tier: Optional[str]) -> str:
     return _pf.format_report(report)
 
 
-def receipts_text(rt: Any, session: str) -> str:
+def receipts_text(rt: Any, session: str, *, fmt: str = "text") -> str:
+    """Delegate to confidential_mode.receipts.render (W6), imported lazily; placeholder if absent."""
     try:
         mod = importlib.import_module(__package__ + ".receipts")
         render = getattr(mod, "render")
     except (ImportError, AttributeError):
         return RECEIPTS_PLACEHOLDER
-    return str(render(rt.ledger, session))
+    if not session:
+        return "Usage: /confidential receipts <session id> [--json] (no current session id here)"
+    import inspect
+    try:
+        params = inspect.signature(render).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kwargs: dict = {}
+    if "pins" in params:
+        kwargs["pins"] = rt.pins
+    if "fmt" in params:
+        kwargs["fmt"] = fmt
+    if "local_hosts" in params:
+        try:
+            kwargs["local_hosts"] = _sealing.extra_hosts(rt.load_config())
+        except Exception:  # noqa: BLE001
+            pass
+    return str(render(rt.ledger, session, **kwargs))
 
 
 def watch_text(rt: Any, limit: int = 20) -> str:
@@ -294,7 +312,9 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
                 return f"Not asked: {exc}"
         return "Usage: /confidential pins [approve]"
     if cmd == "receipts":
-        return receipts_text(rt, rest[0] if rest else sid)
+        fmt = "json" if "--json" in rest else "text"
+        names = [a for a in rest if a != "--json"]
+        return receipts_text(rt, names[0] if names else sid, fmt=fmt)
     if cmd in ("allow", "allow-tool"):
         if len(rest) != 1:
             return "Usage: /confidential allow <tool>"
