@@ -109,8 +109,9 @@ def test_file_is_v2_yaml_and_mode_0600(tmp_path):
 def test_unknown_version_or_garbage_fails_closed(tmp_path):
     path = tmp_path / "pins.yaml"
     path.write_text("version: 1\npins: []\n")
+    assert PinStore(path).match(_result()) is False  # match never raises (Amendment 4)
     with pytest.raises(PinStoreError):
-        PinStore(path).match(_result())
+        PinStore(path).pending()
     path.write_text("{{{not yaml")
     with pytest.raises(PinStoreError):
         PinStore(path).pending()
@@ -195,3 +196,12 @@ def test_apply_is_idempotent_per_pending(tmp_path):
     # A different, never-staged pending is still refused.
     with pytest.raises(PinStoreError):
         store.apply(replace(pending, code_fingerprint="c3"), approved_via="cli")
+
+
+def test_empty_fingerprints_are_never_staged_or_matched(tmp_path):
+    store = PinStore(tmp_path / "pins.yaml")
+    for code, enclave in (("", "e1"), ("c1", ""), ("  ", "e1")):
+        with pytest.raises(PinStoreError):
+            store.stage(_result(code=code, enclave=enclave))
+        assert store.match(_result(code=code, enclave=enclave)) is False
+    assert store.pending() is None
