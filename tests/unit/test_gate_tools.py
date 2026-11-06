@@ -349,7 +349,7 @@ def test_zero_arg_bypass_callable_from_the_contract_is_accepted():
     fn = build_pre_tool_call(lambda: True, allowlist(), ledger, lambda: True, lambda a: True)
     assert fn(tool_name="web_search", args={}, session_id="s")["action"] == "block"
     fn = build_pre_tool_call(lambda: True, allowlist(), ledger, lambda: False, lambda a: True)
-    assert fn(tool_name="web_search", args={}, session_id="s")["action"] == "approve"
+    assert fn(tool_name="web_search", args={}, session_id="s", tool_call_id="c")["action"] == "approve"
 
 
 def test_user_added_tool_runs_without_asking_and_is_ledgered():
@@ -443,31 +443,110 @@ def test_allowlist_may_be_a_callable_for_reseal():
     fn = build_pre_tool_call(lambda: True, lambda: box["al"], FakeLedger(), lambda n: False, lambda a: True)
     assert fn(tool_name="new_tool", args={}, session_id="s")["action"] == "block"
     box["al"] = allowlist(entries=ENTRIES + [("new_tool", "x", _builtin_handler)])
-    assert fn(tool_name="new_tool", args={}, session_id="s")["action"] == "approve"
+    assert fn(tool_name="new_tool", args={}, session_id="s", tool_call_id="c")["action"] == "approve"
 
 
-def test_allowlist_additions_persist_in_yaml(tmp_path):
+def _build(reg, path=None):
+    return build_allowlist(reg, mcp_configs=MCP_CONFIGS, mcp_tool_servers={}, plugin_tool_names=set(),
+                           added_path=path)
+
+
+def _load(reg, path, seal_id="S1"):
+    return Allowlist.load_persisted(path, reg, seal_id=seal_id, mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
+                                    plugin_tool_names=set())
+
+
+def test_persist_and_reload_same_seal_keeps_classification_and_additions(tmp_path):
     path = tmp_path / "allowlist.yaml"
-    al = build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
-                         plugin_tool_names=set(), added_path=path)
+    reg = MutableRegistry(ENTRIES)
+    al = _build(reg, path)
+    al.seal_id = "S1"
+    al.persist()
     al.add("web_search")
-    assert "web_search" in path.read_text()
-    al2 = build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
-                          plugin_tool_names=set(), added_path=path)
-    assert al2.is_added("web_search")
-    # a persisted name that is now a hard block is not honoured
-    path.write_text("version: 1\nallowed: [web_search, cronjob_manage, remote_query, nope]\n")
-    al3 = build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
-                          plugin_tool_names=set(), added_path=path)
-    assert al3.added == {"web_search"}
-    path.write_text("version: 1\nallowed:\n- web_search\n")      # hand-edited YAML (needs hermes_yaml)
-    import importlib.util
-    if importlib.util.find_spec("hermes_yaml") is not None:
-        assert build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
-                               plugin_tool_names=set(), added_path=path).added == {"web_search"}
-    path.write_text(": not yaml [")
-    assert build_allowlist(FakeRegistry(ENTRIES), mcp_configs=MCP_CONFIGS, mcp_tool_servers={},
-                           plugin_tool_names=set(), added_path=path).added == set()
+    data = json.loads(path.read_text())
+    assert data["version"] == 2 and data["seal_id"] == "S1" and data["allowed"] == ["web_search"]
+    row = next(t for t in data["tools"] if t["name"] == "read_file")
+    assert row == {"name": "read_file", "toolset": "core", "module": __name__, "qualname": "_builtin_handler"}
+    al2 = _load(reg, path)
+    assert set(al2.tools) == set(al.tools) and al2.is_added("web_search")
+    # a persisted addition that is now a hard block is not honoured
+    data["allowed"] = ["web_search", "cronjob_manage", "remote_query", "nope"]
+    path.write_text(json.dumps(data))
+    assert _load(reg, path).added == {"web_search"}
+
+
+def test_restart_rebuild_blocks_tools_registered_or_changed_after_seal(tmp_path):
+    """Amendment 4 F5."""
+    path = tmp_path / "allowlist.yaml"
+    reg = MutableRegistry(ENTRIES)
+    al = _build(reg, path)
+    al.seal_id = "S1"
+    al.persist()
+    reg._entries.append(SimpleNamespace(name="crm_push", toolset="crm", handler=_builtin_handler))   # after seal
+    reg.get_entry("web_search").toolset = "evil"                                                     # changed
+    reg.get_entry("terminal").handler = _plugin_handler_factory()                                    # other module
+    al2 = _load(reg, path)
+    for name in ("crm_push", "web_search", "terminal"):
+        assert al2.current(name) is None, name
+    assert al2.current("read_file") is not None
+    r = Rig(al=al2)
+    assert r.hook(tool_name="crm_push", args={}, session_id="s", tool_call_id="c")["action"] == "block"
+    assert refused(r.run("crm_push"))
+
+
+@pytest.mark.parametrize("content", [None, "", ": not yaml [", '{"version": 1, "allowed": ["web_search"]}',
+                                     "OTHER_SEAL"])
+def test_restart_rebuild_without_this_seals_file_blocks_everything(tmp_path, content):
+    path = tmp_path / "allowlist.yaml"
+    reg = MutableRegistry(ENTRIES)
+    if content == "OTHER_SEAL":
+        al = _build(reg, path)
+        al.seal_id = "S0"
+        al.persist()
+    elif content is not None:
+        path.write_text(content)
+    al2 = _load(reg, path, seal_id="S1")
+    assert al2.tools == {} and al2.added == set()
+    assert Rig(al=al2).hook(tool_name="read_file", args={}, session_id="s")["action"] == "block"
+
+
+def test_new_seal_starts_without_previous_additions(tmp_path):
+    """Amendment 4 F6: build_allowlist (a new seal) never reads old additions."""
+    from confidential_mode.gate_tools import clear_persisted, seal_id_for
+    path = tmp_path / "allowlist.yaml"
+    reg = MutableRegistry(ENTRIES)
+    al = _build(reg, path)
+    al.seal_id = "S1"
+    al.persist()
+    al.add("web_search")
+    assert not _build(reg, path).is_added("web_search")
+    clear_persisted(path)
+    assert not path.exists()
+    clear_persisted(path)            # idempotent
+    st = SimpleNamespace(sealed_since=lambda: 12.5, config_fingerprint=lambda: "fp")
+    assert seal_id_for(st) == "12.5|fp"
+    assert seal_id_for(SimpleNamespace(sealed_since=lambda: None, config_fingerprint=lambda: "fp")) == ""
+
+
+def test_empty_tool_call_id_hook_never_asks_middleware_asks_with_fresh_id():
+    """Amendment 4 F3."""
+    from confidential_mode.gate_tools import PATTERN_KEY_PREFIX as P
+    r = Rig(answer=None, hermes_approved=True)
+    assert r.hook(tool_name="web_search", args={}, session_id="s", tool_call_id="") is None
+    r.post(pattern_key=P + "web_search", choice="once", tool_call_id="")     # an id-less answer
+    from confidential_mode.gate_tools import _MISSING
+    assert r.decisions.pop("web_search\x00") is _MISSING                     # never recorded
+    r2 = Rig(answer="once")
+    r2.post(pattern_key=P + "web_search", choice="once", tool_call_id="")    # must never be consumed
+    out = r2.mw(tool_name="web_search", args={}, next_call=lambda a: r2.calls["ran"].append(("web_search", a)) or "{}",
+                session_id="s", tool_call_id="")
+    assert len(r2.calls["ask"]) == 1                                         # asked itself
+    assert r2.ran() == ["web_search"]
+    r3 = Rig(answer="")
+    r3.post(pattern_key=P + "web_search", choice="once", tool_call_id="")
+    out = r3.mw(tool_name="web_search", args={}, next_call=lambda a: r3.calls["ran"].append(("web_search", a)) or "{}",
+                session_id="s", tool_call_id="")
+    assert refused(out) and r3.ran() == []                                   # the stray "once" did not count
 
 
 # --------------------------------------------------------------------------------------------------

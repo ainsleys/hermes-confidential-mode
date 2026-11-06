@@ -251,6 +251,15 @@ def seal(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
     allowlist_text = format_allowlist(allowlist)
 
     state.seal(tier, report.fingerprint)
+    # Amendment 4 F5/F6 (W4): persist this seal's tool identities, tagged with the seal, so a restart
+    # rebuilds from them (not from the live registry) and grants never outlive the seal.
+    if hasattr(allowlist, "persist"):
+        from .gate_tools import seal_id_for
+        allowlist.seal_id = seal_id_for(state)
+        try:
+            allowlist.persist(allowlist_path)
+        except Exception:
+            pass   # an unpersisted seal rebuilds as an empty allowlist after a restart: fail closed
     verification_result = (verification or _default_verification)(PROFILE_NAME) if tier is Tier.ATTESTED else None
     message = seal_message(tier, config, verification=verification_result, clock=clock)
     provider, model, base_url = _main_route(config)

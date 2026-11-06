@@ -92,7 +92,10 @@ class Runtime:
             return gt.Allowlist(tools={})
         from tools.registry import registry
         predicate = _cm("sealing").predicate_for(tier, config=self.load_config())
-        allowlist = gt.build_allowlist(registry, predicate=predicate, added_path=self.allowlist_path)
+        # Amendment 4 F5 (W4): rebuild from the identities persisted at THIS seal; anything registered
+        # after the seal, changed, or a missing/other-seal file is unclassified until a reseal.
+        allowlist = gt.Allowlist.load_persisted(self.allowlist_path, registry, predicate=predicate,
+                                                seal_id=gt.seal_id_for(self.state))
         with self._lock:
             if self._allowlist is None:
                 self._allowlist = allowlist
