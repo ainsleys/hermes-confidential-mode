@@ -73,7 +73,7 @@ def _is_exact(raw: Any, value: str) -> bool:
 def _ledger(ledger: Any, event: dict) -> None:
     """Best effort: a ledger failure never changes a consent decision or hides a successful apply."""
     try:
-        _ledger(ledger, event)
+        ledger.append(event)
     except Exception:
         pass
 
