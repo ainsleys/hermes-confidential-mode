@@ -19,13 +19,24 @@ logged and skipped. The max-iterations summary (`agent/chat_completion_helpers.p
 
 **What the plugin does.** Refuses to seal unless every built-in task (19 at 84a0301, read from
 `DEFAULT_CONFIG["auxiliary"]`) and every plugin-registered task resolves in-tier; re-checks that on
-every sealed turn; refuses `openai-codex` and `moa` as the main provider. At runtime it ledgers each
-auxiliary attempt and, if one goes off-tier anyway, writes a `breach` row and marks the session
-breached. It cannot stop the bytes.
+every sealed turn; refuses `openai-codex` and `moa` as the main provider. Because "auto" tasks follow
+the LIVE main runtime (`agent.auxiliary_client.set_runtime_main`), not config, each sealed turn also
+classifies the live runtime and ends the turn when it is off-tier, and on gateway surfaces `/model`
+and `/moa` are refused while sealed (`pre_gateway_dispatch`). At runtime it ledgers each auxiliary
+attempt and, if one goes off-tier anyway (between turns after a CLI `/model` switch, mid-turn, or when
+Hermes skips the check), writes a `breach` row and marks the session breached. It cannot stop the
+bytes.
 
 **Core change.** Run each auxiliary provider attempt through `run_llm_execution_middleware` with
 the task in the context (`purpose="aux:<task>"`), or let `pre_auxiliary_call` return
 `{"action": "block"}` and have the caller raise instead of sending. Same for the summary call.
+
+A related case: `pre_llm_call` is a timeout-bounded hook, and when it misses
+`plugins.hook_callback_timeout` Hermes skips it and runs the turn (`hermes_cli/plugins_dispatch.py:42-52`,
+`:301-312`). The preflight fingerprints every `plugins.*` key that governs hooks
+(`confidential_mode/preflight.py:55-56`) and refuses to seal with a timeout under 5 s; an edit after
+seal is refused for the main call by the llm gate, but a title-generation call that runs first is
+only ledgered.
 
 ## 2. The CLI approve directive grants on any answer except "deny"
 
@@ -41,6 +52,9 @@ the tool only if `post_approval_response` recorded exactly `once`, `session` or 
 tool call id, or Hermes holds a remembered grant under the plugin's own rule key
 (`plugin_rule:confidential-mode:tool:<name>`). Anything else is refused and ledgered
 `unexpected_choice`. In bypass states the ask becomes a block.
+
+Note that `session` and `always` are real grants: `always` is stored in Hermes' `command_allowlist`
+as `plugin_rule:confidential-mode:tool:<name>` and stops the asking, across seals, until you remove it.
 
 **Core change.** Grant only on an explicit allow choice; treat `None`, empty and unknown values as
 deny. Let a plugin's approve directive carry its own header text. Fire `pre_tool_call` (or a
@@ -117,15 +131,49 @@ a restart can land on the other platform and refuse with "enclave build changed"
 ## 8. No nonce, no attested time
 
 **What happens.** The attestation report commits to the enclave's TLS and HPKE keys, not to any
-request, and carries no client nonce. `verified_at` is this machine's clock. Release metadata is
-unsigned; only the digest is bound by Sigstore.
+request, and carries no client nonce. `verified_at` is this machine's clock. The release tag is bound: the SDK's Sigstore
+policy requires the signing workflow ref to be `refs/tags/<tag>` (tinfoil 0.14.2 `sigstore.py:164-172`).
+What nothing signs is which release the vendor called "latest" (`github.py:50` asks the GitHub proxy).
+The `NOT_ESTABLISHED` string in `replay.py` still says "release metadata is unsigned; only the digest
+is bound", which understates the tag binding.
 
 **What the plugin does.** Labels every time "(local clock)". The offline replay returns a fixed
 `NOT_ESTABLISHED` list with every result. No freshness claim is made beyond "verified at local time T".
 
 **Core change.** None in Hermes. Vendor side: a client nonce in the report, signed responses.
 
-## 9. Context-length probes bypassed the attested transport (mitigated in-plugin)
+## 9. What the network still sees, and what the receipt leaks
+
+**What happens.** Even with every road above closed:
+- Tinfoil terminates TLS at its router. It sees your API key header, request and response sizes,
+  timing and your IP. EHBP encrypts the body to the enclave's key, not the metadata.
+- The collateral proxies are vendor-run: `github-proxy.tinfoil.sh`, `kds-proxy.tinfoil.sh` and
+  `tdx-proxy.tinfoil.sh` see each verification, from your IP, and serve the bytes the verifier checks
+  (the checks are signature checks, so a lying proxy causes a refusal, not a false pass).
+- DNS: every host above is looked up through your resolver.
+- The ledger is a metadata trail: hosts, sizes, times, tool names. A shared receipt shares it.
+- Whoever operates the machine Hermes runs on (a cloud agent host, a VPS provider) sees every prompt
+  before any of this applies.
+
+**What the plugin does.** Nothing beyond saying so. Receipts never contain prompt text.
+
+**Core change.** None in Hermes for the network items. For the host operator, the answer is running
+Hermes on a machine you control, or Hermes itself in an enclave (out of scope).
+
+## 10. Start-up model-list probe on a drifted runtime
+
+**What happens.** If the live runtime has been switched to a hosted provider (for example a session
+`/model` on the CLI), Hermes' agent start-up lists that provider's models (`GET .../models` with your
+API key) on its default transport before any plugin seam (`agent/model_metadata.py:898` and `:1026`).
+No conversation text is sent; the plugin refuses the turn itself. Marked as a disclosed Hermes gap by
+the xfail on `tests/hostile/test_integrated_hostile.py::test_leak_live_off_tier_runtime_hits_hermes_default_transport`.
+
+**What the plugin does.** Refuses the turn and records the drift. It cannot stop the probe.
+
+**Core change.** Let a provider profile or a hook veto metadata fetches, or route them through the
+profile's client.
+
+## 11. Context-length probes bypassed the attested transport (mitigated in-plugin)
 
 **What happens.** At agent build Hermes resolves the context window (`agent/agent_init.py:1883-1884`)
 and, without an answer from the profile, probes `GET {base_url}/models` and `POST /api/show` with
@@ -138,7 +186,7 @@ plain httpx and the API key, off the attested transport.
 **Core change.** Route metadata probes through the profile's own client, or skip them for any
 profile that implements `create_client`.
 
-## 10. SDK caches outside the plugin's data (mitigated in-plugin)
+## 12. SDK caches outside the plugin's data (mitigated in-plugin)
 
 **What happens.** tinfoil 0.14.2 and sigstore-python cache under platformdirs defaults
 (`~/Library/Caches/tinfoil`, `~/.cache/tinfoil`, sigstore TUF dirs) computed at import.
@@ -148,6 +196,15 @@ profile that implements `create_client`.
 written to the defaults.
 
 **Core change.** None in Hermes. SDK side: a cache-directory parameter.
+
+## 13. No mixed "attested or local" tier (planned)
+
+**What happens.** A seal is one tier. You can't run the main model attested and send cheap side jobs
+(titles, compression) to a local model, because the local-only predicate refuses the enclave and the
+attested predicate refuses the local host (`confidential_mode/tiers.py`).
+
+**Plan.** An in-plugin tier whose predicate accepts a destination that either predicate accepts, with
+the attested checks unchanged for the attested routes. No core change needed.
 
 ## Smaller gaps, disclosed
 
@@ -166,10 +223,14 @@ written to the defaults.
 - Remembered `always` grants for a tool live in Hermes' `command_allowlist` as
   `plugin_rule:confidential-mode:tool:<name>` and survive unseal. `/confidential pins` lists them;
   this build has no revoke command, so remove the entry from `command_allowlist` to revoke.
-  Additions made with `/confidential allow` persist in `allowlist.yaml` and are honoured at later
-  seals; delete the line to revoke.
-- BUILD NOTE (remove when fixed): at this commit `register(ctx)` does not hand the ledger to the
-  provider's verification cache, so runtime `verify_ok`, `verify_fail` and `pin_staged` rows are not
-  written. Receipts show seals, sends, refusals, asks, answers, pin approvals and breaches, but carry
-  no attestation evidence, so there is nothing in a receipt to replay offline yet. `hermes confidential
-  setup` writes a `verify_ok` row without evidence.
+- Additions made with `/confidential allow` last for the seal only: they are stored with the seal's
+  identity in `allowlist.yaml`, a new seal starts with none (`confidential_mode/gate_tools.py:452-454`),
+  each seal persists them tagged with its identity (`confidential_mode/sealing.py:323-324`), and
+  `/confidential off` deletes the file (`confidential_mode/commands.py:315-316`).
+- Pins need a consent record: the attested check refuses a pin with no matching `pin_applied` ledger
+  row ("pin has no consent record"). Code in the same process can still write such a row.
+- The offline replay verifies against the repo, trust root and `as_of` that the evidence itself names;
+  it does not yet require `tinfoilsh/confidential-model-router` or your pinned fingerprints. Compare
+  the result's fingerprints with your pin.
+- The pin prompt shows fingerprints truncated to 16 hex characters and cannot tell a code change from
+  an AMD/Intel platform flap. The first pin is trust on first use.

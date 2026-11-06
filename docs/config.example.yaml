@@ -94,3 +94,5 @@ voice:
 
 plugins:
   isolation: in_process            # Hermes' default; under host the attested provider is invisible
+  # hook_callback_timeout:         # leave unset or >= 5 s; shorter lets Hermes skip the per-turn recheck
+                                   # (every plugins.* key that governs hooks is in the seal fingerprint)
