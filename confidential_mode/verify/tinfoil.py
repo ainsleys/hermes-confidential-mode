@@ -16,6 +16,18 @@ Every SDK attestation (including the SDK's own silent re-verification on key/cer
 through a counting guard. Outside an explicit ``verify()`` the guard refuses any attestation whose
 fingerprints differ from the last accepted result, so a rotation can never move traffic to an
 enclave build the pin check has not seen.
+
+Enclave host and the network: constructing the adapter and registering the profile never touch the
+network. A configured ``confidential.tinfoil.enclave`` is used as-is; otherwise the host is chosen by
+``get_router_address()`` lazily, on the first verify() (first create_client / attested_ok) or from a
+setup command, and the profile's base_url is a placeholder until then.
+
+Flapping risk with router discovery: the pin covers the enclave fingerprint, which is the hardware
+measurement of the router that answered. Routers on AMD SEV-SNP and Intel TDX hosts report different
+measurement types, so their enclave fingerprints differ even for the same release (see
+tinfoil/attestation/types.py Measurement.fingerprint). Discovery picks a random router once per process,
+so a restart can land on the other platform and refuse with "enclave build changed" until a human
+re-approves. Configuring ``confidential.tinfoil.enclave`` to one router host avoids this.
 """
 from __future__ import annotations
 
@@ -37,6 +49,9 @@ ROUTER_REPO = "tinfoilsh/confidential-model-router"
 USER_CACHE_SECRET_FILE = "tinfoil_user_cache_secret"
 ENCLAVE_SOURCE_CONFIG = "config"
 ENCLAVE_SOURCE_ROUTER = "router_discovery"
+# Profile base_url before router discovery has run. RFC 6761 .invalid never resolves, so anything that
+# used it would fail to connect, and the attested predicate's host check fails closed against it.
+PLACEHOLDER_BASE_URL = "https://unresolved.attested-tinfoil.invalid/v1"
 _REQUIRED_STEPS = ("fetch_digest", "verify_code", "verify_enclave", "compare_measurements")
 
 
@@ -121,6 +136,8 @@ class TinfoilAdapter:
         self._router_discovery = router_discovery
         self._enclave: str | None = None
         self.enclave_source: str | None = None
+        if self._configured_enclave:  # known without any network
+            self._enclave, self.enclave_source = self._configured_enclave, ENCLAVE_SOURCE_CONFIG
         self._lock = threading.RLock()
         self._explicit = threading.local()
         self._sc: Any = None
@@ -143,30 +160,39 @@ class TinfoilAdapter:
     # ── enclave + SecureClient ────────────────────────────────────────────────────────────────
     @property
     def enclave_host(self) -> str:
-        """The explicit enclave host: config if set, else one router chosen by SDK discovery (once)."""
+        """The resolved enclave host, or "" while unresolved. Never touches the network."""
+        return self._enclave or ""
+
+    @property
+    def enclave_resolved(self) -> bool:
+        return self._enclave is not None
+
+    def resolve_enclave_host(self) -> str:
+        """Resolve the explicit enclave host once: config if set (no network), else one router chosen by
+        SDK discovery (``get_router_address()``, a network call). Raises VerifyError on failure; a later
+        call retries. Called from verify() (first create_client / attested_ok) or a setup command,
+        never from register(ctx)."""
         with self._lock:
             if self._enclave is None:
-                if self._configured_enclave:
-                    self._enclave, self.enclave_source = self._configured_enclave, ENCLAVE_SOURCE_CONFIG
-                else:
-                    discover = self._router_discovery or _sdk().get_router_address
-                    try:
-                        host = discover()
-                    except Exception as exc:
-                        raise VerifyError(f"router discovery failed: {type(exc).__name__}: {exc}") from exc
-                    if not host:
-                        raise VerifyError("router discovery returned no host")
-                    self._enclave, self.enclave_source = str(host), ENCLAVE_SOURCE_ROUTER
+                discover = self._router_discovery or _sdk().get_router_address
+                try:
+                    host = discover()
+                except Exception as exc:
+                    raise VerifyError(f"router discovery failed: {type(exc).__name__}: {exc}") from exc
+                if not host or not isinstance(host, str):
+                    raise VerifyError("router discovery returned no host")
+                self._enclave, self.enclave_source = host, ENCLAVE_SOURCE_ROUTER
             return self._enclave
 
     @property
     def base_url(self) -> str:
-        return f"https://{self.enclave_host}/v1"
+        """The enclave URL, or PLACEHOLDER_BASE_URL (an unroutable .invalid host) while unresolved."""
+        return f"https://{self._enclave}/v1" if self._enclave else PLACEHOLDER_BASE_URL
 
     def _secure_client(self):
         with self._lock:
             if self._sc is None:
-                host = self.enclave_host
+                host = self.resolve_enclave_host()
                 secret = load_or_create_user_cache_secret(self.data_dir)
                 sc = _sdk().SecureClient(enclave=host, repo=self.router_repo, measurement=None,
                                          transport=self.transport, user_cache_secret=secret)

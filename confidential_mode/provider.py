@@ -45,6 +45,7 @@ class _Entry:
     last_error: str | None = None
     failed_mono: float | None = None
     lock: Any = None
+    profile: Any = None   # the registered ProviderProfile; its base_url follows the adapter's resolved host
 
 
 class VerificationCache:
@@ -98,7 +99,10 @@ class VerificationCache:
             raise VerifyError(REASON_NOT_REGISTERED)
         with e.lock:
             try:
-                result = e.adapter.verify()
+                try:
+                    result = e.adapter.verify()  # resolves the enclave host on first use (may hit network)
+                finally:
+                    _sync_profile_base_url(e)
                 if not isinstance(result, VerificationResult):
                     raise VerifyError(f"adapter returned {type(result).__name__}, not VerificationResult")
             except Exception as exc:
@@ -146,6 +150,19 @@ class VerificationCache:
             return False, reason, None
 
 
+def _sync_profile_base_url(e: _Entry) -> None:
+    """Keep profile.base_url (what the attested predicate's host check reads via profile_base_url)
+    equal to the adapter's resolved enclave URL; it stays the .invalid placeholder until resolution."""
+    if e.profile is None:
+        return
+    try:
+        url = e.adapter.base_url
+        if isinstance(url, str) and url and e.profile.base_url != url:
+            e.profile.base_url = url
+    except Exception:
+        logger.debug("could not sync attested profile base_url", exc_info=True)
+
+
 def _fail_reason(err: str | None) -> str:
     return "attested verification failed" + (f" ({err[:160]})" if err else "")
 
@@ -168,15 +185,15 @@ verification_cache = VerificationCache()
 def attested_ok(provider_name: str) -> Verdict:
     """ATTESTED-tier verdict for W1/W3: fresh verification (TTL handled here) and pins match."""
     entry = verification_cache.entry(provider_name)
-    host = ""
-    try:
-        if entry is not None:
-            host = entry.adapter.enclave_host if entry.result is None else entry.result.enclave_host
-    except Exception:
-        host = ""
     ok, reason, result = verification_cache.ensure(provider_name)
+    host = ""
     if result is not None:
         host = result.enclave_host
+    elif entry is not None:
+        try:
+            host = entry.adapter.enclave_host or ""  # resolved host, never a network call
+        except Exception:
+            host = ""
     return Verdict(in_tier=ok, reason=reason, host=host)
 
 
@@ -188,8 +205,9 @@ def _profile_base():
 def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECONDS, *,
                  cache: VerificationCache | None = None,
                  failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS):
-    """Build the 'attested-tinfoil' ProviderProfile and register its cache entry. Resolving
-    ``adapter.base_url`` needs the enclave host (router discovery, a network call, if not configured)."""
+    """Build the 'attested-tinfoil' ProviderProfile and register its cache entry. Never touches the
+    network: base_url is the configured enclave URL, or the adapter's .invalid placeholder until the
+    first verify() resolves the host by router discovery (then it is updated in place)."""
     cache = cache if cache is not None else verification_cache
     ProviderProfile = _profile_base()
 
@@ -208,6 +226,7 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
     profile._confidential_adapter = adapter
     profile._confidential_pins = pins
     cache.register(PROFILE_NAME, adapter, pins, ttl_seconds, failure_backoff_seconds)
+    cache.entry(PROFILE_NAME).profile = profile
     return profile
 
 
@@ -216,6 +235,7 @@ def _create_client(profile, cache: VerificationCache, client_kwargs: dict):
     base_url = profile.base_url
     try:
         ok, reason, _ = cache.ensure(profile.name)
+        base_url = profile.base_url  # may have just been resolved from the placeholder
         if not ok:
             return RefusingClient(reason, api_key=api_key, base_url=base_url)
 
@@ -249,6 +269,8 @@ def _cfg_get(config: dict | None, *path, default=None):
 def register_provider_profile(ctx, *, config: dict | None = None, data_dir: Path | str | None = None,
                               adapter=None, pins: PinStore | None = None):
     """Wire the attested profile into Hermes. Called by W1's register(ctx). Returns the profile.
+    Makes no network call: router discovery (when no enclave is configured) waits for the first
+    create_client / attested_ok, or for a setup command calling ``adapter.resolve_enclave_host()``.
 
     config: Hermes' loaded config (defaults to hermes_cli.config.load_config_readonly()); reads
     ``confidential.tinfoil.enclave`` and ``confidential.verify_ttl_seconds``.

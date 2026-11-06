@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 tinfoil_client = pytest.importorskip("tinfoil.client")
 
+_REAL_GET_ROUTER_ADDRESS = tinfoil_client.get_router_address  # captured before any fixture stubs it
+
 from confidential_mode import provider as provider_mod  # noqa: E402
 from confidential_mode.client import ConfidentialClient, ConfidentialRefused, RefusingClient  # noqa: E402
 from confidential_mode.pins import PinStore  # noqa: E402
@@ -402,3 +404,71 @@ def test_create_client_never_raises_or_returns_none(env, monkeypatch):
 def test_attested_ok_for_unknown_provider_is_off_tier(env):
     v = provider_mod.attested_ok("openrouter")
     assert v.in_tier is False and v.reason == provider_mod.REASON_NOT_REGISTERED
+
+
+def _block_network(monkeypatch):
+    import socket
+    attempts = []
+
+    def blocked(*a, **k):
+        attempts.append(a[:1])
+        raise OSError("NETWORK BLOCKED (test)")
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(socket, "getaddrinfo", blocked)
+    monkeypatch.setattr(socket.socket, "connect", lambda self, *a, **k: blocked(*a))
+    return attempts
+
+
+def test_register_without_network_or_configured_enclave_then_lazy_router_discovery(env, monkeypatch):
+    import providers
+
+    attempts = _block_network(monkeypatch)
+    monkeypatch.setattr(tinfoil_client, "get_router_address", _REAL_GET_ROUTER_ADDRESS)  # the real SDK call
+    cfg = {k: v for k, v in env["cfg"].items() if k != "confidential"}  # no confidential.tinfoil.enclave
+
+    # Fresh import + register: no network, no attestation, placeholder endpoint.
+    for name in [m for m in sys.modules if m.startswith("confidential_mode")]:
+        monkeypatch.delitem(sys.modules, name)
+    import confidential_mode.provider as fresh_provider
+    import confidential_mode.verify.tinfoil as tinfoil_mod
+    from confidential_mode.preflight import profile_base_url
+    from confidential_mode.tiers import AttestedPredicate, Destination
+    monkeypatch.setattr(fresh_provider, "verification_cache", fresh_provider.VerificationCache())
+    profile = fresh_provider.register_provider_profile(None, config=cfg, data_dir=env["tmp"] / "pd2")
+    assert providers.get_provider_profile(PROFILE) is profile
+    ad = profile._confidential_adapter
+    assert profile.base_url == tinfoil_mod.PLACEHOLDER_BASE_URL and ad.enclave_host == ""
+    assert ad.enclave_resolved is False and ad.attestation_count == 0
+    assert attempts == [] and env["sdk"]["verify_calls"] == 0
+    assert not (env["tmp"] / "pd2").exists()  # not even the cache secret is written at register time
+
+    # First create_client with no network: refuses (router discovery failed), never raises.
+    client = profile.create_client(api_key="tf-key", base_url=profile.base_url)
+    assert type(client).__name__ == "RefusingClient" and "router discovery failed" in client.reason
+    assert attempts, "the real get_router_address should have tried (and been blocked)"
+    assert env["sdk"]["verify_calls"] == 0 and env["rec"].requests == []
+    verdict = fresh_provider.attested_ok(PROFILE)
+    assert verdict.in_tier is False and verdict.host == ""
+    predicate = AttestedPredicate([PROFILE], fresh_provider.attested_ok, profile_base_url)
+    assert predicate.classify(Destination(PROFILE, "https://router.tinfoil.invalid/v1", "m", "chat_completions",
+                                          "main")).in_tier is False  # placeholder host never matches
+
+    # Network back: discovery resolves once, base_url follows, the predicate compares the resolved host.
+    monkeypatch.setattr(tinfoil_client, "get_router_address", lambda platform=None: "r9.tinfoil.invalid")
+    fresh_provider.verification_cache.entry(PROFILE).failure_backoff_seconds = 0
+    first = profile.create_client(api_key="tf-key", base_url=profile.base_url)
+    assert first.reason == fresh_provider.REASON_NO_PIN  # no trust on first use, even once reachable
+    assert profile.base_url == "https://r9.tinfoil.invalid/v1"  # resolved by that attempt
+    store = profile._confidential_pins
+    store.apply(store.pending(), approved_via="test")
+    client = profile.create_client(api_key="tf-key", base_url=profile.base_url)
+    assert type(client).__name__ == "ConfidentialClient", getattr(client, "reason", None)
+    assert ad.enclave_host == "r9.tinfoil.invalid" and ad.enclave_source == "router_discovery"
+    assert profile.base_url == "https://r9.tinfoil.invalid/v1" and str(client.base_url).startswith(profile.base_url)
+    assert fresh_provider.attested_ok(PROFILE).host == "r9.tinfoil.invalid"
+    ok = predicate.classify(Destination(PROFILE, "https://r9.tinfoil.invalid/v1", "m", "chat_completions", "main"))
+    assert ok.in_tier is True and ok.host == "r9.tinfoil.invalid"
+    other = predicate.classify(Destination(PROFILE, BASE_URL, "m", "chat_completions", "main"))
+    assert other.in_tier is False
+    client.chat.completions.create(model="m", messages=MSG)
+    assert [r[:2] for r in env["rec"].requests] == [("secure-sync", "r9.tinfoil.invalid")]
