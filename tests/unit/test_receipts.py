@@ -25,7 +25,7 @@ SID = "sess-A"
 SECRET = "the merger closes on friday"   # stands in for prompt text; must never appear
 # Golden digest of the closing paragraph: editing the claims split must be a deliberate change here.
 CLOSING_SHA256 = hashlib.sha256(CLOSING_PARAGRAPH.encode("utf-8")).hexdigest()
-CLOSING_SHA256_PINNED = "c6db56eb5047514888f0e6debfac3a5b9de19e48032dbee2050f396c4ee666a8"
+CLOSING_SHA256_PINNED = "a956bfc7d687a9ae3e2496821c1f5364d19b954d5b1901a0232f1dc03405762d"
 
 
 class Clock:
@@ -326,6 +326,13 @@ def test_closing_paragraph_states_the_claims_split():
     assert "session key" not in text.replace("per-session key", "")
     assert "plugin checked" not in evidence_part
     assert "plugin itself checked that evidence during this session" in record_part
+    assert "Sends were gated by the vendor SDK only" in evidence_part
+    assert "asserted by whoever captured it" in evidence_part
+    assert "confidential_mode/verify/policy_check.py" in evidence_part
+    assert "verified by" not in text.lower()
+    for claim in ("latest release at the time", "requests actually went to that enclave",
+                  "HPKE key each send recorded and whether its response decrypted"):
+        assert claim in record_part, claim
     for claim in ("requests actually went to that enclave", "encrypted to that key", "latest release",
                   "revoked after the evidence was captured", "shell", "code-execution",
                   "model backends sit behind the vendor's router", "vendor's operators"):
@@ -483,7 +490,8 @@ def test_verification_row_shows_repo_platform_host_and_committed_keys(ledger):
     line = next(ln for ln in text.splitlines() if "verify_ok  vendor=" in ln)
     for part in ("repo=tinfoilsh/confidential-model-router", "platform=sev-snp", "enclave=r1.tinfoil.invalid",
                  f"code={'c1' * 32}", f"measurement={'e1' * 32}", f"tls_key_fp={'71' * 32}",
-                 f"hpke_key={'48' * 32}", "release=v1.0.0", "capture claims 2026-11-06T00:00:00Z"):
+                 f"hpke_key={'48' * 32}", "release=v1.0.0", "captured_at=2026-11-06T00:00:00Z (asserted by capturer)",
+                 "enclave=r1.tinfoil.invalid (asserted by capturer)"):
         assert part in line, part
     assert "verifier SDK: 0.14.2" in text
     assert build_receipt(ledger, SID)["header"]["sdk_versions"] == ["0.14.2"]
@@ -550,3 +558,100 @@ def test_local_sends_have_no_coverage_entry(ledger):
     ledger.append(_ev("seal", tier="local-only"))
     ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1", tier="local-only"))
     assert build_receipt(ledger, SID)["sections"]["send_coverage"] == []
+
+
+# ── plan review finding 7 / item 5: replay status, capturer-asserted fields, per-send HPKE ────────
+
+def _one_verify(ledger, kind="verify_ok", **detail):
+    ledger.append(_ev("seal", tier="attested"))
+    vid = ledger.append(_ev(kind, session_id="", host="r1.tinfoil.invalid",
+                            detail={"vendor": "tinfoil", "evidence": FULL_EVIDENCE, **detail}))
+    return vid
+
+
+def test_replay_status_without_a_policy_checker_file(ledger, monkeypatch, tmp_path):
+    monkeypatch.setattr(receipts, "POLICY_CHECK_PATH", tmp_path / "absent.py")
+    vid = _one_verify(ledger, policy_check="pass")
+    ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
+    doc = build_receipt(ledger, SID)
+    st = doc["sections"]["replay_status"][0]
+    assert st["row"] == vid and st["vendor_sdk"] == {"version": "0.14.2", "result": "pass"}
+    assert st["restated_policy_check"] == {"checker": "n/a", "result": "n/a"}
+    assert st["gating"] == "sends were gated by the vendor SDK only"
+    assert st["enclave_host"] == {"value": "r1.tinfoil.invalid", "asserted_by": "capturer"}
+    assert st["captured_at"] == {"value": "2026-11-06T00:00:00Z", "asserted_by": "capturer"}
+    assert doc["header"]["policy_checker"] == "n/a"
+    text = render(ledger, SID)
+    line = next(ln for ln in text.splitlines() if "verify_ok  vendor=" in ln)
+    assert ("evidence replays under: vendor SDK 0.14.2 [pass]; restated policy check (n/a) [n/a]; "
+            "sends were gated by the vendor SDK only") in line
+    assert "Restated policy checker: n/a; sends were gated by the vendor SDK only." in text
+    assert "verified by" not in text.lower()
+
+
+@pytest.mark.parametrize("recorded,expected", [("pass", "pass"), ({"ok": False}, "fail"), (None, "n/a")])
+def test_replay_status_with_the_checker_file_hash(ledger, monkeypatch, tmp_path, recorded, expected):
+    checker = tmp_path / "policy_check.py"
+    checker.write_bytes(b"# restated policy\n")
+    monkeypatch.setattr(receipts, "POLICY_CHECK_PATH", checker)
+    digest = "sha256:" + hashlib.sha256(b"# restated policy\n").hexdigest()
+    _one_verify(ledger, **({} if recorded is None else {"policy_check": recorded}))
+    ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
+    st = build_receipt(ledger, SID)["sections"]["replay_status"][0]
+    assert st["restated_policy_check"] == {"checker": digest, "result": expected}
+    assert f"restated policy check ({digest}) [{expected}]" in render(ledger, SID)
+
+
+def test_policy_checker_hash_is_computed_at_render_time(monkeypatch, tmp_path):
+    f = tmp_path / "pc.py"
+    monkeypatch.setattr(receipts, "POLICY_CHECK_PATH", f)
+    assert receipts.policy_checker_id() == "n/a"
+    f.write_text("a")
+    first = receipts.policy_checker_id()
+    f.write_text("b")
+    assert first.startswith("sha256:") and receipts.policy_checker_id() != first
+
+
+def test_replay_status_for_failed_and_unverified_rows(ledger):
+    ledger.append(_ev("seal", tier="attested"))
+    fail = ledger.append(_ev("verify_fail", session_id="", detail={"evidence": FULL_EVIDENCE, "error": "x"}))
+    bare = ledger.append(_ev("verify_ok", session_id="", detail={"vendor": "tinfoil"}))
+    ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested"))
+    st = {s["row"]: s for s in build_receipt(ledger, SID)["sections"]["replay_status"]}
+    assert st[fail]["vendor_sdk"]["result"] == "fail" and st[bare]["vendor_sdk"]["result"] == "n/a"
+
+
+def _hpke_send(ledger, **detail):
+    vid = _one_verify(ledger)
+    sid_send = ledger.append(_ev("send_observed", purpose="main", host="r1.tinfoil.invalid", tier="attested",
+                                 detail=detail))
+    return vid, sid_send
+
+
+def test_per_send_hpke_key_matching_the_covering_verify_row(ledger):
+    vid, send = _hpke_send(ledger, hpke_key_used="48" * 32, response_decrypted=True)
+    doc = build_receipt(ledger, SID)
+    c = doc["sections"]["send_coverage"][0]
+    assert (c["hpke_key_used"], c["hpke_matches"], c["response_decrypted"]) == ("48" * 32, True, True)
+    assert doc["header"]["hpke_mismatches"] == []
+    line = next(ln for ln in render(ledger, SID).splitlines() if f"#{send} " in ln and "main  host=" in ln)
+    assert f"hpke_key_used={'48' * 32} (matches H of verify #{vid})" in line and "response_decrypted=yes" in line
+
+
+def test_per_send_hpke_key_mismatch_is_flagged(ledger):
+    vid, send = _hpke_send(ledger, hpke_key_used="99" * 32, response_decrypted=False)
+    doc = build_receipt(ledger, SID)
+    assert doc["sections"]["send_coverage"][0]["hpke_matches"] is False
+    assert doc["header"]["hpke_mismatches"] == [send]
+    text = render(ledger, SID)
+    assert f"HPKE KEY MISMATCH on sends: #{send}" in text
+    line = next(ln for ln in text.splitlines() if f"#{send} " in ln and "main  host=" in ln)
+    assert f"HPKE KEY MISMATCH: verify #{vid} H={'48' * 32}" in line and "response_decrypted=no" in line
+
+
+def test_per_send_fields_absent_render_nothing(ledger):
+    _hpke_send(ledger)
+    doc = build_receipt(ledger, SID)
+    c = doc["sections"]["send_coverage"][0]
+    assert "hpke_key_used" not in c and "response_decrypted" not in c and "hpke_matches" not in c
+    assert "hpke_key_used" not in render(ledger, SID)
