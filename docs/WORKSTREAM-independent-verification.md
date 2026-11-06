@@ -42,3 +42,6 @@ The attested tier's chain is: hardware signs a report carrying a measurement and
 
 ## Owner and dependencies
 Owner: the client workstream (W2) after V4 lands. V1 depends only on the stored evidence; V2 depends on network access at verify time and on GitHub API rate limits (unauthenticated: 60/hour; use a conditional-request cache); V3 depends on the ledger (W1) accepting two new detail keys.
+
+## Adopted plan (2026-11-07, after review)
+The sections above are superseded by the "Recommended revised plan" in docs/reviews/2026-11-07-verification-plan-review.md. In force: (1) V4 done properly (numeric repo/owner IDs from the Fulcio certificate, expected fingerprints from pins.yaml or a flag, host and captured_at labelled capturer-asserted); (2) a standalone restated Sigstore policy checker over the stored bundle, extracting logIndex, integratedTime, repo/owner IDs, workflow path and commit, no online Rekor; (3) TLS certificate capture spike on the EHBP connection; (4) key observation not rules, and ledgering the SDK's silent re-attest path; (5) receipt wording "replays under …; sends gated by vendor SDK only". The standalone SEV-SNP checker is gated on a real capture. TDX independent checking, runtime latest-gating, a Rekor monitor and max-key-age enforcement are deferred.
