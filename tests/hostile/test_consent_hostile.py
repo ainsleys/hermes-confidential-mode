@@ -133,6 +133,7 @@ class FakeStore:
         self.apply_delay = 0.0
         self.apply_boom: BaseException | None = None
         self.partial_writes: list = []
+        self.approved_via: list = []
 
     def pending(self):
         return copy.copy(self._pending) if self._pending is not None else None
@@ -144,7 +145,8 @@ class FakeStore:
         self._pending = make_pending(result.code_fingerprint, result.enclave_fingerprint, result.release_tag)
         return self.pending()
 
-    def apply(self, pending):
+    def apply(self, pending, *, approved_via=None):
+        self.approved_via.append(approved_via)
         if self.apply_delay:
             time.sleep(self.apply_delay)
         if self.apply_boom is not None:
@@ -221,10 +223,13 @@ def test_control_exact_value_applies_once_with_the_shown_pending():
     p = make_pending()
     store, ledger = FakeStore(p), FakeLedger()
     ctx = FakeCtx(lambda q, c: affirmative(c)[0])
-    approve_pin(ctx, store, ledger)
+    reply = approve_pin(ctx, store, ledger)
+    assert isinstance(reply, str), "Amendment 3: approve_pending_pin returns a string"
     assert store.applied == [p], "positive control: the exact affirmative value must apply (fresh equal copy)"
     assert ledger.kinds().count("pin_applied") == 1
     assert "raw_pick" in _text(next(e for e in ledger.events if _kind(e) == "pin_applied"))
+    assert store.approved_via and isinstance(store.approved_via[-1], str) and store.approved_via[-1], \
+        "Amendment 2: consent passes apply(pending, approved_via=<surface>)"
     question = ctx.asked[0][0]
     assert p.code_fingerprint[:8] in question or p.enclave_fingerprint[:8] in question, \
         "the human must see what they are pinning (spike 3 question shows the fingerprints)"
@@ -403,11 +408,12 @@ def test_called_from_async_handler_refuses_even_if_ctx_would_answer():
     ctx = FakeCtx(lambda q, c: affirmative(c)[0])
 
     async def handler():
-        with contextlib.suppress(Exception):
-            return approve_pin(ctx, store, ledger)
+        with pytest.raises(consent.ConsentContextError):
+            approve_pin(ctx, store, ledger)
 
     asyncio.run(handler())
     assert store.applied == [], "approve_pending_pin applied from inside a running event loop"
+    assert ctx.asked == [], "asked the human from an event loop"
 
 
 # --------------------------------------------------------------------------------------------------
@@ -639,40 +645,48 @@ def test_gateway_timeout_is_deny(real_ctx):
 @pytest.mark.parametrize("name", ["_t4_not_registered", "terminal ", "Terminal", "web_search​", "",
                                   "mcp__ghost__fetch"])
 def test_allow_tool_with_name_not_in_registry_refuses_without_asking(name):
-    import model_tools  # noqa: F401  registry populated
     ctx = FakeCtx(lambda q, c: affirmative(c)[0])
-    res = None
+    al, ledger = _allowlist(), FakeLedger()
     with contextlib.suppress(Exception):
-        res = consent.allow_tool(ctx, name)
-    assert not res, f"allow_tool({name!r}) granted a tool that does not exist (a later registration fills it)"
+        allow(ctx, al, ledger, name)
+    assert not al.is_added(name), f"allow_tool({name!r}) granted a tool that does not exist"
     assert ctx.asked == [], f"the human was asked to allow {name!r}, which is not a registered tool"
+    assert "tool_allowed" not in ledger.kinds()
 
 
 @pytest.mark.parametrize("variant", ["label", "trailing_space", "int_1", "true", "none", "str_subclass"])
 def test_allow_tool_non_canonical_answer_is_refused(variant):
-    import model_tools  # noqa: F401
     def answer(q, choices):
         value, label = affirmative(choices)
         return ANSWER_VARIANTS[variant](value, label)
 
     ctx = FakeCtx(answer)
-    res = None
+    al, ledger = _allowlist(), FakeLedger()
     with contextlib.suppress(Exception):
-        res = consent.allow_tool(ctx, "web_search")
-    assert not res, f"allow_tool accepted {variant} answer"
-    assert not any("web_search" in json.dumps(v, default=repr) for v in ctx.state.values()), \
-        f"{variant}: web_search was written into plugin state"
+        allow(ctx, al, ledger, "web_search")
+    assert ctx.asked, "harness: web_search is an ask-route tool, the human should be asked"
+    assert not al.is_added("web_search"), f"allow_tool accepted {variant} answer"
+    assert "tool_allowed" not in ledger.kinds()
+
+
+def test_allow_tool_exact_answer_adds_control():
+    ctx = FakeCtx(lambda q, c: affirmative(c)[0])
+    al, ledger = _allowlist(), FakeLedger()
+    reply = allow(ctx, al, ledger, "web_search")
+    assert isinstance(reply, str) and al.is_added("web_search")
+    assert "tool_allowed" in ledger.kinds()
 
 
 def test_allow_tool_from_async_handler_refuses():
-    import model_tools  # noqa: F401
     ctx = FakeCtx(lambda q, c: affirmative(c)[0])
+    al, ledger = _allowlist(), FakeLedger()
 
     async def handler():
-        with contextlib.suppress(Exception):
-            return consent.allow_tool(ctx, "web_search")
+        with pytest.raises(consent.ConsentContextError):
+            allow(ctx, al, ledger, "web_search")
 
-    assert not asyncio.run(handler())
+    asyncio.run(handler())
+    assert not al.is_added("web_search") and ctx.asked == []
 
 
 @pytest.mark.parametrize("name", ["cronjob_manage", "delegate_task"])
@@ -680,9 +694,36 @@ def test_allow_tool_cannot_lift_a_hard_block(name):
     """cronjob_manage and delegate_task-with-profile are hard blocks in the gate. An allowlist addition
     for them must either be refused or not change the gate (asserted at the gate in the gate tests
     once the storage of additions is known -- adjudicate)."""
-    import model_tools  # noqa: F401
     ctx = FakeCtx(lambda q, c: affirmative(c)[0])
-    res = None
+    al, ledger = _allowlist(), FakeLedger()
     with contextlib.suppress(Exception):
-        res = consent.allow_tool(ctx, name)
-    assert not res, f"allow_tool lifted the hard block on {name}"
+        allow(ctx, al, ledger, name)
+    assert not al.is_added(name), f"allow_tool lifted the hard block on {name}"
+    assert ctx.asked == [], f"the human was offered to lift the hard block on {name}"
+
+
+def test_allow_tool_cannot_lift_off_tier_mcp_block(tmp_path):
+    from tools.registry import registry
+    name = "mcp__web_srv__fetch"
+    registry.register(name=name, toolset="mcp-web-srv", schema={"name": name, "description": "t4",
+                      "parameters": {"type": "object", "properties": {}}}, handler=lambda a, **k: "{}")
+    try:
+        al = _allowlist(mcp_configs={"web-srv": {"url": "https://mcp.example.com/sse"}},
+                        mcp_tool_servers={name: "web-srv"})
+        ctx, ledger = FakeCtx(lambda q, c: affirmative(c)[0]), FakeLedger()
+        with contextlib.suppress(Exception):
+            allow(ctx, al, ledger, name)
+        assert not al.is_added(name) and ctx.asked == []
+    finally:
+        registry.deregister(name)
+
+
+def _allowlist(**kw):
+    import model_tools  # noqa: F401  registry populated
+    from confidential_mode import gate_tools
+    from tools.registry import registry
+    return gate_tools.build_allowlist(registry, **kw)
+
+
+def allow(ctx, allowlist, ledger, name):
+    return consent.allow_tool(ctx, allowlist, ledger, name, session_key=SK, session_id="sess-1", platform="cli")

@@ -291,11 +291,18 @@ def seal(h, *, register: bool = True):
             if callable(builder):
                 post = _call_with_pool(builder, _pool(h, allowlist=allowlist), what=cand)
                 break
+    mw = None
+    builder = getattr(gate_tools, "build_tool_execution", None)     # Amendment 3 (pending W4 merge)
+    if callable(builder):
+        mw = _call_with_pool(builder, _pool(h, allowlist=allowlist, allow=allowlist, allowed=allowlist),
+                             what="build_tool_execution")
     if register:
         h.handles.append(h.ctx.register_hook("pre_tool_call", pre))
         if post is not None:
             h.handles.append(h.ctx.register_hook("post_approval_response", post))
-    return SimpleNamespace(pre=pre, post=post, allowlist=allowlist)
+        if mw is not None:
+            h.handles.append(h.ctx.register_middleware("tool_execution", mw))
+    return SimpleNamespace(pre=pre, post=post, mw=mw, allowlist=allowlist)
 
 
 def direct(gate, tool_name: str, args=None, *, session_id: str = SID, task_id: str = "t4"):
@@ -388,6 +395,29 @@ def test_unsealed_observes_only_even_for_hard_block_tools(hermes):
                        ("delegate_task", {"tasks": [{"goal": "g", "profile": "work"}]})):
         assert direct(g, name, args) is None, name
     assert hermes.ledger.events == [], "contract: unsealed -> ledger nothing"
+
+
+@pytest.mark.parametrize("unsealed", [(False, None), [False, None]], ids=["tuple", "list"])
+def test_canonical_is_sealed_tuple_unsealed_is_not_treated_as_sealed(hermes, unsealed):
+    """Amendment 2: canonical is_sealed() -> (bool, Tier | None). A non-empty tuple is truthy, so a gate
+    that does `if not is_sealed()` treats (False, None) as SEALED and gates an unsealed profile."""
+    probe(hermes, "_t4_net")
+    allowlist = _call_with_pool(gate_tools.build_allowlist, _pool(hermes), what="build_allowlist")
+    pre = _call_with_pool(gate_tools.build_pre_tool_call,
+                          _pool(hermes, allowlist=allowlist, is_sealed=lambda: unsealed), what="build_pre_tool_call")
+    hermes.ledger.events.clear()
+    assert direct(SimpleNamespace(pre=pre), "_t4_net", {}) is None, "unsealed (False, None) gated the call"
+    assert direct(SimpleNamespace(pre=pre), "cronjob_manage", {"action": "list"}) is None
+
+
+def test_canonical_is_sealed_tuple_sealed_still_gates(hermes):
+    from confidential_mode.tiers import Tier
+    probe(hermes, "_t4_net")
+    allowlist = _call_with_pool(gate_tools.build_allowlist, _pool(hermes), what="build_allowlist")
+    pre = _call_with_pool(gate_tools.build_pre_tool_call,
+                          _pool(hermes, allowlist=allowlist, is_sealed=lambda: (True, Tier.LOCAL)),
+                          what="build_pre_tool_call")
+    assert_block(direct(SimpleNamespace(pre=pre), "cronjob_manage", {"action": "list"}))
 
 
 # --------------------------------------------------------------------------------------------------
@@ -650,7 +680,10 @@ def test_mcp_command_server_is_local_per_contract_GAP(hermes):
     name = _mcp(hermes, "proxy", "fetch")
     g = seal(hermes)
     res = direct(g, name, {"url": "https://exfil.example.net"})
-    assert res is None, f"contract literal: command MCP servers are local (got {res!r})"
+    # Amendment 3 ruling: "allowed per contract, disclosed gap". W4 routes command servers to ASK, which is
+    # stricter than local; accept either (never a hard block, never garbage).
+    assert res is None or (isinstance(res, dict) and res.get("action") == "approve"), \
+        f"command MCP servers are allowed (local or ask) per contract (got {res!r})"
 
 
 # --------------------------------------------------------------------------------------------------
@@ -733,11 +766,8 @@ def test_delegate_default_backend_routed_off_tier_by_config(hermes):
     hermes.write_cfg("delegation:\n  provider: openrouter\n  base_url: https://openrouter.ai/api/v1\n"
                      "  model: openai/gpt-5\n")
     g = seal(hermes)
-    res = direct(g, "delegate_task", {"tasks": [{"goal": "g"}]})
-    if res is None:
-        pytest.xfail("GAP (covered by W3 preflight per Amendment 1): the gate allows default-backend delegation "
-                     "when delegation.provider/base_url are off-tier")
-    assert_block(res)
+    assert_block(direct(g, "delegate_task", {"tasks": [{"goal": "g"}]}),
+                 "Amendment 3: delegation.provider/base_url in config => block (second line behind preflight)")
 
 
 # --------------------------------------------------------------------------------------------------
@@ -802,22 +832,21 @@ def _bypass(h, kind, monkeypatch):
         h.write_cfg("approvals:\n  single_query_mode: approve\n")
         monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
         yield
-    elif kind == "remembered_always":                    # 'always' granted before the seal, any plugin
+    elif kind == "remembered_bare_always":               # 'always' under the BARE tool name: not our key
         approval.approve_permanent("plugin_rule:_t4_net")
         yield
-    elif kind == "remembered_session":
+    elif kind == "remembered_bare_session":
         approval.approve_session(SK, "plugin_rule:_t4_net")
         yield
     else:  # pragma: no cover
         raise AssertionError(kind)
 
 
-CONTRACT_BYPASSES = ["session_yolo", "mode_off", "process_yolo", "hermes_z"]
-# Spike 3 lists these as auto-approving with no hook and no prompt; the contract names only yolo and
-# mode off. The gate can detect each (approval_context._get_cron_approval_mode etc., is_approved with
-# the plugin_rule: prefix) or avoid it with a seal-scoped rule_key.
-SPIKE_BYPASSES = ["cron_approve", "unattended_approve", "single_query_approve", "remembered_always",
-                  "remembered_session"]
+# Amendment 3: yolo (all forms), approvals.mode off and cron/unattended/single-query approve modes => block.
+CONTRACT_BYPASSES = ["session_yolo", "mode_off", "process_yolo", "hermes_z", "cron_approve", "unattended_approve",
+                     "single_query_approve"]
+# A grant under a key that is not ours (bare tool name) must not apply: the human is asked (or blocked).
+SPIKE_BYPASSES = ["remembered_bare_always", "remembered_bare_session"]
 
 
 @pytest.mark.parametrize("kind", CONTRACT_BYPASSES + SPIKE_BYPASSES)
@@ -836,6 +865,27 @@ def test_bypass_state_offmachine_never_runs_without_a_human(hermes, monkeypatch,
     assert "tool_allowed" not in hermes.ledger.kinds() or hermes.prompts
 
 
+@pytest.mark.parametrize("scope", ["session", "always"])
+def test_remembered_grant_under_our_rule_key_is_honoured_and_ledgered(hermes, scope):
+    """Amendments 2/3: a once/session/always the human gave on OUR prompt
+    (plugin_rule:confidential-mode:tool:<name>) is honoured, ledgered tool_allowed decision 'remembered'."""
+    probe(hermes, "_t4_net")
+    g = seal(hermes)
+    key = f"plugin_rule:confidential-mode:tool:_t4_net"
+    if scope == "session":
+        approval.approve_session(SK, key)
+    else:
+        approval.approve_permanent(key)
+    hermes.answer["value"] = "deny"
+    res = direct(g, "_t4_net", {})
+    assert not (isinstance(res, dict) and res.get("action") == "block"), f"remembered {scope} grant blocked: {res}"
+    call("_t4_net", {})
+    assert len(hermes.ran["_t4_net"]) == 1 and hermes.prompts == [], "remembered grant should run without a prompt"
+    assert any(_kind(e) == "tool_allowed" and (e.get("decision") if isinstance(e, dict) else
+                                               getattr(e, "decision", None)) == "remembered"
+               for e in hermes.ledger.events), hermes.ledger.events
+
+
 def test_yolo_enabled_mid_turn_after_seal_is_seen_per_call(hermes):
     """The bypass check must run per call, not be captured at seal."""
     probe(hermes, "_t4_net")
@@ -848,18 +898,46 @@ def test_yolo_enabled_mid_turn_after_seal_is_seen_per_call(hermes):
         approval.disable_session_yolo(SK)
 
 
-@pytest.mark.xfail(strict=False, reason="HERMES GAP: request_tool_approval grants on ANY CLI answer except the "
-                   "exact string 'deny' (approval.py:1006-1009): None, '', 'DENY', 'Deny', 'd', True all run the "
-                   "tool. W4 cannot veto after pre_tool_call returns approve; adjudicate (tool_execution "
-                   "middleware that requires a recorded once/session/always from post_approval_response?)")
 @pytest.mark.parametrize("answer", [None, "", "DENY", "Deny", "d", "no", True, 0])
 def test_approve_directive_with_garbage_human_answer_does_not_run(hermes, answer):
+    """HERMES GAP (approval.py:1006-1009): the CLI grants on any answer except exactly 'deny'. Amendment 3
+    moves enforcement to gate_tools.build_tool_execution: next_call only on a recorded once/session/always."""
+    if not callable(getattr(gate_tools, "build_tool_execution", None)):
+        pytest.fail("pending W4 change: confidential_mode.gate_tools.build_tool_execution (Amendment 3) is missing")
     probe(hermes, "_t4_net")
     g = seal(hermes)
+    assert g.post is not None, "tool_execution enforcement needs post_approval_response"
     assert direct(g, "_t4_net", {})["action"] == "approve"
     hermes.answer["value"] = answer
     call("_t4_net", {})
     assert hermes.ran["_t4_net"] == [], f"CLI answer {answer!r} ran the off-machine tool"
+    assert "tool_allowed" not in hermes.ledger.kinds()
+
+
+@pytest.mark.parametrize("answer", ["once", "session", "always"])
+def test_approve_directive_explicit_human_grant_runs_control(hermes, answer):
+    """Control for the middleware: an explicit once/session/always must still run the tool exactly once."""
+    probe(hermes, "_t4_net")
+    seal(hermes)
+    hermes.answer["value"] = answer
+    call("_t4_net", {})
+    assert len(hermes.ran["_t4_net"]) == 1
+
+
+def test_tool_execution_refuses_block_route_even_if_hook_is_skipped(hermes):
+    """Amendment 3: block-route tools are refused in the middleware too (second line). skip_pre_tool_call_hook
+    is what Hermes' agent loop passes after firing the hook itself."""
+    if not callable(getattr(gate_tools, "build_tool_execution", None)):
+        pytest.fail("pending W4 change: build_tool_execution missing")
+    import model_tools
+    spy_existing(hermes, "cronjob_manage")
+    probe(hermes, "_t4_net")
+    seal(hermes)
+    probe(hermes, "_t4_late")
+    for name in ("cronjob_manage", "_t4_net", "_t4_late"):
+        out = model_tools.handle_function_call(name, {"action": "list"}, task_id="t4", session_id=SID,
+                                               skip_pre_tool_call_hook=True)
+        assert hermes.ran[name] == [], f"{name} ran with the hook skipped: {out}"
 
 
 # --------------------------------------------------------------------------------------------------
@@ -1014,8 +1092,9 @@ def test_post_approval_response_unexpected_choice(hermes, choice):
         pytest.skip("gate exposes no post_approval_response handler (contract: tool_allowed/tool_refused come "
                     "from post_approval_response) -- adjudicate where it lives")
     from hermes_cli.plugins_dispatch import PluginDispatchMixin
+    pk = "plugin_rule:confidential-mode:tool:_t4_net"
     payload = dict(command="<_t4_net> (plugin approval rule)", description="_t4_net wants to send ~1 KB",
-                   pattern_key="plugin_rule:_t4_net", pattern_keys=["plugin_rule:_t4_net"], session_key=SK,
+                   pattern_key=pk, pattern_keys=[pk], session_key=SK,
                    surface="cli", choice=choice, turn_id="turn-1", tool_call_id="call-1", session_id=SID)
     PluginDispatchMixin._invoke_hook_callback(g.post, payload)       # must not raise
     kinds = hermes.ledger.kinds()
@@ -1023,9 +1102,11 @@ def test_post_approval_response_unexpected_choice(hermes, choice):
         assert "tool_allowed" in kinds
     elif choice in ("deny", "timeout", "cancelled", "notify_failed", "smart_deny"):
         assert "tool_refused" in kinds and "tool_allowed" not in kinds
-    # Unexpected values: Hermes actually GRANTS on anything but 'deny' (see the HERMES GAP test), so a
-    # ledger that writes tool_refused here would lie. Require only no crash and at most one event.
-    assert len(kinds) <= 1, kinds
+    else:
+        # Amendment 3: unexpected values are ledgered and refused (the middleware then refuses the call).
+        assert "tool_allowed" not in kinds, f"unexpected choice {choice!r} ledgered as allowed"
+        assert "tool_refused" in kinds, f"unexpected choice {choice!r} not ledgered"
+    assert len(kinds) == 1, kinds
 
 
 def test_post_approval_response_for_foreign_tool_is_ignored(hermes):
