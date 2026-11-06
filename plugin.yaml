@@ -1,0 +1,4 @@
+name: confidential-mode
+version: 0.0.1
+description: Attested inference provider plus sealed mode. Not yet functional.
+# kind, hooks, middleware, capabilities and requires_hermes are filled in at C1.
