@@ -158,14 +158,16 @@ def test_hand_edited_empty_fingerprints_never_match(cm, tmp_path):
     dict(code=h.FP_CODE_2, enclave=h.FP_ENCLAVE),
     dict(code=h.FP_CODE, enclave=h.FP_ENCLAVE_2),
     dict(code=h.FP_ENCLAVE, enclave=h.FP_CODE),
-    dict(code=h.FP_CODE[:8], enclave=h.FP_ENCLAVE[:8]),
+    dict(code=h.FP_CODE[:32], enclave=h.FP_ENCLAVE[:32]),
+    dict(code=h.FP_CODE[:32], enclave=h.FP_ENCLAVE),
+    dict(code=h.FP_CODE, enclave=h.FP_ENCLAVE[:32]),
     dict(code=h.FP_CODE + "0", enclave=h.FP_ENCLAVE + "0"),
     dict(code="", enclave=h.FP_ENCLAVE),
     dict(code=h.FP_CODE, enclave=""),
     dict(code=" " + h.FP_CODE, enclave=h.FP_ENCLAVE),
     dict(code=h.FP_CODE, enclave=h.FP_ENCLAVE, vendor="evil"),
     dict(code=h.FP_CODE, enclave=h.FP_ENCLAVE, router_repo="evil/router"),
-], ids=["code", "enclave", "swapped", "prefix", "extended", "empty-code", "empty-enclave", "space",
+], ids=["code", "enclave", "swapped", "prefix", "code-prefix", "enclave-prefix", "extended", "empty-code", "empty-enclave", "space",
         "vendor", "repo"])
 def test_match_is_exact(cm, tmp_path, probe):
     store, _ = _pinned_store(cm, tmp_path)

@@ -27,6 +27,7 @@ import sys
 import threading
 import time as _real_time
 import types
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -155,22 +156,46 @@ class NonClosingView(httpx.BaseTransport):
         self.closed = True
 
 
+_LOOP_SERIALS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_SERIAL = [0]
+
+
+def _serial() -> int:
+    with _LOCK:
+        _SERIAL[0] += 1
+        return _SERIAL[0]
+
+
+def loop_serial(loop) -> int | None:
+    """A never-reused identity for a loop (id(loop) is reused once a loop is collected)."""
+    if loop is None:
+        return None
+    if loop not in _LOOP_SERIALS:
+        _LOOP_SERIALS[loop] = _serial()
+    return _LOOP_SERIALS[loop]
+
+
 class LoopBoundAsyncTransport(httpx.AsyncBaseTransport):
+    """Bound to the loop it was built on, held WEAKLY so the stub never keeps a dead loop alive (a strong
+    ref would stop CPython reusing id(loop) and hide id-keyed caches in the client)."""
+
     def __init__(self, loop: asyncio.AbstractEventLoop):
-        self.loop = loop
+        self._loop_ref = weakref.ref(loop)
         self.closed = False
+        self.serial = _serial()
 
     async def handle_async_request(self, request):
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
-        if running is not self.loop or self.loop.is_closed() or self.closed:
-            _record(Req("DEAD-LOOP", request.url.host, request.url.path, _stream_flag(request), id(self),
-                        id(running) if running else None))
+        bound = self._loop_ref()
+        if bound is None or running is not bound or bound.is_closed() or self.closed:
+            _record(Req("DEAD-LOOP", request.url.host, request.url.path, _stream_flag(request), self.serial,
+                        loop_serial(running)))
             raise RuntimeError("async attested client used outside the loop it was built for")
-        _record(Req("secure-async", request.url.host, request.url.path, _stream_flag(request), id(self),
-                    id(running)))
+        _record(Req("secure-async", request.url.host, request.url.path, _stream_flag(request), self.serial,
+                    loop_serial(running)))
         return _respond(request)
 
     async def aclose(self):
@@ -218,7 +243,7 @@ class StubAdapter:
         self.verify_calls = 0
         self.pool = SharedSyncPool()
         self.views: list[httpx.Client] = []
-        self.async_clients: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]] = {}
+        self.async_clients: dict[int, tuple[weakref.ref, httpx.AsyncClient]] = {}
         self.async_builds: list[int] = []
         self.hangs: list[Hang] = [s for s in self.script if isinstance(s, Hang)]
         self._lock = threading.Lock()
@@ -246,8 +271,9 @@ class StubAdapter:
     def async_http_for_loop(self) -> httpx.AsyncClient:
         loop = asyncio.get_running_loop()
         entry = self.async_clients.get(id(loop))
-        if entry is None or entry[0] is not loop:  # identity check: never hand a dead loop's client out
-            entry = (loop, httpx.AsyncClient(transport=LoopBoundAsyncTransport(loop), follow_redirects=False))
+        if entry is None or entry[0]() is not loop:  # identity check: never hand a dead loop's client out
+            entry = (weakref.ref(loop), httpx.AsyncClient(transport=LoopBoundAsyncTransport(loop),
+                                                          follow_redirects=False))
             self.async_clients[id(loop)] = entry
             self.async_builds.append(id(loop))
         return entry[1]
