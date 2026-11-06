@@ -251,7 +251,11 @@ def test_adapter_verify_maps_document_and_counts_one_attestation(tmp_path, monke
     assert (res.code_fingerprint, res.enclave_fingerprint, res.release_tag) == ("c1", "e1", "v9")
     assert res.verifier == "tinfoil/0.14.2"
     assert abs(res.verified_at_local - time.time()) < 5
-    assert res.evidence["codeFingerprint"] == "c1" and res.evidence["securityVerified"] is True
+    assert res.evidence["schema"] == "confidential-mode/tinfoil-evidence/v1"
+    assert res.evidence["claims"]["code_fingerprint"] == "c1"
+    assert res.evidence["verification_document"]["securityVerified"] is True
+    # The stubbed verify fetched nothing, so the capture is (honestly) incomplete.
+    assert res.evidence["capture_complete"] is False and "attestation" in res.evidence["capture_missing"]
     json.dumps(res.evidence)  # JSON-serialisable
     assert ad.enclave_source == "config"
     assert calls == ["router.example"] and ad.attestation_count == 1 and ad.sync_attestation_count == 1
@@ -275,7 +279,7 @@ def test_adapter_router_discovery_is_recorded(tmp_path, monkeypatch, rec):
     _stub_sdk(monkeypatch, rec)
     ad = _adapter(tmp_path, enclave=None, router_discovery=lambda: "r7.example")
     assert ad.verify().enclave_host == "r7.example" and ad.enclave_source == "router_discovery"
-    assert ad.verify().evidence["pluginEnclaveSource"] == "router_discovery"
+    assert ad.verify().evidence["enclave_source"] == "router_discovery"
 
 
 @pytest.mark.parametrize("breakage", ["raise", "not_verified", "step_failed", "no_fingerprint", "wrong_repo"])
