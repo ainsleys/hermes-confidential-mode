@@ -90,7 +90,7 @@ def strict_host(base_url: Any) -> tuple[str, str]:
     """
     if not isinstance(base_url, str):
         return "", "base_url is not a string"
-    raw = base_url.strip()
+    raw = base_url  # never stripped: whitespace/control characters anywhere (even trailing) fail closed
     shown = host_of(raw)
     if not raw:
         return "", "empty base_url"
@@ -161,9 +161,9 @@ def _profile_url(lookup: Callable[[str], Any] | None, provider: str) -> str:
     except Exception:
         return ""
     if isinstance(result, str):
-        return result.strip()
+        return result
     url = getattr(result, "base_url", None)
-    return url.strip() if isinstance(url, str) else ""
+    return url if isinstance(url, str) else ""
 
 
 class LocalPredicate:
@@ -182,7 +182,7 @@ class LocalPredicate:
         self.profile_base_url = profile_base_url
 
     def classify(self, dest: Destination) -> Verdict:
-        base_url = dest.base_url.strip() if isinstance(dest.base_url, str) else dest.base_url
+        base_url = dest.base_url
         via_profile = False
         if base_url == "" or base_url is None:
             base_url = _profile_url(self.profile_base_url, dest.provider)
@@ -219,7 +219,7 @@ class AttestedPredicate:
 
     def classify(self, dest: Destination) -> Verdict:
         provider = dest.provider if isinstance(dest.provider, str) else ""
-        base_url = dest.base_url.strip() if isinstance(dest.base_url, str) else ""
+        base_url = dest.base_url if isinstance(dest.base_url, str) else ""
         host = host_of(base_url)
         if provider not in self.attested_profiles:
             return Verdict(False, f"provider {provider or '(none)'} is not an attested profile", host)

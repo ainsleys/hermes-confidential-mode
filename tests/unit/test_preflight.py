@@ -477,28 +477,53 @@ def test_delegation_explicit_routes():
     assert item(r, "delegation.fallback_providers").verdict == "off_tier"
 
 
-@pytest.mark.parametrize("prov,verdict", [("piper", "local"), ("kittentts", "local"), ("neutts", "local"),
-                                          ("none", "local"), ("edge", "off_tier"), ("", "off_tier"),
-                                          ("elevenlabs", "off_tier"), ("openai", "off_tier")])
-def test_tts_provider(prov, verdict):
-    i = item(run(base_config(tts={"provider": prov})), "tts.provider")
-    assert i.verdict == verdict
+@pytest.mark.parametrize("tts,verdict", [
+    ({"provider": "piper"}, "local"), ({"provider": "kittentts", "enabled": True}, "local"),
+    ({"provider": "neutts"}, "local"), ({"provider": "none"}, "local"),
+    ({"provider": "edge"}, "disabled"),                      # enabled unset => disabled (ruling)
+    ({"provider": "edge", "enabled": False}, "disabled"),
+    ({"provider": "elevenlabs", "enabled": "false"}, "disabled"),
+    ({}, "disabled"), ({"provider": ""}, "disabled"), (None, "disabled"), ("junk", "disabled"),
+    ({"provider": "edge", "enabled": True}, "off_tier"),
+    ({"provider": "", "enabled": True}, "off_tier"),         # unset provider resolves to edge
+    ({"provider": "elevenlabs", "enabled": "yes"}, "off_tier"),
+    ({"provider": "openai", "enabled": True}, "off_tier"),
+])
+def test_tts_rules(tts, verdict):
+    i = item(run(base_config(tts=tts)), "tts.provider")
+    assert i.verdict == verdict, i
     if verdict == "off_tier":
         assert "tts.provider" in i.fix
 
 
-def test_tts_absent_is_hermes_default_edge():
+def test_tts_absent_is_disabled_default_edge():
     cfg = base_config()
     del cfg["tts"]
     i = item(run(cfg), "tts.provider")
-    assert i.verdict == "off_tier" and "edge" in i.value_redacted
+    assert i.verdict == "disabled" and i.value_redacted == "(default edge, disabled)"
+
+
+@pytest.mark.parametrize("tts", [{"provider": "edge", "enabled": False}, {}, {"provider": ""}])
+def test_tts_auto_tts_overrides_disabled(tts):
+    # Hermes has no tts.enabled key; voice.auto_tts makes it speak replies through tts.provider anyway.
+    i = item(run(base_config(tts=tts, voice={"auto_tts": True})), "tts.provider")
+    assert i.verdict == "off_tier" and "voice.auto_tts" in i.fix
+    assert item(run(base_config(tts={"provider": "piper"}, voice={"auto_tts": True})),
+                "tts.provider").verdict == "local"
 
 
 def test_tts_named_command_provider_is_local():
-    cfg = base_config(tts={"provider": "mysay", "providers": {"mysay": {"command": "say -o {out} {text}"}}})
+    cfg = base_config(tts={"provider": "mysay", "enabled": True,
+                           "providers": {"mysay": {"command": "say -o {out} {text}"}}})
     assert item(run(cfg), "tts.provider").verdict == "local"
-    cfg = base_config(tts={"provider": "myhttp", "providers": {"myhttp": {"url": "https://x"}}})
+    cfg = base_config(tts={"provider": "myhttp", "enabled": True, "providers": {"myhttp": {"url": "https://x"}}})
     assert item(run(cfg), "tts.provider").verdict == "off_tier"
+
+
+def test_fingerprint_covers_tts_enabled_and_auto_tts():
+    a = base_config()
+    assert config_fingerprint(a) != config_fingerprint(base_config(tts={"provider": "piper", "enabled": True}))
+    assert config_fingerprint(a) != config_fingerprint(base_config(voice={"auto_tts": True}))
 
 
 @pytest.mark.parametrize("mem", ["honcho", ["honcho"], 3])
