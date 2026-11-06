@@ -870,7 +870,7 @@ def build_tool_execution(is_sealed: Callable[[], Any], allowlist: Allowlist | Ca
         key = _call_key(tool_name, tool_call_id)
         choice = dec.pop(key)
         if choice is not _MISSING:                 # pre_tool_call asked (model_tools order)
-            if isinstance(choice, str) and choice in _ALLOW_CHOICES:
+            if type(choice) is str and choice in _ALLOW_CHOICES:
                 return run()                       # tool_allowed was ledgered by post_approval_response
             return _unexpected(tool_name, args, session_id, base, choice)
         if d.decision == "remembered":
@@ -886,7 +886,7 @@ def build_tool_execution(is_sealed: Callable[[], Any], allowlist: Allowlist | Ca
                      session_id=session_id, turn_id=turn_id)
         choice = dec.pop(_call_key(tool_name, approval_id))
         approved = isinstance(result, dict) and result.get("approved") is True
-        if approved and isinstance(choice, str) and choice in _ALLOW_CHOICES:
+        if approved and type(choice) is str and choice in _ALLOW_CHOICES:
             dec.grant(key)
             try:
                 return run()
@@ -931,7 +931,7 @@ def build_post_approval_response(is_sealed: Callable[[], Any], ledger: Any,
                 return None
             tool_name = pattern_key[len(PATTERN_KEY_PREFIX):]
             dec.record(_call_key(tool_name, tool_call_id), choice)
-            pick = choice if isinstance(choice, str) else ""
+            pick = choice if type(choice) is str else ""
             allowed = pick in _ALLOW_CHOICES
             detail = {"tool": tool_name, "choice": _choice_repr(choice), "tool_call_id": tool_call_id or "",
                       "session_key": session_key or "", "sealed": _safe(is_sealed)}

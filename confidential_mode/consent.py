@@ -65,6 +65,19 @@ def _ask(ctx: Any, question: str, choices: list) -> tuple[Optional[str], Optiona
         return None, f"{type(exc).__name__}: {exc}"
 
 
+def _is_exact(raw: Any, value: str) -> bool:
+    """Exact str match: a str subclass with a lying __eq__ must never count as a pick (C3 review)."""
+    return type(raw) is str and raw == value
+
+
+def _ledger(ledger: Any, event: dict) -> None:
+    """Best effort: a ledger failure never changes a consent decision or hides a successful apply."""
+    try:
+        _ledger(ledger, event)
+    except Exception:
+        pass
+
+
 def _field(obj: Any, name: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(name, default)
@@ -119,8 +132,8 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
     detail = {**base, "raw_pick": raw}
     if error:
         detail["error"] = error
-    if raw != "approve":
-        ledger.append(_event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
+    if not _is_exact(raw, "approve"):
+        _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
                              decision="no_answer" if raw is None else str(raw), detail=detail))
         if raw is None:
             return "No answer (timed out, cancelled, or not one of the options): pin update denied; current pin kept."
@@ -135,7 +148,7 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
             current, detail["recheck_error"] = None, f"{type(exc).__name__}: {exc}"[:200]
         if current is None or current != pending:
             detail["reason"] = "pending pin changed while waiting for the answer"
-            ledger.append(_event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
+            _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
                                  decision="stale", detail=detail))
             return ("The pending pin changed while you were deciding, so nothing was applied. "
                     "Run /confidential pins approve again to review the new one.")
@@ -143,11 +156,11 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
             record = _apply(store, pending, platform or "unknown")
         except Exception as exc:
             detail["error"] = type(exc).__name__
-            ledger.append(_event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
+            _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
                                  decision="apply_failed", detail=detail))
             return f"The pin could not be applied ({type(exc).__name__}); the current pin is unchanged."
     detail["approved_at"] = str(_field(record, "approved_at", "") or "")
-    ledger.append(_event("pin_applied", session_id=session_id, platform=platform, provider=vendor,
+    _ledger(ledger, _event("pin_applied", session_id=session_id, platform=platform, provider=vendor,
                          decision="approve", detail=detail))
     return (f"Pinned {vendor or 'enclave'} build "
             f"{_field(record, 'release_tag', None) or _field(pending, 'release_tag', None) or ''}".rstrip()
@@ -187,11 +200,11 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
     detail = {"tool": name, "raw_pick": raw, "session_key": session_key or "", "change": "allowlist_add"}
     if error:
         detail["error"] = error
-    if raw != "approve":
-        ledger.append(_event("tool_refused", session_id=session_id, platform=platform, purpose=f"tool:{name}",
+    if not _is_exact(raw, "approve"):
+        _ledger(ledger, _event("tool_refused", session_id=session_id, platform=platform, purpose=f"tool:{name}",
                              decision="no_answer" if raw is None else str(raw), detail=detail))
         return f"{name} was not added; it still needs approval each call."
     allowlist.add(name)
-    ledger.append(_event("tool_allowed", session_id=session_id, platform=platform, purpose=f"tool:{name}",
+    _ledger(ledger, _event("tool_allowed", session_id=session_id, platform=platform, purpose=f"tool:{name}",
                          decision="allowlist_add", detail=detail))
     return f"{name} added to the allowlist for this seal."
