@@ -323,6 +323,13 @@ def test_demo(world, monkeypatch):
     for ln in vlines:
         assert f"repo={REPO}" in ln and "platform=sev-snp" in ln and f"enclave={ENCLAVE}" in ln
         assert f"tls_key_fp={TLS_FP}" in ln and f"hpke_key={HPKE_KEY}" in ln
+        assert f"enclave={ENCLAVE} (asserted by capturer)" in ln
+        assert "evidence replays under: vendor SDK 0.14.2 [pass]; restated policy check (" in ln
+        assert "sends were gated by the vendor SDK only" in ln
+    assert "verified by" not in text.lower()
+    from confidential_mode.receipts import policy_checker_id
+    assert doc["header"]["policy_checker"] == policy_checker_id()
+    assert [st["vendor_sdk"]["result"] for st in doc["sections"]["replay_status"]] == ["pass", "pass"]
     # every attested send names the verify row and TTL window that covered it
     cov = doc["sections"]["send_coverage"]
     verify_ids = [r["id"] for r in doc["rows"] if r["kind"] == "verify_ok"]

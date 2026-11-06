@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from ._version import PLUGIN_COMMIT, PLUGIN_VERSION
@@ -79,29 +80,37 @@ CLOSING_PARAGRAPH = (
     "(confidential_mode.verify.replay, or hermes confidential replay <receipt.json>) show that an enclave "
     "whose hardware report commits to TLS key fingerprint T and HPKE public key H ran code with measurement "
     "M, signed by repository R at release tag G, as of the capture time the file claims. T and H are the "
-    "enclave's long-lived keys, not a per-session key. A row marked \"unverified entry\" (no evidence, or "
-    "an incomplete capture) shows nothing. RECORD ONLY, not proven by anything in this receipt: that the "
-    "plugin itself checked that evidence during this session; that this session's requests actually went "
-    "to that enclave; that request bodies were encrypted to that key; that the verified build was the "
-    "vendor's latest release at the time; whether the build or its key was revoked after the evidence was "
-    "captured; what shell, terminal and code-execution tools sent off the machine (they run locally and "
-    "can reach the network); which model backends sit behind the vendor's router; any other access the "
-    "vendor's operators have to the machines involved; and Hermes' auxiliary calls (title generation, "
-    "compaction, memory prefetch, vision, and plugin auxiliary tasks), which can leave the sealed tier "
-    "while sealed, for example after a runtime model or provider switch, and are recorded here after the "
-    "fact, not prevented. The ledger is a local file and is not protected against code running in the "
-    "same Hermes process: another plugin can write rows that look exactly like this plugin's own. The hash "
-    "chain is a checksum over this document that anyone holding the file can recompute; it detects edits "
-    "only when compared with a chain head recorded somewhere else when the receipt was rendered, and it "
-    "says nothing about whether the ledger was complete or its rows genuine. Sealed mode does not apply "
-    "when Hermes runs in safe-worker mode, which loads no plugins. Timestamps come from this machine's "
-    "clock and are not attested."
+    "enclave's long-lived keys, not a per-session key. Each verification row says which checks its "
+    "evidence replays under: the vendor SDK at a stated version, and the plugin's restated policy check, "
+    "identified by the SHA-256 of confidential_mode/verify/policy_check.py, or n/a. Sends were gated by "
+    "the vendor SDK only; the restated check never decided whether a request was sent. The enclave host "
+    "and capture time inside the evidence are asserted by whoever captured it. A row marked \"unverified "
+    "entry\" (no evidence, or an incomplete capture) shows nothing. RECORD ONLY, not proven by anything in "
+    "this receipt: that the plugin itself checked that evidence during this session; that this session's "
+    "requests actually went to that enclave; that request bodies were encrypted to that key; the HPKE key "
+    "each send recorded and whether its response decrypted (the plugin's own observations); that the "
+    "attested build was the vendor's latest release at the time; whether the build or its key was revoked "
+    "after the evidence was captured; what shell, terminal and code-execution tools sent off the machine "
+    "(they run locally and can reach the network); which model backends sit behind the vendor's router; "
+    "any other access the vendor's operators have to the machines involved; and Hermes' auxiliary calls "
+    "(title generation, compaction, memory prefetch, vision, and plugin auxiliary tasks), which can leave "
+    "the sealed tier while sealed, for example after a runtime model or provider switch, and are recorded "
+    "here after the fact, not prevented. The ledger is a local file and is not protected against code "
+    "running in the same Hermes process: another plugin can write rows that look exactly like this "
+    "plugin's own. The hash chain is a checksum over this document that anyone holding the file can "
+    "recompute; it detects edits only when compared with a chain head recorded somewhere else when the "
+    "receipt was rendered, and it says nothing about whether the ledger was complete or its rows genuine. "
+    "Sealed mode does not apply when Hermes runs in safe-worker mode, which loads no plugins. Timestamps "
+    "come from this machine's clock and are not attested."
 )
 
 SELF_REPORT_NOTE = ("This receipt is a self-report by the plugin from its local ledger. Only the attached evidence "
                     "blobs (JSON form) can be checked by a third party, by replaying them offline.")
 CHAIN_HEAD_NOTE = ("Record this chain head somewhere other than this machine now; later edits to this receipt are "
                    "detectable only against a copy kept elsewhere.")
+GATING_NOTE = "sends were gated by the vendor SDK only"
+ASSERTED = "asserted by capturer"
+POLICY_CHECK_PATH = Path(__file__).resolve().parent / "verify" / "policy_check.py"
 DEFAULT_TTL_SECONDS = 300.0   # provider.DEFAULT_TTL_SECONDS; the ledger does not record the TTL in force
 
 
@@ -359,6 +368,57 @@ def verify_facts(row: Mapping) -> dict:
     }
 
 
+def policy_checker_id(path: Path | None = None) -> str:
+    """``sha256:<hex>`` of the restated policy checker file, computed now; "n/a" when it does not exist."""
+    try:
+        return "sha256:" + hashlib.sha256(Path(path or POLICY_CHECK_PATH).read_bytes()).hexdigest()
+    except OSError:
+        return "n/a"
+
+
+def _check_result(value: Any) -> str | None:
+    """pass / fail from the shapes a check result may be recorded in; None when absent or unreadable."""
+    if isinstance(value, bool):
+        return "pass" if value else "fail"
+    if isinstance(value, str) and value.strip().lower() in ("pass", "fail", "ok", "failed"):
+        return "pass" if value.strip().lower() in ("pass", "ok") else "fail"
+    if isinstance(value, Mapping):
+        for key in ("ok", "passed", "result", "verdict", "status"):
+            if key in value:
+                return _check_result(value[key])
+    return None
+
+
+def replay_status(row: Mapping, checker_id: str) -> dict:
+    """What a verify row's evidence replays under (plan review finding 7). The vendor SDK result is the
+    live result the row records (verify_ok pass, verify_fail fail) unless the row records a replay result;
+    the restated policy check is n/a unless the checker file exists AND the row records its result."""
+    d = row.get("detail") if isinstance(row.get("detail"), Mapping) else {}
+    ev = d.get("evidence") if isinstance(d.get("evidence"), Mapping) else {}
+    f = verify_facts(row)
+    if is_unverified_entry(row):
+        sdk = "n/a"
+    else:
+        sdk = _check_result(d.get("sdk_replay")) or ("pass" if row.get("kind") == "verify_ok" else "fail")
+    policy = None
+    if checker_id != "n/a":
+        policy = _check_result(d.get("policy_check")) or _check_result(ev.get("policy_check"))
+    return {
+        "row": row["id"],
+        "vendor_sdk": {"version": f["sdk_version"], "result": sdk},
+        "restated_policy_check": {"checker": checker_id, "result": policy or "n/a"},
+        "gating": GATING_NOTE,
+        "enclave_host": {"value": f["enclave_host"], "asserted_by": "capturer"},
+        "captured_at": {"value": f["captured_at"], "asserted_by": "capturer"},
+    }
+
+
+def replay_status_text(st: Mapping) -> str:
+    sdk, pol = st["vendor_sdk"], st["restated_policy_check"]
+    return (f"evidence replays under: vendor SDK {_p(sdk['version']) or '(version unknown)'} [{sdk['result']}]; "
+            f"restated policy check ({_p(pol['checker'])}) [{pol['result']}]; {GATING_NOTE}")
+
+
 def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> list[dict]:
     """For every attested send: the latest verify_ok before it (same enclave host when both are known)
     and whether the send fell inside that row's TTL window. Wall-clock ledger times; the gate's own TTL
@@ -376,6 +436,12 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
         v = cands[-1] if cands else None
         entry = {"send": r["id"], "verify": None, "ttl_seconds": ttl_seconds, "ttl_source": ttl_source,
                  "window_start": None, "window_end": None, "covered": False, "verify_unverified_entry": None}
+        # W2's per-send observations, when present (plan item 4); absent fields stay absent.
+        d = r["detail"] if isinstance(r["detail"], Mapping) else {}
+        if "hpke_key_used" in d:
+            entry["hpke_key_used"] = d.get("hpke_key_used")
+        if "response_decrypted" in d:
+            entry["response_decrypted"] = d.get("response_decrypted")
         if v is not None:
             row_ttl = v["detail"].get("ttl_seconds")
             from_row = isinstance(row_ttl, (int, float)) and not isinstance(row_ttl, bool)
@@ -384,6 +450,11 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
                          window_start=v["ts"], window_end=v["ts"] + ttl,
                          covered=bool(v["ts"] <= r["ts"] <= v["ts"] + ttl),
                          verify_unverified_entry=is_unverified_entry(v))
+        if "hpke_key_used" in entry:
+            h = verify_facts(v)["hpke_public_key"] if v is not None else None
+            entry["verify_hpke_public_key"] = h
+            entry["hpke_matches"] = None if (h is None or entry["hpke_key_used"] in (None, "")) \
+                else str(entry["hpke_key_used"]).lower() == str(h).lower()
         out.append(entry)
     return out
 
@@ -397,6 +468,7 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Ite
     seal = _seal_info(rows)
     ttl_source = "config" if ttl_seconds is not None else "default (the ledger does not record the TTL)"
     ttl = float(ttl_seconds) if ttl_seconds is not None else DEFAULT_TTL_SECONDS
+    checker_id = policy_checker_id()
     sdk_versions = sorted({f for r in rows if r["kind"] in ("verify_ok", "verify_fail")
                            if (f := verify_facts(r)["sdk_version"])})
     trust = _trust_roots(seal, rows, pins, local_hosts)
@@ -420,6 +492,9 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Ite
             "sdk_versions": sdk_versions,
             "verify_ttl_seconds": ttl,
             "verify_ttl_source": ttl_source,
+            "policy_checker": checker_id,
+            "gating": GATING_NOTE,
+            "hpke_mismatches": [],
             "sealed_tier": seal["tier"],
             "sealed_period": {"since": seal["since"], "until": seal["until"], "source": seal["source"]},
             "sealed_periods": seal["periods"],
@@ -433,11 +508,15 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, local_hosts: Ite
             "trust_roots_sha256": hashlib.sha256(canonical_json(trust).encode("utf-8")).hexdigest(),
         },
         "trust_roots": trust,
-        "sections": {**_sections(rows), "send_coverage": _send_coverage(rows, ttl, ttl_source)},
+        "sections": {**_sections(rows), "send_coverage": _send_coverage(rows, ttl, ttl_source),
+                     "replay_status": [replay_status(r, checker_id) for r in rows
+                                       if r["kind"] in ("verify_ok", "verify_fail")]},
         "rows": rows,
         "evidence": evidence,
         "closing": CLOSING_PARAGRAPH,
     }
+    doc["header"]["hpke_mismatches"] = [c["send"] for c in doc["sections"]["send_coverage"]
+                                        if c.get("hpke_matches") is False]
     leaks = forbidden_keys_in(doc)
     if leaks:  # unreachable after _redact; kept as the last line of defence
         raise ReceiptError(f"content-shaped keys in receipt: {', '.join(leaks[:5])}")
@@ -519,7 +598,7 @@ def _send_body(r: Mapping) -> str:
             f"{_p(r['provider']) or '?'}/{_p(r['model']) or '?'}  {_p(r['decision']) or ''}").rstrip()
 
 
-def _verify_body(r: Mapping) -> str:
+def _verify_body(r: Mapping, status: Mapping | None = None) -> str:
     d = r["detail"]
     k = r["kind"]
     full = lambda v: _p(v) or "?"  # noqa: E731
@@ -527,7 +606,7 @@ def _verify_body(r: Mapping) -> str:
         f = verify_facts(r)
         bits = ["UNVERIFIED ENTRY (no evidence or incomplete capture; proves nothing)"] if is_unverified_entry(r) else []
         bits += [k, f"vendor={_p(d.get('vendor') or r['provider']) or '?'}", f"repo={full(f['repo'])}",
-                 f"platform={full(f['platform'])}", f"enclave={full(f['enclave_host'])}"]
+                 f"platform={full(f['platform'])}", f"enclave={full(f['enclave_host'])} ({ASSERTED})"]
         if f["code_fingerprint"]:
             bits.append(f"code={full(f['code_fingerprint'])}")
         if f["enclave_fingerprint"]:
@@ -539,9 +618,11 @@ def _verify_body(r: Mapping) -> str:
         if f["hpke_public_key"]:
             bits.append(f"hpke_key={full(f['hpke_public_key'])}")
         if f["captured_at"]:
-            bits.append(f"capture claims {full(f['captured_at'])}")
+            bits.append(f"captured_at={full(f['captured_at'])} ({ASSERTED})")
         if k == "verify_fail":
             bits.append(f"reason: {_p(d.get('error') or d.get('reason')) or '(none)'}")
+        if status is not None:
+            bits.append(replay_status_text(status))
         if isinstance(d.get("evidence"), Mapping):
             blob = canonical_json(d["evidence"]).encode("utf-8")
             bits.append(f"evidence attached ({len(blob)} bytes, sha256 {hashlib.sha256(blob).hexdigest()[:16]})")
@@ -560,6 +641,23 @@ def _verify_body(r: Mapping) -> str:
     return "  ".join(bits)
 
 
+def _hpke_text(c: Mapping) -> str:
+    out = ""
+    if "hpke_key_used" in c:
+        used = _p(c["hpke_key_used"]) or "(none recorded)"
+        if c.get("hpke_matches") is True:
+            out += f"  hpke_key_used={used} (matches H of verify #{c['verify']})"
+        elif c.get("hpke_matches") is False:
+            out += (f"  hpke_key_used={used} HPKE KEY MISMATCH: verify #{c['verify']} H="
+                    f"{_p(c.get('verify_hpke_public_key'))}")
+        else:
+            out += f"  hpke_key_used={used} (no H to compare)"
+    if "response_decrypted" in c:
+        rd = c["response_decrypted"]
+        out += f"  response_decrypted={'yes' if rd is True else 'no' if rd is False else _p(rd) or '?'}"
+    return out
+
+
 def render_text(doc: Mapping) -> str:
     h = doc["header"]
     sid = h["session_id"]
@@ -575,6 +673,9 @@ def render_text(doc: Mapping) -> str:
     add(SELF_REPORT_NOTE)
     add(f"Plugin: {_p(h['plugin_version'])} (commit {_p(h['plugin_commit'])})  verifier SDK: "
         f"{', '.join(_p(v) for v in h['sdk_versions']) or '(no verification in this receipt)'}")
+    add(f"Restated policy checker: {_p(h['policy_checker'])}; {GATING_NOTE}.")
+    if h.get("hpke_mismatches"):
+        add("HPKE KEY MISMATCH on sends: " + ", ".join(f"#{i}" for i in h["hpke_mismatches"]))
     add(f"Sealed tier: {_p(h['sealed_tier']) or '(not sealed / unknown)'}  (from {period['source']})")
     if period["since"] is not None:
         for p in h["sealed_periods"]:
@@ -632,7 +733,8 @@ def render_text(doc: Mapping) -> str:
         for i in ids:
             add(_line(rows[i], sid, body(rows[i])))
 
-    section("Verification events", sec["verification"], _verify_body)
+    statuses = {st["row"]: st for st in sec.get("replay_status", [])}
+    section("Verification events", sec["verification"], lambda r: _verify_body(r, statuses.get(r["id"])))
     coverage = {c["send"]: c for c in sec.get("send_coverage", [])}
 
     def send_line(r: Mapping) -> str:
@@ -641,11 +743,13 @@ def render_text(doc: Mapping) -> str:
         if c is None:
             return body
         if c["verify"] is None:
-            return body + f"  NOT covered: no verify_ok row before this send (TTL {c['ttl_seconds']:g} s)"
+            return (body + f"  NOT covered: no verify_ok row before this send (TTL {c['ttl_seconds']:g} s)"
+                    + _hpke_text(c))
         state = "covered by" if c["covered"] else "NOT covered: outside the TTL window of"
         flag = " (an unverified entry)" if c["verify_unverified_entry"] else ""
-        return (body + f"  {state} verify #{c['verify']}{flag}, TTL {c['ttl_seconds']:g} s ({c['ttl_source']}), "
+        line = (body + f"  {state} verify #{c['verify']}{flag}, TTL {c['ttl_seconds']:g} s ({c['ttl_source']}), "
                 f"window {ts_text(c['window_start'])} to {ts_text(c['window_end'])}")
+        return line + _hpke_text(c)
 
     section("Sends (purpose, host, bytes; never text)", sec["sends"], send_line)
     section("Refusals", sec["refusals"],
