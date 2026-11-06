@@ -26,7 +26,8 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Optional
 
 from .gate_tools import Route
 
@@ -89,21 +90,119 @@ def _short(fp: Any) -> str:
     return s[:16] if s else "(none)"
 
 
-def pin_question(pending: Any) -> str:
+UNKNOWN = "unknown"
+Observer = Callable[[Any], Optional[str]]
+
+
+def _value(pending: Any, name: str) -> Any:
+    """A PendingPin field, or W2's helper of that name (property or zero-arg method); None if absent."""
     result = _field(pending, "result", None)
-
-    def get(name: str) -> Any:
+    try:
         v = _field(pending, name, None)
-        return v if v is not None or result is None else _field(result, name, None)
+        if v is None and result is not None:
+            v = _field(result, name, None)
+        if callable(v):
+            v = v()
+    except Exception:
+        return None
+    return v
 
-    return (
-        "Approve confidential pin update?\n"
-        f"Vendor: {get('vendor') or '?'}\n"
-        f"Release: {get('release_tag') or '(untagged)'} ({get('router_repo') or '?'})\n"
-        f"Old fingerprint: {_short(get('previous'))}\n"
-        f"New code fingerprint: {_short(get('code_fingerprint'))}\n"
-        f"New enclave fingerprint: {_short(get('enclave_fingerprint'))}"
-    )
+
+def _text(v: Any) -> str:
+    return UNKNOWN if v in (None, "") else str(v)
+
+
+def _published_epoch(v: Any) -> Optional[float]:
+    if v in (None, ""):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, datetime):
+        return (v if v.tzinfo else v.replace(tzinfo=timezone.utc)).timestamp()
+    try:
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+    except ValueError:
+        return None
+
+
+def _age(published: Any, now: float) -> str:
+    ts = _published_epoch(published)
+    if ts is None:
+        return "release age: unknown (no published timestamp)"
+    hours = (now - ts) / 3600
+    if hours < 0:
+        return "release age: published timestamp is in the future (check the clock)"
+    if hours < 48:
+        n = int(hours)
+        return f"released {n} hour{'s' if n != 1 else ''} ago"
+    n = int(hours // 24)
+    return f"released {n} days ago"
+
+
+def _release_urls(pending: Any) -> tuple[str, str]:
+    repo, tag = _value(pending, "router_repo"), _value(pending, "release_tag")
+    prev_tag = _value(pending, "previous_release_tag")
+    url, compare = _value(pending, "release_url"), _value(pending, "compare_url")
+    if not url and repo and tag:
+        url = f"https://github.com/{repo}/releases/tag/{tag}"
+    if not compare and repo and tag and prev_tag:
+        compare = f"https://github.com/{repo}/compare/{prev_tag}...{tag}"
+    return _text(url), _text(compare)
+
+
+def _change_line(pending: Any) -> str:
+    previous = _value(pending, "previous")
+    if previous in (None, ""):
+        return "TRUST ON FIRST USE: no prior pin to compare against"
+    changed = _value(pending, "code_changed")
+    if not isinstance(changed, bool):
+        changed = str(previous) != str(_value(pending, "code_fingerprint") or "")
+    if changed:
+        return "CODE CHANGED"
+    return (f"code unchanged; platform changed from {_text(_value(pending, 'previous_platform'))} "
+            f"to {_text(_value(pending, 'platform'))}")
+
+
+def _observations(pending: Any, observers: Optional[list]) -> list[str]:
+    if not observers:
+        return ["independent observations: none configured"]
+    lines = []
+    for obs in observers:
+        try:
+            line = obs(pending)
+        except Exception as exc:  # an observer must never stop the human from deciding
+            line = f"observer {getattr(obs, '__name__', 'observer')} failed ({type(exc).__name__})"
+        if isinstance(line, str) and line.strip():
+            lines.append("independent observation: " + " ".join(line.split()))
+    return lines or [f"independent observations: none reported ({len(observers)} configured)"]
+
+
+def pin_question(pending: Any, *, observers: Optional[list] = None, now: Optional[float] = None) -> str:
+    """The text a human judges before trusting an enclave build (Miller-frame review, "Pin prompt").
+    Every field falls back to "unknown" so the prompt works with older PendingPin shapes."""
+    now = time.time() if now is None else now
+    url, compare = _release_urls(pending)
+    rekor = _value(pending, "rekor_log_index")
+    lines = [
+        "Approve confidential pin update?",
+        _change_line(pending),
+        f"Vendor: {_text(_value(pending, 'vendor'))}",
+        f"Release: {_text(_value(pending, 'release_tag'))} ({_text(_value(pending, 'router_repo'))})",
+        f"Release URL: {url}",
+        f"Compare: {compare}",
+        f"Rekor log index: {_text(rekor)}",
+        _age(_value(pending, "release_published_at"), now),
+        f"Enclave host: {_text(_value(pending, 'enclave_host'))}",
+        f"Platform: old {_text(_value(pending, 'previous_platform'))}, new {_text(_value(pending, 'platform'))}",
+        f"Code fingerprint old: {_text(_value(pending, 'previous'))}",
+        f"Code fingerprint new: {_text(_value(pending, 'code_fingerprint'))}",
+        f"Enclave fingerprint old: {_text(_value(pending, 'previous_enclave_fingerprint'))}",
+        f"Enclave fingerprint new: {_text(_value(pending, 'enclave_fingerprint'))}",
+        *_observations(pending, observers),
+        "Approving means trusting this build until it changes again.",
+    ]
+    return "\n".join(lines)
 
 
 def _event(kind: str, *, session_id: str, platform: str, decision: str, detail: dict,
@@ -116,7 +215,7 @@ def _event(kind: str, *, session_id: str, platform: str, decision: str, detail: 
 
 
 def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, session_id: str,
-                        platform: str) -> str:
+                        platform: str, observers: Optional[list] = None) -> str:
     """Ask the human to approve the staged pin; apply it only on an explicit Approve and only if the
     pending pin is still the one the human saw. Returns the user-facing reply."""
     _refuse_on_event_loop("approve_pending_pin")
@@ -128,7 +227,7 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
             "code_fingerprint": str(_field(pending, "code_fingerprint", "") or ""),
             "enclave_fingerprint": str(_field(pending, "enclave_fingerprint", "") or "")}
 
-    raw, error = _ask(ctx, pin_question(pending), PIN_CHOICES)
+    raw, error = _ask(ctx, pin_question(pending, observers=observers), PIN_CHOICES)
     detail = {**base, "raw_pick": raw}
     if error:
         detail["error"] = error
