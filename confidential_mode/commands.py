@@ -441,19 +441,48 @@ class TerminalAsker:
         return None
 
 
-def config_block(rt: Any, model: str) -> str:
+# Default Tinfoil models for the printed config block (setup never writes config).
+DEFAULT_VISION_MODEL = "gemma4-31b"          # vision-capable; the main chat models are text-only
+DEFAULT_AUX_MODEL = "deepseek-v4-1-flash"    # cheaper model for short side jobs
+#: Short auxiliary jobs that do not need the main model (titles, summaries, classification, rewrites).
+CHEAP_AUX_TASKS = ("title_generation", "compression", "approval", "mcp", "memory_query_rewrite",
+                   "tts_audio_tags", "group_router", "profile_describer", "monitor", "triage_specifier")
+_GROUP_COMMENTS = {
+    "vision": "# vision: a vision-capable model; Hermes describes inbound images through this task even "
+              "without a tool call, and the main model is text-only",
+    "cheap": "# short side jobs (titles, compression, approval checks, MCP helpers, query rewrites): a cheaper "
+             "attested model is enough",
+    "main": "# tasks that reason over the whole conversation or act for you: the main model",
+}
+
+
+def config_block(rt: Any, model: str, *, vision_model: str = DEFAULT_VISION_MODEL,
+                 aux_model: str = DEFAULT_AUX_MODEL, enclave: Optional[str] = None) -> str:
     try:
         tasks = list(dict.fromkeys(_pf.builtin_aux_task_names()
                                    + [e if isinstance(e, str) else e.get("key") for e in _sealing._plugin_aux(None)]))
     except Exception:  # noqa: BLE001
         tasks = list(_pf.BUILTIN_AUX_TASKS_SNAPSHOT)
+    tasks = [t for t in tasks if t and not t.startswith("moa")]   # moa is refused while sealed
+    groups = {"vision": [t for t in tasks if t == "vision"],
+              "cheap": [t for t in tasks if t in CHEAP_AUX_TASKS],
+              "main": [t for t in tasks if t != "vision" and t not in CHEAP_AUX_TASKS]}
+    models = {"vision": vision_model, "cheap": aux_model, "main": model}
     lines = ["# Add to config.yaml (review first; setup never writes your config):",
              "model:", f"  provider: {PROFILE_NAME}", f"  default: {model}",
              "fallback_providers: []", "auxiliary:"]
-    for task in tasks:
-        if task and not task.startswith("moa"):
-            lines += [f"  {task}:", f"    provider: {PROFILE_NAME}", f"    model: {model}"]
+    for group in ("vision", "cheap", "main"):
+        if not groups[group]:
+            continue
+        lines.append("  " + _GROUP_COMMENTS[group])
+        for task in groups[group]:
+            lines += [f"  {task}:", f"    provider: {PROFILE_NAME}", f"    model: {models[group]}"]
     lines += ["memory:", '  provider: ""', "voice:", "  auto_tts: false"]
+    if enclave:
+        lines += ["confidential:", "  tinfoil:",
+                  "    # the router this setup verified and pinned; without it each restart may pick another",
+                  "    # router (possibly another hardware platform) and refuse until you re-approve the pin",
+                  f"    enclave: {enclave}"]
     return "\n".join(lines)
 
 
@@ -489,7 +518,14 @@ def cli_setup(rt: Any, args: Any, out=None) -> int:
             from .consent import approve_pending_pin
             out.write(approve_pending_pin(TerminalAsker(), rt.pins, rt.ledger, session_key="cli-setup",
                                           session_id="", platform="cli-setup") + "\n")
-    out.write(config_block(rt, model) + "\n")
+    enclave = None
+    if not getattr(args, "no_verify", False):
+        try:
+            enclave = rt.adapter.enclave_host or None
+        except Exception:  # noqa: BLE001
+            enclave = None
+    out.write(config_block(rt, model, vision_model=getattr(args, "vision_model", None) or DEFAULT_VISION_MODEL,
+                           aux_model=getattr(args, "aux_model", None) or DEFAULT_AUX_MODEL, enclave=enclave) + "\n")
     out.write("Then run `hermes confidential check --tier attested` and `/confidential on attested`.\n")
     return 0
 
@@ -729,6 +765,10 @@ def register_cli(ctx: Any, rt: Any) -> None:
         sub = parser.add_subparsers(dest="confidential_action")
         p = sub.add_parser("setup", help="verify the Tinfoil enclave, approve the first pin, print a config block")
         p.add_argument("--model", default=None, help="model id to put in the printed config block")
+        p.add_argument("--vision-model", default=None,
+                       help=f"vision-capable model for auxiliary.vision (default {DEFAULT_VISION_MODEL})")
+        p.add_argument("--aux-model", default=None,
+                       help=f"cheaper model for short auxiliary jobs (default {DEFAULT_AUX_MODEL})")
         p.add_argument("--no-verify", action="store_true", help="only print the config block")
         p = sub.add_parser("check", help="run the seal preflight and print the table")
         p.add_argument("--tier", default=None, choices=[t.value for t in Tier])
