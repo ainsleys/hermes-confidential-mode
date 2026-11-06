@@ -11,7 +11,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +29,14 @@ DEFAULT_TTL_SECONDS = 300.0
 # for this long (Hermes calls create_client ~4 times before the first turn).
 DEFAULT_FAILURE_BACKOFF_SECONDS = 10.0
 
+# create_client / attested_ok wait at most this long for an attestation, then refuse while it continues
+# in the background (Amendment 4: bounded, < 10 s).
+DEFAULT_VERIFY_WAIT_SECONDS = 5.0
+# Context window reported to Hermes without probing the endpoint (confidential.tinfoil.context_length).
+DEFAULT_CONTEXT_LENGTH = 65536
+
+REASON_VERIFY_PENDING = "attestation still in progress; this turn ended; resend"
+REASON_BAD_RESULT = "attestation returned no usable fingerprints"
 REASON_NOT_REGISTERED = "attested provider is not registered"
 REASON_PIN_MISMATCH = "enclave build changed; run /confidential pins approve"
 REASON_NO_PIN = "no approved enclave build pinned; run /confidential pins approve"
@@ -47,23 +55,28 @@ class _Entry:
     lock: Any = None
     profile: Any = None   # the registered ProviderProfile; its base_url follows the adapter's resolved host
     on_event: Callable[[dict], None] | None = None  # ledger sink (plain dicts, ledger.py column names)
+    verify_wait_seconds: float = 5.0
+    verify_lock: Any = field(default_factory=threading.Lock)
+    inflight: threading.Event | None = None
 
 
 class VerificationCache:
     """In-process verification cache keyed by provider name (not stored in ctx.state)."""
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic):
+    def __init__(self, clock: Callable[[], float] | None = None):
         self._entries: dict[str, _Entry] = {}
         self._clock = clock
         self._lock = threading.Lock()
 
     def register(self, provider: str, adapter, pins: PinStore, ttl_seconds: float,
                  failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS, *,
-                 on_event: Callable[[dict], None] | None = None) -> None:
+                 on_event: Callable[[dict], None] | None = None,
+                 verify_wait_seconds: float = DEFAULT_VERIFY_WAIT_SECONDS) -> None:
         with self._lock:
             self._entries[provider] = _Entry(adapter=adapter, pins=pins, ttl_seconds=float(ttl_seconds),
                                              failure_backoff_seconds=float(failure_backoff_seconds),
-                                             lock=threading.RLock(), on_event=on_event)
+                                             lock=threading.RLock(), on_event=on_event,
+                                             verify_wait_seconds=float(verify_wait_seconds))
 
     def unregister(self, provider: str) -> None:
         with self._lock:
@@ -86,7 +99,7 @@ class VerificationCache:
 
     def fresh(self, provider: str) -> bool:
         e = self._entries.get(provider)
-        return bool(e and e.result is not None and self._clock() - e.verified_mono < e.ttl_seconds)
+        return bool(e and e.result is not None and self._now() - e.verified_mono < e.ttl_seconds)
 
     def invalidate(self, provider: str) -> None:
         e = self._entries.get(provider)
@@ -94,12 +107,16 @@ class VerificationCache:
             with e.lock:
                 e.result, e.failed_mono = None, None
 
+    def _now(self) -> float:
+        # Looked up at call time (module ``time``), never the wall clock or verified_at_local.
+        return self._clock() if self._clock is not None else time.monotonic()
+
     def refresh(self, provider: str) -> VerificationResult:
-        """Re-attest now. Raises VerifyError (and clears the cached result) on failure."""
+        """Re-attest now, blocking. Raises VerifyError (and clears the cached result) on failure."""
         e = self._entries.get(provider)
         if e is None:
             raise VerifyError(REASON_NOT_REGISTERED)
-        with e.lock:
+        with e.verify_lock:  # serialises attestations; the state lock is NOT held during verify()
             try:
                 try:
                     result = e.adapter.verify()  # resolves the enclave host on first use (may hit network)
@@ -108,15 +125,17 @@ class VerificationCache:
                 if not isinstance(result, VerificationResult):
                     raise VerifyError(f"adapter returned {type(result).__name__}, not VerificationResult")
             except Exception as exc:
-                e.result, e.failed_mono = None, self._clock()
-                e.last_error = str(exc) if isinstance(exc, VerifyError) else f"{type(exc).__name__}: {exc}"
+                with e.lock:
+                    e.result, e.failed_mono = None, self._now()
+                    e.last_error = str(exc) if isinstance(exc, VerifyError) else f"{type(exc).__name__}: {exc}"
                 _emit(e, {"kind": "verify_fail", "provider": provider, "purpose": "verify",
                           "host": _adapter_host(e.adapter),
                           "detail": {"vendor": getattr(e.adapter, "vendor", ""),
                                      "error_type": type(exc).__name__, "error": str(exc)[:300],
                                      "enclave_host": _adapter_host(e.adapter)}})
                 raise exc if isinstance(exc, VerifyError) else VerifyError(e.last_error) from exc
-            e.result, e.verified_mono, e.last_error, e.failed_mono = result, self._clock(), None, None
+            with e.lock:
+                e.result, e.verified_mono, e.last_error, e.failed_mono = result, self._now(), None, None
             _emit(e, {"kind": "verify_ok", "provider": provider, "purpose": "verify", "host": result.enclave_host,
                       "detail": {"vendor": result.vendor, "code_fingerprint": result.code_fingerprint,
                                  "enclave_fingerprint": result.enclave_fingerprint,
@@ -124,35 +143,69 @@ class VerificationCache:
                                  "verifier": result.verifier, "evidence": result.evidence}})
             return result
 
+    def _start_refresh(self, provider: str, e: _Entry) -> threading.Event:
+        """Start (or join) the one background attestation for this entry. Caller holds e.lock."""
+        if e.inflight is None:
+            done = threading.Event()
+            e.inflight = done
+
+            def run():
+                try:
+                    self.refresh(provider)
+                except Exception:
+                    pass
+                finally:
+                    with e.lock:
+                        e.inflight = None
+                    done.set()
+            threading.Thread(target=run, name=f"confidential-verify-{provider}", daemon=True).start()
+        return e.inflight
+
     def ensure(self, provider: str) -> tuple[bool, str, VerificationResult | None]:
         """(ok, reason, result). ok iff a fresh result exists and the pins match it. Re-attests once if
-        the cached result is stale or missing (subject to the failure backoff). Never raises."""
+        the cached result is stale or missing (subject to the failure backoff), waiting at most
+        ``verify_wait_seconds``; on timeout it refuses while the attestation continues in the
+        background (Amendment 4). Never raises."""
+        e = None
         try:
             e = self._entries.get(provider)
             if e is None:
                 return False, REASON_NOT_REGISTERED, None
             with e.lock:
-                if not self.fresh(provider):
-                    if e.failed_mono is not None and self._clock() - e.failed_mono < e.failure_backoff_seconds:
+                needs = not self.fresh(provider)
+                if needs:
+                    if e.failed_mono is not None and self._now() - e.failed_mono < e.failure_backoff_seconds:
                         _hold(e.adapter, _fail_reason(e.last_error))
                         return False, _fail_reason(e.last_error), None
-                    try:
-                        self.refresh(provider)
-                    except VerifyError:
-                        _hold(e.adapter, _fail_reason(e.last_error))
-                        return False, _fail_reason(e.last_error), None
+                    e.result = None  # stale results never vouch again (TTL is elapsed < ttl, monotonic)
+                    done = self._start_refresh(provider, e)
+            if needs and not done.wait(e.verify_wait_seconds):
+                _hold(e.adapter, REASON_VERIFY_PENDING)
+                return False, REASON_VERIFY_PENDING, None
+            with e.lock:
                 result = e.result
-                if result is None:
+                if result is None or not self.fresh(provider):
                     _hold(e.adapter, _fail_reason(e.last_error))
                     return False, _fail_reason(e.last_error), None
-                if e.pins.match(result):
+                if e.pins.match(result) is True:
                     _release(e.adapter)
                     return True, "attested enclave verified and pinned", result
-                had_pin = e.pins.get(result.vendor, result.router_repo) is not None
+                try:
+                    had_pin = e.pins.get(result.vendor, result.router_repo) is not None
+                except Exception:
+                    had_pin = False
                 reason = REASON_PIN_MISMATCH if had_pin else REASON_NO_PIN
                 _hold(e.adapter, reason)
-                before = e.pins.pending()
-                staged = e.pins.stage(result)
+                try:
+                    before = e.pins.pending()
+                except Exception:
+                    before = None
+                try:
+                    staged = e.pins.stage(result)
+                except Exception as exc:  # empty fingerprints, unreadable store: refuse, do not stage
+                    logger.warning("attested: not staging a pending pin: %s", exc)
+                    return False, (REASON_BAD_RESULT if not (result.code_fingerprint and result.enclave_fingerprint)
+                                   else reason), result
                 if staged != before:  # a new pending pin, not an idempotent re-stage
                     _emit(e, {"kind": "pin_staged", "provider": provider, "purpose": "verify",
                               "host": result.enclave_host,
@@ -164,10 +217,9 @@ class VerificationCache:
                                          "previous_enclave_fingerprint": staged.previous_enclave_fingerprint,
                                          "reason": reason}})
                 return False, reason, result
-        except Exception as exc:  # pins.yaml unreadable, etc.: fail closed
+        except Exception as exc:  # fail closed
             logger.warning("attested verification check failed: %s", exc, exc_info=True)
             reason = f"attested verification check failed: {type(exc).__name__}"
-            e = self._entries.get(provider)
             if e is not None:
                 _hold(e.adapter, reason)
             return False, reason, None
@@ -222,6 +274,10 @@ def _release(adapter) -> None:
 verification_cache = VerificationCache()
 
 
+def _reset_for_tests() -> None:
+    verification_cache.clear()
+
+
 def attested_ok(provider_name: str) -> Verdict:
     """ATTESTED-tier verdict for W1/W3: fresh verification (TTL handled here) and pins match."""
     entry = verification_cache.entry(provider_name)
@@ -245,7 +301,9 @@ def _profile_base():
 def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECONDS, *,
                  cache: VerificationCache | None = None,
                  failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS,
-                 on_event: Callable[[dict], None] | None = None, ledger=None):
+                 on_event: Callable[[dict], None] | None = None, ledger=None,
+                 context_length: int = DEFAULT_CONTEXT_LENGTH,
+                 verify_wait_seconds: float = DEFAULT_VERIFY_WAIT_SECONDS):
     """Build the 'attested-tinfoil' ProviderProfile and register its cache entry. Never touches the
     network: base_url is the configured enclave URL, or the adapter's .invalid placeholder until the
     first verify() resolves the host by router discovery (then it is updated in place)."""
@@ -256,6 +314,12 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
         def create_client(self, **client_kwargs: Any):
             return _create_client(self, cache, client_kwargs)
 
+        def get_model_context_length(self, model: str) -> int | None:
+            # Returning an int pre-empts Hermes' context-window probes (GET {base_url}/models, POST
+            # /api/show with plain httpx and the API key at agent build), which would otherwise reach the
+            # enclave host off the attested transport (Amendment 4, T2).
+            return int(self._confidential_context_length)
+
     profile = AttestedTinfoilProfile(
         name=PROFILE_NAME,
         display_name="Tinfoil (attested)",
@@ -265,10 +329,12 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
         auth_type="api_key",
     )
     profile._confidential_adapter = adapter
+    profile._confidential_context_length = int(context_length)
     profile._confidential_pins = pins
     if on_event is None and ledger is not None:
         on_event = ledger.append
-    cache.register(PROFILE_NAME, adapter, pins, ttl_seconds, failure_backoff_seconds, on_event=on_event)
+    cache.register(PROFILE_NAME, adapter, pins, ttl_seconds, failure_backoff_seconds, on_event=on_event,
+                   verify_wait_seconds=verify_wait_seconds)
     cache.entry(PROFILE_NAME).profile = profile
     return profile
 
@@ -334,6 +400,11 @@ def register_provider_profile(ctx, *, config: dict | None = None, data_dir: Path
     if pins is None:
         pins = PinStore(data_dir / "pins.yaml")
     ttl = float(_cfg_get(config, "confidential", "verify_ttl_seconds", default=DEFAULT_TTL_SECONDS))
-    profile = make_profile(adapter, pins, ttl, on_event=on_event, ledger=ledger)
+    profile = make_profile(
+        adapter, pins, ttl, on_event=on_event, ledger=ledger,
+        context_length=int(_cfg_get(config, "confidential", "tinfoil", "context_length",
+                                    default=DEFAULT_CONTEXT_LENGTH)),
+        verify_wait_seconds=float(_cfg_get(config, "confidential", "verify_wait_seconds",
+                                           default=DEFAULT_VERIFY_WAIT_SECONDS)))
     providers.register_provider(profile)
     return profile

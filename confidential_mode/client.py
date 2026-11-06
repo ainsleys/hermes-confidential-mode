@@ -35,7 +35,8 @@ class ConfidentialRefused(Exception):
 
 
 def _caller_is_coroutine(frame) -> bool:
-    return bool(frame is not None and frame.f_code.co_flags & inspect.CO_COROUTINE)
+    # ``async def`` frames: coroutines and async generators (an ``async def ... yield`` awaiting create).
+    return bool(frame is not None and frame.f_code.co_flags & (inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR))
 
 
 def openai_kwargs_from(client_kwargs: dict) -> dict:

@@ -41,6 +41,10 @@ SCHEMA_VERSION = 2
 DEFAULT_APPROVAL_RULE_KEY = "confidential-mode:pin"
 
 
+def _nonempty(v) -> bool:
+    return isinstance(v, str) and v.strip() != ""
+
+
 class PinStoreError(Exception):
     """pins.yaml is unreadable or of an unknown version. Callers fail closed."""
 
@@ -128,7 +132,10 @@ class PinStore:
                 raise PinStoreError(f"{self.path}: expected version {SCHEMA_VERSION}, "
                                     f"got {data.get('version') if isinstance(data, dict) else type(data).__name__}")
             pins: dict[tuple[str, str], PinRecord] = {}
-            for entry in data.get("pins") or []:
+            raw_pins = data.get("pins") or []
+            if not isinstance(raw_pins, list):
+                raise PinStoreError(f"{self.path}: 'pins' is not a list")
+            for entry in raw_pins:
                 rec = _record_from_dict(PinRecord, entry)
                 pins[rec.key] = rec
             pending_raw = data.get("pending")
@@ -177,9 +184,18 @@ class PinStore:
         return self.load()[0].get((vendor, router_repo))
 
     def match(self, result: VerificationResult) -> bool:
-        pin = self.get(result.vendor, result.router_repo)
-        return (pin is not None and pin.code_fingerprint == result.code_fingerprint
-                and pin.enclave_fingerprint == result.enclave_fingerprint)
+        """Exactly True only for an intact v2 file whose pin for (vendor, router_repo) has both
+        fingerprints non-empty and equal to the result's. Never raises: an unreadable, corrupt,
+        truncated or unknown-version file matches nothing (Amendment 4)."""
+        try:
+            code, enclave = result.code_fingerprint, result.enclave_fingerprint
+            if not (_nonempty(code) and _nonempty(enclave)):
+                return False
+            pin = self.get(result.vendor, result.router_repo)
+            return bool(pin is not None and _nonempty(pin.code_fingerprint) and _nonempty(pin.enclave_fingerprint)
+                        and pin.code_fingerprint == code and pin.enclave_fingerprint == enclave)
+        except Exception:
+            return False
 
     def pending(self) -> PendingPin | None:
         return self.load()[1]
@@ -190,6 +206,8 @@ class PinStore:
         build (fingerprints, release tag, host): re-staging returns the existing PendingPin unchanged, so a
         consent prompt's equality re-check survives repeat stages. Anything else, including the same
         fingerprints under a different release tag, is a new PendingPin (a swap, Amendment 3)."""
+        if not (_nonempty(result.code_fingerprint) and _nonempty(result.enclave_fingerprint)):
+            raise PinStoreError("refusing to stage a result with an empty code or enclave fingerprint")
         with self._lock:
             pins, pending = self.load()
             if (pending is not None and pending.key == (result.vendor, result.router_repo)
@@ -219,6 +237,8 @@ class PinStore:
         with self._lock:
             if not approved_via:
                 raise ValueError("approved_via (the approval surface) is required")
+            if not (_nonempty(pending.code_fingerprint) and _nonempty(pending.enclave_fingerprint)):
+                raise PinStoreError("refusing to apply a pending pin with an empty fingerprint")
             pins, stored = self.load()
             last = self._last_applied()
             if stored is None and last is not None and last[0] == pending and pending.key in pins:
