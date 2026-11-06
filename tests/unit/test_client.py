@@ -470,7 +470,7 @@ def _ehbp_like(handler_label, rec, *, nonce=True, fail=False, der=None):
         if der is not None:
             class _S:
                 def get_extra_info(self, n):
-                    return type("X", (), {"getpeercert": lambda self, binary_form=False: der})() \
+                    return type("X", (), {"getpeercert": lambda self, binary_form=False, /: der})() \
                         if n == "ssl_object" else None
             ext["network_stream"] = _S()
 

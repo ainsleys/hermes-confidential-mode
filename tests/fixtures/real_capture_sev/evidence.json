@@ -1,8 +1,8 @@
 {
  "schema": "confidential-mode/tinfoil-evidence/v1",
  "vendor": "tinfoil",
- "captured_at": "2026-11-06T14:30:20.848979Z",
- "captured_at_unix": 1793975420.92975,
+ "captured_at": "2026-11-06T15:10:41.830567Z",
+ "captured_at_unix": 1793977841.862711,
  "sdk_version": "0.14.2",
  "repo": "tinfoilsh/confidential-model-router",
  "enclave_host": "router-0.tinfoil.sh",
@@ -26,9 +26,21 @@
  "hardware_measurements": null,
  "trusted_root": {
   "sha256": "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
-  "path": "/private/tmp/claude-501/-Users-ainsleys-TwitterHelper/eac2d0b1-eab0-4ae4-9a30-81dae45a670f/scratchpad/live/run1/plugin-data/trust-roots/6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66.json"
+  "path": "/private/tmp/claude-501/-Users-ainsleys-TwitterHelper/eac2d0b1-eab0-4ae4-9a30-81dae45a670f/scratchpad/live/run2/plugin-data/trust-roots/6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66.json"
  },
- "tls_cert_pem": null,
+ "tls_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIFaDCCBFCgAwIBAgIRALvVlZAw6GpSE1+EtlkHA0QwDQYJKoZIhvcNAQELBQAw\nOzELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFUdvb2dsZSBUcnVzdCBTZXJ2aWNlczEM\nMAoGA1UEAxMDV1IxMB4XDTI2MTEwNTAyMzY1NloXDTI3MDIwMzAyMzY1NVowHjEc\nMBoGA1UEAxMTcm91dGVyLTAudGluZm9pbC5zaDB2MBAGByqGSM49AgEGBSuBBAAi\nA2IABNn+VZlTpjhssm8xLtnCv2JqOvhYMYvO6zw0/oVHGD8zlr82NIQ0dZ98UX1B\nbbj/KF0gyeZ5acngXfnAy80JgZGJBUqYJgVzVR1swkHSLnA4M9JKmY9Wyghgdogj\nlp74KaOCAzAwggMsMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcD\nATAMBgNVHRMBAf8EAjAAMB0GA1UdDgQWBBR3lnNIYyNIX5iPJnUhghiajRaIRTAf\nBgNVHSMEGDAWgBRmaUnU3iqckQPPiQ4kuA4wA26ILjA1BggrBgEFBQcBAQQpMCcw\nJQYIKwYBBQUHMAKGGWh0dHA6Ly9pLnBraS5nb29nL3dyMS5jcnQwggEhBgNVHREE\nggEYMIIBFIITcm91dGVyLTAudGluZm9pbC5zaII/MDBxdmhqYWdzZXR6Nm9zN251\naWJsb3VybmxxN2UzcWtudGhmenZocXNicXR6ZzIuaHBrZS50aW5mb2lsLnNoghkw\nMWZ0eGVubWEuaHBrZS50aW5mb2lsLnNogj8wMG1xMnRjbnRlaGF6Z2NtanJnZTJ0\nbW5yc211MndnbWJ1ZzQ0Z2lvanRoYnF0YS5oYXR0LnRpbmZvaWwuc2iCPzAxeXJ2\nbWl6d2N6cnNnaXl3bW9sYmd5MmdjeWxibXJzd2t5cnFndXpkaW1ydWc0LmhhdHQu\ndGluZm9pbC5zaIIfMDIyZGNuZGVoYnRna3phLmhhdHQudGluZm9pbC5zaDATBgNV\nHSAEDDAKMAgGBmeBDAECATA2BgNVHR8ELzAtMCugKaAnhiVodHRwOi8vYy5wa2ku\nZ29vZy93cjEvd3NJVHZmcDBjWW8uY3JsMIIBDAYKKwYBBAHWeQIEAgSB/QSB+gD4\nAHYAABpdGhwtk3W2SFV4+C9xoa5u7zl9KXyK4xV7yt7hoB4AAAGhqcf7RgAABAMA\nRzBFAiA3GM4BlVxtIfJ8gm8FFtJnXVaIpv6iPsPycBGsgNgyIAIhAKjYQ1Yp699R\nNP+qDjp6xmuYLgZQqaz0kixnO0uvhghgAH4AooEAGHNOF24dR+CVQPOBulRml81j\nqENQcW64CU7a8Q0AAAGhqcf+fgAIAAAFADg6gV8EAwBHMEUCIFFRz5U4pHqhGcBC\nM3xqUUvJG+Ea0VaLnxzZT4KDnm+8AiEAgMwkZ3YMsVNM79porT0pZVsOnKnc52Mt\nE0DLpcDeU+EwDQYJKoZIhvcNAQELBQADggEBAHg9lM2BOrNBtLfUG1wfxSh1Pc8m\nMLpehXFJPaVz4SETWvpr5oVC28lhyXGGZ5XqXAGXD6K+E2zquiWXiJbKqupi9kx6\nsVmSq56SNyxC6GvuH5NuOIsxcSXrzV5XvVipxn3Vbs9M9hjVTFDxqO8fBLfsAhuW\n8xZ10cNI1dLpcdQSlK+QF0B6V0BJiXTL+yH5kNfEdZrX0po6zT29JcO7vWFFSnA7\na1hWcrRopMhWAqqqrU23Gl1O9j1iRM5LFvdft3f61fNc/Efs3G+2zY0oDKDrYkUf\nG7yC8xtaF15EN0Sxvgl5Sg1OugyeLyR6vYs4OMH1J6W++sIxj92N/RJdj8o=\n-----END CERTIFICATE-----\n",
+ "tls_observation": {
+  "captured": true,
+  "spki_sha256": "fc0a91a9eabdd22c69b3226e8e5c2aa2b2ba9a68194c41e338bacb91743af612",
+  "matches_report_tls_key": true,
+  "issuer": "CN=WR1,O=Google Trust Services,C=US",
+  "subject": "CN=router-0.tinfoil.sh",
+  "serial": "bbd5959030e86a52135f84b659070344",
+  "not_before": "2026-11-05T02:36:56+00:00",
+  "not_after": "2027-02-03T02:36:55+00:00",
+  "san_binding": true,
+  "verdict": "TLS terminates in the attested enclave (SPKI == report TLS key, SAN binding ok)"
+ },
  "claims": {
   "code_fingerprint": "284bd9e5d470c4812fad60fcec6f99bc0958cd5a1ef4d317a99f702e2913f5fb",
   "enclave_fingerprint": "fb8eabe68d3b977b05e48e7a41aff6bbb6dc576cbf5639360fbdf49f357f7d6698be2537f1a425975f89b8a73023022a",
@@ -70,7 +82,7 @@
    "name": "tinfoil",
    "version": "0.14.2"
   },
-  "verifiedAt": "2026-11-06T14:30:20.848979Z",
+  "verifiedAt": "2026-11-06T15:10:41.830567Z",
   "steps": {
    "fetchDigest": {
     "status": "success"

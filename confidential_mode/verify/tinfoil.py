@@ -729,7 +729,7 @@ def peer_certificate_der(response) -> bytes | None:
     ssl_obj = get("ssl_object") if callable(get) else None
     if ssl_obj is None:
         return None
-    der = ssl_obj.getpeercert(binary_form=True)
+    der = ssl_obj.getpeercert(True)  # positional: the raw _ssl._SSLSocket rejects keywords
     return der or None
 
 

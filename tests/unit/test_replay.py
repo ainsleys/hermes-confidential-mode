@@ -312,7 +312,7 @@ class _FakeSSL:
     def __init__(self, der):
         self.der = der
 
-    def getpeercert(self, binary_form=False):
+    def getpeercert(self, binary_form=False, /):  # positional-only, like the real _ssl._SSLSocket
         return self.der
 
 
