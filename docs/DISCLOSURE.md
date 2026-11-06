@@ -298,7 +298,8 @@ whole profile. While sealed, the plugin blocks the following.
   The request carries no conversation text.
 
 - **Network metadata.** This covers the sizes, timing and addresses visible on the connection to
-  Tinfoil's router, the vendor-run collateral proxies, DNS, and the host operator if Hermes runs on someone else's machine.
+  Tinfoil's router, the vendor-run collateral proxies, DNS, and the host operator if Hermes runs
+  on someone else's machine.
 
 - **Local tools.** These are `terminal`, `process_manage`, `execute_code`, `read_file`, `write_file`,
   `patch`, `search_files`, `skills_list`, `skill_view`, `skill_manage`, `todo_list`, `memory`,
