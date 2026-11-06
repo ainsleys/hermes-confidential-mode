@@ -95,7 +95,8 @@ def test_leak_live_off_tier_runtime_hits_hermes_default_transport(plugin, net, m
     "timeouts, or wrap the auxiliary client in llm_execution middleware."))
 def test_leak_hook_timeout_config_disables_recheck_and_aux_reaches_openrouter(plugin, net, monkeypatch):
     """Config edit AFTER sealing: aux title_generation -> openrouter (fingerprinted, the recheck should
-    block) plus `plugins.hook_callback_timeout: 0.0001` (NOT fingerprinted). pre_llm_call is a
+    block) plus `plugins.hook_callback_timeout: 0.0001` (also fingerprinted, preflight.py:55-56, so the recheck
+    would block too, if it ran). pre_llm_call is a
     timeout-bounded hook (hermes_cli/plugins_dispatch.py:42-52); the recheck worker misses the deadline,
     Hermes skips it (fail-open) and suppresses the callback for 60 s. The late worker still ledgers
     breach/config_changed, but its block is discarded => the turn titles the session through the hosted aux

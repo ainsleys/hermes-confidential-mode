@@ -2,17 +2,45 @@
 # confidential-mode
 
 This Hermes plugin shows you every place your conversation leaves the machine, then lets you seal a
-profile so the model can only be on your own box or in a Tinfoil enclave whose build you approved.
-Sealed, it refuses off-tier model calls and fallbacks before a byte is sent, asks you before every
-off-machine tool call, and won't seal at all while a side job (compression, titles, vision, memory)
-is configured to go somewhere else. Every send, refusal, ask and answer goes to a local ledger you
-can watch live and turn into a receipt.
+profile so the model can only be on a host whose address is loopback or private-range (which is not
+the same as a machine you control), or in a Tinfoil enclave whose measurement fingerprint you
+approved. Sealed, it refuses off-tier model calls and fallbacks before a byte is sent, asks you
+before off-machine tool calls (an `always` answer stops the asking until you remove it from
+`command_allowlist`), and won't seal at all while a side job (compression, titles, vision, memory) is
+configured to go somewhere else. Every send, refusal, ask and answer goes to a local ledger you can
+watch live and turn into a receipt.
 
 Think Little Snitch for your agent: deny by default, an allow-once prompt, a list of what you've
 allowed, and a log.
 
 Built and tested against Hermes 84a0301 and tinfoil SDK 0.14.2. Entry for the Nous Research Hermes
 Agent Plugin Hackathon.
+
+## What it defends against, and what it doesn't
+
+> **First:** if Hermes runs on someone else's machine (a cloud agent, a VPS), that operator sees
+> every prompt before anything here applies. This plugin protects the road out of the Hermes
+> process, not the process itself.
+>
+> **Defends against**
+> - your conversation going to hosted providers and fallbacks you didn't mean to send it to
+>   (refused before a byte is sent, or, for auxiliary side jobs, refused at seal time and recorded
+>   as a breach if one goes anyway);
+> - the vendor shipping a new enclave build without your consent (the turn is refused until you
+>   approve the new fingerprints).
+>
+> **Does not defend against**
+> - other code in the same Hermes process (other plugins can write ledger rows, apply pins, patch);
+> - you editing your own ledger (receipts are a self-report);
+> - shell and code-execution tools (`terminal`, `execute_code` can reach the network);
+> - the vendor's control plane and the downstream workers behind its router;
+> - metadata visible where Tinfoil terminates TLS: your API key header, request sizes, timing, IP;
+> - the vendor-run collateral proxies (`github-proxy`, `kds-proxy`, `tdx-proxy`.tinfoil.sh), which
+>   see that you verify and when;
+> - DNS lookups for every host above;
+> - Hermes' start-up model-list probe when the live runtime has drifted to a hosted provider (an
+>   API-key request, no conversation text);
+> - the ledger itself as a metadata trail (hosts, sizes, times) if you share a receipt.
 
 ## The leak map
 
@@ -39,7 +67,7 @@ first one.
 
 | Tier | Where the model runs | What it costs you |
 |---|---|---|
-| `local-only` | A host on loopback or your private network (127/8, 10/8, 172.16/12, 192.168/16, 100.64/10, fe80::/10, fc00::/7, `localhost`), or a host you list in `confidential.local.extra_hosts`. | Model quality is whatever your box runs; availability is your hardware. Every auxiliary task, vision included, needs a local route. Hermes' local profiles (ollama, lmstudio, llama-cpp) report no base URL, so set `model.base_url` and `auxiliary.<task>.base_url` yourself. |
+| `local-only` | A host whose address is loopback or private-range (127/8, 10/8, 172.16/12, 192.168/16, 100.64/10, fe80::/10, fc00::/7, `localhost`), or a host you list in `confidential.local.extra_hosts`. Private-range is not "yours": a cloud VPC neighbour or a carrier-NAT (100.64/10) address passes too. | Model quality is whatever your box runs; availability is your hardware. Every auxiliary task, vision included, needs a local route. Hermes' local profiles (ollama, lmstudio, llama-cpp) report no base URL, so set `model.base_url` and `auxiliary.<task>.base_url` yourself. |
 | `attested` | Tinfoil's confidential model router in an AMD SEV-SNP or Intel TDX enclave, verified before use and again once the last verification is older than 300 s. | Open-weight models only (Kimi K3.1 Pro, GLM-5.3, DeepSeek V4.1 Flash, Gemma 4 31B, gpt-oss-120b, Llama 3.3 70B). A Tinfoil API key. If the enclave can't be verified within 5 s, or answers with an error, the turn ends with a refusal and you resend: no retry, no fallback. A pin prompt every time Tinfoil ships a new router build, and possibly after a restart (see Pins). |
 | `zero-retention` | Not implemented. `/confidential on zero-retention` refuses. | Nothing yet. A hosted provider's "we don't keep it" is a policy, not something this plugin can check. |
 
@@ -94,29 +122,39 @@ Refusals and breaches print red, off-tier verdicts yellow. `--once` prints the l
 ```
 
 `on` runs the preflight and refuses with the table if anything fails. When it passes it records a
-fingerprint of your routing config, builds the tool allowlist from the live registry, and prints it:
-which tools run locally, which ask, which are blocked. From then on, for this profile:
+fingerprint of your routing config (including the `plugins.*` keys that govern hooks; a
+`hook_callback_timeout` under 5 s fails), builds the tool allowlist from the live registry, persists
+it for this seal, and prints it: which tools run locally, which ask, which are blocked. After a
+restart the seal survives and the allowlist is rebuilt from what was persisted, not from whatever is
+registered now. From then on, for this profile:
 
 - A main-loop call to anything off the tier gets a refusal reply instead of being sent. A provider
   error on the in-tier endpoint ends the turn ("attested endpoint unavailable; this turn ended;
   resend"), so Hermes never arms a fallback.
 - If the routing config changes after you seal, every turn is blocked until you unseal and seal again.
+- Each sealed turn also checks the live model runtime (what a session `/model` switch or
+  `--provider` changed), and ends the turn if it is off-tier. On gateway surfaces `/model` and
+  `/moa` are refused while sealed. On the CLI and TUI they aren't intercepted; the per-turn check
+  catches the switch, but auxiliary calls Hermes makes in between are only recorded.
 - Local tools run without asking: `terminal`, `process_manage`, `execute_code`, `read_file`,
   `write_file`, `patch`, `search_files`, `skills_list`, `skill_view`, `skill_manage`, `todo_list`,
   `memory`, `clarify`, `session_search`. Yes, terminal can reach the network; see Limitations.
-- Every other tool asks, every call, on Hermes' approval prompt:
+- Every other tool asks on Hermes' approval prompt:
   `web_search wants to send ~3 KB of this conversation off the machine`. Only the exact answers
   `once`, `session` or `always` run the tool. Anything else, including answers Hermes' CLI would
-  wave through, is refused and logged.
+  wave through, is refused and logged. `session` stops asking for that session; `always` stops
+  asking for good, across seals, until you delete `plugin_rule:confidential-mode:tool:<name>` from
+  `command_allowlist` (`/confidential pins` lists these grants).
 - Under yolo, `approvals.mode: off`, cron, `-q`, or anywhere nobody can answer, the ask becomes a block.
 - Always blocked: `cronjob_manage`; tools from MCP servers whose URL is off the tier; any tool that
   wasn't registered at seal or whose handler changed since; `delegate_task` with a route field
   (profile, provider, base_url, ACP command, non-default backend). Plain delegation on the default
   backend inherits the sealed profile and runs.
 
-`/confidential allow <tool>` puts an asking tool on the allowlist so it stops asking. It asks you
-first through `ctx.ask_choice`, which never auto-picks under any bypass and treats no answer as no.
-Hard blocks can't be lifted.
+`/confidential allow <tool>` puts an asking tool on the allowlist for the rest of this seal so it
+stops asking. It asks you first through `ctx.ask_choice`, which never auto-picks under any bypass and
+treats no answer as no. Additions die with the seal: `/confidential off` clears them and the next
+seal starts empty. Hard blocks can't be lifted.
 
 ## Pins
 
@@ -143,8 +181,12 @@ When Tinfoil ships a new build, the next sealed turn is refused with "enclave bu
 ```
 
 The prompt shows vendor, release tag, old fingerprint and the new code and enclave fingerprints.
-Approve writes the pin with who, when and which surface, and keeps the previous one. Deny, timeout or
-a non-answer keeps the old pin and keeps refusing. The gate never waits on you mid-turn.
+Approve writes the pin with who, when and which surface, keeps the previous one, and ledgers a
+`pin_applied` row. A pin with no matching `pin_applied` row is refused ("pin has no consent record"),
+so a pin written straight into `pins.yaml` by other code doesn't count. (Other in-process code could
+forge the row too; this raises the bar, it isn't a wall.) Deny, timeout or a non-answer keeps the old
+pin and keeps refusing. The gate never waits on you mid-turn. The first pin is trust on first use:
+you're approving fingerprints, and nothing in the prompt tells you whether that build is any good.
 
 The pin covers the router that answered, and AMD and Intel routers have different enclave
 fingerprints for the same release. Discovery picks a router at random per process, so a restart can
@@ -156,22 +198,27 @@ ask you to re-approve. Set `confidential.tinfoil.enclave` to one router host to 
 /confidential receipts [session] [--json]
 ```
 
-A receipt is a rendering of the ledger for one session: trust roots, verification events, sends,
-refusals, asks and answers, breaches, compactions. No prompt or response text, ever: the ledger
-stores hosts, byte counts and decisions, and rejects rows that carry content-shaped keys. Times are
-this machine's clock and say so. The JSON form adds a SHA-256 hash chain over the rows and attaches
-the raw attestation evidence of each verification row that has it.
+A receipt is a rendering of the ledger for one session: trust roots, verification events (with
+the raw attestation evidence each verification captured), sends, refusals, asks and answers,
+breaches, compactions. No prompt or response text, ever: the ledger stores hosts, byte counts and
+decisions, and rejects rows that carry content-shaped keys. Times are this machine's clock and say
+so. The JSON form adds a SHA-256 hash chain over the rows. Treat a receipt as a self-report: the only
+part a third party can check is the evidence blobs.
 
 Every receipt ends with the same fixed paragraph, never templated, which splits the claims:
 
-- **Evidence:** when the receipt says a build was verified, the plugin checked that build's
-  hardware-signed attestation against the vendor's published code measurement and bound the session
-  key to it; where the raw evidence is attached, anyone can replay that check offline.
+- **Evidence:** a verification row with evidence attached says that enclave's hardware-signed
+  attestation was checked against the vendor's published code measurement, and that holds only as far
+  as the attached bytes replay offline. A row marked "unverified entry" (no evidence, or an incomplete
+  capture) proves nothing. The ledger is a local file, unprotected against code in the same process,
+  and the hash chain only shows the receipt wasn't edited after rendering, not that the ledger was
+  complete or its rows genuine.
 - **Record only:** that this session's requests actually went to that enclave; that request bodies
   were encrypted to that key; that the build was the vendor's latest release; whether it was revoked
-  later; what shell, terminal and code tools sent; which model backends sit behind the router; any
-  other operator access. Timestamps are not attested. The hash chain shows the receipt wasn't edited
-  after rendering, not that the local ledger was complete before it.
+  later; what shell, terminal and code tools sent; which model backends sit behind the router; other
+  operator access; and Hermes' auxiliary calls, which can leave the tier while sealed (for example
+  after a runtime switch) and are recorded after the fact, not prevented. Sealed mode doesn't apply in
+  safe-worker mode. Timestamps are not attested.
 
 ### Offline replay
 
@@ -194,24 +241,28 @@ for item in doc["evidence"]:
 EOF
 ```
 
-What a replay can't establish comes back with every result, word for word (`NOT_ESTABLISHED`):
+What a replay can't establish comes back with every result (`NOT_ESTABLISHED`):
 
 - that any request was sent to or answered by this enclave (the report commits to keys, not to
-  requests, and carries no client nonce)
-- that requests were encrypted to this HPKE key (only the plugin's own log says so)
-- that this release was the latest release when verified (release metadata is unsigned; only the
-  digest is bound by Sigstore)
-- revocation or TCB changes after captured_at
+  requests, and carries no client nonce);
+- that requests were encrypted to this HPKE key (only the plugin's own log says so);
+- that this release was the latest release when verified. The release tag *is* bound: the SDK's
+  Sigstore policy requires the signing workflow ref to be `refs/tags/<tag>`. What nothing signs is
+  which release the vendor called "latest" at the time. (The string in `replay.py` still says
+  "release metadata is unsigned; only the digest is bound", which undersells the tag binding.)
+- revocation or TCB changes after captured_at.
 
-> Build note: at this commit runtime verifications are not yet written to the ledger (last item in
-> [docs/LIMITATIONS.md](docs/LIMITATIONS.md)), so receipts carry no evidence to replay. The replay
-> itself works on captured evidence and is covered by `tests/unit/test_replay.py`.
+Also not checked by this build's replay: that the evidence names `tinfoilsh/confidential-model-router`
+as its repo (it verifies against whatever repo the evidence carries), and the trust root and `as_of`
+both come from the evidence. Compare `code_fingerprint` and `enclave_fingerprint` in the result with
+your pin yourself.
 
-## Staying hosted? Four changes with no capability loss
+## Four config changes that reduce how many hosted parties see your conversation (each still sees plaintext; not quality-tested)
 
-Not going to seal? You can still shrink the map. These are config changes you make yourself; the
-plugin doesn't apply them. None has been quality-evaluated yet: we haven't measured what they do to
-compression summaries, titles or vision answers. Run `hermes confidential watch` before and after.
+Not going to seal? You can still cut the number of vendors on the map. Every party that's left still
+sees your conversation in plaintext. These are config changes you make yourself; the plugin doesn't
+apply them. None has been quality-evaluated yet: we haven't measured what they do to compression
+summaries, titles or vision answers. Run `hermes confidential watch` before and after.
 
 1. **Tell OpenRouter not to train on you** (not yet quality-evaluated).
    `provider_routing: {data_collection: "deny"}` keeps OpenRouter to providers that don't collect
@@ -235,8 +286,9 @@ core change that would close it. Long form: [docs/LIMITATIONS.md](docs/LIMITATIO
    `run_llm_execution_middleware` (`hermes_cli/middleware.py:136`, called only from
    `agent/turn_api_call.py:139`), and `pre_auxiliary_call` can't veto (`agent/auxiliary_hooks.py:210-240`).
    The plugin refuses to seal while any task routes off-tier and flags a breach if one goes anyway; it
-   can't stop the bytes. *Fix:* run aux attempts through the middleware with `purpose="aux:<task>"`,
-   or let `pre_auxiliary_call` block.
+   can't stop the bytes, including aux calls that follow a live `/model` switch before the next
+   turn's check. *Fix:* run aux attempts through the middleware with `purpose="aux:<task>"`, or let
+   `pre_auxiliary_call` block.
 2. **The CLI approve directive grants on any answer except "deny".** `tools/approval.py:1006-1010`:
    `None`, `""`, `"d"`, `"yes"` all run the tool. The plugin enforces in `tool_execution` on the
    exact answer. *Fix:* grant only on an explicit once/session/always.
@@ -263,6 +315,14 @@ core change that would close it. Long form: [docs/LIMITATIONS.md](docs/LIMITATIO
 10. **SDK caches outside the plugin's data. Mitigated in-plugin:** the tinfoil SDK's and
     sigstore-python's platformdirs caches are redirected under the plugin data dir before the first
     verification. *Fix:* a cache-dir parameter in the SDK.
+11. **Start-up model-list probe on a drifted runtime.** If the live runtime has been switched to a
+    hosted provider, Hermes' agent start-up lists that provider's models (`GET .../models` with your
+    API key) on its default transport before any plugin seam (`agent/model_metadata.py:898`, `:1026`).
+    No conversation text; the plugin then refuses the turn. *Fix:* let a provider profile or a hook
+    veto metadata fetches.
+12. **No mixed "attested or local" tier yet (planned).** Today a seal is one tier, so cheap side jobs
+    can't run on a local model while the main model is attested. *Fix (in-plugin, planned):* a tier
+    whose predicate accepts either.
 
 What it touches on your machine and the network: [docs/DISCLOSURE.md](docs/DISCLOSURE.md).
 
