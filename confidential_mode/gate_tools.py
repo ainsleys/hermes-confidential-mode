@@ -31,6 +31,7 @@ Hermes facts this module relies on (pinned checkout 84a0301):
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
 import json
@@ -112,6 +113,9 @@ class Allowlist:
     # Re-read at call time for MCP tools so a server re-pointed after seal is re-judged (fail closed).
     mcp_config_loader: Optional[Callable[[], Mapping[str, Any]]] = field(default=None, repr=False)
     predicate: Any = field(default=None, repr=False)
+    seal_id: str = ""                    # identity of the seal this allowlist belongs to (F5/F6)
+    # name -> (toolset, handler module, handler qualname) as persisted at seal; set on a restart rebuild
+    persisted_identity: Optional[dict[str, tuple[str, str, str]]] = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def get(self, name: str) -> Optional[ToolInfo]:
@@ -160,8 +164,114 @@ class Allowlist:
             raise ValueError(f"{name!r} cannot be added to the allowlist")
         with self._lock:
             self.added.add(name)
-            if self.added_path is not None:
-                _write_added(self.added_path, self.added)
+        if self.added_path is not None:
+            self.persist()
+
+    # -- persistence (Amendment 4 F5/F6) ------------------------------------------------------------
+    def persist(self, path: Optional[Path] = None) -> None:
+        """Write the seal's tool identities (name, toolset, handler module, qualname) and the
+        human-approved additions, tagged with ``seal_id``. Called at seal and after each add.
+        JSON (a YAML subset): Hermes ships ruamel via hermes_yaml, not PyYAML."""
+        target = Path(path) if path is not None else self.added_path
+        if target is None:
+            return
+        with self._lock:
+            added = sorted(self.added)
+        tools = []
+        for name, (toolset, handler) in sorted(self.pins.items()):
+            if name not in self.tools:
+                continue
+            module, qualname = _handler_identity(handler)
+            tools.append({"name": name, "toolset": toolset, "module": module, "qualname": qualname})
+        data = {"version": 2, "seal_id": self.seal_id, "tools": tools, "allowed": added}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, target)
+
+    @classmethod
+    def load_persisted(cls, path: Optional[Path], registry: Any, *, seal_id: str, predicate: Any = None,
+                       mcp_configs: Optional[Mapping[str, Mapping[str, Any]]] = None,
+                       mcp_tool_servers: Optional[Mapping[str, str]] = None,
+                       plugin_tool_names: Optional[Iterable[str]] = None) -> "Allowlist":
+        """Rebuild the allowlist after a restart. Only tools persisted at THIS seal (matching
+        ``seal_id``) whose live toolset, handler module and qualname still match are classified;
+        everything else is unclassified (block/refuse) until a reseal. A missing, corrupt or
+        other-seal file yields an empty allowlist: every tool blocked. Additions are honoured only
+        from the same seal."""
+        empty = cls(tools={}, added_path=Path(path) if path is not None else None, seal_id=seal_id,
+                    registry=registry, persisted_identity={})
+        data = _read_json_or_yaml(path) if path is not None else None
+        if not isinstance(data, dict) or data.get("version") != 2 or not seal_id or data.get("seal_id") != seal_id:
+            return empty
+        identity: dict[str, tuple[str, str, str]] = {}
+        for t in data.get("tools") or []:
+            if isinstance(t, dict) and all(isinstance(t.get(k), str) for k in ("name", "toolset", "module", "qualname")):
+                identity[t["name"]] = (t["toolset"], t["module"], t["qualname"])
+        fresh = build_allowlist(registry, predicate=predicate, mcp_configs=mcp_configs,
+                                mcp_tool_servers=mcp_tool_servers, plugin_tool_names=plugin_tool_names,
+                                added_path=path)
+        keep = {}
+        for name, info in fresh.tools.items():
+            toolset, handler = fresh.pins.get(name, ("", None))
+            if identity.get(name) == (toolset, *_handler_identity(handler)):
+                keep[name] = info
+        fresh.tools = keep
+        fresh.seal_id = seal_id
+        fresh.persisted_identity = identity
+        allowed = data.get("allowed") if isinstance(data.get("allowed"), list) else []
+        fresh.added = {n for n in allowed if isinstance(n, str) and n in keep and keep[n].route is Route.ASK}
+        return fresh
+
+
+def clear_persisted(path: Optional[Path]) -> None:
+    """Unseal: drop the seal's persisted allowlist and its additions (Amendment 4 F6)."""
+    if path is None:
+        return
+    with contextlib.suppress(FileNotFoundError):
+        Path(path).unlink()
+
+
+def seal_id_for(state: Any) -> str:
+    """A seal's identity: when it was sealed plus the config fingerprint recorded at seal."""
+    try:
+        since, fp = state.sealed_since(), state.config_fingerprint()
+    except Exception:
+        return ""
+    return f"{since!r}|{fp}" if since is not None else ""
+
+
+def _handler_identity(handler: Any) -> tuple[str, str]:
+    current, seen = handler, set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, functools.partial):
+            current = current.func
+        elif getattr(current, "__func__", None) is not None:
+            current = current.__func__
+        elif getattr(current, "__wrapped__", None) is not None and not hasattr(current, "__qualname__"):
+            current = current.__wrapped__
+        else:
+            break
+    qual = getattr(current, "__qualname__", None) or type(current).__qualname__
+    return _handler_module(handler), str(qual)
+
+
+def _read_json_or_yaml(path: Path) -> Any:
+    try:
+        text = Path(path).read_text() if Path(path).exists() else ""
+    except Exception:
+        return None
+    if not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        try:
+            import hermes_yaml   # a hand-edited YAML file
+            return hermes_yaml.safe_load(text)
+        except Exception:
+            return None
 
 
 def _live_entry(registry: Any, name: str) -> Any:
@@ -176,29 +286,9 @@ def _live_entry(registry: Any, name: str) -> Any:
 
 def _read_added(path: Path) -> set[str]:
     """Names in allowlist.yaml; missing file -> empty; unreadable/corrupt -> empty (adds nothing)."""
-    try:
-        text = Path(path).read_text() if Path(path).exists() else ""
-    except Exception:
-        return set()
-    try:
-        data = json.loads(text) if text.strip() else None   # what we write: JSON, a YAML subset
-    except ValueError:
-        try:
-            import hermes_yaml   # a hand-edited YAML file
-            data = hermes_yaml.safe_load(text)
-        except Exception:
-            return set()
+    data = _read_json_or_yaml(path)
     names = data.get("allowed") if isinstance(data, dict) else None
     return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
-
-
-def _write_added(path: Path, names: Iterable[str]) -> None:
-    # JSON is valid YAML; it needs no YAML library (Hermes ships ruamel via hermes_yaml, not PyYAML).
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"version": 1, "allowed": sorted(names)}, indent=2) + "\n")
-    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -359,11 +449,9 @@ def build_allowlist(registry: Any, *, mcp_configs: Optional[Mapping[str, Mapping
         is_plugin = name in plugin_names or _handler_module(getattr(entry, "handler", None)).startswith(
             "hermes_plugins.")
         tools[name] = classify_tool(name, toolset, origin=Origin.PLUGIN if is_plugin else Origin.BUILTIN)
-    added: set[str] = set()
-    if added_path is not None:
-        # Only names that are still on the ask route at this seal are honoured.
-        added = {n for n in _read_added(added_path) if n in tools and tools[n].route is Route.ASK}
-    return Allowlist(tools=tools, added=added, added_path=Path(added_path) if added_path is not None else None,
+    # A NEW seal starts with no additions (Amendment 4 F6): ``added_path`` is where this seal persists
+    # them; only Allowlist.load_persisted (same seal, after a restart) reads them back.
+    return Allowlist(tools=tools, added=set(), added_path=Path(added_path) if added_path is not None else None,
                      pins=pins, registry=registry, mcp_config_loader=mcp_loader, predicate=predicate)
 
 
@@ -752,6 +840,10 @@ def build_pre_tool_call(is_sealed: Callable[[], Any], allowlist: Allowlist | Cal
                 return _block(d.message)
             if d.action == "run":
                 return None
+            if not tool_call_id:
+                # No id => an answer recorded for this call could not be told apart from a concurrent
+                # call's (Amendment 4 F3). Do not ask here; the middleware asks with a fresh approval id.
+                return None
             key = _call_key(tool_name, tool_call_id)
             if dec.take_grant(key):
                 return None                      # the middleware asked for this call already
@@ -867,8 +959,9 @@ def build_tool_execution(is_sealed: Callable[[], Any], allowlist: Allowlist | Ca
                 ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id,
                                      decision=d.decision, nbytes=args_bytes(args), surface="middleware", detail=base))
             return run()
-        key = _call_key(tool_name, tool_call_id)
-        choice = dec.pop(key)
+        key = _call_key(tool_name, tool_call_id) if tool_call_id else None
+        # Never consume an answer recorded under an empty id (Amendment 4 F3).
+        choice = dec.pop(key) if key is not None else _MISSING
         if choice is not _MISSING:                 # pre_tool_call asked (model_tools order)
             if type(choice) is str and choice in _ALLOW_CHOICES:
                 return run()                       # tool_allowed was ledgered by post_approval_response
@@ -887,6 +980,8 @@ def build_tool_execution(is_sealed: Callable[[], Any], allowlist: Allowlist | Ca
         choice = dec.pop(_call_key(tool_name, approval_id))
         approved = isinstance(result, dict) and result.get("approved") is True
         if approved and type(choice) is str and choice in _ALLOW_CHOICES:
+            if key is None:
+                return run()                       # the inner hook never asks for an id-less call
             dec.grant(key)
             try:
                 return run()
@@ -930,7 +1025,8 @@ def build_post_approval_response(is_sealed: Callable[[], Any], ledger: Any,
             if not isinstance(pattern_key, str) or not pattern_key.startswith(PATTERN_KEY_PREFIX):
                 return None
             tool_name = pattern_key[len(PATTERN_KEY_PREFIX):]
-            dec.record(_call_key(tool_name, tool_call_id), choice)
+            if tool_call_id:                     # an id-less answer is never recorded (Amendment 4 F3)
+                dec.record(_call_key(tool_name, tool_call_id), choice)
             pick = choice if type(choice) is str else ""
             allowed = pick in _ALLOW_CHOICES
             detail = {"tool": tool_name, "choice": _choice_repr(choice), "tool_call_id": tool_call_id or "",

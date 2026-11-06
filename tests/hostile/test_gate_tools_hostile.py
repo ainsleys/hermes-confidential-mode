@@ -1026,7 +1026,10 @@ def test_ledger_slower_than_hook_timeout_is_fail_closed(hermes):
     hermes.ledger.delay = 2.5
     hermes.answer["value"] = "once"
     t0 = time.monotonic()
-    out = call("_t4_net", {})
+    # W4 (Amendment 4 F3): an id-less call is never asked by the hook (the middleware asks), so this
+    # hook-timeout property is exercised with a tool_call_id, as the agent loop always passes one.
+    import model_tools
+    out = model_tools.handle_function_call("_t4_net", {}, task_id="t4", session_id=SID, tool_call_id="c-slow")
     assert time.monotonic() - t0 < 10
     assert hermes.ran["_t4_net"] == [], out
     assert "timed out" in out or "BLOCKED" in out or "block" in out.lower()
