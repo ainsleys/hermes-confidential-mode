@@ -1,14 +1,33 @@
 # Running the tests
 
-Hermes' own `.venv` has no pytest (its pyproject sets `default-groups = []`), so use an
-ephemeral overlay that leaves that environment untouched:
+The tests run inside Hermes' own Python environment, because the seam tests import real Hermes
+modules. That environment does not include pytest. Hermes' `pyproject.toml` sets
+`default-groups = []`, so no development dependencies are installed into its `.venv`.
+
+The command below adds pytest for the length of one run only. `uv run --with` builds a temporary
+overlay on top of Hermes' environment. The overlay goes away when the run ends, and Hermes' `.venv`
+is left untouched.
 
     cd ~/hermes-agent && PYTHONDONTWRITEBYTECODE=1 HERMES_HOME=$(mktemp -d) \
       uv run --no-sync --with pytest==9.1.1 --with pytest-asyncio==1.4.0 \
       pytest ~/hermes-confidential-mode/tests -q -p no:cacheprovider
 
-Never `uv pip install` from inside ~/hermes-agent: that targets its `.venv`. For SDK
-experiments use a separate environment synced from Hermes' lock:
+The other settings in that command each keep the run from leaving traces:
+
+- `HERMES_HOME=$(mktemp -d)` points Hermes at an empty temporary home. The tests therefore never
+  read or write your real profile.
+- `PYTHONDONTWRITEBYTECODE=1` stops Python from writing `.pyc` files.
+- `-p no:cacheprovider` stops pytest from writing its `.pytest_cache` directory.
+- `--no-sync` stops uv from changing Hermes' environment to match its lock file.
+
+Never run `uv pip install` from inside `~/hermes-agent`. From that directory, uv targets Hermes' own
+`.venv`, and the install would change it.
+
+For experiments with the tinfoil SDK, use a separate environment. Build it from Hermes' lock file, so
+it has the same versions, and then add the SDK to it:
 
     cd ~/hermes-agent && UV_PROJECT_ENVIRONMENT=<dir>/.venv uv sync
     uv pip install --python <dir>/.venv/bin/python tinfoil==0.14.2
+
+`UV_PROJECT_ENVIRONMENT` tells uv to create the environment in `<dir>/.venv` instead of in Hermes'
+own `.venv`. The second command installs the SDK into that separate environment only.
