@@ -31,6 +31,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
 from .ledger import LedgerEvent
+from .state import StateError
 from .tiers import Destination, Tier, TierPredicate, Verdict
 
 logger = logging.getLogger(__name__)
@@ -224,25 +225,29 @@ class LlmGate:
 
     def handle(self, request: Any, next_call: Callable[..., Any], context: Mapping[str, Any]) -> Any:
         dest = self.destination(context)
+        # Values crossing a trust boundary are compared by identity, never truthiness (Ruling 8):
+        # only ``True`` permits, only ``False`` means unsealed; anything else fails closed.
         try:
             sealed, tier = self.is_sealed()
-            if sealed:
+            if self.permits(sealed, "sealed"):
                 tier = Tier(tier)
+            elif not self.is_false(sealed):
+                raise StateError(f"is_sealed returned a non-bool sealed flag ({type(sealed).__name__})")
         except Exception as exc:  # corrupt seal state: fail closed (INTERFACES Amendment 2)
             return self.internal_error(context, exc, text=TEXT_STATE_UNREADABLE,
                                        reason_code="seal_state_unreadable")
-        if not sealed:
+        if self.is_false(sealed):
             self.record("send_observed", dest, context, host=_host(dest.base_url),
                         nbytes=request_bytes(request), decision="observed")
             return next_call(request)
 
         predicate = self.predicate_for(tier)
-        if Tier(predicate.tier) != tier:
+        if not self.same_tier(Tier(predicate.tier), tier):
             raise RuntimeError(f"predicate tier {predicate.tier!r} does not match sealed tier {tier.value!r}")
         verdict = predicate.classify(dest)
         if not isinstance(verdict, Verdict):
             raise TypeError("predicate returned a non-Verdict")
-        if not verdict.in_tier:
+        if not self.permits(verdict.in_tier, "verdict"):
             return self.refuse(dest, context, tier, verdict, off_tier_text(tier, verdict.reason),
                                reason_code="off_tier", nbytes=request_bytes(request))
 
@@ -250,14 +255,28 @@ class LlmGate:
             att = self.attested_ok(dest.provider)
             if not isinstance(att, Verdict):
                 raise TypeError("attested_ok returned a non-Verdict")
-            if not att.in_tier:
-                pending = bool(self.pin_pending()) if self.pin_pending is not None else False
+            if not self.permits(att.in_tier, "attested"):
+                # Only selects the refusal text; both branches refuse.
+                pending = self.pin_pending is not None and self.permits(self.pin_pending(), "pin_pending")
                 text = TEXT_PIN_CHANGED if pending else attested_fail_text(att.reason)
                 return self.refuse(dest, context, tier, att, text,
                                    reason_code="pin_mismatch" if pending else "attestation_not_ok",
                                    nbytes=request_bytes(request))
 
         return self.guarded_call(request, next_call, dest, context, tier, verdict)
+
+    # Identity checks, one place so mutant tests can target each use (``what``).
+    @staticmethod
+    def permits(value: Any, what: str) -> bool:
+        return value is True
+
+    @staticmethod
+    def is_false(value: Any) -> bool:
+        return value is False
+
+    @staticmethod
+    def same_tier(a: Tier, b: Tier) -> bool:
+        return a is b
 
     def guarded_call(self, request, next_call, dest, context, tier: Tier, verdict: Verdict) -> Any:
         nbytes = request_bytes(request)
