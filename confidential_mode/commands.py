@@ -166,6 +166,7 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
     except Exception:  # noqa: BLE001
         config = {}
     lines.append(_main_route_line(config))
+    lines.append(_live_runtime_line(rt))
     lines.append(_enclave_line(rt))
     lines.extend(_pin_lines(rt))
     lines.append(_verification_line(rt, clock))
@@ -195,7 +196,24 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
     lines.extend(_grant_lines(rt, session_key))
     for step, err in getattr(rt, "errors", [])[:5]:
         lines.append(f"Plugin registration problem: {step}: {err}")
+    lines.append(f"Tools: {_sealing.TOOLS_TEXT}")
+    lines.append(f"Limits: {_sealing.AUX_TEXT} {_sealing.SAFE_WORKER_TEXT}")
     return "\n".join(lines)
+
+
+def _live_runtime_line(rt: Any) -> str:
+    """The live main runtime (Amendment 4 F1): what the last sealed turn ran on, or this context's binding."""
+    live = _sealing.live_main_runtime()
+    if live:
+        from .tiers import host_of
+        return (f"Live runtime (this context): {live.get('provider') or '?'} / {live.get('model') or '?'}"
+                f" at {host_of(live.get('base_url') or '') or '(provider default)'}")
+    last = getattr(rt, "last_live", None)
+    if last:
+        verdict = "in tier" if last.get("in_tier") else f"OFF-TIER ({last.get('reason')})"
+        return (f"Live runtime (last sealed turn): {last.get('provider') or '?'} / {last.get('model') or '?'} at "
+                f"{last.get('host') or '(no host)'}: {verdict}")
+    return "Live runtime: not seen yet (checked at the start of each sealed turn)"
 
 
 def pins_text(rt: Any, *, session_key: str = "") -> str:
@@ -330,6 +348,11 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
                               platform=surface)
         except ConsentContextError as exc:
             return f"Not asked: {exc}"
+    if cmd == "blocked":       # pre_gateway_dispatch rewrites a sealed /model (or /moa) to this
+        what = rest[0] if rest else "that command"
+        return (f"Refused while sealed: /{what} switches this session's live model runtime, and Hermes routes "
+                "auxiliary calls (titles, compression, vision) to the live runtime. Run /confidential off first, "
+                "switch, then seal again.")
     if cmd == "watch":
         return watch_text(rt) + "\n(live view: `hermes confidential watch` in a terminal)"
     return USAGE

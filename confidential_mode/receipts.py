@@ -60,8 +60,11 @@ CLOSING_PARAGRAPH = (
     "encrypted to that key; that the verified build was the vendor's latest release at the time; whether "
     "the build or its key was revoked after the evidence was captured; what shell, terminal and "
     "code-execution tools sent off the machine (they run locally and can reach the network); which model "
-    "backends sit behind the vendor's router; and any other access the vendor's operators have to the "
-    "machines involved. Timestamps come from this machine's clock and are not attested. The hash chain "
+    "backends sit behind the vendor's router; any other access the vendor's operators have to the "
+    "machines involved; Hermes' auxiliary model calls (titles, compression, memory prefetch, vision, smart "
+    "approvals, MCP sampling, background review), which a plugin cannot stop and which appear here only "
+    "after the fact as observed sends or breaches; and anything that happened while Hermes ran in "
+    "safe-worker mode, where sealed mode does not apply and nothing is recorded. Timestamps come from this machine's clock and are not attested. The hash chain "
     "shows only that this receipt was not edited after it was rendered; it does not show that the local "
     "ledger was complete or unedited before that."
 )

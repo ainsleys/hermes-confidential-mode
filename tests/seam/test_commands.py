@@ -226,6 +226,27 @@ def test_attested_seal_message_and_refusal_reason_without_network(plugin, monkey
     entry.result, entry.verified_mono = _result(plugin), time.monotonic()
     out = plugin.slash("on attested")
     assert out.startswith("Sealed. Model: attested-tinfoil/llama3-3-70b at router.tinfoil.invalid, verified 4")
-    assert "ago (local clock). Web, browser, messaging, media and remote MCP tools are off. Memory: local. " \
-           "Fallbacks: none." in out
+    assert "ago (local clock). Tools that send data off this machine" in out and "Fallbacks: none." in out
     assert "SEALED (attested)" in plugin.slash("status")
+
+
+def test_gateway_model_switch_is_refused_while_sealed(plugin):
+    from types import SimpleNamespace as NS
+    from hermes_cli.plugins import invoke_hook
+    assert invoke_hook("pre_gateway_dispatch", event=NS(text="/model openrouter:x")) == []      # unsealed
+    assert plugin.slash("on local-only").startswith("Sealed")
+    out = invoke_hook("pre_gateway_dispatch", event=NS(text="/model openrouter:x"))
+    assert out == [{"action": "rewrite", "text": "/confidential blocked model"}]
+    assert plugin.slash("blocked model").startswith("Refused while sealed: /model")
+    assert invoke_hook("pre_gateway_dispatch", event=NS(text="/moa hi")) == [
+        {"action": "rewrite", "text": "/confidential blocked moa"}]
+    assert invoke_hook("pre_gateway_dispatch", event=NS(text="/help")) == []
+    assert invoke_hook("pre_gateway_dispatch", event=NS(text="model please")) == []
+
+
+def test_seal_refuses_when_hook_timeout_lets_the_recheck_be_skipped(plugin):
+    plugin.cfg.write_text(BASE_CONFIG.replace("plugins:\n", "plugins:\n  hook_callback_timeout: 0.5\n"))
+    out = plugin.slash("on local-only")
+    assert out.startswith("Not sealed") and "plugins.hook_callback_timeout" in out
+    plugin.cfg.write_text(BASE_CONFIG.replace("plugins:\n", "plugins:\n  hook_callback_timeout: 30\n"))
+    assert plugin.slash("on local-only").startswith("Sealed")

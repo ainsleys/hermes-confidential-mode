@@ -50,6 +50,10 @@ _VISION_FIX = ("set {p}.provider (or {p}.base_url) explicitly to an in-tier visi
                "gateway inbound images through vision even without a tool call, and 'auto' walks "
                "openrouter -> nous -> deepinfra when the main model cannot take images")
 _ABSENT = object()
+#: Amendment 4 F2: a positive plugins.hook_callback_timeout below this lets Hermes skip pre_llm_call.
+HOOK_TIMEOUT_FLOOR_SECONDS = 5.0
+#: plugins.* keys that govern whether and how plugin hooks run; all are fingerprinted.
+_PLUGIN_EXECUTION_KEYS = ("isolation", "hook_callback_timeout", "load_timeout_seconds", "enabled", "disabled")
 _LOCAL_MEMORY = frozenset({"", "builtin", "built-in", "local", "none"})
 _AUX_ROUTE_KEYS = frozenset({"provider", "model", "base_url", "api_key", "api_mode", "key_env",
                              "api_key_env", "reasoning_effort"})
@@ -441,6 +445,31 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             "set plugins.isolation: in_process; under host isolation the plugin's provider and middleware "
             "register in the plugin-host child and are invisible to Hermes")
 
+    # hook execution (Amendment 4 F2): pre_llm_call (the per-turn recheck) is a timeout-bounded hook that
+    # Hermes SKIPS, fail-open, when it overruns plugins.hook_callback_timeout (hermes_cli/plugins_dispatch.py
+    # _HOOK_TIMEOUT_BOUNDED_HOOKS, plugins.py _resolve_hook_callback_timeout). <= 0 runs hooks synchronously
+    # (safe); a positive value below HOOK_TIMEOUT_FLOOR_SECONDS lets the recheck be skipped.
+    pcfg = config.get("plugins") if isinstance(config.get("plugins"), Mapping) else {}
+    t_key = "plugins.hook_callback_timeout"
+    raw_t = pcfg.get("hook_callback_timeout", _ABSENT)
+    t_fix = (f"remove {t_key} or set it to at least {HOOK_TIMEOUT_FLOOR_SECONDS:g} (seconds) while sealed; a "
+             "shorter timeout lets Hermes skip the per-turn seal recheck")
+    if raw_t is _ABSENT or raw_t is None:
+        add(t_key, "(default 30s)", ctx.pass_verdict)
+    else:
+        try:
+            if isinstance(raw_t, bool):
+                raise ValueError("bool")
+            t = float(raw_t)
+            if t != t:  # NaN
+                raise ValueError("nan")
+        except (TypeError, ValueError):
+            add(t_key, repr(raw_t), OFF_TIER, t_fix + " (the value is not a number)")
+        else:
+            ok = t <= 0 or t >= HOOK_TIMEOUT_FLOOR_SECONDS
+            add(t_key, f"{t:g}s" if t > 0 else f"{t:g} (hooks run synchronously)",
+                ctx.pass_verdict if ok else OFF_TIER, t_fix)
+
     # attested profile presence
     if tier == Tier.ATTESTED:
         name = _s(attested_profile)
@@ -519,6 +548,9 @@ def config_fingerprint(config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
         if isinstance(servers, Mapping) or servers is None else servers,
         "plugins.isolation": plugins_cfg.get("isolation", "<absent>") if isinstance(plugins_cfg, Mapping)
         else plugins_cfg,
+        # Amendment 4 F2: every plugins.* key that governs hook execution.
+        "plugins.execution": {k: plugins_cfg.get(k, "<absent>") for k in _PLUGIN_EXECUTION_KEYS}
+        if isinstance(plugins_cfg, Mapping) else plugins_cfg,
     }
     blob = json.dumps(view, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()

@@ -39,7 +39,7 @@ from ._harness import Rec, no_lazy_installs, provider_ok  # noqa: F401  (fixture
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 MODULE = "hermes_plugins.confidential_mode"
 HOOKS = {"pre_tool_call", "post_approval_response", "pre_llm_call", "pre_api_request", "pre_auxiliary_call",
-         "post_auxiliary_call", "on_session_start", "on_session_end", "post_compaction"}
+         "post_auxiliary_call", "on_session_start", "on_session_end", "post_compaction", "pre_gateway_dispatch"}
 LOCAL_URL = "http://127.0.0.1:11434/v1"
 REMOTE_URL = "https://llm.example.test/v1"
 SK = "cm:w5:seam"
@@ -210,7 +210,8 @@ def test_unsealed_turn_is_observed_and_sent(plugin, monkeypatch):
 def test_sealed_local_in_tier_turn_passes_with_the_sealed_note(plugin, monkeypatch):
     out = plugin.slash("on local-only")
     assert out.startswith("Sealed (local-only). Model: custom/llama3 at 127.0.0.1"), out
-    assert "Web, browser, messaging, media and remote MCP tools are off. Memory: local. Fallbacks: none." in out
+    assert "ask you first, each call" in out and "Memory: local. Fallbacks: none." in out
+    assert "safe-worker" in out and "recorded after the fact" in out
     assert "local (runs without asking)" in out and "web_search" in out
     rec = Rec()
     agent = build_agent(monkeypatch, rec, LOCAL_URL)
@@ -229,8 +230,10 @@ def test_sealed_off_tier_provider_is_refused_with_zero_provider_calls(plugin, mo
     agent = build_agent(monkeypatch, rec, REMOTE_URL)
     result = agent.run_conversation("the merger terms are")
     assert result["final_response"].startswith("Confidential mode: sealed to local-only; this request was not sent.")
+    assert "live model runtime is custom at llm.example.test" in result["final_response"]
     assert rec.provider_calls == [] and rec.streaming_calls == [] and rec.fallback_calls == []
-    assert ("send_refused", "refused") in plugin.kinds()
+    assert ("send_refused", "refused") in plugin.kinds() and ("breach", "live_runtime_off_tier") in plugin.kinds()
+    assert "OFF-TIER" in plugin.slash("status")
     # mutant twin: the same agent unsealed reaches the provider.
     plugin.slash("off")
     agent.run_conversation("again")
@@ -383,4 +386,4 @@ def test_plugins_doctor_ci_passes(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "OK: runtime discovery, manifest parsing, import, and registration passed" in proc.stdout
     assert "ERROR" not in proc.stdout and "registration adds" not in proc.stdout
-    assert "9 hook(s)" in proc.stdout
+    assert "10 hook(s)" in proc.stdout

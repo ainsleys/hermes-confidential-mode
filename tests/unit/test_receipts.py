@@ -25,7 +25,7 @@ SID = "sess-A"
 SECRET = "the merger closes on friday"   # stands in for prompt text; must never appear
 # Golden digest of the closing paragraph: editing the claims split must be a deliberate change here.
 CLOSING_SHA256 = hashlib.sha256(CLOSING_PARAGRAPH.encode("utf-8")).hexdigest()
-CLOSING_SHA256_PINNED = "ce29b5d33f587e28753d4b0753d3225c589d3767cf7ddb9d20452bf47564363a"
+CLOSING_SHA256_PINNED = "5a3d5d5151b697de16e9863f12c1f29262c0b15d431ee2b262475def628a8fa3"
 
 
 class Clock:
@@ -54,6 +54,7 @@ EVIDENCE = {"format": "tinfoil-attestation", "body": "eyJyZXBvcnQiOiAiZmFrZSJ9",
 
 def fill_every_kind(led: Ledger, sid: str = SID) -> None:
     """One session that exercises every ledger kind, in demo order."""
+    led.append(_ev("session_start", purpose="session", tier="attested", decision="session_start"))  # Amendment 4 F7
     led.append(_ev("preflight_fail", session_id="", purpose="seal", tier="attested",
                    detail={"reason": "fallback_providers[0].provider off_tier", "failures": 1}))
     led.append(_ev("seal", session_id="", tier="attested", decision="sealed", detail={"tier": "attested"}))
@@ -86,6 +87,7 @@ def fill_every_kind(led: Ledger, sid: str = SID) -> None:
                    detail={"reason": "compression summary sent off-tier"}))
     led.append(_ev("compaction", purpose="compaction", provider="attested-tinfoil", host="r1.tinfoil.invalid",
                    model="tf-model"))
+    led.append(_ev("session_end", purpose="session", tier="attested", decision="session_end"))
     led.append(_ev("unseal", session_id="", decision="unsealed"))
 
 
