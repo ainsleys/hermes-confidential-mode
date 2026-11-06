@@ -611,3 +611,17 @@ def test_api_key_comes_from_secret_scope_not_the_environment(env, monkeypatch):
     assert provider_mod.tinfoil_api_key() == ""  # no direct os.environ fallback
     import inspect
     assert "os.environ" not in inspect.getsource(provider_mod).replace("never os.environ directly", "")
+
+
+def test_verify_rows_carry_source_and_key_first_seen_and_silent_reattest_reaches_the_ledger(env):
+    events = []
+    profile = env["register"](on_event=events.append)
+    profile.create_client(api_key="tf-key", base_url=BASE_URL)
+    (ok,) = events
+    assert ok["detail"]["source"] == "verify" and ok["detail"]["key_first_seen"]["new"] is True
+    assert set(ok["detail"]) >= {"log_index", "integrated_time", "policy_check", "ttl_seconds"}
+    ad = provider_mod.adapter_for(PROFILE)
+    assert ad is profile._confidential_adapter
+    ad._sc.verify()  # an SDK-internal re-attestation (key rotation path)
+    assert [e["detail"]["source"] for e in events] == ["verify", "silent_reattest"]
+    assert events[1]["provider"] == PROFILE and events[1]["detail"]["key_first_seen"]["new"] is False

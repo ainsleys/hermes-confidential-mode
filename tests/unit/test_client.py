@@ -202,7 +202,7 @@ tinfoil_client = pytest.importorskip("tinfoil.client")
 
 def _stub_sdk(monkeypatch, rec: Recorder, *, code="c1", enclave="e1", fail=None):
     calls = []
-    state = {"code": code, "enclave": enclave, "fail": fail}
+    state = {"code": code, "enclave": enclave, "fail": fail, "hpke": "11" * 32, "tls": "ab" * 32}
 
     def fake_verify(self):
         calls.append(self.enclave)
@@ -215,8 +215,11 @@ def _stub_sdk(monkeypatch, rec: Recorder, *, code="c1", enclave="e1", fail=None)
         doc.verified_at = "2026-11-06T00:00:00Z"
         for step in doc.steps.values():
             step.status = "success"
+        doc.tls_public_key, doc.hpke_public_key = state["tls"], state["hpke"]
         self._verification_document = doc
-        return tinfoil_client.GroundTruth(public_key="ab" * 32, digest="d" * 64, measurement="m")
+        self._ground_truth = tinfoil_client.GroundTruth(public_key=state["tls"], digest="d" * 64, measurement="m",
+                                                        hpke_public_key=state["hpke"])
+        return self._ground_truth
 
     def fake_sync(self):
         self.verify()
@@ -409,3 +412,109 @@ def test_confidential_client_over_real_adapter_end_to_end(tmp_path, monkeypatch,
     assert rec.labels() == ["secure-sync", "secure-async"]
     assert ad.sync_attestation_count == 1 and ad.async_attestation_count == 1
     assert isinstance(c._sync, openai.OpenAI)
+
+
+
+# ── round 4: silent re-attest rows, key observation, per-send records ────────────────────────
+
+def test_silent_reattest_is_ledgered_with_evidence_and_updates_the_accepted_keys(tmp_path, monkeypatch, rec):
+    _, state = _stub_sdk(monkeypatch, rec)
+    ad = _adapter(tmp_path, hold_until_accepted=False)
+    rows = []
+    ad.event_sink = rows.append
+    first = ad.verify()
+    assert rows == [] and ad.current_hpke_key() == "11" * 32  # explicit verifies are ledgered by the provider
+    state["hpke"], state["tls"] = "22" * 32, "cd" * 32  # the enclave rotated its keys (same build)
+    ad._sc.verify()  # what the SDK's re-verifying transport does on a key-config mismatch
+    (row,) = rows
+    assert row["kind"] == "verify_ok" and row["detail"]["source"] == "silent_reattest"
+    assert row["detail"]["evidence"]["claims"]["hpke_public_key"] == "22" * 32
+    assert row["detail"]["code_fingerprint"] == first.code_fingerprint
+    assert row["detail"]["key_first_seen"]["new"] is True
+    assert ad.current_hpke_key() == "22" * 32
+    assert ad.last_result.evidence["claims"]["hpke_public_key"] == "22" * 32
+
+
+def test_async_pool_attestation_is_ledgered(tmp_path, monkeypatch, rec):
+    _stub_sdk(monkeypatch, rec)
+    ad = _adapter(tmp_path, hold_until_accepted=False)
+    rows = []
+    ad.event_sink = rows.append
+    ad.verify()
+
+    async def go():
+        ad.async_http_for_loop()
+    asyncio.run(go())
+    assert [r["detail"]["source"] for r in rows] == ["async_pool"]
+
+
+def test_key_first_seen_is_persisted_and_warn_only(tmp_path, caplog):
+    from confidential_mode.verify.tinfoil import TinfoilAdapter
+    ad = TinfoilAdapter(data_dir=tmp_path / "d", enclave="h.example", tls_probe=False)
+    a = ad.observe_key("h.example", "t1", "k1")
+    assert a["new"] is True and a["other_keys_for_host"] == 0
+    assert ad.observe_key("h.example", "t1", "k1")["new"] is False
+    assert TinfoilAdapter(data_dir=tmp_path / "d", enclave="h.example").observe_key(
+        "h.example", "t1", "k1")["first_seen"] == a["first_seen"]  # persisted
+    with caplog.at_level("WARNING"):
+        b = ad.observe_key("h.example", "t2", "k2")
+    assert b["new"] is True and b["other_keys_for_host"] == 1
+    assert "new enclave key pair" in caplog.text  # warned, nothing refused
+
+
+def _ehbp_like(handler_label, rec, *, nonce=True, fail=False, der=None):
+    def handle(request):
+        rec.requests.append((handler_label, request.url.path))
+        headers = {"Ehbp-Response-Nonce": "00" * 32} if nonce else {}
+        ext = {}
+        if der is not None:
+            class _S:
+                def get_extra_info(self, n):
+                    return type("X", (), {"getpeercert": lambda self, binary_form=False: der})() \
+                        if n == "ssl_object" else None
+            ext["network_stream"] = _S()
+
+        class Body(httpx.SyncByteStream):
+            def __iter__(self):
+                yield json.dumps(_completion("m")).encode()
+                if fail:
+                    raise ValueError("AEAD tag mismatch")
+        return httpx.Response(200, headers=headers, stream=Body(), extensions=ext)
+    return handle
+
+
+@pytest.mark.parametrize("mode", ["decrypted", "failed", "plain"])
+def test_send_records_hpke_key_and_response_decrypted(tmp_path, monkeypatch, rec, mode):
+    from confidential_mode.verify import tinfoil as tmod
+    _stub_sdk(monkeypatch, rec)
+    from cryptography import x509 as _x
+    from cryptography.hazmat.primitives import hashes as _h, serialization as _s
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    from cryptography.x509.oid import NameOID as _N
+    from datetime import datetime, timedelta, timezone
+    key = _ec.generate_private_key(_ec.SECP256R1())
+    nm = _x.Name([_x.NameAttribute(_N.COMMON_NAME, "router.example")])
+    der = (_x.CertificateBuilder().subject_name(nm).issuer_name(nm).public_key(key.public_key()).serial_number(1)
+           .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
+           .not_valid_after(datetime.now(timezone.utc) + timedelta(days=1)).sign(key, _h.SHA256())
+           .public_bytes(_s.Encoding.DER))
+
+    def fake_sync(self):
+        self.verify()
+        return httpx.Client(transport=httpx.MockTransport(_ehbp_like("secure-sync", rec, nonce=mode != "plain",
+                                                                     fail=mode == "failed", der=der)))
+    monkeypatch.setattr(tinfoil_client.SecureClient, "make_secure_http_client", fake_sync)
+    ad = _adapter(tmp_path, hold_until_accepted=False)
+    ad.verify()
+    view = ad.sync_http_view()
+    with tmod.capture_sends() as records:
+        with view.stream("POST", "https://router.example/v1/chat/completions", json={"m": 1}) as resp:
+            try:
+                resp.read()
+            except ValueError:
+                pass
+    (r,) = records
+    assert r["hpke_key_used"] == "11" * 32 and r["host"] == "router.example" and r["encrypted"] is True
+    assert r["response_decrypted"] == {"decrypted": True, "failed": False, "plain": None}[mode]
+    assert r["tls_spki_sha256"] == tmod.spki_sha256(der) and r["tls_matches_report"] is False
+    assert tmod.last_send_record() is r

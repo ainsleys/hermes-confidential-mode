@@ -71,6 +71,15 @@ class VerificationCache:
         self._clock = clock
         self._lock = threading.Lock()
 
+    def _wire_adapter_sink(self, provider: str, e: _Entry) -> None:
+        """Let the adapter ledger verifications the cache never sees (SDK silent re-attest, per-loop
+        async pool attestation) through this entry's on_event."""
+        if hasattr(e.adapter, "event_sink"):
+            try:
+                e.adapter.event_sink = lambda ev: _emit(e, {**ev, "provider": provider})
+            except Exception:
+                pass
+
     def register(self, provider: str, adapter, pins: PinStore, ttl_seconds: float,
                  failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS, *,
                  on_event: Callable[[dict], None] | None = None,
@@ -80,6 +89,7 @@ class VerificationCache:
                                              failure_backoff_seconds=float(failure_backoff_seconds),
                                              lock=threading.RLock(), on_event=on_event,
                                              verify_wait_seconds=float(verify_wait_seconds))
+            self._wire_adapter_sink(provider, self._entries[provider])
 
     def unregister(self, provider: str) -> None:
         with self._lock:
@@ -139,8 +149,16 @@ class VerificationCache:
                 raise exc if isinstance(exc, VerifyError) else VerifyError(e.last_error) from exc
             with e.lock:
                 e.result, e.verified_mono, e.last_error, e.failed_mono = result, self._now(), None, None
+            claims = (result.evidence or {}).get("claims") or {} if isinstance(result.evidence, dict) else {}
+            observe = getattr(e.adapter, "observe_key", None)
+            try:
+                first_seen = observe(result.enclave_host, claims.get("tls_public_key_fp"),
+                                     claims.get("hpke_public_key")) if callable(observe) else None
+            except Exception:
+                first_seen = None
             _emit(e, {"kind": "verify_ok", "provider": provider, "purpose": "verify", "host": result.enclave_host,
-                      "detail": {"vendor": result.vendor, "code_fingerprint": result.code_fingerprint,
+                      "detail": {"vendor": result.vendor, "source": "verify", "key_first_seen": first_seen,
+                                 "code_fingerprint": result.code_fingerprint,
                                  "enclave_fingerprint": result.enclave_fingerprint,
                                  "release_tag": result.release_tag, "enclave_host": result.enclave_host,
                                  "verifier": result.verifier, "ttl_seconds": e.ttl_seconds,
@@ -389,6 +407,13 @@ def _release(adapter) -> None:
 
 
 verification_cache = VerificationCache()
+
+
+def adapter_for(provider_name: str):
+    """The VendorAdapter behind a registered attested profile (W1/W5: current_hpke_key(), and
+    verify.tinfoil.capture_sends / last_send_record for send rows), or None."""
+    e = verification_cache.entry(provider_name)
+    return e.adapter if e is not None else None
 
 
 def _reset_for_tests() -> None:
