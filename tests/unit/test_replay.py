@@ -195,6 +195,7 @@ def fulcio_cert_der(repo: str, tag: str | None, *, repo_id=REPO_ID, owner_id=OWN
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "sigstore-intermediate")])
     ref = f"refs/tags/{tag or 'v0'}"
+    raw_v1 = {"1.3.6.1.4.1.57264.1.5": repo, "1.3.6.1.4.1.57264.1.6": ref}  # v1 extensions: raw bytes
     exts = {"1.3.6.1.4.1.57264.1.8": "https://token.actions.githubusercontent.com",
             "1.3.6.1.4.1.57264.1.9": f"https://github.com/{repo}/.github/workflows/release.yml@{ref}",
             "1.3.6.1.4.1.57264.1.12": f"https://github.com/{repo}",
@@ -209,6 +210,8 @@ def fulcio_cert_der(repo: str, tag: str | None, *, repo_id=REPO_ID, owner_id=OWN
          .not_valid_after(CAPTURED_AT + timedelta(minutes=10)))
     for oid, val in exts.items():
         b = b.add_extension(x509.UnrecognizedExtension(O(oid), _der_utf8(val)), critical=False)
+    for oid, val in raw_v1.items():
+        b = b.add_extension(x509.UnrecognizedExtension(O(oid), val.encode()), critical=False)
     return b.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER)
 
 
@@ -249,6 +252,35 @@ def fake_sigstore(monkeypatch):
             raise ValueError(f"Digest mismatch: expected {digest}")
         return st
     monkeypatch.setattr(tf_sigstore, "_verify_dsse_bundle", fake)
+
+    # The standalone policy checker's sigstore-python calls get the same stand-in; its own policy
+    # object still runs against the bundle's (stand-in) Fulcio certificate.
+    from confidential_mode.verify import policy_check as pc
+
+    class _FakeBundle:
+        def __init__(self, raw):
+            self.raw = json.loads(raw)
+            der = pc.bundle_certificate_der(self.raw)
+            if der is None:
+                raise VerificationError("bundle has no certificate")
+            self.signing_certificate = x509.load_der_x509_certificate(der)
+
+    class _FakeVerifier:
+        def __init__(self, root):
+            from sigstore.models import TrustedRoot
+            from sigstore_models.trustroot.v1 import TrustedRoot as _Inner
+            TrustedRoot(_Inner.from_json(root))  # the stored root must at least parse
+            used.append("policy_check")
+
+        def verify_dsse(self, bundle, policy):
+            policy.verify(bundle.signing_certificate)
+            env = bundle.raw["testEnvelope"]
+            payload = base64.b64decode(env["payload"])
+            if not hmac.compare_digest(env["mac"], hmac.new(FIXTURE_KEY, payload, "sha256").hexdigest()):
+                raise VerificationError("bundle signature invalid")
+            return "application/vnd.in-toto+json", json.dumps(json.loads(payload)["statement"]).encode()
+    monkeypatch.setattr(pc, "_load_bundle", _FakeBundle)
+    monkeypatch.setattr(pc, "_make_verifier", _FakeVerifier)
     return used
 
 
@@ -355,11 +387,11 @@ def test_sdk_caches_are_redirected_under_the_plugin_data_dir(captured, tmp_path)
 
 # ── replay: SEV passes on synthetic bytes, tampering fails the right check ────────────────────
 
-def _expect(result, failed: str):
+def _expect(result, failed: str, also: tuple = ()):
     assert result.ok is False
     assert isinstance(result.checks[failed], str) and result.checks[failed].startswith("fail:"), result.checks
     for key, value in result.checks.items():
-        if key != failed:
+        if key != failed and key not in also:
             assert not (isinstance(value, str) and value.startswith("fail:")), (key, value)
 
 
@@ -370,7 +402,7 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
     assert r.checks == {"repo_match": True, "repo_identity": "name only (ids not supplied)",
                         "trust_root_source": "from_evidence", "hardware_signature": True, "cert_chain": True, "tcb_policy": True,
                         "collateral_fresh_at_capture": "n/a: SEV-SNP has no Intel collateral",
-                        "code_signature": True, "measurement_match": True,
+                        "code_signature": True, "policy_check": True, "measurement_match": True,
                         "hardware_platform_match": "n/a: SEV-SNP", "report_data_keys": True,
                         "tls_cert_binding": "n/a: TLS certificate not captured on the ehbp path"}
     assert set(r.checks) == set(CHECK_KEYS)
@@ -384,7 +416,8 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
     assert r.not_established == NOT_ESTABLISHED and len(NOT_ESTABLISHED) == 5
     assert any("captured_at is when the capture happened" in x for x in NOT_ESTABLISHED)
     assert any("binds the release tag" in x and "latest" in x for x in NOT_ESTABLISHED)
-    assert fake_sigstore == ["Verifier"]  # Verifier.production() was served from the stored root
+    assert fake_sigstore == ["Verifier", "policy_check"]  # SDK path from the stored root + second column
+    assert (r.log_index, r.integrated_time) == (123456789, 1762400000)
     assert offline == []
 
 
@@ -715,21 +748,21 @@ def test_repo_identity_right_name_and_ids(captured, offline):
 def test_repo_identity_wrong_repo_id_with_the_right_name_fails(captured, offline):
     """A deleted-and-recreated (or transferred) repository keeps the name but not the numeric id."""
     r = replay(_with_bundle(captured, repo_id="999999"), expected_repo_id=REPO_ID, expected_owner_id=OWNER_ID)
-    _expect(r, "repo_identity")
-    assert "repo_id 999999" in r.checks["repo_identity"]
+    _expect(r, "repo_identity", also=("policy_check",))
+    assert "repo_id 999999" in r.checks["repo_identity"] and r.checks["policy_check"].startswith("fail:")
     r = replay(_with_bundle(captured, owner_id="1"), expected_repo_id=REPO_ID, expected_owner_id=OWNER_ID)
-    _expect(r, "repo_identity")
+    _expect(r, "repo_identity", also=("policy_check",))
 
 
 def test_repo_identity_wrong_repo_name_in_the_certificate_fails(captured, offline):
     r = replay(_with_bundle(captured, cert_repo="attacker/router"))
-    _expect(r, "repo_identity")
+    _expect(r, "repo_identity", also=("policy_check",))
     assert "attacker/router" in r.checks["repo_identity"]
 
 
 def test_repo_identity_ids_requested_but_absent_from_the_certificate(captured, offline):
     r = replay(_with_bundle(captured, repo_id=None, owner_id=None), expected_repo_id=REPO_ID)
-    _expect(r, "repo_identity")
+    _expect(r, "repo_identity", also=("policy_check",))
 
 
 def test_policy_check_module_has_no_tinfoil_import_and_runs_isolated(captured, tmp_path):
@@ -740,8 +773,20 @@ def test_policy_check_module_has_no_tinfoil_import_and_runs_isolated(captured, t
     assert not re.search(r"^\s*(import|from)\s+(tinfoil|confidential_mode|\.)", src, re.M)
     p = tmp_path / "bundle.json"
     p.write_text(json.dumps(signed_bundle(code_statement(), repo=REPO, tag=TAG)))
-    done = subprocess.run([sys.executable, "-I", policy_check.__file__, str(p)], capture_output=True, text=True,
+    done = subprocess.run([sys.executable, "-I", policy_check.__file__, "--bundle", str(p), "--identity-only"], capture_output=True, text=True,
                           timeout=60)
     assert done.returncode == 0, done.stderr
     out = json.loads(done.stdout)
     assert out["repo_id"] == REPO_ID and out["repository"] == REPO and out["log_index"] == 123456789
+
+
+def test_verify_time_policy_check_detail(captured):
+    """What provider.py puts in verify_ok detail.policy_check for a captured verification."""
+    from confidential_mode import provider as provider_mod
+    d = provider_mod._policy_check_detail(captured.evidence)
+    assert d["ok"] is True and d["repo_id"] == REPO_ID, d
+    assert provider_mod._tlog_fields(captured.evidence) == {"log_index": 123456789, "integrated_time": 1762400000}
+    bad = copy.deepcopy(captured.evidence)
+    bad["release"]["tag"] = "v0.0.0"
+    assert provider_mod._policy_check_detail(bad)["ok"] is False
+    assert provider_mod._policy_check_detail({})["ok"] is False

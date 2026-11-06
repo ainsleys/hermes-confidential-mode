@@ -40,6 +40,7 @@ CHECK_KEYS = (
     "tcb_policy",                   # SDK policy: guest policy, minimum TCB/firmware, TDX module / QE identity
     "collateral_fresh_at_capture",  # TDX: TCB info / QE identity not expired at as_of (n/a for SEV)
     "code_signature",               # Sigstore DSSE + Rekor + GitHub workflow policy for the release digest
+    "policy_check",                 # second column: verify/policy_check.py (no tinfoil code) on the same bundle(s)
     "measurement_match",            # signed code measurement == enclave measurement; fingerprints == claims
     "hardware_platform_match",      # TDX: MRTD/RTMR0 match a signed hardware-measurements entry (n/a for SEV)
     "report_data_keys",             # report_data (TLS key fp || HPKE key) == the keys the client used
@@ -480,6 +481,18 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
                 return
             out["code_fingerprint"] = code.fingerprint()
             _repo_identity(checks, out, bundle, opts, repo)
+            pc = policy_check.check_bundle(bundle, digest=release.get("digest") or "", repo=policy_repo,
+                                           tag=release.get("tag"), trusted_root=root,
+                                           expected_repo_id=opts.get("expected_repo_id"),
+                                           expected_owner_id=opts.get("expected_owner_id"))
+            if pc.ok:
+                checks.passed("policy_check")
+                for k_out, k_pc in (("log_index", "log_index"), ("integrated_time", "integrated_time"),
+                                    ("source_repo_id", "repo_id"), ("source_owner_id", "owner_id"),
+                                    ("build_signer_uri", "workflow"), ("source_commit", "commit")):
+                    out[k_out] = getattr(pc, k_pc)
+            else:
+                checks.failed("policy_check", f"code bundle: {pc.reason}")
 
             # 5) measurement match + the fingerprints recorded at capture
             try:
@@ -505,5 +518,10 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
                     checks.passed("hardware_platform_match")
                 except Exception as exc:
                     checks.failed("hardware_platform_match", f"{type(exc).__name__}: {exc}")
+                hpc = policy_check.check_bundle((hw.get("bundle") or "").encode("utf-8"), digest=hw.get("digest") or "",
+                                                repo=HARDWARE_MEASUREMENTS_REPO, tag=None, trusted_root=root,
+                                                predicate_type=policy_check.PREDICATE_HARDWARE)
+                if not hpc.ok:
+                    checks.failed("policy_check", f"hardware-measurements bundle: {hpc.reason}")
     if attempts:  # belt and braces: a banned call that was swallowed somewhere still fails the replay
         checks.failed("hardware_signature", f"network access attempted during replay: {attempts[0]}")

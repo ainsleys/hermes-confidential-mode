@@ -144,6 +144,8 @@ class VerificationCache:
                                  "enclave_fingerprint": result.enclave_fingerprint,
                                  "release_tag": result.release_tag, "enclave_host": result.enclave_host,
                                  "verifier": result.verifier, "ttl_seconds": e.ttl_seconds,
+                                 **_tlog_fields(result.evidence),
+                                 "policy_check": _policy_check_detail(result.evidence),
                                  "evidence": result.evidence}})
             return result
 
@@ -317,6 +319,38 @@ def _consent_recorded(e: _Entry, result: VerificationResult) -> bool:
     except Exception:
         logger.warning("attested: consent ledger unreadable; refusing", exc_info=True)
         return False
+
+
+def _policy_check_detail(evidence) -> dict:
+    """Second column at verify time: the standalone verify/policy_check.py re-verifies the captured
+    release bundle against the captured trust root (offline). {"ok": bool, "reason": str, ...}."""
+    try:
+        from pathlib import Path as _P
+        from .verify import policy_check
+        ev = evidence or {}
+        rel, tr, bundle = ev.get("release") or {}, ev.get("trusted_root") or {}, ev.get("sigstore_bundle")
+        if not (bundle and rel.get("digest") and tr.get("path")):
+            return {"ok": False, "reason": "evidence incomplete: no bundle, digest or trust root captured"}
+        r = policy_check.check_bundle(bundle, digest=rel["digest"], repo=ev.get("repo") or "",
+                                      tag=rel.get("tag"), trusted_root=_P(tr["path"]).read_bytes())
+        return {"ok": bool(r.ok), "reason": r.reason, "repo_id": r.repo_id, "owner_id": r.owner_id,
+                "workflow": r.workflow, "commit": r.commit}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"[:300]}
+
+
+def _tlog_fields(evidence) -> dict:
+    """logIndex / integratedTime of the release signature's transparency-log entry, from the stored
+    bundle (no online Rekor)."""
+    try:
+        from .verify.policy_check import fulcio_identity
+        bundle = (evidence or {}).get("sigstore_bundle")
+        if not bundle:
+            return {"log_index": None, "integrated_time": None}
+        ident = fulcio_identity(bundle)
+        return {"log_index": ident.get("log_index"), "integrated_time": ident.get("integrated_time")}
+    except Exception:
+        return {"log_index": None, "integrated_time": None}
 
 
 def _adapter_host(adapter) -> str:
