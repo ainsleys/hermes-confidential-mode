@@ -1,4 +1,7 @@
 name: confidential-mode
 version: 0.0.1
-description: Attested inference provider plus sealed mode. Not yet functional.
-# kind, hooks, middleware, capabilities and requires_hermes are filled in at C1.
+description: Attested inference provider plus sealed mode for Hermes Agent. Pre-C0 scaffold, not yet functional.
+author: ainsleys
+kind: standalone
+provides_tools: []
+provides_hooks: []
