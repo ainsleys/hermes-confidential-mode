@@ -505,3 +505,113 @@ def test_setup_prints_the_resolved_enclave_line(plugin):
     assert block.rstrip().endswith("  tinfoil:\n    # the router this setup verified and pinned; without it each "
                                    "restart may pick another\n    # router (possibly another hardware platform) and "
                                    "refuse until you re-approve the pin\n    enclave: router-3.inf6.tinfoil.sh")
+
+
+# ── CLI verbs mirroring /confidential (scriptable demo / live tests) ─────────────────────────────
+
+def _hermes(plugin, *argv, stdin=None):
+    import os
+    import subprocess
+    from pathlib import Path
+    exe = Path(sys.executable).with_name("hermes")
+    cmd = [str(exe)] if exe.exists() else [sys.executable, "-m", "hermes_cli.main"]
+    env = {**os.environ, "HERMES_HOME": str(plugin.home), "PYTHONDONTWRITEBYTECODE": "1"}
+    return subprocess.run(cmd + ["confidential", *argv], capture_output=True, text=True, env=env, timeout=180,
+                          input=stdin)
+
+
+def test_cli_on_and_off_in_another_process_govern_the_running_gateway(plugin, monkeypatch):
+    """`hermes confidential on/off` in a separate process (the scripted demo) writes the same ctx.state; the
+    loaded plugin (the 'gateway') reads it fresh on its next turn and its allowlist follows the new seal."""
+    from .test_register import LOCAL_URL, REMOTE_URL, build_agent
+    from ._harness import Rec
+    proc = _hermes(plugin, "on", "local-only")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("Sealed (local-only)") and "Preflight:" in proc.stdout
+    assert "confidential preflight: tier=local-only PASS" in proc.stdout
+    tiers = _sub(plugin, "tiers")
+    assert plugin.rt.state.sealed() == (True, tiers.Tier.LOCAL)
+    rec = Rec()
+    agent = build_agent(monkeypatch, rec, REMOTE_URL)
+    assert agent.run_conversation("q1")["final_response"].startswith("Confidential mode: sealed to local-only")
+    assert rec.provider_calls == []
+    # The gateway's allowlist is the one persisted by the CLI's seal, not a stale or empty one.
+    gt = _sub(plugin, "gate_tools")
+    al = plugin.rt.allowlist()
+    assert al.seal_id == gt.seal_id_for(plugin.rt.state) and al.get("web_search").route is gt.Route.ASK
+    # The CLI process imported the built-in tools before building it (else every tool would be unclassified).
+    assert al.get("read_file").route is gt.Route.LOCAL and len(al.tools) > 40
+    # An addition approved in another process (same seal) is honoured without a restart.
+    from tools.registry import registry
+    other = gt.Allowlist.load_persisted(plugin.rt.allowlist_path, registry, seal_id=al.seal_id)
+    other.add("web_search")
+    assert plugin.rt.allowlist().is_added("web_search")
+    proc = _hermes(plugin, "off")
+    assert proc.returncode == 0 and proc.stdout.startswith("Unsealed (local-only)"), proc.stdout + proc.stderr
+    assert agent.run_conversation("q2")["final_response"] == "provider answered"
+    # A reseal from the CLI starts a new seal: the earlier addition does not carry over.
+    assert _hermes(plugin, "on", "local-only").returncode == 0
+    assert not plugin.rt.allowlist().is_added("web_search")
+    ok = build_agent(monkeypatch, Rec(), LOCAL_URL).run_conversation("q3")
+    assert ok["final_response"] == "provider answered"
+
+
+def test_cli_on_refusal_and_receipts_exit_codes(plugin):
+    plugin.cfg.write_text(BASE_CONFIG + "fallback_providers:\n  - provider: openrouter\n    model: x/y\n")
+    proc = _hermes(plugin, "on", "local-only")
+    assert proc.returncode == 1 and proc.stdout.startswith("Not sealed") and "fallback_providers[0]" in proc.stdout
+    plugin.cfg.write_text(BASE_CONFIG)
+    assert _hermes(plugin, "receipts").returncode == 2
+    plugin.rt.ledger.append({"kind": "send_observed", "session_id": "sess-cli", "purpose": "main", "host": "127.0.0.1"})
+    proc = _hermes(plugin, "receipts", "sess-cli", "--json")
+    assert proc.returncode == 0, proc.stderr
+    assert _sub(plugin, "receipts").verify_chain(json.loads(proc.stdout))
+
+
+def test_cli_pins_and_allow_use_the_exact_terminal_asker(plugin):
+    import io
+    commands = _sub(plugin, "commands")
+
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    def run(action, **kw):
+        out = io.StringIO()
+        rc = commands.cli_verb(plugin.rt, action, argparse.Namespace(**kw), out=out,
+                               asker=commands.TerminalAsker(TTY(ANSWER[0]), io.StringIO()))
+        return rc, out.getvalue()
+
+    ANSWER = ["yes\n"]
+    plugin.rt.pins.stage(_result(plugin))
+    rc, out = run("pins", pins_action=None)
+    assert rc == 0 and "Pending pin: tinfoil" in out
+    rc, out = run("pins", pins_action="approve")                     # "yes" is not an exact choice
+    assert rc == 1 and plugin.rt.pins.pending() is not None
+    ANSWER[0] = "approve\n"
+    rc, out = run("pins", pins_action="approve")
+    assert rc == 0 and out.startswith("Pinned tinfoil") and plugin.rt.pins.pending() is None
+    rc, out = run("allow", tool="web_search")
+    assert rc == 1 and out.startswith("Not sealed")
+    assert run("on", tier="local-only")[0] == 0
+    ANSWER[0] = "1\n"
+    rc, out = run("allow", tool="web_search")
+    assert rc == 0 and plugin.rt.allowlist().is_added("web_search"), out
+    rc, out = run("off")
+    assert rc == 0 and out.startswith("Unsealed")
+    # The non-tty default asker (a script) answers nobody: nothing is pinned.
+    plugin.rt.pins.stage(_result(plugin, code="ab" * 32))
+    out = io.StringIO()
+    assert commands.cli_verb(plugin.rt, "pins", argparse.Namespace(pins_action="approve"), out=out) == 1
+    assert plugin.rt.pins.pending() is not None
+
+
+def test_cli_verbs_parse(plugin):
+    parser, _ = _replay_parser(plugin)
+    assert parser.parse_args(["on", "attested"]).tier == "attested"
+    assert parser.parse_args(["pins", "approve"]).pins_action == "approve"
+    assert parser.parse_args(["pins"]).pins_action is None
+    a = parser.parse_args(["receipts", "s1", "--json"])
+    assert (a.session, a.json) == ("s1", True)
+    assert parser.parse_args(["allow", "web_search"]).tool == "web_search"
+    assert parser.parse_args(["off"]).confidential_action == "off"

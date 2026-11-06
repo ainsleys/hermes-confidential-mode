@@ -240,6 +240,24 @@ def pins_text(rt: Any, *, session_key: str = "") -> str:
     return "\n".join(lines)
 
 
+INTERACTIVE_VERIFY_WAIT_SECONDS = 60.0   # check / setup / on: a human is waiting; cold attestation ~5-20 s
+
+
+def interactive_attested_ok(rt: Any, wait_seconds: float = INTERACTIVE_VERIFY_WAIT_SECONDS) -> Callable[[str], Any]:
+    """provider.attested_ok with a longer bounded wait for commands a human is waiting on (W2). Resolved at
+    call time; an attested_ok without ``wait_seconds`` is called plainly."""
+    def call(provider_name: str):
+        import inspect
+        fn = _provider_module(rt).attested_ok
+        try:
+            params = inspect.signature(fn).parameters
+            takes = "wait_seconds" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+        except (TypeError, ValueError):
+            takes = False
+        return fn(provider_name, wait_seconds=wait_seconds) if takes else fn(provider_name)
+    return call
+
+
 def check_text(rt: Any, tier: Optional[str]) -> str:
     try:
         sealed, sealed_tier = rt.is_sealed()
@@ -252,7 +270,7 @@ def check_text(rt: Any, tier: Optional[str]) -> str:
         return f"Unknown tier {chosen!r} (one of: {', '.join(x.value for x in Tier)})."
     if t is Tier.ZDR:
         return f"zero-retention: {_sealing.ZDR_REASON}."
-    report = _sealing.run_tier_preflight(t, config=rt.load_config())
+    report = _sealing.run_tier_preflight(t, config=rt.load_config(), attested_ok=interactive_attested_ok(rt))
     return _pf.format_report(report)
 
 
@@ -322,7 +340,11 @@ def watch_text(rt: Any, limit: int = 20) -> str:
 
 # ── slash command ────────────────────────────────────────────────────────────────────────────────
 
-def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: str = "", platform: str = "") -> str:
+def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: str = "", platform: str = "",
+                 asker: Any = None, show_report: bool = False) -> str:
+    """One verb of /confidential (and of the mirroring CLI subcommands). ``asker`` is the object whose
+    ``ask_choice`` consent uses: ctx (chat surfaces) or a TerminalAsker (CLI)."""
+    asker = asker if asker is not None else rt.ctx
     try:
         argv = shlex.split(raw_args or "")
     except ValueError:
@@ -335,9 +357,12 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
         if len(rest) != 1:
             return "Usage: /confidential on <local-only|attested>"
         result = _sealing.seal(rest[0], state=rt.state, ledger=rt.ledger, config=rt.load_config(),
-                               allowlist_path=rt.allowlist_path, session_id=sid, surface=surface)
+                               allowlist_path=rt.allowlist_path, session_id=sid, surface=surface,
+                               attested_ok=interactive_attested_ok(rt))
         if result.ok:
             rt.set_allowlist(result.allowlist)
+            if show_report and result.report is not None:
+                return result.message + "\n\nPreflight:\n" + _pf.format_report(result.report)
         return result.message
     if cmd in ("off", "unseal"):
         result = _sealing.unseal(state=rt.state, ledger=rt.ledger, session_id=sid, surface=surface,
@@ -361,7 +386,7 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
             if rt.pins is None:
                 return "The pin store is not available; see /confidential status."
             try:
-                return approve_pending_pin(rt.ctx, rt.pins, rt.ledger, session_key=skey, session_id=sid,
+                return approve_pending_pin(asker, rt.pins, rt.ledger, session_key=skey, session_id=sid,
                                            platform=surface or "unknown")
             except ConsentContextError as exc:
                 return f"Not asked: {exc}"
@@ -381,7 +406,7 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
             return "Not sealed: every tool runs without asking. Seal first with /confidential on <tier>."
         from .consent import ConsentContextError, allow_tool
         try:
-            return allow_tool(rt.ctx, rt.allowlist(), rt.ledger, rest[0], session_key=skey, session_id=sid,
+            return allow_tool(asker, rt.allowlist(), rt.ledger, rest[0], session_key=skey, session_id=sid,
                               platform=surface)
         except ConsentContextError as exc:
             return f"Not asked: {exc}"
@@ -497,17 +522,19 @@ def cli_setup(rt: Any, args: Any, out=None) -> int:
         cache = _provider_module(rt).verification_cache
         try:
             rt.adapter.resolve_enclave_host()
-            result = cache.refresh(PROFILE_NAME)
         except Exception as exc:  # noqa: BLE001
-            rt.append({"kind": "verify_fail", "purpose": "setup", "provider": PROFILE_NAME, "decision": "failed",
-                       "surface": "cli", "detail": {"error": f"{type(exc).__name__}: {exc}"[:300]}})
-            out.write(f"Verification failed: {exc}\n")
+            out.write(f"Router discovery failed: {exc}\n")
             return 1
-        rt.append({"kind": "verify_ok", "purpose": "setup", "provider": PROFILE_NAME, "host": result.enclave_host,
-                   "decision": "verified", "surface": "cli",
-                   "detail": {"code_fingerprint": result.code_fingerprint,
-                              "enclave_fingerprint": result.enclave_fingerprint,
-                              "release_tag": result.release_tag, "verifier": result.verifier}})
+        # A fresh attestation, bounded at INTERACTIVE_VERIFY_WAIT_SECONDS (W2). The cache ledgers
+        # verify_ok / verify_fail / pin_staged itself (Amendment 4 F4), so nothing is ledgered here.
+        cache.invalidate(PROFILE_NAME)
+        try:
+            ok, reason, result = cache.ensure(PROFILE_NAME, wait_seconds=INTERACTIVE_VERIFY_WAIT_SECONDS)
+        except TypeError:   # an older cache without wait_seconds
+            ok, reason, result = cache.ensure(PROFILE_NAME)
+        if result is None:
+            out.write(f"Verification failed: {reason}\n")
+            return 1
         out.write(f"Verified {result.enclave_host}: code {_short(result.code_fingerprint, 16)} enclave "
                   f"{_short(result.enclave_fingerprint, 16)} release {result.release_tag or '(untagged)'} "
                   f"(verified_at is the local clock)\n")
@@ -760,6 +787,41 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
     return 1 if failed else 0
 
 
+CLI_VERBS = ("on", "off", "receipts", "pins", "allow")
+
+
+def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> int:
+    """`hermes confidential on|off|receipts|pins|allow`: the slash verbs on the same ctx.state, ledger,
+    pins and allowlist files as a running gateway (state is re-read from disk on every gate call, so a seal
+    or unseal here takes effect on the gateway's next turn). Consent uses the exact-match TerminalAsker."""
+    out = out or sys.stdout
+    asker = asker if asker is not None else TerminalAsker()
+    if action == "on":
+        raw, ok_prefix = f"on {args.tier}", "Sealed"
+    elif action == "off":
+        raw, ok_prefix = "off", ""
+    elif action == "receipts":
+        if not getattr(args, "session", None):
+            out.write("Usage: hermes confidential receipts <session id> [--json]\n")
+            return 2
+        raw, ok_prefix = f"receipts {shlex.quote(args.session)}" + (" --json" if args.json else ""), ""
+    elif action == "pins":
+        raw = "pins approve" if getattr(args, "pins_action", None) == "approve" else "pins"
+        ok_prefix = "Pinned" if raw == "pins approve" else ""
+    else:
+        raw, ok_prefix = f"allow {shlex.quote(args.tool)}", ""
+    text = handle_slash(rt, raw, session_id="", session_key="cli", platform="cli", asker=asker,
+                        show_report=(action == "on"))
+    out.write(text.rstrip() + "\n")
+    if action == "allow":
+        return 0 if text.endswith("added to the allowlist for this seal.") or text.endswith("is already allowed.") else 1
+    if ok_prefix:
+        return 0 if text.startswith(ok_prefix) else 1
+    if action == "receipts" and text.startswith(("Receipts are not available", "Usage")):
+        return 1
+    return 0
+
+
 def register_cli(ctx: Any, rt: Any) -> None:
     def setup_fn(parser: argparse.ArgumentParser) -> None:
         sub = parser.add_subparsers(dest="confidential_action")
@@ -776,6 +838,16 @@ def register_cli(ctx: Any, rt: Any) -> None:
         from . import watch
         watch.setup_parser(p)
         sub.add_parser("status", help="seal state, pins, verification, breaches")
+        p = sub.add_parser("on", help="seal this profile (same path as /confidential on)")
+        p.add_argument("tier", choices=[t.value for t in Tier])
+        sub.add_parser("off", help="unseal this profile and print the seal period's counts")
+        p = sub.add_parser("receipts", help="render a session receipt")
+        p.add_argument("session", nargs="?", default=None, help="session id")
+        p.add_argument("--json", action="store_true", help="hash-chained JSON form")
+        p = sub.add_parser("pins", help="list pins; 'approve' approves the staged pin on this terminal")
+        p.add_argument("pins_action", nargs="?", choices=["approve"], default=None)
+        p = sub.add_parser("allow", help="allow an off-machine tool for this seal (asks on this terminal)")
+        p.add_argument("tool")
         p = sub.add_parser("replay", help="replay a receipt's attestation evidence offline")
         p.add_argument("receipt", help="receipt JSON (/confidential receipts <session> --json)")
         p.add_argument("--expected-repo", default=DEFAULT_EXPECTED_REPO,
@@ -800,6 +872,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
                 return cli_setup(rt, args)
             if action == "replay":
                 return cli_replay(args, rt=rt)
+            if action in CLI_VERBS:
+                return cli_verb(rt, action, args)
             if action == "check":
                 print(check_text(rt, getattr(args, "tier", None)))
                 return 0
@@ -811,7 +885,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
             if action == "status":
                 print(status_text(rt))
                 return 0
-            print("Usage: hermes confidential setup|check|watch|status|replay <receipt.json>")
+            print("Usage: hermes confidential setup|check|watch|status|on <tier>|off|receipts <session>|"
+                  "pins [approve]|allow <tool>|replay <receipt.json>")
             return 2
         except Exception as exc:  # noqa: BLE001
             print(f"confidential: error ({type(exc).__name__}: {exc})", file=sys.stderr)

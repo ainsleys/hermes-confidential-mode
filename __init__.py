@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import threading
 from collections import deque
 from typing import Any, Callable, Optional
@@ -61,6 +62,7 @@ class Runtime:
                                                  "cli_commands": [], "providers": []}
         self.errors: list[tuple[str, str]] = []
         self._allowlist: Any = None
+        self._allowlist_stamp: Any = None
         self._lock = threading.Lock()
         self._aux_seen: deque = deque(maxlen=512)
         self.last_live: Optional[dict] = None      # last live main runtime seen by pre_llm_call (status)
@@ -80,29 +82,50 @@ class Runtime:
     def set_allowlist(self, allowlist: Any) -> None:
         with self._lock:
             self._allowlist = allowlist
+            self._allowlist_stamp = self._file_stamp()
+
+    def _file_stamp(self):
+        """(mtime_ns, size) of the persisted allowlist, or None. A seal, unseal or allow from ANOTHER
+        process (the `hermes confidential` CLI next to a running gateway) changes it."""
+        try:
+            st = os.stat(self.allowlist_path)
+            return st.st_mtime_ns, st.st_size
+        except Exception:  # noqa: BLE001
+            return None
 
     def allowlist(self):
-        """The allowlist built at seal. After a restart the seal survives (ctx.state) but the
-        in-memory allowlist does not: rebuild it from the live registry on first use and ledger that."""
-        with self._lock:
-            if self._allowlist is not None:
-                return self._allowlist
+        """The allowlist for the CURRENT seal. The seal lives in ctx.state (re-read from disk on every
+        call), so another process may have sealed, unsealed or resealed since this one cached its
+        allowlist: the cache is used only while its seal_id matches the persisted seal, and additions
+        another process approved (allowlist.yaml changed, same seal) are merged in. After a restart, or a
+        seal made by another process, it is rebuilt from the identities persisted at that seal and ledgered."""
         gt = _cm("gate_tools")
         try:
             sealed, tier = self.is_sealed()
         except Exception:  # noqa: BLE001
             sealed, tier = False, None
         if sealed is not True:
+            with self._lock:
+                self._allowlist = None
             return gt.Allowlist(tools={})
+        seal_id = gt.seal_id_for(self.state)
+        stamp = self._file_stamp()
+        with self._lock:
+            cached = self._allowlist
+            if cached is not None and getattr(cached, "seal_id", "") == seal_id:
+                if stamp != self._allowlist_stamp:
+                    _merge_added(cached, self.allowlist_path, seal_id)
+                    self._allowlist_stamp = stamp
+                return cached
         from tools.registry import registry
         predicate = _cm("sealing").predicate_for(tier, config=self.load_config())
         # Amendment 4 F5 (W4): rebuild from the identities persisted at THIS seal; anything registered
         # after the seal, changed, or a missing/other-seal file is unclassified until a reseal.
-        allowlist = gt.Allowlist.load_persisted(self.allowlist_path, registry, predicate=predicate,
-                                                seal_id=gt.seal_id_for(self.state))
+        allowlist = gt.Allowlist.load_persisted(self.allowlist_path, registry, predicate=predicate, seal_id=seal_id)
         with self._lock:
-            if self._allowlist is None:
-                self._allowlist = allowlist
+            current = self._allowlist
+            if current is None or getattr(current, "seal_id", "") != seal_id:
+                self._allowlist, self._allowlist_stamp = allowlist, stamp
             allowlist = self._allowlist
         # Not kind "seal": receipts open a sealed period at every seal row (Amendment 4 F7).
         self.append({"kind": "session_start", "purpose": "seal", "tier": tier.value, "decision": "allowlist_rebuilt",
@@ -129,6 +152,23 @@ class Runtime:
                 self.ledger.append(event)
         except Exception as exc:  # noqa: BLE001
             logger.warning("confidential-mode ledger append failed: %s", type(exc).__name__)
+
+
+def _merge_added(allowlist: Any, path: Any, seal_id: str) -> None:
+    """Pull human-approved additions another process persisted for the SAME seal into ``allowlist``.
+    Only names still on the ask route count; a file for another seal adds nothing."""
+    import json
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+    except Exception:  # noqa: BLE001
+        return
+    if not isinstance(data, dict) or data.get("seal_id") != seal_id or not isinstance(data.get("allowed"), list):
+        return
+    route_ask = _cm("gate_tools").Route.ASK
+    names = {n for n in data["allowed"] if isinstance(n, str)
+             and getattr(allowlist.tools.get(n), "route", None) is route_ask}
+    with allowlist._lock:
+        allowlist.added |= names
 
 
 class _ChangedConfigPredicate:
