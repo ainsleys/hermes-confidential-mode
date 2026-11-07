@@ -27,12 +27,12 @@ description: >-
   NEAR_AI_API_KEY through Hermes' secret scope, checks only whether OPENROUTER_API_KEY and NOUS_API_KEY
   are set (to report Hermes' side-call fall-through), reads TERMINAL_ENV, TERMINAL_CWD, HERMES_HOME,
   CONFIDENTIAL_MODE_PROGRESS and CONFIDENTIAL_MODE_NO_FETCH, sets XDG_CONFIDENTIAL_MODE_TOOL_PROCESS,
-  stores no credential and runs no shell command or subprocess. It starts daemon threads of five kinds: an
-  attestation, a pins.yaml match record, a NEAR compose-file fetch, the own-host-name DNS lookup, and,
-  while locked, one long-running re-verification thread per attested provider. During each Tinfoil
-  attestation only, it wraps the SDK's fetch functions and requests.Session.request process-wide, inert
-  for every other thread, and puts them back afterwards. hermes plugins validate counts 30 private core
-  import sites (docs/DISCLOSURE.md).
+  stores no credential and runs no shell command or subprocess. The plugin starts daemon threads of five
+  kinds: an attestation, a pins.yaml match record, a NEAR compose-file fetch, the own-host-name DNS
+  lookup, and, while locked, one long-running re-verification thread per attested provider. During each
+  Tinfoil attestation only, the plugin wraps the SDK's fetch functions and requests.Session.request
+  process-wide, inert for every other thread, and puts them back afterwards. hermes plugins validate
+  counts 30 private core import sites (docs/DISCLOSURE.md).
 maintainer: ainsleys
 tier: community
 category: models

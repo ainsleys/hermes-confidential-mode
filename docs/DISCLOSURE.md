@@ -217,7 +217,7 @@ rotation): the SDK's fetch functions and, while the SDK reads its latest release
 A replay, which only the `hermes confidential replay` command runs, also wraps
 `urllib.request.urlopen`, urllib3's `HTTPConnectionPool.urlopen` and the httpx transports, for the
 offline network ban. Each wrapper is installed when the window opens and the original attribute is put
-back when the last open window for it closes. Inside the window the wrapper is shared by the whole
+back when the last open window for that attribute closes. Inside the window the wrapper is shared by the whole
 process, Hermes' own `requests` calls included, and does nothing for any thread but the one that opened
 the window: another thread's call runs the original function unchanged. Hermes core attributes are never
 wrapped.
