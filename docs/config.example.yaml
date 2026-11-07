@@ -118,9 +118,11 @@ confidential:
     require_tls_binding: true
 
     # What happens to an image or other non-text part of a message. NEAR's encryption covers text only.
-    # disclose: every text part is encrypted, every non-text part leaves this host in plaintext to NEAR's
-    # gateway, each send's ledger row counts those parts, and the first one per lock adds a notice row
-    # and one line to that turn's reply. refuse: such a message is refused before it is sent. Any other
+    # disclose: every text part is encrypted, each image part (image_url or input_image holding an inline
+    # data:image base64 image) leaves this host in plaintext to NEAR's gateway, and any other part type,
+    # remote image URL or extra field is refused. Each send's ledger row counts the image parts, and the
+    # first one per lock adds a notice row and one line to the reply. refuse: any message with a non-text
+    # part is refused before it is sent. Any other
     # value refuses, and the preflight refuses the lock on it. Default disclose.
     image_parts: disclose
 
@@ -137,9 +139,10 @@ confidential:
     # true, only three structured settings pass, checked by shape: reasoning (keys enabled, effort,
     # summary, max_tokens, exclude only; effort null or one of none/minimal/low/medium/high/xhigh/max, summary one of
     # auto/concise/detailed/none), stream_options (include_usage only) and reasoning_effort (an effort
-    # word). Their keys are fixed and their values are booleans, integers or words from those lists, so
-    # they carry no free text. Any other key or word, logit_bias and every other extra_body entry are
-    # refused before sending (token ids could encode text).
+    # word). Their keys are fixed and their values are booleans, integers (max_tokens 0 to 2^31 - 1) or
+    # words from those lists, so they carry no free text. Any other key or word, logit_bias, every other
+    # extra_body entry and any other top-level list or mapping are refused before sending (token ids
+    # could encode text).
     # The reply is sealed to a per-request key named in a header NEAR's signature does not cover, so a
     # gateway that swaps that key can read a reply; the plugin then withholds it and marks the send
     # unverified (docs/LIMITATIONS.md section 14). Default true.

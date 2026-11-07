@@ -40,6 +40,7 @@ def test_a_background_result_with_another_fingerprint_stages_a_pin_and_is_never_
     assert cache.ensure(P)[0] is True
     r = cache.entry(P).refresher
     clock.t = 250.0
+    assert cache.ensure(P)[0] is True   # a recent use: the refresh is for an active session
     r.step()
     assert r.outcomes == ["staged"]
     assert [c for c, _ in ad.commits] == [first] and ad.discarded == [evil]
@@ -131,3 +132,37 @@ def test_near_commit_refuses_after_close(tmp_path):
     ad.close()
     with pytest.raises(VerifyError):
         ad.commit_verification(prepared, hold=False)
+
+
+def test_a_send_prepared_before_a_held_commit_is_refused_at_the_pool(tmp_path):
+    """S09, atomic: a request that passed the first hold check and was built on the old verification is
+    refused when a verification was committed with a hold in between (checked with the pool choice)."""
+    pytest.importorskip("nacl")
+    import httpx
+    from tests.near_world import BASE, MODEL
+    world, ad, _gate, _entered, _blocking = _blocking_world(tmp_path)
+    ad.verify()
+    ad.release()
+    req = httpx.Request("POST", f"{BASE}/chat/completions",
+                        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]})
+    req.read()
+    ex = ad.begin_exchange(req)
+    ad.commit_verification(ad.prepare_verification(), hold=True)
+    with pytest.raises(VerifyError, match="held"):
+        ad._acquire(ex, check=True)
+    ad.release()
+    with pytest.raises(VerifyError, match="changed while this request was prepared"):
+        ad._acquire(ex, check=True)
+    ad.close()
+    with pytest.raises(VerifyError, match="closed"):
+        ad.prepare_verification()
+
+
+def test_the_text_receipt_marks_an_unaccepted_background_row():
+    row = {"id": 2, "kind": "verify_ok", "ts": 350.0, "host": "h", "provider": "attested-tinfoil",
+           "detail": {"enclave_host": "h", "source": "background", "accepted": False, "vendor": "tinfoil"}}
+    text = receipts._verify_body(row)
+    assert "NOT ACCEPTED (the pins did not match this build; never used for a send)" in text
+    assert "source=background" in text
+    ok = dict(row, detail={"enclave_host": "h", "source": "background", "accepted": True, "vendor": "tinfoil"})
+    assert "NOT ACCEPTED" not in receipts._verify_body(ok) and "source=background" in receipts._verify_body(ok)

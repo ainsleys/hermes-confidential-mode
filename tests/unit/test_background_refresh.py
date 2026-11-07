@@ -142,6 +142,7 @@ def test_the_refresh_waits_for_the_lead_then_swaps_an_accepted_result_in(world):
     clock.t = 200.0
     assert 0 < r.step() <= cache.refresh_poll_seconds and ad.prepares == 1   # not yet due (due at 240)
     clock.t = 241.0
+    assert cache.ensure(P)[0] is True   # a recent use: the refresh is for an active session
     assert r.step() == 0.0 and r.outcomes == ["accepted"]
     assert ad.prepares == 2 and ad.commits[-1] == (second, False)   # committed without a hold
     e = cache.entry(P)
@@ -159,6 +160,7 @@ def test_no_send_waits_on_a_background_capture(world):
     assert cache.ensure(P)[0] is True
     r = _refresher(cache)
     clock.t = 250.0
+    assert cache.ensure(P)[0] is True   # a recent use: the refresh is for an active session
     ad.capture_gate = threading.Event()
     t = threading.Thread(target=r.step, daemon=True)
     t.start()
@@ -182,6 +184,7 @@ def test_a_failed_background_capture_keeps_the_old_result_until_expiry_then_refu
     assert cache.ensure(P)[0] is True
     r = _refresher(cache)
     clock.t = 250.0
+    assert cache.ensure(P)[0] is True   # a recent use: the refresh is for an active session
     r.step()
     assert r.outcomes == ["failed"] and cache.entry(P).result is first
     fail = _rows(events, "verify_fail")
@@ -211,9 +214,30 @@ def test_a_lost_background_verify_row_is_a_failure(world):
     good = e.on_event
     e.on_event = lambda ev: (_ for _ in ()).throw(RuntimeError("disk full")) if ev["kind"] == "verify_ok" else good(ev)
     clock.t = 250.0
+    assert cache.ensure(P)[0] is True   # a recent use: the refresh is for an active session
     _refresher(cache).step()
-    assert _refresher(cache).outcomes == ["failed"] and e.result is first and len(ad.commits) == 1
-    assert ad.discarded
+    # The row is written after the commit; a lost row holds the adapter and drops the entry (fail closed).
+    assert _refresher(cache).outcomes == ["failed"] and e.result is None and len(ad.commits) == 2
+    assert ad.held_reason == provider_mod.REASON_VERIFY_ROW_LOST
+    with pytest.raises(VerifyError):
+        ad.send()
+
+
+def test_a_failed_commit_writes_no_accepted_row(world):
+    cache, clock, events = world["cache"], world["clock"], world["events"]
+    first = _result()
+    ad = world["make"]([first, _result()])
+    assert cache.ensure(P)[0] is True
+
+    def boom(prepared, *, hold):
+        raise VerifyError("closed meanwhile")
+    ad.commit_verification = boom
+    clock.t = 250.0
+    assert cache.ensure(P)[0] is True   # a recent use: the refresh is for an active session
+    _refresher(cache).step()
+    assert _refresher(cache).outcomes == ["failed"] and cache.entry(P).result is first and ad.discarded
+    assert [x["detail"].get("source") for x in _rows(events, "verify_ok")] == ["verify"]
+    assert _rows(events, "verify_fail")[-1]["detail"]["source"] == "background"
 
 
 def test_the_refresh_never_runs_while_unlocked_and_never_without_a_prepare_step(world):
@@ -291,6 +315,7 @@ def test_an_unlock_during_the_capture_discards_the_result(world):
     assert cache.ensure(P)[0] is True
     r = _refresher(cache)
     clock.t = 250.0
+    assert cache.ensure(P)[0] is True   # a recent use: the refresh is for an active session
     ad.capture_gate = threading.Event()
     t = threading.Thread(target=r.step, daemon=True)
     t.start()
@@ -308,6 +333,7 @@ def test_an_inline_verification_in_progress_makes_the_refresh_wait(world):
     assert cache.ensure(P)[0] is True
     r = _refresher(cache)
     clock.t = 250.0
+    assert cache.ensure(P)[0] is True   # a recent use: the refresh is for an active session
     e = cache.entry(P)
     with e.verify_lock:
         r.step()
@@ -320,10 +346,14 @@ def test_an_idle_session_is_not_refreshed(world):
     assert cache.ensure(P)[0] is True
     r = _refresher(cache)
     clock.t = 250.0
+    assert cache.ensure(P)[0] is True   # a recent use: the refresh is for an active session
     r.step()
     assert r.outcomes == ["accepted"] and ad.prepares == 2
-    clock.t = 250.0 + 241.0          # the swapped verification is due, but no call used it
+    clock.t = 250.0 + 241.0          # the swapped verification is due, but no call used it recently
+    assert r.step() > 0 and ad.prepares == 2
+    clock.t = 250.0 + 301.0          # expired without a use: the thread ends, nothing was fetched
     assert r.step() is None and ad.prepares == 2
+    clock.t = 250.0 + 241.0
     assert cache.ensure(P)[0] is True    # a call uses it and starts a refresh again
     assert _refresher(cache) is not r
     _refresher(cache).step()

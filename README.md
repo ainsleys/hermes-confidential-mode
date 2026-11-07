@@ -568,17 +568,22 @@ The plugin refuses some requests before they are sent.
   `extra_body`, unless the plugin knows the key. Such a mapping would leave this host in plaintext.
 
 Images are not refused by default. NEAR's encryption covers only text. In a message that holds an
-image, the plugin encrypts every text part and sends every image part, and every other non-text part,
-in plaintext. So NEAR's gateway reads each image you send. The text around the image stays encrypted.
-NEAR's model still signs the reply with its `provider_tee` key, and the release rules are unchanged.
+image, the plugin encrypts every text part (`text` or `input_text`, in any letter case) and sends each
+image part in plaintext. An image part may be `image_url` or `input_image`, and it must hold an inline
+`data:image/...;base64,` image, with an optional `detail` of `low`, `high` or `auto`. Any other part
+type, a remote image URL, or an extra field on an image part is refused before sending, with the part
+type named, because its text could only leave in plaintext. So NEAR's gateway reads each image you
+send. The text around the image stays encrypted. NEAR's model still signs the reply with its
+`provider_tee` key, and the release rules are unchanged.
 
 - Each send's `send_signed` ledger row records the parts in `plaintext_parts`, with their count and
   types. The receipt's line for that send says "N image part(s) left this host in plaintext to NEAR's
   gateway".
-- The first time per lock that an image leaves to NEAR, the plugin writes a `notice` ledger row. It
-  also appends one line to that turn's reply: "Confidential mode: an image in this turn went to NEAR's
-  gateway in plaintext; the text around it was encrypted." The plugin adds that line through Hermes'
-  `transform_llm_output` hook.
+- The first time per lock that an image leaves to NEAR, the plugin writes a `notice` ledger row. Once
+  that row is written, the plugin also appends one line to the reply of that session's next turn,
+  naming the part types, for example: "Confidential mode: an image part (image_url) in this turn went
+  to NEAR's gateway in plaintext; the text around it was encrypted." The plugin adds that line through
+  Hermes' `transform_llm_output` hook.
 - `confidential.near.image_parts: refuse` refuses every message with a non-text part before it is
   sent, as earlier versions did. The default is `disclose`. The preflight accepts both values and
   shows the one in force.
@@ -934,16 +939,17 @@ runs without asking, in these contexts too.
 - `delegate_task` when the call names a route. A route is any field that would send the child agent
   somewhere else: a profile, a provider, a base URL, an ACP command, or a backend other than the
   default. (An ACP command launches an external agent through the Agent Client Protocol.)
-- A `terminal`, `process_manage` or `execute_code` call that would run `hermes confidential`, type
-  `/confidential`, import the plugin's `confidential_mode` package, or write one of the plugin's state
-  files (`pins.yaml`, `ledger.sqlite`, `allowlist.yaml` or its `state.json`). A `write_file` or `patch`
-  call whose target is one of those files is refused too. The ledger records each refusal with the
-  decision `self_approval`. Text that only mentions the command, the package or a file passes. For
-  example, `grep "confidential off" docs/README.md`, `cat` of the pins file, and an edit to this
-  plugin's own source all run. The check reads the text of the call, so a command assembled at run
-  time passes it. [LIMITATIONS.md](docs/LIMITATIONS.md), section 15, lists the forms the check
-  refuses. [Reviewing a pending pin](#reviewing-a-pending-pin) says what else guards the approval
-  prompt.
+- A `terminal`, `process_manage` or `execute_code` call whose literal text has one of the forms
+  listed in [LIMITATIONS.md](docs/LIMITATIONS.md), section 15. Those forms run `hermes confidential`,
+  type `/confidential`, import the plugin's `confidential_mode` package, or write one of the plugin's
+  state files (`pins.yaml`, `ledger.sqlite`, `allowlist.yaml` or its `state.json`) or its data
+  directory. A `write_file` or `patch` call whose target is one of those files, or lies in that
+  directory, is refused too. The ledger records each refusal with the decision `self_approval`. The
+  calls on the gate's test list that only mention the command, the package or a file run, for example
+  `grep "confidential off" docs/README.md`, `make confidential status`, `cat` of the pins file, and an
+  edit to this plugin's own source. The check reads only the literal text of the call. A command
+  assembled at run time, or split across several writes to a process, passes it.
+  [Reviewing a pending pin](#reviewing-a-pending-pin) says what else guards the approval prompt.
 
 Plain delegation on the default backend is allowed. The child agent inherits the locked profile, so
 it stays inside the tier.

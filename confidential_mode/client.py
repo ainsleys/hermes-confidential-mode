@@ -72,9 +72,10 @@ class ConfidentialClient:
     HERMES_SKIP_ASYNC_WRAP = True
 
     def __init__(self, adapter, *, api_key: str, base_url: str, gate: Callable[[], None] | None = None,
-                 openai_kwargs: dict | None = None):
+                 openai_kwargs: dict | None = None, on_refuse: Callable[[BaseException], None] | None = None):
         self._adapter = adapter
         self._gate = gate
+        self._on_refuse = on_refuse
         self._kw = dict(openai_kwargs or {})
         self._kw.setdefault("max_retries", 0)
         self._view = adapter.sync_http_view()
@@ -87,7 +88,11 @@ class ConfidentialClient:
 
     def _check_gate(self) -> None:
         if self._gate is not None:
-            self._gate()  # raises ConfidentialRefused when verification is no longer fresh/pinned
+            try:
+                self._gate()  # raises ConfidentialRefused when verification is no longer fresh/pinned
+            except ConfidentialRefused as exc:
+                _record(self._on_refuse, exc)
+                raise
 
     def _async_client(self) -> openai.AsyncOpenAI:
         loop = asyncio.get_running_loop()
@@ -111,45 +116,61 @@ class ConfidentialClient:
 # ── RefusingClient ─────────────────────────────────────────────────────────────────────────────
 
 
+def _record(on_refuse, exc: BaseException) -> None:
+    """Hand a provider-gate refusal to the vendor's ledger hook (NEAR: a send_refused row). Never raises."""
+    if on_refuse is not None:
+        try:
+            on_refuse(exc)
+        except Exception:
+            pass
+
+
 class _RefusingTransport(httpx.BaseTransport):
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, on_refuse=None):
         self._reason = reason
+        self._on_refuse = on_refuse
 
     def handle_request(self, request):
-        raise ConfidentialRefused(self._reason)
+        exc = ConfidentialRefused(self._reason)
+        _record(self._on_refuse, exc)
+        raise exc
 
 
 class _RefusingResource:
     """Any method call raises; used for chat.completions, models, embeddings, responses."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, on_refuse=None):
         self._reason = reason
+        self._on_refuse = on_refuse
 
     def _refuse(self, *args, **kwargs):
-        raise ConfidentialRefused(self._reason)
+        exc = ConfidentialRefused(self._reason)
+        _record(self._on_refuse, exc)
+        raise exc
 
     create = list = retrieve = parse = stream = _refuse
 
 
 class _RefusingChat:
-    def __init__(self, reason: str):
-        self.completions = _RefusingResource(reason)
+    def __init__(self, reason: str, on_refuse=None):
+        self.completions = _RefusingResource(reason, on_refuse)
 
 
 class RefusingClient:
     HERMES_SKIP_TRANSPORT_WRAP = True
     HERMES_SKIP_ASYNC_WRAP = True
 
-    def __init__(self, reason: str, *, api_key: str = "", base_url: str = ""):
+    def __init__(self, reason: str, *, api_key: str = "", base_url: str = "",
+                 on_refuse: Callable[[BaseException], None] | None = None):
         self.reason = reason
         self.api_key = api_key or "refused"
         self.base_url = base_url
-        self.chat = _RefusingChat(reason)
-        self.models = _RefusingResource(reason)
-        self.embeddings = _RefusingResource(reason)
-        self.responses = _RefusingResource(reason)
+        self.chat = _RefusingChat(reason, on_refuse)
+        self.models = _RefusingResource(reason, on_refuse)
+        self.embeddings = _RefusingResource(reason, on_refuse)
+        self.responses = _RefusingResource(reason, on_refuse)
         self._custom_headers: dict = {}
-        self._client = httpx.Client(transport=_RefusingTransport(reason))
+        self._client = httpx.Client(transport=_RefusingTransport(reason, on_refuse))
         self._closed = False
 
     def with_options(self, **_kwargs) -> "RefusingClient":

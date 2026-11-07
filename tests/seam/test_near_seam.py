@@ -435,7 +435,9 @@ def test_an_image_to_near_while_locked_is_disclosed_once_per_lock_and_the_reply_
     assert notices[0].detail["note"] == "1 image part(s) left this host in plaintext to NEAR's gateway"
     signed = [e for e in rows if e.kind == "send_signed"][-2:]
     assert all(e.detail["plaintext_parts"]["count"] == 1 and e.verdict == "verified" for e in signed)
-    line = plugin.mod.IMAGE_NOTICE_LINE
+    line = plugin.mod.image_notice_line({"count": 1, "types": {"image_url": 1}})
+    assert line == ("Confidential mode: an image part (image_url) in this turn went to NEAR's gateway in "
+                    "plaintext; the text around it was encrypted.")
     other = invoke_hook("transform_llm_output", response_text="hi", session_id="another", model=MODEL, platform="cli")
     assert not [r for r in other if r]
     out = [r for r in invoke_hook("transform_llm_output", response_text="A cat.", session_id="sess-img",
@@ -473,3 +475,21 @@ def test_image_parts_refuse_is_in_tier_and_shown_and_refuses_images(plugin, near
     with pytest.raises(Exception):
         client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": [IMAGE_PART]}])
     assert near.chat_posts() == 0 and not [e for e in plugin.rt.ledger.tail(0) if e.kind == "notice"]
+
+
+def test_an_aux_call_refused_by_the_provider_gate_writes_one_send_refused_row(plugin, near):
+    """Review item 7: a NEAR client refused before any transport (no pin yet) is ledgered too."""
+    import providers
+    client = providers.get_provider_profile("attested-near").create_client(api_key="sk-near-seam", base_url=BASE)
+    assert type(client).__name__ == "RefusingClient"
+    sendctx = _sub(plugin, "sendctx")
+    with sendctx.send_context(session_id="sess-aux", purpose="aux:title_generation", tier="attested"):
+        with pytest.raises(Exception):
+            client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "x"}])
+    rows = [e for e in plugin.rt.ledger.tail(0) if e.kind == "send_refused"]
+    assert len(rows) == 1 and rows[0].purpose == "aux:title_generation" and rows[0].session_id == "sess-aux"
+    assert rows[0].detail["stage"] == "provider_gate" and "pinned" in rows[0].detail["reason"]
+    with sendctx.send_context(session_id="s", purpose="main", refusals_ledgered_by="llm_gate"):
+        with pytest.raises(Exception):
+            client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "x"}])
+    assert len([e for e in plugin.rt.ledger.tail(0) if e.kind == "send_refused"]) == 1   # the gate writes its own

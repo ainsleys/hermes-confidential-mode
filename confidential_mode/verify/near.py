@@ -869,13 +869,27 @@ class NearAdapter:
 
     def _attest_pool(self) -> httpx.BaseTransport:
         with self._lock:
+            if self.closed:
+                raise VerifyError("the NEAR adapter is closed")
             if self._attest_transport is None:
                 self._attest_transport = self._transport_factory()
             return self._attest_transport
 
-    def _acquire(self) -> tuple[httpx.BaseTransport, Callable[[], None]]:
-        """The current send pool, counted as in use until the returned release() is called (once)."""
+    def _check_current(self, ex: "_Exchange | None") -> None:
+        """Caller holds the adapter lock. The hold check, made again together with the pool choice: a send
+        that passed the first check before a verification was committed with a hold is refused here, and an
+        exchange built on an accepted verification that was replaced since is refused (S09, atomic)."""
+        if self.held_reason is not None:
+            raise VerifyError(f"attested transport held: {self.held_reason}")
+        if ex is not None and ex.accepted is not self._accepted:
+            raise VerifyError("the accepted NEAR verification changed while this request was prepared; resend")
+
+    def _acquire(self, ex: "_Exchange | None" = None, *, check: bool = False) -> tuple[httpx.BaseTransport, Callable[[], None]]:
+        """The current send pool, counted as in use until the returned release() is called (once). With
+        ``check`` the hold and the exchange's verification are checked under the same lock."""
         with self._lock:
+            if check:
+                self._check_current(ex)
             t = self._pool()
             self._inflight[id(t)] = self._inflight.get(id(t), 0) + 1
         done = [False]
@@ -1172,7 +1186,7 @@ class NearAdapter:
             raise VerifyError(f"model {model!r} is not an attested NEAR model on the allowlist "
                               "(confidential.near.models); refused before sending")
         acc = self._accepted
-        ex = _Exchange(adapter=self, path=path, model=model, stream=stream,
+        ex = _Exchange(adapter=self, path=path, model=model, stream=stream, accepted=acc,
                        request_sha256="", request_bytes=0,
                        authorization=request.headers.get("authorization"), context=sendctx.current() or {},
                        attestation_nonce=((acc.evidence or {}).get("nonce") if acc else None),
@@ -1440,6 +1454,7 @@ class _Exchange:
     attestation_nonce: str | None
     code_fingerprint: str | None
     responses_api: bool = False
+    accepted: Any = None            # the accepted verification this exchange was built on (S09 re-check)
     status: int | None = None
     content_encoding: str | None = None
     chat_id: str | None = None
@@ -1784,7 +1799,10 @@ class _SyncView(httpx.BaseTransport):
             ex = a.begin_exchange(request)
         except VerifyError as exc:
             raise _refuse(a, exc, "before_send", request=request) from exc
-        pool, release_pool = a._acquire()
+        try:
+            pool, release_pool = a._acquire(ex, check=True)
+        except VerifyError as exc:
+            raise _refuse(a, exc, "before_send", ex=ex, request=request) from exc
         try:
             response = pool.handle_request(ex.request if ex is not None else request)
         except BaseException as exc:
@@ -1860,7 +1878,13 @@ class _AsyncView(httpx.AsyncBaseTransport):
         except VerifyError as exc:
             raise _refuse(a, exc, "before_send", request=request) from exc
         try:
-            response = await a._async_pool().handle_async_request(ex.request if ex is not None else request)
+            with a._lock:                # the hold re-check and the pool choice under one lock (S09)
+                a._check_current(ex)
+                pool = a._async_pool()
+        except VerifyError as exc:
+            raise _refuse(a, exc, "before_send", ex=ex, request=request) from exc
+        try:
+            response = await pool.handle_async_request(ex.request if ex is not None else request)
         except BaseException as exc:
             refusal = _send_failed(a, ex, exc) if ex is not None else None
             if refusal is None and any(isinstance(e, TLSPinMismatch) for e in _chain(exc)):

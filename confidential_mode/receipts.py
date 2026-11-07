@@ -778,6 +778,9 @@ def _verify_body(r: Mapping, status: Mapping | None = None) -> str:
     if k in ("verify_ok", "verify_fail"):
         f = verify_facts(r)
         bits = ["UNVERIFIED ENTRY (no evidence or incomplete capture; proves nothing)"] if is_unverified_entry(r) else []
+        if d.get("accepted") is False:
+            # Amendment 9: a background verification the pins did not accept was never used for a send.
+            bits.append("NOT ACCEPTED (the pins did not match this build; never used for a send)")
         bits += [k, f"vendor={_p(d.get('vendor') or r['provider']) or '?'}", f"repo={full(f['repo'])}",
                  f"platform={full(f['platform'])}", f"enclave={full(f['enclave_host'])} ({ASSERTED})"]
         if f["code_fingerprint"]:
@@ -792,6 +795,8 @@ def _verify_body(r: Mapping, status: Mapping | None = None) -> str:
             bits.append(f"hpke_key={full(f['hpke_public_key'])}")
         if f["captured_at"]:
             bits.append(f"captured_at={full(f['captured_at'])} ({ASSERTED})")
+        if d.get("source") == "background":
+            bits.append("source=background")
         if k == "verify_fail":
             bits.append(f"reason: {_p(d.get('error') or d.get('reason')) or '(none)'}")
         if status is not None:

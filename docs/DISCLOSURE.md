@@ -236,16 +236,23 @@ writes `pins.yaml`. The third kind runs each attestation. The sequence for an at
 5. The thread exits when the verification ends.
 
 The fourth kind is the background re-verification thread, one per attested provider (Tinfoil and NEAR).
-Its name is `confidential-refresh-<provider>`. It starts after a turn whose verification the pins
-accepted, and only while the profile is locked. It sleeps until 60 seconds before the five-minute
-verification ends (`confidential.verify_refresh_lead_seconds`). It then runs one verification over the
-network, to the same attestation hosts as any other verification. It refreshes only a verification
-that a turn used, so an idle locked session makes no requests; the thread exits, and the next turn
-starts it again. It holds no lock that a send takes
-while it waits on the network. It checks the lock state at least every five seconds. It stops on
-unlock, when the profile is no longer locked, when the adapter closes, and when an HTTP 421 or a TLS
-certificate change drops the verification. Each verification it runs writes a `verify_ok` or
-`verify_fail` ledger row with `source: background`.
+Its name is `confidential-refresh-<provider>`. It starts after a call whose verification the pins
+accepted, and only while the profile is locked on the attested tier. It sleeps until 60 seconds before
+the five-minute verification ends (`confidential.verify_refresh_lead_seconds`). It then runs one
+verification over the network, to the same attestation hosts as any other verification. It refreshes a
+verification only when a call checked that verification in the last two minutes before it ends. A
+session idle for longer makes no request, and the thread exits when the verification ends. A call that
+checks the verification includes a model call and a `status` or `check` command.
+
+While it waits on the network, the thread holds no lock that a send already set up takes. On Tinfoil,
+the SDK checks one verification at a time, so a send that must attest by itself waits for a capture
+in progress. Such a send is the first one on a new event loop, or one after the enclave rotated a key.
+The thread checks the lock state at least every five seconds. It stops on unlock, when the profile is
+no longer locked, when the adapter closes, and when an HTTP 421 or a TLS certificate change drops the
+verification. A capture already in progress then finishes, and its result is discarded. Each
+verification it runs writes a `verify_ok` or `verify_fail` ledger row with `source: background`. A
+verification the pins did not accept is written with `accepted: false`. The receipt marks it "NOT
+ACCEPTED" and never counts it for a send.
 
 ### Environment variable it sets
 
@@ -288,7 +295,7 @@ which means it happens inside a function, not when the plugin loads.
 | `tools.approval_context` | `get_current_session_key`, `set_current_observability_context`, `reset_current_observability_context`, `_get_approval_mode` | To get the session key for remembered grants. To tie an approval answer to its tool call. To detect `approvals.mode: off`. |
 | `tools.registry` | `registry`, `discover_builtin_tools` | To build the tool allowlist at lock, and to record each tool's handler identity. A lock from the `hermes confidential` command line first loads the built-in tools, as a chat process would. |
 | `agent.error_classifier` | `_CONTEXT_OVERFLOW_PATTERNS` | To recognise a NEAR context-length error, so that Hermes can compress the context as it would for any provider. |
-| `agent.auxiliary_client` | `_RUNTIME_MAIN_CONTEXT` | To read the live main runtime on each locked turn. Auxiliary tasks set to `auto` follow the live runtime, not the config. |
+| `agent.auxiliary_client` | `_RUNTIME_MAIN_CONTEXT`, `_RELAY_AUX_CALL_CONTEXT` | To read the live main runtime on each locked turn. Auxiliary tasks set to `auto` follow the live runtime, not the config. The second name gives a NEAR auxiliary send its purpose (`aux:<task>`) and session in the ledger. Without it, such a send takes the purpose and session of the turn around it, or reads "unattributed" with an empty session. |
 | `agent.secret_scope` | `get_secret` | To resolve `TINFOIL_API_KEY` and `NEAR_AI_API_KEY` for the active profile. |
 | `tools.terminal_tool`, `tools.terminal_tool_lifecycle`, `tools.terminal_scope` | `_get_env_config`, `_active_environments`, `_env_lock`, `get_active_env`, and `terminal_env` as a fallback | To read the terminal backend a terminal, code or file tool call would run on, the way Hermes' tools resolve it, and the backend of the environment Hermes has cached for the task. The plugin blocks the call, and refuses to lock, unless both are `local`. |
 | `hermes_cli.commands` | `resolve_command` | To recognise `/model` and `/moa`, and their aliases, in `pre_gateway_dispatch`. |
@@ -300,7 +307,7 @@ which means it happens inside a function, not when the plugin loads.
 | `plugins.plugin_storage` | `plugin_db`, `plugin_data_dir` | To open the ledger database. |
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
 
-`hermes plugins validate` reports 29 of these import sites as private core imports. This is a warning,
+`hermes plugins validate` reports 30 of these import sites as private core imports. This is a warning,
 not a failure. The imports are the price of classifying tools and approvals without a public seam. The
 upstream roadmap in [LIMITATIONS.md](LIMITATIONS.md) lists the seams that would remove them.
 
@@ -326,9 +333,10 @@ whole profile. While locked, the plugin blocks the following.
 
 - **NEAR requests the encryption cannot cover (attested-near).** With `confidential.near.encrypt` on,
   which the lock requires, the plugin refuses before sending: streaming, every POST other than chat
-  completions, and settings whose value is a mapping it does not know. Images and other non-text parts
-  are not refused by default (`confidential.near.image_parts: disclose`). They leave this host in
-  plaintext to NEAR's gateway, beside the encrypted text. Each send's ledger row and the receipt count
+  completions, and settings whose value is a mapping it does not know. Image parts holding an inline
+  image are not refused by default (`confidential.near.image_parts: disclose`). They leave this host in
+  plaintext to NEAR's gateway, beside the encrypted text. Any other non-text part, a remote image URL,
+  or an extra field on an image part is refused. Each send's ledger row and the receipt count
   them. The first time per lock, the plugin writes a `notice` ledger row and appends one line to that
   turn's reply. With `confidential.near.image_parts: refuse` the plugin refuses such a message before
   sending. The plugin releases a reply only after a verified `provider_tee` signature. The plugin
@@ -358,10 +366,12 @@ whole profile. While locked, the plugin blocks the following.
   at all, the ask becomes a block.
 
 - **Tool calls that run the plugin's own commands or write its state files.** A `terminal`,
-  `process_manage` or `execute_code` call that would run `hermes confidential`, type `/confidential`,
-  import the `confidential_mode` package, or write a state file is refused. So is a `write_file` or
-  `patch` call whose target is a state file. A call that only mentions the command, the package or a
-  file runs. [LIMITATIONS.md](LIMITATIONS.md), section 15, lists the forms.
+  `process_manage` or `execute_code` call whose literal text has one of the forms listed in
+  [LIMITATIONS.md](LIMITATIONS.md), section 15, is refused. Those forms run `hermes confidential`, type
+  `/confidential`, import the `confidential_mode` package, or write a state file or the plugin's data
+  directory. So is a `write_file` or `patch` call whose target is a state file or lies in that
+  directory. The calls on the gate's test list that only mention the command, the package or a file
+  run. A command assembled at run time, or split across several writes to a process, is not caught.
 
 - **Tools that are always blocked.** These are the following:
   - `cronjob_manage`, because a scheduled job would run later, outside the locked session;

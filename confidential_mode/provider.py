@@ -438,9 +438,9 @@ class BackgroundRefresh:
     cache, both under the entry lock. A failed capture, a lost verify_ok row or a result the pins do not
     accept changes nothing: the verification in use keeps vouching until its TTL ends, and the next call
     verifies inline and refuses as it would without the refresh. A failure is retried after the failure
-    backoff while time remains; a staged result is not retried. A verification no call used is not
-    refreshed, so an idle locked session makes no requests; the next call starts the thread again. The
-    thread stops on unlock, on adapter
+    backoff while time remains; a staged result is not retried. A verification is refreshed only when a
+    call used it within two lead periods of its end (the lead window or the lead before it), so a session
+    idle that long makes no request; a call in the window still refreshes. The thread stops on unlock, on adapter
     close, on invalidation (an HTTP 421 or a TLS pin mismatch) and when the profile is no longer locked.
     Each attempt writes a verify_ok or verify_fail row with ``source: background``."""
 
@@ -494,8 +494,10 @@ class BackgroundRefresh:
             due = expires - e.refresh_lead_seconds
             if now < due:
                 return min(due - now, poll)
-            if self.e.used_mono < t0:
-                return None                      # no call used this verification: an idle session is not refreshed
+            if self.e.used_mono < due - e.refresh_lead_seconds:
+                # No call used the verification in the lead window or the lead before it: an idle session
+                # is not refreshed. Keep looking until expiry, so a call inside the window still refreshes.
+                return min(expires - now, poll)
             if self.done_for == (id(result), t0):
                 return min(expires - now, poll)
             if self.failed_mono is not None and now - self.failed_mono < e.failure_backoff_seconds:
@@ -538,17 +540,22 @@ class BackgroundRefresh:
                     prepared.discard()
                     self.done_for = (id(result), t0)
                     return "staged"
-                if not cache._emit_verify_ok(provider, e, new, source="background", accepted=True):
-                    prepared.discard()
-                    self.failed_mono = cache._now()
-                    cache._emit_verify_fail(provider, e, VerifyError(REASON_VERIFY_ROW_LOST), source="background")
-                    return "failed"
                 try:
                     e.adapter.commit_verification(prepared, hold=False)
                 except Exception as exc:
                     prepared.discard()
                     self.failed_mono = cache._now()
                     cache._emit_verify_fail(provider, e, exc, source="background")
+                    return "failed"
+                # The row is written after the commit, so no accepted row names a verification the adapter
+                # never used. A lost row cannot be undone by un-committing, so it fails closed instead: the
+                # adapter is held and the entry dropped; the next call verifies inline and writes its row.
+                if not cache._emit_verify_ok(provider, e, new, source="background", accepted=True):
+                    _hold(e.adapter, REASON_VERIFY_ROW_LOST)
+                    e.result, e.failed_mono, e.last_error = None, cache._now(), REASON_VERIFY_ROW_LOST
+                    self.failed_mono = cache._now()
+                    cache._emit_verify_fail(provider, e, VerifyError(REASON_VERIFY_ROW_LOST), source="background")
+                    self.stop()
                     return "failed"
                 e.result, e.verified_mono, e.last_error, e.failed_mono = new, cache._now(), None, None
                 self.failed_mono, self.done_for = None, None
@@ -962,14 +969,24 @@ def classify_refusal(error, **_context):
     return None
 
 
+def _refusal_recorder(profile):
+    """The adapter's refusal ledger hook for a provider-gate refusal (NEAR: one send_refused row with stage
+    provider_gate, skipped inside the llm gate, which writes its own), or None."""
+    record = getattr(getattr(profile, "_confidential_adapter", None), "record_refusal", None)
+    if not callable(record):
+        return None
+    return lambda exc: record(exc, stage="provider_gate")
+
+
 def _create_client(profile, cache: VerificationCache, client_kwargs: dict):
     api_key = client_kwargs.get("api_key") or api_key_for(getattr(profile, "_confidential_env_var", API_KEY_ENV))
     base_url = profile.base_url
+    on_refuse = _refusal_recorder(profile)
     try:
         ok, reason, _ = cache.ensure(profile.name)
         base_url = profile.base_url  # may have just been resolved from the placeholder
         if not ok:
-            return RefusingClient(reason, api_key=api_key, base_url=base_url)
+            return RefusingClient(reason, api_key=api_key, base_url=base_url, on_refuse=on_refuse)
 
         def gate() -> None:
             g_ok, g_reason, _ = cache.ensure(profile.name)
@@ -977,12 +994,12 @@ def _create_client(profile, cache: VerificationCache, client_kwargs: dict):
                 raise ConfidentialRefused(g_reason)
 
         return ConfidentialClient(profile._confidential_adapter, api_key=api_key, base_url=base_url, gate=gate,
-                                  openai_kwargs=openai_kwargs_from(client_kwargs))
+                                  openai_kwargs=openai_kwargs_from(client_kwargs), on_refuse=on_refuse)
     except Exception as exc:
         logger.warning("attested create_client failed closed: %s", exc, exc_info=True)
         try:
             return RefusingClient(f"attested client unavailable: {type(exc).__name__}", api_key=api_key,
-                                  base_url=base_url)
+                                  base_url=base_url, on_refuse=on_refuse)
         except Exception:
             return RefusingClient("attested client unavailable")
 

@@ -500,12 +500,16 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   completions, or while the `pynacl` package is missing. Before sending, it refuses any POST other
   than chat completions and any top-level request key that would carry text in plaintext.
 - It sends image parts in plaintext beside the encrypted text, by default
-  (`confidential.near.image_parts: disclose`). Every text part of such a message is encrypted. Every
-  image part, and every other non-text part, leaves this host in plaintext to NEAR's gateway. The
+  (`confidential.near.image_parts: disclose`). Every text part of such a message (`text` or
+  `input_text`, in any letter case) is encrypted. An `image_url` or `input_image` part that holds an
+  inline `data:image/...;base64,` image leaves this host in plaintext to NEAR's gateway. Any other
+  part type, a remote image URL, or an extra field on an image part is refused before sending. The
   live probe of 2026-11-07 showed that NEAR accepts this shape and still returns a `provider_tee`
   signature. Each send's ledger row counts the plaintext parts by type, and the receipt says how many
-  left. The first time per lock, the plugin writes a `notice` row and appends one line to that turn's
-  reply through Hermes' `transform_llm_output` hook. That hook keeps the first non-empty rewrite, so
+  left. The first time per lock, the plugin writes a `notice` row and, once the row is written, appends
+  one line naming the part types to that session's next reply through Hermes' `transform_llm_output`
+  hook. A send with no session id puts the line on the next reply of any session, and a send made by a
+  delegated subagent puts it on the subagent's reply, which goes to the parent model. That hook keeps the first non-empty rewrite, so
   another plugin that rewrites the same reply can displace the line. The ledger row and the receipt
   stay either way. With `confidential.near.image_parts: refuse`, the plugin refuses a message with any
   non-text part before it is sent.
@@ -543,14 +547,18 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   - `reasoning_effort`, one of the same effort words.
 
   These settings carry no free text: every key is fixed, and every value is a boolean, an integer or a
-  word from a fixed list. Any other key, or a word outside the list, is refused. `logit_bias` and every
-  other `extra_body` entry are still refused, because token ids could encode text. The gateway reads the
+  word from a fixed list, and the integer `max_tokens` must lie between 0 and 2^31 - 1. Any other key,
+  or a word outside the list, is refused. `logit_bias`, every other `extra_body` entry, and any other
+  top-level list or mapping, even one of numbers only, are still refused, because token ids could
+  encode text. The gateway reads the
   structured settings, and the `send_signed` row names them in `plaintext_keys`.
 - Every NEAR refusal is recorded. A request the plugin refuses before sending, or a reply it withholds
   after receiving, gets a `send_refused` row with the purpose (`main` or `aux:<task>`), the host, the
   reason and the request size when the plugin knows the size. The receipt lists the row under Refusals.
-  For a main call while locked, the LLM gate writes that row; for any other call, the NEAR transport
-  writes the row.
+  For a main call while locked, the LLM gate writes that row. For any other call, such as an
+  auxiliary task, the NEAR transport writes the row. When the provider's own check refuses an
+  auxiliary call before the transport runs, for example because no pin matches, the NEAR client writes
+  the row, with the stage `provider_gate`.
 - It pins each CVM it saw as an entry of its own: the gateway, and each model instance. An entry pins
   the CVM's measured docker-compose, its app_id, OS image and KMS key as RTMR3 records them, and its
   firmware and kernel measurements. A model entry also pins the compose-manager image the log reports
@@ -632,40 +640,60 @@ agent session as the agent's work unless they remember answering.
 The details:
 
 - The tool gate reads the arguments of `terminal` calls as shell commands, `execute_code` calls as
-  Python, and `process_manage` input as both. It first expands bash's `$'...'` quoting. It splits shell
-  text into single commands at `;`, `&&`, `||`, `|`, `&`, parentheses and line ends. It refuses these
-  forms:
-  - a `hermes` program, by name or by path, or `python -m hermes_cli.main`, with a later argument
-    `confidential` or one starting with `/confidential`, also after `sudo`, `env`, `uv run` and similar
-    wrappers;
+  Python, and `process_manage` input as both. Before it splits shell text, it joins a backslash at a
+  line end with the next line, and it expands bash's `$'...'` quoting. It scans each `$(...)`,
+  backtick, `<(...)` and `>(...)` substitution on its own, and it scans each heredoc body. It then
+  splits the text into single commands at `;`, `&&`, `||`, `|`, `&`, parentheses and line ends. The
+  gate refuses exactly these forms:
+  - a word named `hermes`, by name or by path, or `python -m hermes_cli.main`, `python -m hermes_cli`
+    or `python -m runpy hermes_cli.main`, with a later word `confidential` or a word starting with
+    `/confidential` in the same command. This covers wrappers and launchers such as `sudo`, `env`,
+    `uv run`, `find -exec`, `ssh`, `screen`, `tmux`, `watch` and `parallel`. Text tools such as `echo`
+    and `grep` are exempt;
+  - `xargs` or `parallel` running `hermes` in a pipeline in which another command prints the word
+    `confidential`;
   - a command whose first argument is `confidential` and whose second is one of its verbs (`pins`,
     `allow`, `off`, `on`, `lock`, `unlock`, `setup`, `approve`, `retire`, `status`, `check`,
-    `receipts`, `replay`), which covers an alias or a renamed copy of `hermes`, unless the command is a
-    text tool such as `echo` or `grep`;
+    `receipts`, `replay`). This covers an alias, a renamed copy of `hermes`, and `$(which hermes)`.
+    Text tools and build or package tools such as `make` and `npm` are exempt;
   - a line that types the slash command `/confidential`;
-  - Python code that imports `confidential_mode`, in `execute_code`, after `python -c`, in a script
-    file `python` runs, or fed to Python through a heredoc or a pipe; also `python -m
-    confidential_mode...`;
-  - Python code that starts a process with one of the forms above, or that imports `hermes_cli` and
-    passes `confidential`;
-  - any of the forms above inside `bash -c`, `$(...)`, backticks, `eval`, or text piped into a shell;
-  - a redirection or `tee` into a state file, and any command other than a read-only one (`cat`,
-    `grep`, `head`, `ls`, `sed` without `-i`, `git` and similar) that names a state file.
+  - Python code that imports `confidential_mode` in code, not in a string or a comment. The gate
+    reads such code in `execute_code`, after `python -c`, in a script file `python` runs, in a script
+    an earlier command of the same call writes, and in Python fed through a heredoc, a here-string or
+    a pipe. `python -m confidential_mode...` is refused too;
+  - Python code that imports or runs `hermes_cli` with a `confidential` string, or that starts a process
+    with one of the shell forms above;
+  - code passed to `perl`, `ruby`, `node` and similar interpreters with `-e`, whose strings name
+    `hermes` and then `confidential`;
+  - any of the forms above inside `bash -c`, `sh -lc`, `eval`, a shell or `at` reading a pipe or a
+    heredoc, or a shell script an earlier command of the same call writes;
+  - a write to a state file or into the plugin's data directory. That is a redirection or `tee` into
+    one; the destination of `cp`, `mv`, `install`, `rsync` or `ln`, including `-t DIR` (a source is a
+    read, except for `mv` and `ln`); a `w` file in a `sed` or `awk` script; and any word, or the value
+    of a word such as `of=pins.yaml`, of another command that is not read-only. The read-only commands
+    are the text tools, `jq`, `yq`, `sqlite3 -readonly`, `sed` and `perl` without `-i`, and the `git`
+    subcommands that only read, such as `log`, `diff`, `show` and `status`.
 
   A state file is `pins.yaml`, `ledger.sqlite` or `allowlist.yaml`, with their lock, journal and backup
-  files, or `state.json` inside a `plugin-data` directory. A path counts when it is relative, because
-  the gate does not know the working directory, when it lies inside a `plugin-data` directory, or when
-  it lies inside the Hermes home outside this plugin's source tree. The gate also refuses `write_file`
-  and `patch` calls whose target path, or a multi-file patch's file, is such a state file. Each refusal
-  writes a `tool_refused` row with the decision `self_approval`.
-- The gate lets text through that only mentions the command, the package or a file. Examples are
-  `grep "confidential off" docs/README.md`, `echo 'mark confidential on purpose'`, `git diff
-  confidential_mode/`, `cat` of the pins file, and `write_file` or `patch` on this plugin's own source.
-  A test run such as `pytest` imports the package without naming it, so the gate does not see that
-  import.
-- The gate cannot see a command built at run time, for example from a variable, base64 or a computed
-  `eval`. It cannot see a script that imports the package indirectly. It cannot see a command split
-  across several `process_manage` writes.
+  files, or `state.json` inside a `plugin-data` directory. A glob that could match one counts. A path
+  counts when it is relative, because the gate does not know the working directory, when it lies inside
+  a `plugin-data` directory, or when it lies inside the Hermes home outside this plugin's source tree.
+  The plugin's data directory is the `plugin-data` directory entry whose name contains `confidential`,
+  or a glob there. The gate also refuses `write_file` and `patch` calls whose target path, or a
+  multi-file patch's file, is a state file or lies in the plugin's data directory. Each refusal writes a
+  `tool_refused` row with the decision `self_approval`.
+- The gate lets through the calls in its test list that only mention the command, the package or a
+  file. Examples are `grep "confidential off" docs/README.md`, `echo 'mark confidential on purpose'`,
+  `awk '/confidential on/' notes.txt`, `make confidential status`, `git diff confidential_mode/`,
+  `git commit -m` with any message, `cat`, `jq` or `cp` of the pins file to elsewhere,
+  `print('import confidential_mode')` in Python, and `write_file` or `patch` on this plugin's own
+  source. A test run such as `pytest` imports the package without naming it, so the gate does not see
+  that import. A literal match can still refuse an unusual harmless call, for example a non-text
+  command whose argument is the bare file name `pins.yaml`.
+- The gate cannot see a command assembled at run time, for example from a variable, base64, brace
+  expansion or a computed `eval`. It cannot see a script that imports the package indirectly, a script
+  or file written by an earlier call, or a symlink or directory made by an earlier call. It cannot see a
+  command split across several `process_manage` writes.
 - The tool marker is the environment variable `XDG_CONFIDENTIAL_MODE_TOOL_PROCESS`. The plugin's tool
   hooks set it, once, to the id of the Hermes process, before any tool runs. The `XDG_` prefix is one
   Hermes passes into execute_code's restricted environment. A prompt in the process that set the
