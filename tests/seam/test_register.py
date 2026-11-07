@@ -182,7 +182,7 @@ def test_real_discovery_registers_every_hook_middleware_command_and_provider(plu
     assert set(manifest["provides_hooks"]) == HOOKS
     assert manifest["provides_middleware"] == ["llm_execution", "tool_execution"]
     assert manifest["provides_tools"] == [] and manifest["requires_env"] == ["TINFOIL_API_KEY"]
-    assert [e["name"] for e in manifest["optional_env"]] == ["NEAR_AI_API_KEY"]
+    assert [e["name"] for e in manifest["optional_env"]] == ["NEAR_AI_API_KEY", "OPENROUTER_API_KEY", "NOUS_API_KEY"]
 
 
 def test_cli_command_parses_through_argparse(plugin):
