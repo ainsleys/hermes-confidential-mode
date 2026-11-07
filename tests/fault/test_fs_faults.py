@@ -523,8 +523,6 @@ def test_a_read_only_data_directory_refuses_the_lock(plugin):
     assert plugin.rt.state.locked() == (False, None)
 
 
-@pytest.mark.xfail(strict=True, reason="FI-2: Allowlist.add keeps the name in memory when the allowlist.yaml write "
-                                       "fails, so the tool runs without asking while the reply reports an error")
 def test_an_allow_whose_write_fails_grants_nothing(plugin, monkeypatch):
     """Amendment 3: "additions persist in allowlist.yaml through Allowlist.add"; Amendment 10: Allowlist.add
     "starts from the names on disk for its lock under that lock". A grant the file does not hold must not
@@ -534,7 +532,9 @@ def test_an_allow_whose_write_fails_grants_nothing(plugin, monkeypatch):
     fail_replace(monkeypatch, {"allowlist.yaml"}, ENOSPC)
     out = plugin.slash("allow web_search")
     assert not out.endswith("added to the allowlist for this lock.")
-    assert out.startswith("confidential: error")           # the person is told the allow failed
+    assert out.startswith("web_search was not added: the grant could not be recorded"), out
+    assert "will ask again" in out                             # the person is told the allow failed
+    assert ("tool_refused", "allowlist_write_failed") in plugin.kinds()
     ran = []
     mw = plugin.mgr._middleware["tool_execution"][0]
     mw(tool_name="web_search", args={"query": "q"}, next_call=lambda a: ran.append(a) or "{}", session_id="s1",

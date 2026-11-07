@@ -223,26 +223,35 @@ class Allowlist:
                 self.added.add(name)
             return
         # Amendment 10: under the file lock, start from the names on disk for this lock, so a name another
-        # process revoked while this process waited for the human is not written back.
+        # process revoked while this process waited for the human is not written back. FI-2: the file is
+        # written first and the grant is taken in memory only after the write succeeded, so a failed write
+        # (which raises) grants nothing.
         from .revoke import allowed_on_disk, file_lock
         with file_lock(self.added_path):
             on_disk = allowed_on_disk(self.added_path, self.lock_id)
             with self._lock:
                 if on_disk is not None:
-                    self.added = {n for n in on_disk if getattr(self.tools.get(n), "route", None) is Route.ASK}
-                self.added.add(name)
-            self.persist()
+                    base = {n for n in on_disk if getattr(self.tools.get(n), "route", None) is Route.ASK}
+                else:
+                    base = set(self.added)
+            new = base | {name}
+            self.persist(added=new)
+            with self._lock:
+                self.added = new
 
     # -- persistence (Amendment 4 F5/F6) ------------------------------------------------------------
-    def persist(self, path: Optional[Path] = None) -> None:
+    def persist(self, path: Optional[Path] = None, *, added: Optional[Iterable[str]] = None) -> None:
         """Write the lock's tool identities (name, toolset, handler module, qualname) and the
-        human-approved additions, tagged with ``lock_id``. Called at lock and after each add.
-        JSON (a YAML subset): Hermes ships ruamel via hermes_yaml, not PyYAML."""
+        human-approved additions (``added``, default the in-memory set), tagged with ``lock_id``. Called at
+        lock and after each add. JSON (a YAML subset): Hermes ships ruamel via hermes_yaml, not PyYAML."""
         target = Path(path) if path is not None else self.added_path
         if target is None:
             return
-        with self._lock:
-            added = sorted(self.added)
+        if added is not None:
+            added = sorted(added)
+        else:
+            with self._lock:
+                added = sorted(self.added)
         tools = []
         for name, (toolset, handler) in sorted(self.pins.items()):
             if name not in self.tools:

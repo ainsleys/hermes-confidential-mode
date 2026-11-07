@@ -654,7 +654,14 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
         if refused:
             return SELF_APPROVAL_REPLY + f". {name} was not added."
         return f"{name} was not added; it still needs approval each call."
-    allowlist.add(name)
+    try:
+        allowlist.add(name)
+    except Exception as exc:  # noqa: BLE001  FI-2: the grant is taken only once allowlist.yaml holds it
+        detail["error"] = f"{type(exc).__name__}: {exc}"[:500]
+        _ledger(ledger, _event("tool_refused", session_id=session_id, platform=platform, purpose=f"tool:{name}",
+                             decision="allowlist_write_failed", detail=detail))
+        return (f"{name} was not added: the grant could not be recorded in allowlist.yaml "
+                f"({type(exc).__name__}), so {name} will ask again each call.")
     _ledger(ledger, _event("tool_allowed", session_id=session_id, platform=platform, purpose=f"tool:{name}",
                          decision="allowlist_add", detail=detail))
     return f"{name} added to the allowlist for this lock."
