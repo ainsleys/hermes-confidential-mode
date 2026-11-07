@@ -525,7 +525,7 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   ATTESTED". With encryption on, the reply of such a send never reaches the agent: the plugin decrypts
   a reply only after a verified `provider_tee` signature over the encrypted bytes. Only an HTTP 200
   reply that verifies and decrypts is handed over; any other status is refused. While the profile is
-  locked, any error on a main call ends the turn (README, "What happens while locked"). While it is
+  locked, any error on a main call ends the turn (GUIDE.md, "What happens while locked"). While it is
   unlocked, Hermes retries only a rate limit (429), a server error (5xx), a context-length error
   (which it first compresses), and a timeout or a reset. A reply that fails its checks, an HTTP 421
   and every other refusal are not resent. Each attempt is a new encrypted request and gets its own
@@ -587,7 +587,7 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   keeps a file only when its SHA-256 equals the log's `file_sha256`. The approve
   command fetches again before it asks, and so does `hermes confidential pins review`. From those files
   the plugin tags each service's privileges, such as holding `dstack.sock` or running privileged. The
-  README's section "Reviewing a pending pin" lists every tag. Until every file of an entry is kept, the
+  guide's section "Reviewing a pending pin" (GUIDE.md) lists every tag. Until every file of an entry is kept, the
   entry cannot be approved, and the approve command says so and names `pins review`. A file that is
   kept but does not parse blocks approval of that entry for good, which fails closed. The tags read the compose text only. A
   missing tag is not evidence, and the tags do not show what runs, because what runs after launch is
@@ -713,7 +713,7 @@ The details:
   gate does not see its calls. It can run the approve command for this profile under a
   pseudo-terminal and answer it.
 - Any process running as your user can write `pins.yaml` and a matching `pin_applied` row into the
-  ledger file, so a forged approval passes the consent check (see "Pins need a consent record").
+  ledger file, so a forged approval passes the consent check (GUIDE.md, "Why a pin needs a consent record").
 
 **The change that would close it.** A consent surface that an agent cannot drive, for example an
 approval that Hermes core asks on a channel it never exposes to tools, plus a marker Hermes sets on
@@ -772,7 +772,7 @@ Each item below is a smaller gap. Each one is stated in full.
   config, and this version added the terminal backend to it. A lock made by an earlier version still
   matches. A process that still runs the earlier version, however, reads a lock made by this version
   as a changed config. That process refuses every turn and marks the session breached. Restart every Hermes
-  process that loads the plugin after an upgrade (README, "Upgrading").
+  process that loads the plugin after an upgrade (GUIDE.md, "Upgrading").
 
 - **The ledger grows without limit.** The plugin never deletes ledger rows. On the attested tier a
   `verify_ok` row with its evidence is written about every `confidential.verify_ttl_seconds` minus

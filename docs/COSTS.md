@@ -104,7 +104,7 @@ locked.
 - **GitHub unreachable during a NEAR approval.** A pending NEAR model entry cannot be approved, so
   the attested tier keeps refusing on that profile until the fetch succeeds.
 
-The README's sections on request encryption and on what happens while locked state each rule.
+The guide's sections (GUIDE.md) on request encryption and on what happens while locked state each rule.
 
 ## The honest summary
 

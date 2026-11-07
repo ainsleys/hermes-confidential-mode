@@ -89,7 +89,7 @@ confidential:
 
   near:
     # NEAR AI Cloud, the second attested vendor (provider attested-near). These keys matter only when
-    # model.provider or an auxiliary task uses attested-near. README: "The attested tier with NEAR AI".
+    # model.provider or an auxiliary task uses attested-near. docs/GUIDE.md: "The attested tier with NEAR AI".
     #
     # The gateway URL. Attestation, inference and signature requests all go here. Default:
     base_url: https://cloud-api.near.ai/v1
