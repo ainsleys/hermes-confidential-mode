@@ -65,7 +65,6 @@ answers.](docs/images/routes-figure-2-with-the-plugin.svg)
 ```
 hermes plugins install https://github.com/ainsleys/hermes-confidential-mode
 hermes plugins enable confidential-mode
-hermes confidential status | grep '^Plugin:'
 ```
 
 - **Enable is required.** Without it, every `hermes confidential` command fails with
@@ -74,9 +73,6 @@ hermes confidential status | grep '^Plugin:'
   they need into Hermes' environment, and meanwhile Hermes prints only "Resolving Python
   dependencies" and "Installing Python dependencies". A quiet terminal doesn't mean it has hung. Set
   `HERMES_VERBOSE=1` to watch the installer.
-- **Check the commit.** The last command prints a line such as
-  `Plugin: confidential-mode 0.1.0 (commit 3c20cf4a1b2c (git checkout))`. Compare it with the commit
-  you meant to install; receipts carry the same value.
 - **Set your key** in the shell that starts Hermes, or in `<hermes home>/.env`.
 - Leave `plugins.isolation` at its default, `in_process`; under host isolation the lock is refused.
 - Running Hermes from a source checkout with `uv run --no-sync`? The enable step doesn't run there, so
@@ -94,8 +90,6 @@ Confidential mode: not locked (observing only)
 …
 Preflight: run /confidential check <tier>
 …
-Plugin: confidential-mode 0.1.0 (commit 3c20cf4a1b2c (git checkout))
-Data: ledger and evidence in …; lock, pins and tool grants in …
 ```
 
 `hermes confidential watch` streams each model call's purpose, host and size, locked or not.
@@ -120,15 +114,14 @@ both tiers.
 
 ```
 $ hermes confidential on attested
-confidential-mode: discovering tools... 78 found
-Locked to Tinfoil, llama3-3-70b at router-0.tinfoil.sh; verified … ago. Off-host tools ask first. Details: hermes confidential status, docs/LIMITATIONS.md
+Locked. Model: attested-tinfoil/llama3-3-70b at router-0.tinfoil.sh, verified … ago (host clock). Tools that send data off this machine (web, browser, messaging, media and other off-host tools) ask you first, each call; …
 ```
 
 **4. Have a conversation.** Start `hermes` and ask something that needs the web. The first time each
 tool wants to send data off the machine, Hermes' approval panel shows the plugin's line:
 
 ```
-Confidential mode: web_search wants to send ~1 KB of this conversation off the machine
+web_search wants to send ~1 KB of this conversation off the machine
 ```
 
 Pick Allow once, Allow for this session (that tool then stops asking until the session ends), Add to
@@ -194,17 +187,17 @@ except where noted.
 |---|---|
 | `on <on-host-only\|attested>` | Lock this profile (the preflight runs first). |
 | `off` | Unlock, with the lock period's counts. |
-| `status [--verbose]` | Lock state, pins, verification, installed commit; `--verbose` adds the tool list. |
+| `status` | Lock state, pins, verification, breaches. |
 | `check [tier]` | The preflight table (`check --tier <tier>` in a terminal). |
 | `setup` | Terminal only: `hermes confidential setup [--vendor near] --model <id>`. |
 | `allow <tool>` | Let an off-host tool run without asking, for this lock (asks you). |
 | `revoke <tool>`, `revoke --all` | Withdraw the grants confidential mode holds. |
 | `pins` | Approved pins, the pending pin, tool grants. |
-| `pins review` | Terminal only: fetches the review bundle for a pending pin. |
+| `pins review` | Terminal only: builds the review bundle for a pending pin. |
 | `pins approve` | Approve the pending pin (asks you). |
 | `pins retire <fingerprint>` | Remove one approved entry. |
 | `receipts <session> [--json]` | A session receipt. |
-| `replay <receipt.json>` | Terminal only: replay a receipt's evidence offline. |
+| `replay <receipt.json>` | Terminal only: replay a receipt's attestation evidence offline. |
 | `watch` | The latest ledger rows (live in a terminal: `hermes confidential watch`). |
 
 ## Documentation
