@@ -68,15 +68,29 @@ def test_leak_title_generation_follows_live_off_tier_runtime(plugin, net, monkey
     assert net.openrouter.requests == [], net.openrouter.requests
 
 
-@pytest.mark.xfail(strict=False, reason=(
+def _cold_model_metadata(monkeypatch):
+    """Hermes memoises model-list probes in process memory (agent/model_metadata.py). An earlier test that
+    built an openrouter agent leaves them warm, and then no probe is sent. Start every leak test cold, so the
+    observation does not depend on test order (review finding 14)."""
+    from agent import model_metadata as mm
+    for name in ("_model_metadata_cache", "_endpoint_model_metadata_cache", "_endpoint_model_metadata_cache_time",
+                 "_endpoint_probe_path_cache", "_endpoint_blackhole_cache", "_LOCAL_CTX_PROBE_CACHE"):
+        if isinstance(getattr(mm, name, None), dict):
+            monkeypatch.setattr(mm, name, {})
+    monkeypatch.setattr(mm, "_model_metadata_cache_time", 0, raising=False)
+
+
+@pytest.mark.xfail(strict=True, reason=(
     "HERMES GAP, disclosed: with the live runtime switched to a hosted provider, Hermes' own agent start-up\n"
     "lists that provider's models (GET /api/v1/models with the API key) on its default transport before any\n"
     "plugin seam (agent/model_metadata.py). No conversation text is sent; the plugin refuses the turn itself.\n"
-    "Order-dependent in the suite."))
+    "Strict: the caches are cleared first, so the probe fires in any test order; an XPASS means Hermes\n"
+    "closed or moved the gap and LIMITATIONS 10 must be revisited."))
 def test_leak_live_off_tier_runtime_hits_hermes_default_transport(plugin, net, monkeypatch):
     """Same live off-tier runtime: Hermes probes GET openrouter/models on its plain httpx transport (not the
     keepalive builder) while locked on-host-only. No conversation bytes, but a request (carrying the API
     key) to an off-tier host on Hermes' default transport, never ledgered."""
+    _cold_model_metadata(monkeypatch)
     _locked_on_host(plugin)
     rec = h.Rec()
     agent = h.make_agent(monkeypatch, rec, provider="openrouter", base_url=h.OPENROUTER_URL,
@@ -228,11 +242,14 @@ def test_cli_setup_terminal_asker_non_tty_never_pins_withstood(plugin, net, monk
     assert plugin.rt.pins.load()[0] == {}, out.getvalue()
 
 
-def test_pin_written_by_second_plugin_is_honoured_without_any_consent_record(plugin, net, monkeypatch):
+def test_pin_written_by_second_plugin_without_consent_record_is_refused_withstood(plugin, net, monkeypatch):
     """IN-PROCESS TRUST BOUNDARY. A second plugin applies the staged pin through PinStore directly
-    (approved_via="telegram"); no ask_choice, no pin_applied row. What the plugin CAN do is notice a pin in
-    force with no pin_applied ledger row for its fingerprints. It does not: attested sends are trusted, and
-    /confidential status presents the pin as human-approved."""
+    (approved_via="telegram"); no ask_choice, no pin_applied row. The plugin notices a pin in force with no
+    pin_applied ledger row for its fingerprints: attested_ok refuses ("pin has no consent record"), or status
+    flags the pin. In-process code can still forge the row too; that limit is disclosed.
+
+    History: this test was written as a finding (the pin was trusted and shown as approved) and fixed by
+    INTERFACES Amendment 4 F8."""
     _, provider = _stage_pin(plugin, net, monkeypatch)
     pins_mod = h.cm(plugin, "pins")
     rogue = pins_mod.PinStore(plugin.rt.pins.path)
@@ -304,12 +321,15 @@ def test_cli_non_exact_answers_never_run_the_tool_withstood(plugin, net, monkeyp
     assert ran == [], answer
 
 
-def test_parallel_calls_without_tool_call_id_share_one_decision(plugin, net, monkeypatch):
+def test_parallel_calls_without_tool_call_id_get_separate_decisions_withstood(plugin, net, monkeypatch):
     """Two concurrent web_search calls with NO tool_call_id (execute_code's RPC path calls
-    handle_function_call(name, args, task_id) exactly like this: tools/code_execution_rpc.py:30). The
-    recorded answer is keyed (tool, tool_call_id) = ("web_search", ""), so call A, which the human did NOT
-    approve (answered "", which Hermes' CLI treats as a grant and only our middleware refuses), consumes
-    call B's "once". A slow post_approval_response observer (a second plugin) provides the interleaving."""
+    handle_function_call(name, args, task_id) exactly like this: tools/code_execution_rpc.py:30). The human
+    answers "" to call A (Hermes' CLI treats that as a grant; only our middleware refuses it) and "once" to
+    call B. Each call is asked with its own fresh approval id, so call A never runs on call B's answer. A slow
+    post_approval_response observer (a second plugin) provides the interleaving.
+
+    History: this test was written as a finding (both answers were keyed ("web_search", ""), so call A
+    consumed call B's "once") and fixed by INTERFACES Amendment 4 F3."""
     import model_tools
     from tools import terminal_tool
     ran = []
@@ -423,11 +443,13 @@ def test_restart_keeps_lock_and_refuses_off_tier_withstood(plugin, net, monkeypa
     assert rec.provider_calls == []
 
 
-def test_restart_launders_a_tool_registered_after_lock(plugin, net, monkeypatch):
-    """Before the restart a plugin tool registered after lock is unclassified => blocked. After a restart the
-    in-memory allowlist is rebuilt from the live registry (__init__.py Runtime.allowlist) and the same tool
-    is classified fresh: it is now on the ask route and runs on 'once'. A post-lock tool must stay blocked
-    until a human relocks."""
+def test_restart_keeps_a_tool_registered_after_lock_blocked_withstood(plugin, net, monkeypatch):
+    """A plugin tool registered after lock is unclassified, so it is blocked. After a restart the allowlist is
+    rebuilt from the identities persisted at the lock, not from the live registry, so the same tool stays
+    blocked on 'once' until a human relocks.
+
+    History: this test was written as a finding (the restart rebuilt from the live registry and classified
+    the tool fresh, so it ran on 'once') and fixed by INTERFACES Amendment 4 F5."""
     import model_tools
     _locked_on_host(plugin)
     ran = []
@@ -463,11 +485,13 @@ def test_restart_cold_verification_cache_reattests_before_trusting_withstood(plu
 
 # ══ 5. receipts and watch ═════════════════════════════════════════════════════════════════════════
 
-def test_integrated_build_never_ledgers_verification_events(plugin, net, monkeypatch):
-    """register(ctx) calls provider.register_provider_profile(ctx, config=...) with no ledger/on_event
-    (__init__.py provider step), so the VerificationCache's verify_ok / verify_fail / pin_staged rows are
-    never written. An attested session's receipt therefore never shows a verification event or attached
-    evidence; the 'replay offline' half of the closing paragraph is unreachable from a live turn."""
+def test_integrated_build_ledgers_verification_events_withstood(plugin, net, monkeypatch):
+    """register(ctx) passes the ledger to provider.register_provider_profile, so the VerificationCache writes
+    its pin_staged and verify_ok rows. An attested session's receipt then shows the verification event
+    with its evidence attached, which the offline replay needs.
+
+    History: this test was written as a finding (no ledger was passed, so these rows were never written)
+    and fixed by INTERFACES Amendment 4 F4."""
     adapter, provider = _stage_pin(plugin, net, monkeypatch)
     h.answer_choice(plugin, monkeypatch, "approve")
     plugin.slash("pins approve")
