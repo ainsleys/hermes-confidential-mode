@@ -36,12 +36,16 @@ def test_revoke_of_grants_the_plugin_did_not_write_is_a_noop_with_a_message(plug
     _with_allowlist(plugin, FOREIGN)
     before = plugin.cfg.read_bytes()
     out = plugin.slash("revoke web_search")
-    assert out.startswith("Nothing to revoke for web_search: no grant written by confidential mode was found."), out
+    assert out.startswith("Nothing to revoke for web_search in this process: no grant written by confidential "
+                          "mode was found"), out
     assert "did not write were left alone" in out and "plugin_rule:other-plugin:tool:web_search" in out
     assert plugin.cfg.read_bytes() == before
-    assert _grant_rows(plugin) == []
+    # The revoke is still recorded for running processes and ledgered, with nothing removed here.
+    (row,) = _grant_rows(plugin)
+    detail = row.detail if isinstance(row.detail, dict) else json.loads(row.detail)
+    assert detail["removed"] == {"allowlist": [], "command_allowlist": [], "session": []}
     rv = _sub(plugin, "revoke")
-    assert not rv.revocations_path(plugin.rt.allowlist_path).exists()
+    assert rv.revocations_path(plugin.rt.allowlist_path).exists()
 
 
 def test_revoke_removes_only_the_exact_plugin_key(plugin):
@@ -53,7 +57,7 @@ def test_revoke_removes_only_the_exact_plugin_key(plugin):
     assert sorted(left) == sorted(FOREIGN)
 
 
-def test_revoke_with_no_grant_at_all_is_a_noop(plugin):
+def test_revoke_with_no_grant_at_all_changes_no_grant_file(plugin):
     before = plugin.cfg.read_bytes()
     for state in ("unlocked", "locked"):
         if state == "locked":
@@ -64,7 +68,7 @@ def test_revoke_with_no_grant_at_all_is_a_noop(plugin):
         assert plugin.cfg.read_bytes() == before
     assert plugin.rt.allowlist_path.read_bytes() == before_al
     assert plugin.slash("revoke --all").startswith("Nothing to revoke for every confidential-mode tool grant")
-    assert _grant_rows(plugin) == []
+    assert all(r.decision in ("revoke", "revoke_all") for r in _grant_rows(plugin))
 
 
 @pytest.mark.parametrize("args", ["revoke", "revoke a b", "revoke --al", "revoke -x", "revoke '*'",

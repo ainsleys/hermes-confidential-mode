@@ -218,9 +218,19 @@ class Allowlist:
         info = self.tools.get(name)
         if info is None or info.route is not Route.ASK:
             raise ValueError(f"{name!r} cannot be added to the allowlist")
-        with self._lock:
-            self.added.add(name)
-        if self.added_path is not None:
+        if self.added_path is None:
+            with self._lock:
+                self.added.add(name)
+            return
+        # Amendment 9: under the file lock, start from the names on disk for this lock, so a name another
+        # process revoked while this process waited for the human is not written back.
+        from .revoke import allowed_on_disk, file_lock
+        with file_lock(self.added_path):
+            on_disk = allowed_on_disk(self.added_path, self.lock_id)
+            with self._lock:
+                if on_disk is not None:
+                    self.added = {n for n in on_disk if getattr(self.tools.get(n), "route", None) is Route.ASK}
+                self.added.add(name)
             self.persist()
 
     # -- persistence (Amendment 4 F5/F6) ------------------------------------------------------------

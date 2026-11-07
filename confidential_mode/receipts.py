@@ -367,6 +367,7 @@ def _sections(rows: list[dict]) -> dict:
         "compactions": by_kind(("compaction",)),
         "notices": by_kind(("notice",)),
         "signed_sends": by_kind(("send_signed",)),
+        "grants_revoked": by_kind(("grant_revoked",)),   # Amendment 9
     }
 
 # Added only when a receipt holds an encrypted NEAR send (W11, Amendment 5.1); checked by verify_chain then.
@@ -938,7 +939,7 @@ def render_text(doc: Mapping) -> str:
 
     add("")
     add("Asks and answers")
-    if not sec["asks"] and not sec["allowed_without_prompt"]:
+    if not sec["asks"] and not sec["allowed_without_prompt"] and not sec.get("grants_revoked"):
         add("  (none)")
     for ask in sec["asks"]:
         r = rows[ask["ask"]]
@@ -954,6 +955,12 @@ def render_text(doc: Mapping) -> str:
         r = rows[i]
         how = "remembered" if r["decision"] == "remembered" else _p(r["decision"]) or "allowed"
         add(_line(r, sid, f"allowed without a prompt  {_p(r['purpose'])}  ({how})"))
+    for i in sec.get("grants_revoked", []):
+        r = rows[i]
+        rem = (r["detail"] or {}).get("removed") or {}
+        where = ", ".join(k for k in ("allowlist", "command_allowlist", "session") if rem.get(k)) or "nothing here"
+        add(_line(r, sid, f"grant revoked  {_p(r['purpose'])}  ({_p(r['decision']) or 'revoke'}; removed from "
+                          f"{_p(where)}; via {_p(r.get('surface')) or 'unknown'})"))
 
     section("Breaches", sec["breaches"],
             lambda r: f"{_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  "

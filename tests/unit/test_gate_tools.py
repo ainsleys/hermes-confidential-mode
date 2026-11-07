@@ -539,7 +539,8 @@ def test_persisted_allowlist_is_mode_0600_and_leaves_no_temp_file(tmp_path):
     al.persist()
     al.add("web_search")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["allowlist.yaml"]
+    # allowlist.yaml.lock is the advisory lock file (Amendment 9), empty and kept, as pins.yaml.lock is.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["allowlist.yaml", "allowlist.yaml.lock"]
 
 
 def test_persist_and_reload_same_lock_keeps_classification_and_additions(tmp_path):

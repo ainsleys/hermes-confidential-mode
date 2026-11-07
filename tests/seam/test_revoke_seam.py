@@ -132,3 +132,41 @@ def test_a_new_answer_after_a_revoke_is_honoured(plugin, web):
     _call(3)
     _call(4)
     assert len(web) == 4 and len(plugin.prompts) == 2           # asked once after the revoke, then remembered
+
+
+def test_cli_revoke_reaches_a_gateway_session_only_grant(plugin, web):
+    """Review finding 1: the gateway holds a 'session' grant only in memory (no command_allowlist entry, no
+    allowlist.yaml addition). The CLI process finds nothing itself, but still records the revoke, and the
+    gateway's next call asks again."""
+    plugin.human("session")
+    _call(1)
+    _call(2)
+    assert len(web) == 2 and len(plugin.prompts) == 1 and KEY not in plugin.cfg.read_text()
+    proc = _hermes(plugin, "revoke", "web_search")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("Nothing to revoke for web_search in this process"), proc.stdout
+    assert "A running gateway applies the revoke on its next tool call" in proc.stdout
+    plugin.human("deny")
+    _call(3)
+    assert len(plugin.prompts) == 2 and len(web) == 2
+
+
+def test_cli_revoke_failure_exits_non_zero(plugin, web, monkeypatch):
+    """Review finding 3: a config.yaml that is not written (a managed install, where Hermes' save_config
+    returns without saving) is a failure, not 'Nothing to revoke'."""
+    _always(plugin, web)
+    monkeypatch.setenv("HERMES_MANAGED", "1")
+    try:
+        proc = _hermes(plugin, "revoke", "web_search")
+    finally:
+        monkeypatch.delenv("HERMES_MANAGED")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("Revoke failed for web_search:"), proc.stdout
+    assert KEY in plugin.cfg.read_text()
+
+
+def test_receipt_shows_the_revoke(plugin, web):
+    _always(plugin, web)
+    plugin.slash("revoke web_search")
+    text = plugin.slash("receipts sess-w5")
+    assert "grant revoked  tool:web_search  (revoke; removed from command_allowlist, session; via cli)" in text, text

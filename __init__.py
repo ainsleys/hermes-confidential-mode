@@ -276,7 +276,12 @@ def _register(rt: Runtime) -> None:
             if al is not None:
                 with al._lock:
                     al.added -= {n for n in al.added if tools is None or n in tools}
-        rt.revocations = rv.RevocationWatcher(rv.revocations_path(rt.allowlist_path), drop_added=drop_added)
+        def on_error(tools, error):
+            rt.append({"kind": "grant_revoked", "purpose": f"tool:{','.join(sorted(tools)) if tools else '*'}",
+                       "decision": "apply_failed", "detail": {"tools": sorted(tools) if tools else ["*"],
+                                                              "errors": [error], "session_dropped": False}})
+        rt.revocations = rv.RevocationWatcher(rv.revocations_path(rt.allowlist_path), drop_added=drop_added,
+                                              on_error=on_error)
         rt.revocations.baseline()
     _step(rt, "revocations", revocations)
 

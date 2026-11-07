@@ -12,14 +12,20 @@ A grant that lets an off-host tool run without a prompt while locked lives in on
   a "session" or "always" answer, in the process that asked.
 
 Revoke removes exactly those entries and nothing else: a command_allowlist entry under any other key is
-the user's or another plugin's, and is left alone. Revoking narrows and never widens, so it asks nobody
+the user's or another plugin's, and is left alone. The key prefix is a convention, not something Hermes
+enforces: Hermes forms the key from the rule_key a caller chooses, so another plugin could write an entry
+under this prefix, and revoke would remove that entry too (which only narrows). Revoking narrows and never widens, so it asks nobody
 and runs under the self-approval marker.
 
 How a running gateway sees a revoke made in another process (the ``hermes confidential`` CLI): the
 gateway re-reads allowlist.yaml on its next tool call when the file changes, and Hermes re-syncs
 ``command_allowlist`` from disk on every approval check. Session approvals live only in the gateway's
-memory, so the revoke also appends a record to ``grants_revoked.json``; the gateway applies each new
-record on its next tool call (``RevocationWatcher``), before the gate consults any grant.
+memory, so every revoke of a named tool (or ``--all``) appends a record to ``grants_revoked.json``, even
+when the revoking process found nothing to remove itself; the gateway applies each new record on its next
+tool call (``RevocationWatcher``), before the gate consults any grant.
+
+Writes to allowlist.yaml and grants_revoked.json take an advisory lock file next to each file
+(``file_lock``, the pins-file pattern), so a CLI and a gateway never interleave a read-modify-write.
 """
 from __future__ import annotations
 
@@ -62,6 +68,44 @@ def _is_ours(entry: Any, tools: Optional[set[str]]) -> bool:
     return tools is None or entry[len(_prefix()):] in tools
 
 
+_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+@contextlib.contextmanager
+def file_lock(path: Any):
+    """Thread lock plus an advisory lock file ``<path>.lock`` (pins.PinStore._mutating), so two processes
+    never interleave a read-modify-write of one of the plugin's JSON files. Not reentrant."""
+    path = Path(path)
+    with _THREAD_LOCKS_GUARD:
+        tlock = _THREAD_LOCKS.setdefault(str(path), threading.Lock())
+    with tlock:
+        fh = None
+        try:
+            import fcntl
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(path.with_name(path.name + ".lock"), "a")
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            if fh is not None:
+                fh.close()
+            fh = None
+        try:
+            yield
+        finally:
+            if fh is not None:
+                fh.close()
+
+
+def allowed_on_disk(path: Any, lock_id: str) -> Optional[set[str]]:
+    """The ``allowed`` names in allowlist.yaml when the file belongs to ``lock_id``, else None."""
+    data = _read_json(Path(path)) if path is not None else None
+    if not isinstance(data, dict) or not lock_id or data.get("lock_id") != lock_id \
+            or not isinstance(data.get("allowed"), list):
+        return None
+    return {n for n in data["allowed"] if isinstance(n, str)}
+
+
 def _atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -94,15 +138,16 @@ def remove_allowlist_grants(path: Optional[Path], lock_id: str, tools: Optional[
     to ``lock_id``. Every other key of the file is kept. Returns the names removed."""
     if path is None or not lock_id:
         return []
-    data = _read_json(path)
-    if not isinstance(data, dict) or data.get("lock_id") != lock_id or not isinstance(data.get("allowed"), list):
-        return []
-    allowed = data["allowed"]
-    removed = sorted({n for n in allowed if isinstance(n, str) and (tools is None or n in tools)})
-    if not removed:
-        return []
-    data["allowed"] = [n for n in allowed if n not in removed]
-    _atomic_write_json(Path(path), data)
+    with file_lock(path):
+        data = _read_json(path)
+        if not isinstance(data, dict) or data.get("lock_id") != lock_id or not isinstance(data.get("allowed"), list):
+            return []
+        allowed = data["allowed"]
+        removed = sorted({n for n in allowed if isinstance(n, str) and (tools is None or n in tools)})
+        if not removed:
+            return []
+        data["allowed"] = [n for n in allowed if n not in removed]
+        _atomic_write_json(Path(path), data)
     return removed
 
 
@@ -139,15 +184,26 @@ def remove_command_allowlist_grants(tools: Optional[set[str]]) -> tuple[list[str
 
 # ── Hermes' in-memory session approvals (this process) ─────────────────────────────────────────
 
-def forget_session_grants(tools: Optional[set[str]]) -> list[str]:
+_HERMES_STATE = ("_lock", "_session_approved", "_permanent_set")
+SESSION_ERROR = ("Hermes' in-memory session approval could not be dropped (tools.approval has no {name}); "
+                 "restart the gateway to end that grant")
+
+
+def forget_session_grants(tools: Optional[set[str]]) -> tuple[list[str], str]:
     """Drop the plugin's keys for ``tools`` (None = every plugin key) from Hermes' session approvals, for
     every session in this process, and from this process's copy of the permanent allowlist (Hermes also
-    re-syncs that copy from config.yaml on every check). Returns the tools whose session approval was
-    dropped. Touches Hermes private state at 84a0301 (``_lock``, ``_session_approved``, ``_permanent_set``),
-    as commands.remembered_grants reads it. Never raises."""
+    re-syncs that copy from config.yaml on every check). Returns (tools whose session approval was dropped,
+    error). The error is "" on success, and names the missing private attribute when this Hermes does not
+    have the 84a0301 state (``_lock``, ``_session_approved``, ``_permanent_set``). Never raises."""
     dropped: set[str] = set()
     try:
         from tools import approval
+    except Exception as exc:  # noqa: BLE001
+        return [], SESSION_ERROR.format(name=f"importable module ({type(exc).__name__})")
+    missing = [n for n in _HERMES_STATE if not hasattr(approval, n)]
+    if missing:
+        return [], SESSION_ERROR.format(name=", ".join(missing))
+    try:
         with approval._lock:
             for keys in list(approval._session_approved.values()):
                 for key in [k for k in keys if _is_ours(k, tools)]:
@@ -156,9 +212,9 @@ def forget_session_grants(tools: Optional[set[str]]) -> list[str]:
             permanent = approval._permanent_set()
             for key in [k for k in permanent if _is_ours(k, tools)]:
                 permanent.discard(key)
-    except Exception:  # noqa: BLE001
-        pass
-    return sorted(dropped)
+    except Exception as exc:  # noqa: BLE001
+        return sorted(dropped), SESSION_ERROR.format(name=f"usable session state ({type(exc).__name__})")
+    return sorted(dropped), ""
 
 
 # ── revocation records for other processes ─────────────────────────────────────────────────────
@@ -177,8 +233,9 @@ def append_record(path: Optional[Path], tools: Optional[set[str]]) -> str:
     if path is None:
         return ""
     rec = {"id": uuid.uuid4().hex, "ts": time.time(), "tools": sorted(tools) if tools is not None else [ALL]}
-    recs = (_records(path) + [rec])[-MAX_RECORDS:]
-    _atomic_write_json(Path(path), {"version": 1, "records": recs})
+    with file_lock(path):
+        recs = (_records(path) + [rec])[-MAX_RECORDS:]
+        _atomic_write_json(Path(path), {"version": 1, "records": recs})
     return rec["id"]
 
 
@@ -187,9 +244,10 @@ class RevocationWatcher:
     load marks the records already present as applied: a fresh process has no session grants, and its
     file-backed grants already reflect them. ``apply()`` runs before each gate decision. Never raises."""
 
-    def __init__(self, path: Optional[Path], drop_added=None):
+    def __init__(self, path: Optional[Path], drop_added=None, on_error=None):
         self.path = path
         self.drop_added = drop_added
+        self.on_error = on_error      # on_error(tools, error): a session approval this process could not drop
         self.applied: set[str] = set()
         self._stamp: Any = None
         self._lock = threading.Lock()
@@ -226,7 +284,10 @@ class RevocationWatcher:
             for rec in fresh:
                 names = rec.get("tools") if isinstance(rec.get("tools"), list) else [ALL]
                 tools = None if ALL in names else {n for n in names if isinstance(n, str)}
-                forget_session_grants(tools)
+                _, error = forget_session_grants(tools)
+                if error and self.on_error is not None:
+                    with contextlib.suppress(Exception):
+                        self.on_error(tools, error)
                 if self.drop_added is not None:
                     self.drop_added(tools)
         except Exception:  # noqa: BLE001
@@ -248,18 +309,23 @@ def _drop_cached_added(rt: Any, tools: Optional[set[str]]) -> list[str]:
     return gone
 
 
+REVOKED, NOTHING, FAILED = "revoked", "nothing", "failed"
+_GATEWAY = "A running gateway applies the revoke on its next tool call"
+
+
 def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id: str = "",
-           surface: str = "") -> tuple[bool, str]:
-    """(changed, message). Removes the plugin's grants for ``tool`` (or all of them) from allowlist.yaml,
-    command_allowlist and this process's session approvals; records the revoke for other processes and
-    writes a ``grant_revoked`` ledger row. A revoke that finds nothing changes nothing."""
+           surface: str = "") -> tuple[str, str]:
+    """(status, message); status is REVOKED, NOTHING or FAILED. Removes the plugin's grants for ``tool``
+    (or all of them) from allowlist.yaml, command_allowlist and this process's session approvals, records
+    the revoke for other processes in every case, and writes a ``grant_revoked`` ledger row. FAILED when any
+    step did not take effect; the message then starts with the failure."""
     from .gate_tools import lock_id_for
     if revoke_all:
         tools, what = None, "every confidential-mode tool grant"
     else:
         problem = tool_name_problem(tool)
         if problem:
-            return False, f"Usage: /confidential revoke <tool>|--all ({problem})"
+            return FAILED, f"Usage: /confidential revoke <tool>|--all ({problem})"
         tools, what = {tool}, tool
     try:
         locked, _ = rt.is_locked()
@@ -281,37 +347,39 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
         errors.append(str(exc))
     except Exception as exc:  # noqa: BLE001
         from_hermes = []
-        errors.append(f"command_allowlist could not be read or written ({type(exc).__name__})")
-    from_session = forget_session_grants(tools)
-    removed = sorted(set(from_allowlist) | set(from_cache) | set(from_hermes) | set(from_session))
-    left_alone = (f" Entries in command_allowlist that confidential mode did not write were left alone: "
-                  f"{', '.join(foreign)}." if foreign else "")
-    if not removed:
-        msg = f"Nothing to revoke for {what}: no grant written by confidential mode was found."
-        if not revoke_all and surface == "cli":
-            msg += (f" A session grant held by a running gateway ends with that session, or run /confidential "
-                    f"revoke {what} in that chat.")
-        return False, msg + left_alone + (" " + "; ".join(errors) + "." if errors else "")
-    note = ""
+        errors.append(f"command_allowlist in config.yaml could not be read or written ({type(exc).__name__}); "
+                      "the grant may still be there")
+    from_session, session_error = forget_session_grants(tools)
+    if session_error:
+        errors.append(session_error)
     try:
         rec_id = append_record(revocations_path(getattr(rt, "allowlist_path", None)), tools)
         watcher = getattr(rt, "revocations", None)
-        if watcher is not None:
+        if watcher is not None and rec_id:
             watcher.mark(rec_id)
+        if not rec_id:
+            errors.append("the plugin's data directory is unknown, so no running process was told")
     except Exception as exc:  # noqa: BLE001
-        note += (f" The revocation record could not be written ({type(exc).__name__}), so another running "
-                 "process keeps a session grant until its session ends.")
+        errors.append(f"the revocation record could not be written ({type(exc).__name__}), so a running gateway "
+                      "keeps any session grant until its session ends")
+    removed = sorted(set(from_allowlist) | set(from_cache) | set(from_hermes) | set(from_session))
+    status = FAILED if errors else (REVOKED if removed else NOTHING)
     row = {"ts": time.time(), "session_id": session_id or "", "kind": "grant_revoked",
            "purpose": f"tool:{tool if not revoke_all else ALL}", "provider": "", "host": "", "model": "",
-           "bytes": None, "tier": None, "verdict": None, "decision": "revoke_all" if revoke_all else "revoke",
+           "bytes": None, "tier": None, "verdict": None,
+           "decision": ("revoke_all" if revoke_all else "revoke") + ("_failed" if status == FAILED else ""),
            "surface": surface or None,
            "detail": {"tool": tool if not revoke_all else ALL, "lock_id": lock_id, "surface": surface or "unknown",
                       "removed": {"allowlist": sorted(set(from_allowlist) | set(from_cache)),
-                                  "command_allowlist": from_hermes, "session": from_session}}}
+                                  "command_allowlist": from_hermes, "session": from_session},
+                      "errors": errors, "session_dropped": not session_error}}
+    note = ""
     try:
         rt.ledger.append(row)
     except Exception as exc:  # noqa: BLE001
-        note += f" The grant_revoked ledger row could not be written ({type(exc).__name__})."
+        note = f" The grant_revoked ledger row could not be written ({type(exc).__name__})."
+    left_alone = (f" Entries in command_allowlist that confidential mode did not write were left alone: "
+                  f"{', '.join(foreign)}." if foreign else "")
     places = []
     if from_allowlist or from_cache:
         places.append("this lock's allowlist (allowlist.yaml)")
@@ -319,7 +387,14 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
         places.append("Hermes' command_allowlist")
     if from_session:
         places.append("this process's session approvals")
+    done = f" Removed {', '.join(removed)} from {' and '.join(places)}." if removed else ""
+    if status == FAILED:
+        return FAILED, (f"Revoke failed for {what}: {'; '.join(errors)}." + done
+                        + " Until this is fixed, the tool may still run without asking." + left_alone + note)
+    if status == NOTHING:
+        return NOTHING, (f"Nothing to revoke for {what} in this process: no grant written by confidential mode "
+                         "was found in allowlist.yaml or command_allowlist. The revoke was recorded. " + _GATEWAY
+                         + " and drops any session grant it holds." + left_alone + note)
     nxt = "The next call of each asks again" if (revoke_all or len(removed) > 1) else f"The next {tool} call asks again"
-    return True, (f"Revoked {', '.join(removed)}: removed from {' and '.join(places)}. {nxt} while locked."
-                  + left_alone + (" " + "; ".join(errors) + "." if errors else "") + note)
-
+    return REVOKED, (f"Revoked {', '.join(removed)}: removed from {' and '.join(places)}. {nxt} while locked. "
+                     + _GATEWAY + "." + left_alone + note)

@@ -552,7 +552,7 @@ def register_slash(ctx: Any, rt: Any) -> None:
     ctx.register_command("confidential", confidential,
                          description="Confidential mode: lock, unlock, status, pins, receipts, allow, revoke, watch",
                          args_hint="on <tier>|off|status|check|pins [approve|retire <fp>]|receipts|allow <tool>|"
-                                   "revoke <tool>|watch")
+                                   "revoke <tool>|revoke --all|watch")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────────────────────
@@ -1104,10 +1104,10 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
         if every == bool(tool):
             out.write("Usage: hermes confidential revoke <tool> | --all\n")
             return 2
-        changed, text = (_revoke.revoke(rt, None, revoke_all=True, surface="cli") if every
-                         else _revoke.revoke(rt, tool, surface="cli"))
+        status, text = (_revoke.revoke(rt, None, revoke_all=True, surface="cli") if every
+                        else _revoke.revoke(rt, tool, surface="cli"))
         out.write(text.rstrip() + "\n")
-        return 0 if changed or text.startswith("Nothing to revoke") else 1
+        return 1 if status == _revoke.FAILED else 0
     else:
         raw, ok_prefix = f"allow {shlex.quote(args.tool)}", ""
     text = handle_slash(rt, raw, session_id="", session_key="cli", platform="cli", asker=asker,
