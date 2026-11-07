@@ -33,6 +33,27 @@ RESP_WIRE = ("152dab99279f45dd66eb2c7f9e5682a2e14a7feb42aff04e5cc4238621c2624bb4
              "c7c8c9cacb74f81c48ed49cdc5bc49cb37e16d76063777e33fed")
 
 
+def test_frozen_vectors_regenerate_from_the_guides_code_and_independently():
+    """tests/fixtures/near_e2ee_vectors/generate.py runs the guide's v2_encrypt (fixed randomness) and an
+    independent recomputation (curve map, cryptography X25519 and HKDF); both give the frozen bytes."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "fixtures" / "near_e2ee_vectors" / "generate.py"
+    spec = importlib.util.spec_from_file_location("near_e2ee_vectors_generate", path)
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    v = gen.vectors()
+    assert (v["MODEL_PUB"], v["REQ_WIRE"], v["CLIENT_PUB"], v["RESP_WIRE"]) == (MODEL_PUB, REQ_WIRE, CLIENT_PUB, RESP_WIRE)
+
+
+def test_the_fake_gateways_independent_cipher_matches_the_vectors():
+    """tests/near_cipher_ref.py (the synthetic model side) shares no code with near_e2ee."""
+    from tests import near_cipher_ref as ref
+    assert ref.seal(MODEL_PUB, REQ_PLAINTEXT, eph=REQ_EPH, nonce=REQ_NONCE) == REQ_WIRE
+    assert ref.open_(ref.ed_seed_to_x_secret(CLIENT_SEED), RESP_WIRE) == b"Paris"
+    assert ref.open_(ref.ed_seed_to_x_secret(MODEL_SEED), e2.seal(MODEL_PUB, b"x")) == b"x"
+
+
 def model_key():
     return e2.ClientKey.from_seed(MODEL_SEED)   # the "model" side of a vector holds a key like any other
 
@@ -213,9 +234,17 @@ def test_top_level_fields_outside_the_table_are_refused(extra, needle):
         e2.encrypt_request(body, MODEL_PUB)
 
 
-def test_non_string_extras_pass_and_are_reported():
-    out, rep = e2.encrypt_request({"model": "m", "messages": [], "stream_options": {"include_usage": True}}, MODEL_PUB)
-    assert out["stream_options"] == {"include_usage": True} and rep["plaintext_keys"] == ["stream_options"]
+def test_every_top_level_key_that_leaves_in_plaintext_is_reported():
+    out, rep = e2.encrypt_request({"model": "m", "messages": [], "parallel_tool_calls": True, "user": "u",
+                                   "stop": ["X"], "temperature": 0.1}, MODEL_PUB)
+    assert out["parallel_tool_calls"] is True
+    assert rep["plaintext_keys"] == ["parallel_tool_calls", "stop", "temperature", "user"]
+
+
+@pytest.mark.parametrize("value", [{"secret text as a key": 1}, {"include_usage": True}, [{"k": None}]])
+def test_mapping_keys_count_as_text(value):
+    with pytest.raises(e2.E2EEError, match="carries text"):
+        e2.encrypt_request({"model": "m", "messages": [], "extra": value}, MODEL_PUB)
 
 
 @pytest.mark.parametrize("msg,needle", [
