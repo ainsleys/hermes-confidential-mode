@@ -161,21 +161,23 @@ def _pin_lines(rt: Any) -> list[str]:
     return lines
 
 
-def remembered_grants(session_key: str = "") -> list[str]:
-    """Hermes-held once/session/always grants under OUR rule keys (Amendment 2), as 'tool (scope)'."""
+def remembered_grants(session_key: str = "", current_key=None) -> list[str]:
+    """Hermes-held session/always grants under OUR rule keys (Amendment 2), as 'tool (scope)'. Read-only.
+    ``current_key(tool)``: the rule key the gate asks under now (Amendment 13); a grant under an older key
+    matches nothing the plugin asks for and is not listed."""
     out: list[str] = []
     try:
         from tools import approval
-        from .gate_tools import PATTERN_KEY_PREFIX
+        from .gate_tools import parse_pattern_key, rule_key_for
+        current = current_key or rule_key_for
         with approval._lock:
             session = set(approval._session_approved.get(session_key, set())) if session_key else set()
             permanent = set(approval._permanent_set())
-        for key in sorted(permanent):
-            if isinstance(key, str) and key.startswith(PATTERN_KEY_PREFIX):
-                out.append(f"{key[len(PATTERN_KEY_PREFIX):]} (always)")
-        for key in sorted(session):
-            if isinstance(key, str) and key.startswith(PATTERN_KEY_PREFIX):
-                out.append(f"{key[len(PATTERN_KEY_PREFIX):]} (session)")
+        for keys, scope in ((permanent, "always"), (session, "session")):
+            for key in sorted(k for k in keys if isinstance(k, str)):
+                parsed = parse_pattern_key(key)
+                if parsed is not None and key == f"plugin_rule:{current(parsed[0])}":
+                    out.append(f"{parsed[0]} ({scope})")
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -192,7 +194,7 @@ def _grant_lines(rt: Any, session_key: str) -> list[str]:
             added = sorted(_read_added(rt.allowlist_path))
     except Exception:  # noqa: BLE001
         pass
-    remembered = remembered_grants(session_key)
+    remembered = remembered_grants(session_key, getattr(rt, "rule_key", None))
     return [f"Tool grants (allowlist): {', '.join(added) if added else 'none'}",
             f"Tool grants (remembered by Hermes): {', '.join(remembered) if remembered else 'none'}"]
 

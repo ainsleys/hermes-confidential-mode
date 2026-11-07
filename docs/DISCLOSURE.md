@@ -151,9 +151,6 @@ config sends them. The plugin only writes ledger rows that describe them, as des
   still holds an entry (a managed install, or a file that is not writable), the revoke fails and says
   so. Nothing else in the plugin writes `config.yaml`; `hermes confidential setup` prints a config
   block for you to apply yourself.
-- **Hermes' in-memory approvals, on a revoke only.** The revoke discards the same keys from
-  `tools.approval._session_approved` and from the set `_permanent_set()` returns, under
-  `tools.approval._lock` (rule 9, below).
 - **The tool-discovery cache, on a terminal lock.** See the next section.
 
 ### What it writes in its own data
@@ -165,8 +162,11 @@ modes: on Windows, chmod sets only the read-only flag.
 
 `hermes confidential on` run in a terminal imports every Hermes built-in tool module, so the lock can classify
 each tool. Hermes may then rewrite its tool-discovery cache, `<hermes home>/cache/tool_discovery_cache.json`,
-when that cache is stale. The imported modules register their exit handlers; the plugin removes the browser
-reaper's handler again, so a terminal command never stops browser processes a running gateway owns.
+when that cache is stale. The imported modules register their exit handlers, and the plugin leaves them in
+place. One of them is Hermes' browser handler: when the terminal command exits, the handler closes the
+browsers that command opened (none) and stops browser processes whose owning Hermes process is gone, as
+any Hermes command does on exit. A running gateway's browsers have a live owner, so the handler leaves
+them alone.
 `hermes confidential allow` and `status --verbose` import only the tool modules the lock recorded. Those commands fall
 back to the full import, and its cache rewrite, only when a recorded tool is still missing after that.
 
@@ -177,7 +177,7 @@ back to the full import, and its cache rewrite, only when a recorded tool is sti
 | The same directory, `pins.yaml` | Version 3 of the pins file: for each vendor and identity, the approved entries and the pending entries. The plugin writes a pending entry when a verification finds a CVM or build that no approved entry covers. The plugin turns pending entries into approved entries only on an explicit Approve from you. The only exception is the platform-only policy, `confidential.pins.auto_approve_platform_only`, which is off by default and applies to Tinfoil only. Beside it: `pins.yaml.lock` (empty; it serialises writes between processes) and, after an upgrade, `pins.yaml.v2.bak` (the version-2 file as it was before the first version-3 write). |
 | `plugin-data/confidential-mode/evidence/blobs/` | Large pieces of NEAR evidence (each docker-compose, compose-manager attestation, TDX quote and Intel Trust Authority token), one file each, named by its SHA-256. A ledger row names the files it uses. A file no row names is deleted by a later evidence write once it is more than 24 hours old. |
 | The same directory as `state.json`, `pins/composes/` | The docker-compose files fetched for NEAR entries, each named `<sha256>.yaml` by its content hash, and (from `pins review`) `commit-<sha>.json` with each commit's GitHub metadata. |
-| The same directory, `allowlist.yaml.lock`, `grants_revoked.json`, `grants_revoked.json.lock` | `allowlist.yaml.lock` and `grants_revoked.json.lock` are empty lock files that serialise writes between processes. `grants_revoked.json` holds the most recent revoke records (at most 200), which a running gateway reads to drop session approvals. |
+| The same directory, `allowlist.yaml.lock`, `grants_revoked.json`, `grants_revoked.json.lock` | `allowlist.yaml.lock` and `grants_revoked.json.lock` are empty lock files that serialise writes between processes. `grants_revoked.json` holds the most recent revoke records (at most 200) and, per tool, the latest record naming the tool. A running gateway reads the file before each tool decision, and the tool gate asks Hermes under an approval key derived from that latest record. |
 | The same directory, `lock-transition.lock` | Empty. A lock or an unlock holds it, so two processes never lock or unlock the profile at the same time. |
 | The same directory, `allowlist.yaml` | This lock's tool identities: each tool's name, toolset, handler module and handler name. The file also holds the tools you allowed with `/confidential allow`, tagged with the lock's identity. After a restart, the plugin rebuilds the allowlist from this file. `/confidential off` deletes it, so additions never outlive the lock. |
 | The same directory, `tinfoil_user_cache_secret` | A random 32-byte secret, stored as hex with file mode 0600. The SDK sends it as `user_cache_secret`, which keeps Tinfoil's prompt cache separate for you. The SDK's own default location is `~/.tinfoil/user_cache_secret`. The plugin never uses that path. |
@@ -331,7 +331,7 @@ when the plugin loads.
 
 | Module | Names | Why |
 |---|---|---|
-| `tools.approval` | `request_tool_approval`, `is_approved`, `_yolo_active`, `_presence`, and, in `/confidential pins` and `revoke`, `_lock`, `_session_approved`, `_permanent_set` | To ask before an off-host tool call. To detect bypass states that would approve a call without asking. To read remembered grants stored under the plugin's own rule key, and to drop them on a revoke. |
+| `tools.approval` | `request_tool_approval`, `is_approved`, `_yolo_active`, `_presence`, and, in `/confidential status` and `pins`, `_lock`, `_session_approved`, `_permanent_set` (read only) | To ask before an off-host tool call. To detect bypass states that would approve a call without asking. To list the remembered grants stored under the plugin's own rule key. |
 | `tools.approval_context` | `get_current_session_key`, `set_current_observability_context`, `reset_current_observability_context`, `_get_approval_mode` | To get the session key for remembered grants. To tie an approval answer to its tool call. To detect `approvals.mode: off`. |
 | `tools.registry` | `registry`, `discover_builtin_tools` | To build the tool allowlist at lock, and to record each tool's handler identity. A lock from the `hermes confidential` command line first loads the built-in tools, as a chat process would. |
 | `agent.error_classifier` | `_CONTEXT_OVERFLOW_PATTERNS` | To recognise a NEAR context-length error, so that Hermes can compress the context as it would for any provider. |
@@ -348,20 +348,23 @@ when the plugin loads.
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
 | `hermes_constants` | `get_hermes_home` | To find `<hermes home>/auth.json` (see "What it reads outside its own data"). |
 
-`hermes plugins validate` reports 31 of these import sites as private core imports, counting module
-imports as it does; it does not count the private attributes used, such as `approval._lock`,
+`hermes plugins validate` reports 30 of these import sites as private core imports, counting module
+imports as it does; it does not count the private attributes read, such as `approval._lock`,
 `_session_approved`, `_permanent_set` and `mcp_tool._servers`. This is a warning, not a failure.
 
-Two behaviours fall under rule 9's ban on in-place edits, and are disclosed as exceptions:
+The plugin makes no in-place edit of Hermes core (rule 9). Every private name above is read, never
+written. Two places where an edit would have been the short way:
 
-- A revoke discards the plugin's own keys from `tools.approval._session_approved` and from the set
-  `tools.approval._permanent_set()` returns, under `tools.approval._lock`. No public seam drops a
-  session approval, and without the edit a revoked `session` or `always` grant would last until the
-  gateway restarts.
-- When a terminal command imports Hermes' built-in tool modules to classify tools (a terminal lock,
-  and `allow` or `status --verbose` when they fall back to the full import), the plugin calls
-  `atexit.unregister` on `tools.browser_session._atexit_cleanup` if that import loaded the module, so
-  that a terminal command never stops browser processes a running gateway owns. The imports are the price of classifying tools and approvals without a public seam. The
+- A revoke leaves Hermes' session approvals where they are. The tool gate asks Hermes under the rule key
+  `confidential-mode:tool:<tool>` until the first revoke naming the tool, and under
+  `confidential-mode:tool@<generation>:<tool>` after one, where the generation is derived from the
+  latest revoke record in `grants_revoked.json`. A `session` or `always` answer Hermes holds for the
+  older key then matches nothing the plugin asks for. When the record cannot be written, the reply says
+  that a grant Hermes itself holds for this session ends when the session ends or Hermes restarts.
+- A terminal command that imports Hermes' built-in tool modules leaves their exit handlers registered
+  (see "What it writes in its own data").
+
+The imports are the price of classifying tools and approvals without a public seam. The
 upstream roadmap in [LIMITATIONS.md](LIMITATIONS.md) lists the seams that would remove them.
 
 ## What locked mode blocks

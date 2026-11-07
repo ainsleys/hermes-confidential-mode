@@ -8,21 +8,24 @@ A grant that lets an off-host tool run without a prompt while locked lives in on
 * Hermes' ``command_allowlist`` in config.yaml: written by Hermes when a person answers "always" to the
   plugin's approve prompt (tools/approval.py _persist_choice -> save_permanent_allowlist), under the
   plugin's own rule key ``plugin_rule:confidential-mode:tool:<tool>``.
-* Hermes' in-memory session approvals (tools/approval.py ``_session_approved``), under the same key, for
-  a "session" or "always" answer, in the process that asked.
-
-Revoke removes exactly those entries and nothing else: a command_allowlist entry under any other key is
-the user's or another plugin's, and is left alone. The key prefix is a convention, not something Hermes
+* Hermes' in-memory session approvals, under the same key, for a "session" or "always" answer, in the
+  process that asked.
+Revoke removes the first two and leaves Hermes' session approvals where they are: the plugin never
+writes Hermes' approval tables (catalog rule 9). It withdraws them instead by changing the rule key it asks
+under: every revoke appends a record to ``grants_revoked.json``, and from then on the gate asks under
+``confidential-mode:tool@<generation>:<tool>``, where the generation names the latest record covering the
+tool. A session or always answer Hermes holds for the older key then matches nothing the plugin asks for.
+A command_allowlist entry under any other key is the user's or another plugin's, and is left alone. The key prefix is a convention, not something Hermes
 enforces: Hermes forms the key from the rule_key a caller chooses, so another plugin could write an entry
 under this prefix, and revoke would remove that entry too (which only narrows). Revoking narrows and never widens, so it asks nobody
 and runs under the self-approval marker.
 
 How a running gateway sees a revoke made in another process (the ``hermes confidential`` CLI): the
 gateway re-reads allowlist.yaml on its next tool call when the file changes, and Hermes re-syncs
-``command_allowlist`` from disk on every approval check. Session approvals live only in the gateway's
-memory, so every revoke of a named tool (or ``--all``) appends a record to ``grants_revoked.json``, even
-when the revoking process found nothing to remove itself; the gateway applies each new record on its next
-tool call (``RevocationWatcher``), before the gate consults any grant.
+``command_allowlist`` from disk on every approval check. Every revoke of a named tool (or ``--all``)
+appends a record, even when the revoking process found nothing to remove itself; the gateway reads each new
+record on its next tool call (``RevocationWatcher``), before the gate consults any grant, drops its cached
+grants for the tools named and asks under the new generation's rule key.
 
 Writes to allowlist.yaml and grants_revoked.json take an advisory lock file next to each file
 (``file_lock``, the pins-file pattern), so a CLI and a gateway never interleave a read-modify-write.
@@ -62,10 +65,15 @@ def tool_name_problem(name: Any) -> str:
     return ""
 
 
+def _parse(entry: Any) -> Optional[tuple[str, str]]:
+    from .gate_tools import parse_pattern_key
+    return parse_pattern_key(entry)
+
+
 def _is_ours(entry: Any, tools: Optional[set[str]]) -> bool:
-    if not isinstance(entry, str) or not entry.startswith(_prefix()):
-        return False
-    return tools is None or entry[len(_prefix()):] in tools
+    """A Hermes key the plugin asked under (any generation), for one of ``tools`` (None = any tool)."""
+    parsed = _parse(entry)
+    return parsed is not None and (tools is None or parsed[0] in tools)
 
 
 @contextlib.contextmanager
@@ -155,80 +163,105 @@ def remove_command_allowlist_grants(tools: Optional[set[str]]) -> tuple[list[str
         return [], foreign
     config["command_allowlist"] = [e for e in entries if e not in ours]
     save_config(config)
-    left = [e for e in _command_allowlist(load_config()) if e in ours]
+    left = sorted({e for e in _command_allowlist(load_config()) if e in ours})
     if left:
         raise RevokeError("config.yaml was not updated (a managed install, or the file is not writable); "
-                          f"remove {', '.join(left)} from command_allowlist by hand")
-    return sorted({e[len(_prefix()):] for e in ours}), foreign
+                          f"delete the line{'s' if len(left) > 1 else ''} {', '.join(left)} under "
+                          "command_allowlist in config.yaml by hand")
+    return sorted({_parse(e)[0] for e in ours}), foreign
 
 
-# ── Hermes' in-memory session approvals (this process) ─────────────────────────────────────────
-
-_HERMES_STATE = ("_lock", "_session_approved", "_permanent_set")
-SESSION_ERROR = ("Hermes' in-memory session approval could not be dropped (tools.approval has no {name}); "
-                 "restart the gateway to end that grant")
-
-
-def forget_session_grants(tools: Optional[set[str]]) -> tuple[list[str], str]:
-    """Drop the plugin's keys for ``tools`` (None = every plugin key) from Hermes' session approvals, for
-    every session in this process, and from this process's copy of the permanent allowlist (Hermes also
-    re-syncs that copy from config.yaml on every check). Returns (tools whose session approval was dropped,
-    error). The error is "" on success, and names the missing private attribute when this Hermes does not
-    have the 84a0301 state (``_lock``, ``_session_approved``, ``_permanent_set``). Never raises."""
-    dropped: set[str] = set()
-    try:
-        from tools import approval
-    except Exception as exc:  # noqa: BLE001
-        return [], SESSION_ERROR.format(name=f"importable module ({type(exc).__name__})")
-    missing = [n for n in _HERMES_STATE if not hasattr(approval, n)]
-    if missing:
-        return [], SESSION_ERROR.format(name=", ".join(missing))
-    try:
-        with approval._lock:
-            for keys in list(approval._session_approved.values()):
-                for key in [k for k in keys if _is_ours(k, tools)]:
-                    keys.discard(key)
-                    dropped.add(key[len(_prefix()):])
-            permanent = approval._permanent_set()
-            for key in [k for k in permanent if _is_ours(k, tools)]:
-                permanent.discard(key)
-    except Exception as exc:  # noqa: BLE001
-        return sorted(dropped), SESSION_ERROR.format(name=f"usable session state ({type(exc).__name__})")
-    return sorted(dropped), ""
-
-
-# ── revocation records for other processes ─────────────────────────────────────────────────────
+# ── revocation records: every process, and the rule-key generation ───────────────────────────────
 
 def revocations_path(allowlist_path: Optional[Path]) -> Optional[Path]:
     return Path(allowlist_path).parent / REVOCATIONS_FILE if allowlist_path is not None else None
 
 
 def _records(path: Optional[Path]) -> list[dict]:
-    data = _read_json(path)
+    return _records_of(_read_json(path))
+
+
+def _records_of(data: Any) -> list[dict]:
     recs = data.get("records") if isinstance(data, dict) else None
     return [r for r in recs if isinstance(r, dict) and isinstance(r.get("id"), str)] if isinstance(recs, list) else []
 
 
+def _rec_id(value: Any) -> str:
+    return value if isinstance(value, str) and 0 < len(value) <= 200 else ""
+
+
+GENERATION_CHARS = 12
+
+
+def latest_of(data: Any) -> dict[str, tuple[int, str]]:
+    """{tool or "*": (seq, record id)}: the latest record naming each tool, from the file's ``latest`` map
+    (never truncated) and its records (a version 1 file has no ``latest``; its records count in file order)."""
+    out: dict[str, tuple[int, str]] = {}
+
+    def put(name: Any, seq: Any, rec_id: Any) -> None:
+        rid = _rec_id(rec_id)
+        if not isinstance(name, str) or not rid or isinstance(seq, bool) or not isinstance(seq, int):
+            return
+        if name not in out or seq > out[name][0]:
+            out[name] = (seq, rid)
+    latest = data.get("latest") if isinstance(data, dict) else None
+    if isinstance(latest, dict):
+        for name, value in latest.items():
+            if isinstance(value, list) and len(value) == 2:
+                put(name, value[0], value[1])
+    for i, rec in enumerate(_records_of(data)):
+        seq = rec.get("seq") if isinstance(rec.get("seq"), int) else i + 1
+        names = rec.get("tools") if isinstance(rec.get("tools"), list) else [ALL]
+        for name in names:
+            put(name, seq, rec.get("id"))
+    return out
+
+
 def append_record(path: Optional[Path], tools: Optional[set[str]]) -> str:
+    """Append one record (and update the ``latest`` map) under the file lock; returns its id."""
     if path is None:
         return ""
-    rec = {"id": uuid.uuid4().hex, "ts": time.time(), "tools": sorted(tools) if tools is not None else [ALL]}
+    rec_id = uuid.uuid4().hex
+    names = sorted(tools) if tools is not None else [ALL]
     with file_lock(path):
-        recs = (_records(path) + [rec])[-MAX_RECORDS:]
-        _atomic_write_json(Path(path), {"version": 1, "records": recs})
-    return rec["id"]
+        data = _read_json(path)
+        latest = latest_of(data)
+        seq = max([s for s, _ in latest.values()] + [0]) + 1
+        rec = {"id": rec_id, "ts": time.time(), "tools": names, "seq": seq}
+        recs = (_records_of(data) + [rec])[-MAX_RECORDS:]
+        for name in names:
+            latest[name] = (seq, rec_id)
+        _atomic_write_json(Path(path), {"version": 2, "records": recs,
+                                        "latest": {k: [v[0], v[1]] for k, v in sorted(latest.items())}})
+    return rec_id
+
+
+def generation_from(latest: dict[str, tuple[int, str]], tool: str) -> str:
+    """The rule-key generation for ``tool``: a hex digest of the id of the latest record naming it or ``*``;
+    "" when no record does. Any record id counts, a forged one included: a record can only take grants away."""
+    import hashlib
+    found = [v for v in (latest.get(tool), latest.get(ALL)) if v is not None]
+    if not found:
+        return ""
+    return hashlib.sha256(max(found)[1].encode("utf-8")).hexdigest()[:GENERATION_CHARS]
 
 
 class RevocationWatcher:
-    """Applies revocation records another process wrote, once each, in this process. ``baseline()`` at
-    load marks the records already present as applied: a fresh process has no session grants, and its
-    file-backed grants already reflect them. ``apply()`` runs before each gate decision. Never raises."""
+    """Reads the revocation records in this process. ``baseline()`` at load marks the records already present
+    as applied: a fresh process holds no cached grant, and its file-backed grants already reflect them.
+    ``apply()`` runs before each gate decision: each new record drops this process's cached grants for its
+    tools (``drop_added``). ``generation(tool)`` gives the rule-key generation the gate asks under, which
+    never goes back: a record file that is deleted, replaced by an older copy or unreadable keeps the newest
+    generation this process has seen, and an unreadable file with nothing seen gives a generation of this
+    process alone, so no older grant matches. Never raises."""
 
-    def __init__(self, path: Optional[Path], drop_added=None, on_error=None):
+    def __init__(self, path: Optional[Path], drop_added=None):
         self.path = path
         self.drop_added = drop_added
-        self.on_error = on_error      # on_error(tools, error): a session approval this process could not drop
         self.applied: set[str] = set()
+        self.latest: dict[str, tuple[int, str]] = {}
+        self.unreadable = False
+        self._own = uuid.uuid4().hex[:GENERATION_CHARS]
         self._stamp: Any = None
         self._lock = threading.Lock()
 
@@ -239,11 +272,35 @@ class RevocationWatcher:
         except Exception:  # noqa: BLE001
             return None
 
+    def _read(self) -> Any:
+        """The parsed file; None when missing; _UNREADABLE when present and not readable as a record file."""
+        if self.path is None or not os.path.lexists(self.path):
+            return None
+        data = _read_json(self.path)
+        return data if isinstance(data, dict) else _UNREADABLE
+
+    def _merge(self, data: Any) -> None:
+        self.unreadable = data is _UNREADABLE
+        if not isinstance(data, dict):
+            return
+        top = max([s for s, _ in self.latest.values()] + [0])
+        for name, (seq, rid) in latest_of(data).items():
+            mine = self.latest.get(name)
+            if mine is None or (seq > mine[0] and rid != mine[1]):
+                self.latest[name] = (seq, rid)
+            elif rid != mine[1] and seq <= mine[0]:
+                # A replaced file restarted its sequence: a record this process has not seen is still newer.
+                if rid not in self.applied:
+                    top += 1
+                    self.latest[name] = (max(top, mine[0] + 1), rid)
+
     def baseline(self) -> None:
         try:
             with self._lock:
                 self._stamp = self._file_stamp()
-                self.applied |= {r["id"] for r in _records(self.path)}
+                data = self._read()
+                self._merge(data)
+                self.applied |= {r["id"] for r in _records_of(data)}
         except Exception:  # noqa: BLE001
             pass
 
@@ -252,26 +309,50 @@ class RevocationWatcher:
             if rec_id:
                 self.applied.add(rec_id)
 
+    def refresh(self) -> list[dict]:
+        """Re-read the file when it changed; returns the records not seen before (already marked)."""
+        stamp = self._file_stamp()
+        with self._lock:
+            if stamp == self._stamp:
+                return []
+            self._stamp = stamp
+            data = self._read()
+            self._merge(data)
+            fresh = [r for r in _records_of(data) if r["id"] not in self.applied]
+            self.applied |= {r["id"] for r in fresh}
+        return fresh
+
     def apply(self) -> None:
         try:
-            stamp = self._file_stamp()
-            with self._lock:
-                if stamp == self._stamp:
-                    return
-                self._stamp = stamp
-                fresh = [r for r in _records(self.path) if r["id"] not in self.applied]
-                self.applied |= {r["id"] for r in fresh}
+            fresh = self.refresh()
             for rec in fresh:
                 names = rec.get("tools") if isinstance(rec.get("tools"), list) else [ALL]
                 tools = None if ALL in names else {n for n in names if isinstance(n, str)}
-                _, error = forget_session_grants(tools)
-                if error and self.on_error is not None:
-                    with contextlib.suppress(Exception):
-                        self.on_error(tools, error)
                 if self.drop_added is not None:
-                    self.drop_added(tools)
+                    with contextlib.suppress(Exception):
+                        self.drop_added(tools)
         except Exception:  # noqa: BLE001
             pass
+
+    def generation(self, tool: str) -> str:
+        try:
+            self.apply()
+            with self._lock:
+                gen = generation_from(self.latest, tool)
+                if not gen and self.unreadable:
+                    return self._own
+                return gen
+        except Exception:  # noqa: BLE001
+            return self._own
+
+
+_UNREADABLE = object()
+
+
+def rule_key(watcher: Optional[RevocationWatcher], tool: str) -> str:
+    """The rule key the gate asks Hermes under for ``tool`` (gate_tools.rule_key_for with the generation)."""
+    from .gate_tools import rule_key_for
+    return rule_key_for(tool, watcher.generation(tool) if watcher is not None else "")
 
 
 # ── the command ─────────────────────────────────────────────────────────────────────────────────
@@ -291,14 +372,30 @@ def _drop_cached_added(rt: Any, tools: Optional[set[str]]) -> list[str]:
 
 REVOKED, NOTHING, FAILED = "revoked", "nothing", "failed"
 _GATEWAY = "A running gateway applies the revoke on its next tool call"
+_SESSION_NOT_ENDED = ("the running gateway applies the revoke on its next tool call; a grant Hermes itself holds "
+                      "for this session ends when the session ends or Hermes restarts")
+_ROTATED = ("A session or always answer Hermes holds for {what} no longer applies: confidential mode now asks under "
+            "a new approval key.")
+
+
+def _drop_lock_grants(rt: Any, tools: Optional[set[str]]) -> list[str]:
+    grants = getattr(rt, "lock_grants", None)
+    if grants is None:
+        return []
+    try:
+        return grants.drop(tools)
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id: str = "",
            surface: str = "") -> tuple[str, str]:
     """(status, message); status is REVOKED, NOTHING or FAILED. Removes the plugin's grants for ``tool``
-    (or all of them) from allowlist.yaml, command_allowlist and this process's session approvals, records
-    the revoke for other processes in every case, and writes a ``grant_revoked`` ledger row. FAILED when any
-    step did not take effect; the message then starts with the failure."""
+    (or all of them) from allowlist.yaml, command_allowlist and this process's lock grants, and appends a
+    revocation record in every case, which moves the gate to a new rule key (so Hermes' session approvals for
+    the old key stop applying, without the plugin touching them) and tells other processes. Writes a
+    ``grant_revoked`` ledger row. FAILED when any step did not take effect; the message then starts with the
+    failure."""
     from .gate_tools import lock_id_for
     if revoke_all:
         tools, what = None, "every confidential-mode tool grant"
@@ -323,33 +420,39 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
         from_allowlist = []
         errors.append(f"allowlist.yaml could not be written ({type(exc).__name__})")
     from_cache = _drop_cached_added(rt, tools)
+    from_lock_grants = _drop_lock_grants(rt, tools)
     foreign: list[str] = []
+    config_error = ""
     try:
         from_hermes, foreign = remove_command_allowlist_grants(tools)
     except RevokeError as exc:
         from_hermes = []
-        errors.append(str(exc))
+        config_error = str(exc)
     except Exception as exc:  # noqa: BLE001
         from_hermes = []
-        errors.append(f"command_allowlist in config.yaml could not be read or written ({type(exc).__name__}); "
-                      "the grant may still be there")
-    from_session, session_error = forget_session_grants(tools)
-    if session_error:
-        errors.append(session_error)
+        config_error = (f"command_allowlist in config.yaml could not be read or written ({type(exc).__name__}); "
+                        "an entry for the tool may still be there")
+    rotated = False
     try:
         rec_id = append_record(revocations_path(getattr(rt, "allowlist_path", None)), tools)
         watcher = getattr(rt, "revocations", None)
         if watcher is not None and rec_id:
             watcher.mark(rec_id)
+            watcher.refresh()
+        rotated = bool(rec_id)
         if not rec_id:
-            errors.append("the plugin's data directory is unknown, so no running process was told")
+            errors.append("the plugin's data directory is unknown, so the revoke was not recorded; "
+                          + _SESSION_NOT_ENDED)
     except LockBusy as exc:
-        errors.append(f"the revocation record was not written: {exc}; a running gateway keeps any session grant "
-                      "until its session ends")
+        errors.append(f"the revocation record was not written: {exc}; {_SESSION_NOT_ENDED}")
     except Exception as exc:  # noqa: BLE001
-        errors.append(f"the revocation record could not be written ({type(exc).__name__}), so a running gateway "
-                      "keeps any session grant until its session ends")
-    removed = sorted(set(from_allowlist) | set(from_cache) | set(from_hermes) | set(from_session))
+        errors.append(f"the revocation record could not be written ({type(exc).__name__}); {_SESSION_NOT_ENDED}")
+    if config_error:
+        # With the record written, the entry no longer matches the key the plugin asks under; it is still the
+        # user's line to delete, so the revoke reports it.
+        errors.append(config_error + (" (the entry no longer grants anything: confidential mode now asks under a "
+                                       "new approval key)" if rotated else ""))
+    removed = sorted(set(from_allowlist) | set(from_cache) | set(from_hermes) | set(from_lock_grants))
     status = FAILED if errors else (REVOKED if removed else NOTHING)
     row = {"ts": time.time(), "session_id": session_id or "", "kind": "grant_revoked",
            "purpose": f"tool:{tool if not revoke_all else ALL}", "provider": "", "host": "", "model": "",
@@ -358,8 +461,8 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
            "surface": surface or None,
            "detail": {"tool": tool if not revoke_all else ALL, "lock_id": lock_id, "surface": surface or "unknown",
                       "removed": {"allowlist": sorted(set(from_allowlist) | set(from_cache)),
-                                  "command_allowlist": from_hermes, "session": from_session},
-                      "errors": errors, "session_dropped": not session_error}}
+                                  "command_allowlist": from_hermes, "lock_grants": from_lock_grants},
+                      "errors": errors, "rule_key_rotated": rotated}}
     note = ""
     try:
         rt.ledger.append(row)
@@ -370,18 +473,20 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
     places = []
     if from_allowlist or from_cache:
         places.append("this lock's allowlist (allowlist.yaml)")
+    if from_lock_grants:
+        places.append("this lock's grants in this process")
     if from_hermes:
         places.append("Hermes' command_allowlist")
-    if from_session:
-        places.append("this process's session approvals")
     done = f" Removed {', '.join(removed)} from {' and '.join(places)}." if removed else ""
+    rotated_text = (" " + _ROTATED.format(what=what)) if rotated else ""
     if status == FAILED:
-        return FAILED, (f"Revoke failed for {what}: {'; '.join(errors)}." + done
-                        + " Until this is fixed, the tool may still run without asking." + left_alone + note)
+        still = "" if rotated else " Until this is fixed, the tool may still run without asking."
+        return FAILED, (f"Revoke failed for {what}: {'; '.join(errors)}." + done + rotated_text + still
+                        + left_alone + note)
     if status == NOTHING:
         return NOTHING, (f"Nothing to revoke for {what} in this process: no grant written by confidential mode "
-                         "was found in allowlist.yaml or command_allowlist. The revoke was recorded. " + _GATEWAY
-                         + " and drops any session grant it holds." + left_alone + note)
+                         "was found in allowlist.yaml or command_allowlist. The revoke was recorded." + rotated_text
+                         + " " + _GATEWAY + "." + left_alone + note)
     nxt = "The next call of each asks again" if (revoke_all or len(removed) > 1) else f"The next {tool} call asks again"
-    return REVOKED, (f"Revoked {', '.join(removed)}: removed from {' and '.join(places)}. {nxt} while locked. "
-                     + _GATEWAY + "." + left_alone + note)
+    return REVOKED, (f"Revoked {', '.join(removed)}: removed from {' and '.join(places)}. {nxt} while locked."
+                     + rotated_text + " " + _GATEWAY + "." + left_alone + note)

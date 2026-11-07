@@ -21,12 +21,12 @@ description: >-
   verification stages a NEAR entry; the plugin sends no telemetry. The plugin writes under
   <HERMES_HOME>/plugin-data/ (including the ledger, evidence blobs, pins.yaml, allowlist.yaml, state and
   SDK caches), Hermes' tool-discovery cache on a terminal lock, and, on a revoke only, its own
-  command_allowlist entries in config.yaml and Hermes' in-memory approvals; the plugin reads
+  command_allowlist entries in config.yaml; the plugin reads
   config.yaml, auth.json (presence only, a known issue) and script files a locked tool call runs. The
   plugin reads TINFOIL_API_KEY, NEAR_AI_API_KEY, TERMINAL_ENV, TERMINAL_CWD, HERMES_HOME,
   CONFIDENTIAL_MODE_PROGRESS and CONFIDENTIAL_MODE_NO_FETCH, sets XDG_CONFIDENTIAL_MODE_TOOL_PROCESS,
   stores no credential, runs no shell command or subprocess, and keeps one re-verification thread per
-  attested provider while locked. hermes plugins validate counts 31 private core import sites
+  attested provider while locked. hermes plugins validate counts 30 private core import sites
   (docs/DISCLOSURE.md).
 maintainer: ainsleys
 tier: community
@@ -44,7 +44,6 @@ known_issues:
   - "Tinfoil attests its router, not the model backend behind it, and its report carries no client nonce; the plugin's own timestamps are the host clock."
   - "Tinfoil TLS is not pinned per send: the SDK's ehbp transport encrypts request bodies to the enclave's key but leaves headers, the API key included, readable by a TLS intermediary; the plugin's TLS probe only records the certificate after each verification. NEAR connections are pinned per send."
   - "The lock and check read <hermes home>/auth.json directly (presence only) to report whether a credential is set, which catalog rule 11 forbids; a code change that asks Hermes instead is pending."
-  - "A revoke edits Hermes' private approval tables in place (tools.approval._session_approved and _permanent_set) to drop the plugin's own grants, an exception to catalog rule 9 disclosed in docs/DISCLOSURE.md."
   - "AMD and Intel routers have different enclave fingerprints, so a restart can ask for a new pin; set confidential.tinfoil.enclave to one router to stop this."
   - "An 'always' tool grant lives in Hermes' command_allowlist and outlives the lock until /confidential revoke <tool>."
   - "After a runtime switch to a hosted provider, Hermes' start-up model-list request goes out with your API key (no conversation text) before any plugin seam runs; the plugin then refuses the turn."

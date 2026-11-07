@@ -167,6 +167,15 @@ class Runtime:
             return _ChangedConfigPredicate(_cm("tiers").Tier(tier))
         return locking.predicate_for(tier, config=config)
 
+    def rule_key(self, tool_name: str) -> str:
+        """The rule key the tool gate asks Hermes under (Amendment 13): it changes at every revoke naming the
+        tool, so an older Hermes session or always grant stops applying."""
+        return _cm("revoke").rule_key(self.revocations, tool_name)
+
+    def remembered(self, tool_name: str) -> bool:
+        gt = _cm("gate_tools")
+        return gt.hermes_remembered_grant(tool_name, rule_key=self.rule_key(tool_name))
+
     def pin_pending(self) -> bool:
         return self.pins is not None and self.pins.pending() is not None
 
@@ -319,12 +328,7 @@ def _register(rt: Runtime) -> None:
             if al is not None:
                 with al._lock:
                     al.added -= {n for n in al.added if tools is None or n in tools}
-        def on_error(tools, error):
-            rt.append({"kind": "grant_revoked", "purpose": f"tool:{','.join(sorted(tools)) if tools else '*'}",
-                       "decision": "apply_failed", "detail": {"tools": sorted(tools) if tools else ["*"],
-                                                              "errors": [error], "session_dropped": False}})
-        rt.revocations = rv.RevocationWatcher(rv.revocations_path(rt.allowlist_path), drop_added=drop_added,
-                                              on_error=on_error)
+        rt.revocations = rv.RevocationWatcher(rv.revocations_path(rt.allowlist_path), drop_added=drop_added)
         rt.revocations.baseline()
     _step(rt, "revocations", revocations)
 
@@ -381,13 +385,15 @@ def _register(rt: Runtime) -> None:
     def tool_mw():
         gt = _cm("gate_tools")
         _middleware(rt, "tool_execution", gt.build_tool_execution(rt.is_locked, rt.allowlist, rt.ledger,
-                                                                  rt.decisions))
+                                                                  rt.decisions, remembered=rt.remembered,
+                                                                  rule_key=rt.rule_key))
     _step(rt, "tool_execution", tool_mw)
 
     def pre_tool():
         gt = _cm("gate_tools")
         _hook(rt, "pre_tool_call", gt.build_pre_tool_call(rt.is_locked, rt.allowlist, rt.ledger,
-                                                           decisions=rt.decisions))
+                                                           decisions=rt.decisions, remembered=rt.remembered,
+                                                           rule_key=rt.rule_key))
     _step(rt, "pre_tool_call", pre_tool)
 
     def post_approval():

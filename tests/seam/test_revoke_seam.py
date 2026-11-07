@@ -60,7 +60,7 @@ def test_always_grant_then_revoke_then_the_gate_asks_again(plugin, web):
     detail = rows[0].detail if isinstance(rows[0].detail, dict) else json.loads(rows[0].detail)
     gt = _sub(plugin, "gate_tools")
     assert detail["tool"] == "web_search" and detail["lock_id"] == gt.lock_id_for(plugin.rt.state)
-    assert detail["removed"]["command_allowlist"] == ["web_search"] and detail["removed"]["session"] == ["web_search"]
+    assert detail["removed"]["command_allowlist"] == ["web_search"] and detail["rule_key_rotated"] is True
     assert "Tool grants (remembered by Hermes): none" in plugin.slash("status")
 
 
@@ -87,7 +87,7 @@ def test_revoke_all_removes_every_plugin_grant_and_nothing_else(plugin, web):
     out = plugin.slash("revoke --all")
     assert out.startswith("Revoked vision_analyze, web_search"), out
     cfg = plugin.cfg.read_text()
-    assert "confidential-mode:tool:" not in cfg
+    assert "confidential-mode:tool" not in cfg
     assert "plugin_rule:other-plugin:tool:web_search" in cfg and "- web_search" in cfg
     assert json.loads(plugin.rt.allowlist_path.read_text())["allowed"] == []
     assert [e.decision for e in plugin.rt.ledger.tail(0) if e.kind == "grant_revoked"] == ["revoke_all"]
@@ -169,4 +169,4 @@ def test_receipt_shows_the_revoke(plugin, web):
     _always(plugin, web)
     plugin.slash("revoke web_search")
     text = plugin.slash("receipts sess-w5")
-    assert "grant revoked  tool:web_search  (revoke; removed from command_allowlist, session; via cli)" in text, text
+    assert "grant revoked  tool:web_search  (revoke; removed from command_allowlist; new approval key; via cli)" in text, text

@@ -43,7 +43,7 @@ def test_revoke_of_grants_the_plugin_did_not_write_is_a_noop_with_a_message(plug
     # The revoke is still recorded for running processes and ledgered, with nothing removed here.
     (row,) = _grant_rows(plugin)
     detail = row.detail if isinstance(row.detail, dict) else json.loads(row.detail)
-    assert detail["removed"] == {"allowlist": [], "command_allowlist": [], "session": []}
+    assert detail["removed"] == {"allowlist": [], "command_allowlist": [], "lock_grants": []}
     rv = _sub(plugin, "revoke")
     assert rv.revocations_path(plugin.rt.allowlist_path).exists()
 
@@ -118,12 +118,12 @@ def test_a_corrupt_revocation_file_never_breaks_the_gate(plugin, monkeypatch):
     assert ran == [{"q": 1}] and len(plugin.prompts) == 1
     _with_allowlist(plugin, [OURS])
     assert plugin.slash("revoke web_search").startswith("Revoked web_search")   # rewrites the corrupt file
-    assert json.loads(rv.revocations_path(plugin.rt.allowlist_path).read_text())["version"] == 1
+    assert json.loads(rv.revocations_path(plugin.rt.allowlist_path).read_text())["version"] == 2
 
 
 def test_a_forged_record_only_narrows(plugin, monkeypatch):
-    """Anyone who can write grants_revoked.json can only take grants away: a record naming every tool
-    drops session approvals; it cannot add one."""
+    """Anyone who can write grants_revoked.json can only take grants away: a record naming every tool moves
+    every tool to a new rule key, so Hermes' session approvals stop applying; it cannot add a grant."""
     import model_tools
     from tools.registry import registry
     ran = []

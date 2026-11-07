@@ -798,10 +798,11 @@ Each item below is a smaller gap. Each one is stated in full.
 - **Remembered `always` grants outlive the lock.** Hermes stores them in `command_allowlist` as
   `plugin_rule:confidential-mode:tool:<name>`. They survive an unlock. `/confidential pins` lists them.
   `/confidential revoke <tool>` (or `hermes confidential revoke <tool>`) removes the grant, and
-  `revoke --all` removes every grant the plugin holds. A revoke reads Hermes' private approval state
-  at 84a0301 (`_lock`, `_session_approved`, `_permanent_set`) to drop a session approval. A Hermes
-  release that renames that state leaves a session approval in place until its session ends, while
-  the revoke still removes the `command_allowlist` entry. An approval prompt already open in the
+  `revoke --all` removes every grant the plugin holds. A revoke does not edit Hermes' session
+  approvals: the plugin asks under a new approval key from then on, so a session approval for the old
+  key stops applying. Deleting `grants_revoked.json` does not bring the old key back in a running
+  process; after a restart with the file deleted, the old key is used again, and only a `command_allowlist`
+  entry the revoke could not remove would then apply. An approval prompt already open in the
   gateway can still be answered after a revoke, and that answer grants the tool again. A tool call
   already past the gate finishes.
 

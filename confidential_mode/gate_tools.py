@@ -113,6 +113,12 @@ def names_state_file(args: Any) -> bool:
 # the remembered-grant check MUST use the prefixed key (see hermes_remembered_grant).
 RULE_KEY_PREFIX = "confidential-mode:tool:"
 PATTERN_KEY_PREFIX = "plugin_rule:" + RULE_KEY_PREFIX
+# After a revoke the plugin asks under a new rule key, ``confidential-mode:tool@<generation>:<tool>``
+# (revoke.py, Amendment 13): a session or always answer Hermes holds for the old key then matches nothing the
+# plugin asks for, so the grant is withdrawn without editing Hermes' approval tables.
+RULE_KEY_STEM = "confidential-mode:tool"
+PATTERN_KEY_STEM = "plugin_rule:" + RULE_KEY_STEM
+_GENERATION_CHARS = frozenset("0123456789abcdef")
 
 # post_approval_response choices that let the tool run (tools/approval.py:907-913, :928).
 _ALLOW_CHOICES = frozenset({"once", "session", "always"})
@@ -394,32 +400,13 @@ def _read_added(path: Path) -> set[str]:
 # allowlist from the live registry
 # --------------------------------------------------------------------------------------------------
 
-#: The module whose import registers Hermes' browser reaper at exit (tools/browser_session.py:388). A CLI process
-#: that imports it only to classify tools must not reap the Chromium processes a running gateway owns.
-_BROWSER_REAPER_MODULE = "tools.browser_session"
-
-
-def _drop_browser_reaper(was_loaded: bool) -> None:
-    """Unregister the browser reaper's exit handler when this call imported its module. Never raises."""
-    import atexit
-    import sys
-    try:
-        mod = sys.modules.get(_BROWSER_REAPER_MODULE)
-        handler = getattr(mod, "_atexit_cleanup", None) if mod is not None else None
-        if not was_loaded and callable(handler):
-            atexit.unregister(handler)
-    except Exception:
-        pass
-
-
 def ensure_builtin_tools(progress: Any = None) -> None:
     """Import every Hermes built-in tool module so the lock can classify them all. Built-in tools register
     themselves on import, and a `hermes confidential` CLI process never builds an agent. Side effects
     (INTERFACES Amendment 11): Hermes may rewrite its tool-discovery cache when the cache is stale, and the
-    imported modules register their exit handlers; the browser reaper's handler is removed again when this call
-    imported it. Idempotent; never raises. ``progress``: a progress.Progress for the "discovering tools" line."""
-    import sys
-    browser_loaded = _BROWSER_REAPER_MODULE in sys.modules
+    imported modules register their exit handlers (Hermes' browser module registers one that, at exit, closes the
+    browsers this process opened and stops browser processes whose owning Hermes process is gone; a running
+    gateway's browsers have a live owner and are left alone). Idempotent; never raises. ``progress``: a progress.Progress for the "discovering tools" line."""
     try:
         from tools.registry import discover_builtin_tools, registry
         if progress is None or not getattr(progress, "enabled", False):
@@ -430,7 +417,6 @@ def ensure_builtin_tools(progress: Any = None) -> None:
                 box["result"] = f"{len(registry.get_all_entries())} found"
     except Exception:
         pass
-    _drop_browser_reaper(browser_loaded)
 
 
 def ensure_tools_for_lock(path: Optional[Path], progress: Any = None) -> None:
@@ -463,8 +449,6 @@ def ensure_tools_for_lock(path: Optional[Path], progress: Any = None) -> None:
 
 def _import_modules(missing: list, progress: Any = None) -> None:
     import importlib
-    import sys
-    browser_loaded = _BROWSER_REAPER_MODULE in sys.modules
     try:
         if progress is not None and getattr(progress, "enabled", False):
             with progress.phase("loading the locked tools") as box:
@@ -478,7 +462,6 @@ def _import_modules(missing: list, progress: Any = None) -> None:
                     importlib.import_module(name)
     except Exception:
         pass
-    _drop_browser_reaper(browser_loaded)
 
 
 def _default_mcp_configs() -> dict[str, dict]:
@@ -685,8 +668,29 @@ def format_allowlist(allowlist: Allowlist) -> str:
 # bypass and delegation predicates (defaults wired by register(); injectable for tests)
 # --------------------------------------------------------------------------------------------------
 
-def rule_key_for(tool_name: str) -> str:
+def rule_key_for(tool_name: str, generation: str = "") -> str:
+    """The rule key the plugin asks Hermes under. ``generation`` (hex, from the latest revoke naming the tool,
+    revoke.RevocationWatcher.generation) is empty until the first revoke."""
+    if generation:
+        return f"{RULE_KEY_STEM}@{generation}:{tool_name}"
     return f"{RULE_KEY_PREFIX}{tool_name}"
+
+
+def parse_pattern_key(pattern_key: Any) -> Optional[tuple[str, str]]:
+    """(tool, generation) for a Hermes pattern key the plugin asked under (``plugin_rule:`` plus a rule key of
+    rule_key_for), else None. The generation is "" for the key before any revoke."""
+    if not isinstance(pattern_key, str) or not pattern_key.startswith(PATTERN_KEY_STEM):
+        return None
+    rest = pattern_key[len(PATTERN_KEY_STEM):]
+    if rest.startswith(":"):
+        tool, generation = rest[1:], ""
+    elif rest.startswith("@") and ":" in rest:
+        generation, tool = rest[1:].split(":", 1)
+        if not generation or not set(generation) <= _GENERATION_CHARS:
+            return None
+    else:
+        return None
+    return (tool, generation) if tool else None
 
 
 def _hermes_approval_state() -> tuple[bool, bool]:
@@ -711,14 +715,16 @@ def hermes_bypass_active(tool_name: str) -> bool:
         return True
 
 
-def hermes_remembered_grant(tool_name: str) -> bool:
-    """True when Hermes holds a session/always grant for our rule key in this session.
+def hermes_remembered_grant(tool_name: str, rule_key: Optional[str] = None) -> bool:
+    """True when Hermes holds a session/always grant for our rule key (``rule_key``, default the key before any
+    revoke) in this session.
     The plugin_rule: prefix trap: the grant is stored under the PREFIXED key; is_approved(sk, rule_key)
     without it is always False (tests/spikes/test_approval_gate.py:384). Any error -> False (ask)."""
     try:
         from tools.approval import is_approved
         from tools.approval_context import get_current_session_key
-        return bool(is_approved(get_current_session_key(), f"plugin_rule:{rule_key_for(tool_name)}"))
+        key = rule_key if rule_key is not None else rule_key_for(tool_name)
+        return bool(is_approved(get_current_session_key(), f"plugin_rule:{key}"))
     except Exception:
         return False
 
@@ -1175,7 +1181,8 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
                         delegation_ok: Callable[[dict], bool] = default_delegation_ok,
                         remembered: Callable[[str], bool] = hermes_remembered_grant,
                         decisions: Optional[ApprovalDecisions] = None,
-                        terminal_backend: Optional[Callable[[str], str]] = None) -> Callable[..., Optional[dict]]:
+                        terminal_backend: Optional[Callable[[str], str]] = None,
+                        rule_key: Callable[[str], str] = rule_key_for) -> Callable[..., Optional[dict]]:
     """``pre_tool_call`` callback: blocks every refuse decision (ledgered tool_refused) and, for an
     off-host tool, returns the approve directive with the "~N KB" message (ledgered tool_asked).
     The directive only ASKS: Hermes' CLI grants on any answer except the exact string "deny"
@@ -1222,7 +1229,7 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
             key = _call_key(tool_name, tool_call_id)
             if dec.take_grant(key):
                 return None                      # the middleware asked for this call already
-            directive = {"action": "approve", "message": d.message, "rule_key": rule_key_for(tool_name)}
+            directive = {"action": "approve", "message": d.message, "rule_key": rule_key(tool_name)}
             dec.pop(key)                         # forget any stale answer for this key: only a fresh one counts
             if d.decision == "remembered":
                 return directive                 # Hermes honours the grant silently; the middleware ledgers it
@@ -1271,7 +1278,8 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                          delegation_ok: Callable[[dict], bool] = default_delegation_ok,
                          remembered: Callable[[str], bool] = hermes_remembered_grant,
                          ask: Callable[..., dict] = hermes_request_approval,
-                         terminal_backend: Optional[Callable[[str], str]] = None) -> Callable[..., Any]:
+                         terminal_backend: Optional[Callable[[str], str]] = None,
+                         rule_key: Callable[[str], str] = rule_key_for) -> Callable[..., Any]:
     """``tool_execution`` middleware: the ENFORCEMENT line, for ctx.register_middleware("tool_execution", fn).
 
     Off-host tool => ``next_call`` only on an explicit once/session/always recorded by
@@ -1361,7 +1369,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                              nbytes=args_bytes(args), surface="middleware",
                              detail={**base, "kb": d.kb, "message": d.message, "approval_id": approval_id}))
         with dec.asking(tool_name, approval_id):
-            result = ask(tool_name, d.message, rule_key=rule_key_for(tool_name), approval_id=approval_id,
+            result = ask(tool_name, d.message, rule_key=rule_key(tool_name), approval_id=approval_id,
                          session_id=session_id, turn_id=turn_id)
         choice = dec.pop(_call_key(tool_name, approval_id))
         hook_wrote_row = dec.pop_ledgered(_call_key(tool_name, approval_id))
@@ -1430,9 +1438,10 @@ def build_post_approval_response(is_locked: Callable[[], Any], ledger: Any,
                                session_key: str = "", surface: str = "", tool_call_id: str = "",
                                **kw: Any) -> None:
         try:
-            if not isinstance(pattern_key, str) or not pattern_key.startswith(PATTERN_KEY_PREFIX):
+            parsed = parse_pattern_key(pattern_key)
+            if parsed is None:
                 return None
-            tool_name = pattern_key[len(PATTERN_KEY_PREFIX):]
+            tool_name = parsed[0]
             # An answer with an empty id is keyed on the middleware's ask in progress, if any (Amendment 11).
             call_id = tool_call_id or dec.current_ask(tool_name)
             pick = choice if type(choice) is str else ""

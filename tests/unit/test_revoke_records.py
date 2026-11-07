@@ -1,11 +1,11 @@
-"""Amendment 10 (U06): revocation records and the watcher, pure logic over files."""
+"""Amendment 10 (U06) and Amendment 13: revocation records, the watcher and the rule-key generation, pure logic
+over files."""
 import json
 
 from confidential_mode import revoke as rv
 
 
-def test_records_are_applied_once_and_a_fresh_process_baselines(tmp_path, monkeypatch):
-    monkeypatch.setattr(rv, "forget_session_grants", lambda tools: ([], ""))
+def test_records_are_applied_once_and_a_fresh_process_baselines(tmp_path):
     path = tmp_path / rv.REVOCATIONS_FILE
     dropped = []
     w = rv.RevocationWatcher(path, drop_added=dropped.append)
@@ -24,26 +24,89 @@ def test_records_are_applied_once_and_a_fresh_process_baselines(tmp_path, monkey
     assert late == []
 
 
-def test_watcher_reports_a_session_drop_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(rv, "forget_session_grants", lambda tools: ([], "no _session_approved"))
+def test_each_revoke_moves_the_tool_to_a_new_rule_key(tmp_path):
+    from confidential_mode.gate_tools import parse_pattern_key, rule_key_for
     path = tmp_path / rv.REVOCATIONS_FILE
-    errors = []
-    w = rv.RevocationWatcher(path, on_error=lambda tools, e: errors.append((tools, e)))
+    w = rv.RevocationWatcher(path)
     w.baseline()
-    rv.append_record(path, {"x"})
-    w.apply()
-    assert errors == [({"x"}, "no _session_approved")]
+    assert rv.rule_key(w, "web_search") == rule_key_for("web_search") == "confidential-mode:tool:web_search"
+    rv.append_record(path, {"web_search"})
+    first = rv.rule_key(w, "web_search")
+    assert first != rule_key_for("web_search") and rv.rule_key(w, "vision_analyze") == rule_key_for("vision_analyze")
+    assert parse_pattern_key("plugin_rule:" + first) == ("web_search", first.split("@")[1].split(":")[0])
+    rv.append_record(path, None)                       # --all moves every tool
+    assert rv.rule_key(w, "web_search") not in (first, rule_key_for("web_search"))
+    assert rv.rule_key(w, "vision_analyze") != rule_key_for("vision_analyze")
+    # A fresh process reads the same generation from the file.
+    fresh = rv.RevocationWatcher(path)
+    fresh.baseline()
+    assert rv.rule_key(fresh, "web_search") == rv.rule_key(w, "web_search")
+
+
+def test_the_generation_survives_record_truncation(tmp_path):
+    path = tmp_path / rv.REVOCATIONS_FILE
+    rv.append_record(path, {"web_search"})
+    w = rv.RevocationWatcher(path)
+    w.baseline()
+    key = rv.rule_key(w, "web_search")
+    for i in range(rv.MAX_RECORDS + 3):
+        rv.append_record(path, {f"t{i}"})
+    fresh = rv.RevocationWatcher(path)
+    fresh.baseline()
+    assert rv.rule_key(fresh, "web_search") == key
+
+
+def test_the_generation_never_goes_back(tmp_path):
+    """A deleted or older record file must not revive a grant held under an earlier key."""
+    path = tmp_path / rv.REVOCATIONS_FILE
+    w = rv.RevocationWatcher(path)
+    w.baseline()
+    rv.append_record(path, {"web_search"})
+    older = path.read_bytes()
+    rv.append_record(path, {"web_search"})
+    newest = rv.rule_key(w, "web_search")
+    path.write_bytes(older)
+    assert rv.rule_key(w, "web_search") == newest
+    path.unlink()
+    assert rv.rule_key(w, "web_search") == newest
+    # A replaced file whose sequence restarted still moves the key on its new record.
+    rv.append_record(path, {"web_search"})
+    assert rv.rule_key(w, "web_search") != newest
+
+
+def test_an_unreadable_record_file_gives_a_key_no_earlier_grant_has(tmp_path):
+    from confidential_mode.gate_tools import rule_key_for
+    path = tmp_path / rv.REVOCATIONS_FILE
+    path.write_text("{not json")
+    w = rv.RevocationWatcher(path)
+    w.baseline()
+    key = rv.rule_key(w, "web_search")
+    assert key != rule_key_for("web_search") and key == rv.rule_key(w, "web_search")
+
+
+def test_a_version_1_file_still_counts(tmp_path):
+    path = tmp_path / rv.REVOCATIONS_FILE
+    path.write_text(json.dumps({"version": 1, "records": [{"id": "ab" * 16, "ts": 1, "tools": ["web_search"]}]}))
+    w = rv.RevocationWatcher(path)
+    w.baseline()
+    first = rv.rule_key(w, "web_search")
+    assert first.startswith("confidential-mode:tool@") and first.endswith(":web_search")
+    rv.append_record(path, {"web_search"})
+    assert rv.rule_key(w, "web_search") != first
 
 
 def test_watcher_never_raises_on_a_corrupt_or_missing_file(tmp_path):
     path = tmp_path / rv.REVOCATIONS_FILE
-    w = rv.RevocationWatcher(path, drop_added=lambda t: 1 / 0, on_error=lambda t, e: 1 / 0)
+    w = rv.RevocationWatcher(path, drop_added=lambda t: 1 / 0)
     w.baseline()
     w.apply()
     path.write_text("{not json")
     w.apply()
-    path.write_text(json.dumps({"version": 1, "records": [{"id": "a", "tools": "web_search"}, 5, {"id": 7}]}))
+    assert w.generation("x")
+    path.write_text(json.dumps({"version": 1, "records": [{"id": "a", "tools": "web_search"}, 5, {"id": 7}],
+                                "latest": {"x": "bad", "y": [True, "zz"]}}))
     w.apply()
+    w.generation("web_search")
 
 
 def test_records_are_capped(tmp_path):

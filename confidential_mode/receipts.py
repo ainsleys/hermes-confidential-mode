@@ -1006,9 +1006,11 @@ def render_text(doc: Mapping) -> str:
     for i in sec.get("grants_revoked", []):
         r = rows[i]
         rem = (r["detail"] or {}).get("removed") or {}
-        where = ", ".join(k for k in ("allowlist", "command_allowlist", "session") if rem.get(k)) or "nothing here"
+        where = ", ".join(k for k in ("allowlist", "command_allowlist", "session", "lock_grants")
+                          if rem.get(k)) or "nothing here"
+        rotated = "; new approval key" if (r["detail"] or {}).get("rule_key_rotated") is True else ""
         add(_line(r, sid, f"grant revoked  {_p(r['purpose'])}  ({_p(r['decision']) or 'revoke'}; removed from "
-                          f"{_p(where)}; via {_p(r.get('surface')) or 'unknown'})"))
+                          f"{_p(where)}{rotated}; via {_p(r.get('surface')) or 'unknown'})"))
 
     section("Breaches", sec["breaches"],
             lambda r: f"{_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  "

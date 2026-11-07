@@ -634,8 +634,13 @@ plugin holds for one tool, and `revoke --all` withdraws every such grant. The ne
 asks again while locked. A revoke removes exactly:
 
 - the tool's name in `allowlist.yaml`'s `allowed` list, when the file belongs to the current lock;
-- `plugin_rule:confidential-mode:tool:<tool>` in Hermes' `command_allowlist`;
-- the same key in Hermes' session approvals.
+- the plugin's own keys for the tool in Hermes' `command_allowlist`
+  (`plugin_rule:confidential-mode:tool:<tool>`, or `plugin_rule:confidential-mode:tool@<generation>:<tool>`
+  after an earlier revoke).
+
+A revoke never edits Hermes' session approvals. The plugin asks Hermes under a new approval key from
+the revoke on, so a `session` or `always` answer Hermes holds for the old key no longer applies, and
+the next call asks again.
 
 Any other `command_allowlist` entry was written by you or another plugin, so a revoke leaves it alone
 and names it in the reply. A revoke that finds no grant says so. Each revoke that removes a grant
@@ -644,17 +649,18 @@ writes a `grant_revoked` row with the tool, the surface and the lock's identity.
 entry under it, which only narrows what runs.
 
 A command-line revoke reaches a running gateway on the gateway's next tool call. The gateway re-reads
-`allowlist.yaml` when it changes, and Hermes re-reads `command_allowlist` on every check. Session
-approvals live only in the gateway's memory, so every revoke appends a record to `grants_revoked.json`,
-even when it found nothing to remove, and the gateway drops matching session approvals when it sees
-a new record. Writes to `allowlist.yaml` and `grants_revoked.json` take a lock file beside each;
+`allowlist.yaml` when it changes, and Hermes re-reads `command_allowlist` on every check. Every revoke
+appends a record to `grants_revoked.json`, even when it found nothing to remove. The gateway reads the
+file before each tool decision and asks under the approval key the latest record gives, so a session
+approval the gateway holds for the old key stops applying on its next tool call. Writes to `allowlist.yaml` and `grants_revoked.json` take a lock file beside each;
 the plugin waits at most two seconds for it, and otherwise fails, names the lock file and exits
 non-zero.
 
 A revoke that doesn't take effect is reported as a failure and `hermes confidential revoke` exits
-non-zero: for example a `config.yaml` Hermes didn't write (a managed install), or a Hermes release
-without the private approval state the plugin reads, in which case the reply says to restart the
-gateway. Revoking only narrows, so it asks nobody. While locked, the tool gate refuses any tool call
+non-zero: for example a `config.yaml` Hermes didn't write (a managed install), in which case the reply
+names the line to delete, or a `grants_revoked.json` the plugin could not write, in which case the reply
+says that the running gateway applies the revoke on its next tool call and that a grant Hermes itself
+holds for this session ends when the session ends or Hermes restarts. Revoking only narrows, so it asks nobody. While locked, the tool gate refuses any tool call
 that names `hermes confidential`, revoke included, so run it from a terminal you opened or from chat.
 
 **Limits.** An `always` grant outlives the lock until you revoke it. An approval prompt already open
