@@ -9,8 +9,8 @@ prints both vendors the same way. ``replay_signed_send(detail, evidence)`` judge
 row. ``replay_receipt(doc)`` does both for every NEAR row of a receipt (JSON form) and needs nothing
 but the receipt.
 
-v2 evidence keeps its large texts (each app_compose, each compose_manager_attestation) as blobs by
-SHA-256. A ledger row holds only ``blob_refs``; a JSON receipt carries the texts beside the evidence
+v2 evidence keeps its large strings (each app_compose, each compose_manager_attestation, each TDX quote
+and each Intel Trust Authority token) as blobs by SHA-256. A ledger row holds only ``blob_refs``; a JSON receipt carries the texts beside the evidence
 (``blobs``), and ``with_blobs`` joins them for replay. A blob that is missing or does not hash to its id
 fails the check that needs it.
 

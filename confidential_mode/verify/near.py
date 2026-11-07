@@ -11,8 +11,8 @@ What one ``verify()`` does (all over plain HTTPS to the configured host, plus on
 Attestation requests carry no API key (NEAR documents them as public). The bytes are kept as evidence
 (schema ``confidential-mode/near-evidence/v2``; v1 still appraises under v1 rules) and appraised by
 ``appraise()``, the same function the offline replay runs (verify/replay_near.py). Any failed required
-check raises VerifyError. Large texts (each app_compose, each compose_manager_attestation) sit in the
-evidence's ``blobs`` by SHA-256; the ledger moves them to ``<data_dir>/evidence/blobs/`` and keeps
+check raises VerifyError. Large strings (each app_compose, each compose_manager_attestation, each TDX
+quote and each Intel Trust Authority token) sit in the evidence's ``blobs`` by SHA-256; the ledger moves them to ``<data_dir>/evidence/blobs/`` and keeps
 ``blob_refs``, and a JSON receipt embeds them again (ledger.py, receipts.py).
 
 What the checks establish, and with which key:
