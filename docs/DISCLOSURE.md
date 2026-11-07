@@ -149,7 +149,12 @@ config sends them. The plugin only writes ledger rows that describe them, as des
   defaults merged), remove from `command_allowlist` only the plugin's own entries,
   `plugin_rule:confidential-mode:tool:<name>` and `plugin_rule:confidential-mode:tool@<generation>:<name>`
   (the keys Hermes stored for an `always` answer to the plugin's prompt), and save with Hermes'
-  `save_config`, which keeps every other key, value, comment and environment reference. When no such
+  `save_config`, which keeps every other key, value, comment and environment reference. Hermes' save
+  also normalises an older layout, as any Hermes config save does: root `provider`, `base_url` and
+  `context_length` move under `model`, `model.api_base` becomes `model.base_url`, `model.name` or
+  `model.model` becomes `model.default`, a root `max_turns` moves under `agent`, and values equal to
+  Hermes' defaults that were not set explicitly are dropped. Hermes applies the same normalisation
+  when it loads the file, so the effective config, and the lock's fingerprint, are unchanged. When no such
   entry exists the file is not written. When the saved file still holds an entry (a managed install,
   or a file that is not writable), the revoke fails and names the line to delete by hand; the entry no
   longer grants anything, because the plugin then asks under a new approval key. Nothing else in the plugin writes `config.yaml`; `hermes confidential setup` prints a config
@@ -165,11 +170,11 @@ modes: on Windows, a mode change sets only the read-only flag.
 
 `hermes confidential on` run in a terminal imports every Hermes built-in tool module, so the lock can classify
 each tool. Hermes may then rewrite its tool-discovery cache, `<hermes home>/cache/tool_discovery_cache.json`,
-when that cache is stale. The imported modules register their exit handlers, and the plugin leaves them in
-place. One of them is Hermes' browser handler: when the terminal command exits, the handler closes the
+when that cache is stale. The imported modules register their exit handlers, and the plugin leaves those
+handlers in place. One of the handlers is Hermes' browser handler: when the terminal command exits, the handler closes the
 browsers that command opened (none) and stops browser processes whose owning Hermes process is gone, as
 any Hermes command does on exit. A running gateway's browsers have a live owner, so the handler leaves
-them alone.
+those browsers alone.
 `hermes confidential allow` and `status --verbose` import only the tool modules the lock recorded. Those commands fall
 back to the full import, and its cache rewrite, only when a recorded tool is still missing after that.
 
@@ -237,8 +242,14 @@ A replay, which only the `hermes confidential replay` command runs, also wraps
 offline network ban. Each wrapper is installed when the window opens and the original attribute is put
 back when the last open window for that attribute closes. Inside the window the wrapper is shared by the whole
 process, Hermes' own `requests` calls included, and does nothing for any thread but the one that opened
-the window: another thread's call runs the original function unchanged. Hermes core attributes are never
-wrapped.
+the window: another thread's call runs the original function unchanged. For the length of each replay
+only, the plugin also replaces the `datetime` global of tinfoil's `collateral_tdx` and `cert_utils`
+modules and `verify_sev.crypto` with versions that read a clock pinned on the replaying thread (the
+capture time) and behave as the originals on every other thread; the original attributes are put
+back when the last open replay window closes. On the plugin's own `SecureClient` instance, and on no
+other object, the plugin sets the instance attributes `verify`, `_build_ehbp_sync_transport` and
+`_build_ehbp_async_transport` (the verification guard and the pinned transports); the SDK class is
+unchanged. Hermes core attributes are never wrapped.
 
 ## Credentials
 

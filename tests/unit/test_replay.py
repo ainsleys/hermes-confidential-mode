@@ -485,6 +485,17 @@ def test_sev_replay_passes_offline(captured, offline, fake_sigstore):
     assert offline == []
 
 
+def test_replay_puts_the_sdk_clock_and_crypto_back(captured, offline, fake_sigstore):
+    """The clock and crypto rebinds last for the replay only (rule 9 grey area): afterwards each SDK module
+    attribute is the library's own again."""
+    from datetime import datetime as real_datetime
+    from tinfoil.attestation import cert_utils, collateral_tdx, verify_sev
+    before = (collateral_tdx.datetime, cert_utils.datetime, verify_sev.crypto)
+    assert before[0] is real_datetime and before[1] is real_datetime
+    assert replay(captured.evidence).ok is True
+    assert (collateral_tdx.datetime, cert_utils.datetime, verify_sev.crypto) == before
+
+
 def test_replay_needs_no_sdk_cache(captured, offline):
     import shutil
     shutil.rmtree(captured.data_dir / "sdk-cache")

@@ -837,6 +837,14 @@ Each item below is a smaller gap. Each one is stated in full.
   asks on its own. Later calls are not shown to you; each has a `tool_allowed` row naming
   the answer that granted it.
 
+- **A vendor key held only in Hermes' credential pool refuses the lock.** The plugin reads
+  `TINFOIL_API_KEY` and `NEAR_AI_API_KEY` only through Hermes' secret scope
+  (`agent.secret_scope.get_secret`, which sees the environment Hermes loaded from your shell and
+  `<hermes home>/.env`), or from `model.api_key`, and opens no credential store (catalog rule 11). A key added only with `hermes auth add` reads as not
+  set, so the lock and `check` refuse with the key row, although Hermes itself would find the key for
+  the provider. Export the key or put it in `<hermes home>/.env`. Closing this gap needs a Hermes
+  call that reports whether a pooled credential exists without reading it.
+
 - **`tts.enabled` is a plugin convention.** Hermes 84a0301 has no such key.
 
 - **Remembered `always` grants outlive the lock.** Hermes stores them in `command_allowlist` as

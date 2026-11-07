@@ -158,17 +158,6 @@ class PinnableDatetime(datetime):
         return pinned.astimezone(tz) if tz is not None else pinned.replace(tzinfo=None)
 
 
-_clock_modules_installed: set[int] = set()
-
-
-def install_clock(*modules) -> None:
-    with _install_lock:
-        for mod in modules:
-            if id(mod) not in _clock_modules_installed and getattr(mod, "datetime", None) is datetime:
-                mod.datetime = PinnableDatetime
-                _clock_modules_installed.add(id(mod))
-
-
 @contextlib.contextmanager
 def pinned_clock(when: datetime) -> Iterator[None]:
     if when.tzinfo is None:

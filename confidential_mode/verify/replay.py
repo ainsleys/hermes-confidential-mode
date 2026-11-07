@@ -17,6 +17,7 @@ What a replay can NOT establish is fixed in ``NOT_ESTABLISHED`` and returned wit
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import threading
@@ -209,14 +210,41 @@ class _CryptoProxy:
 
 
 _install_lock = threading.Lock()
+_clock_windows = 0
+_clock_saved: dict = {}
 
 
-def _install_clocks() -> None:
+@contextlib.contextmanager
+def _clock_window():
+    """For one replay only: the ``datetime`` global of tinfoil's ``collateral_tdx`` and ``cert_utils`` becomes
+    _sdkpatch.PinnableDatetime and ``verify_sev.crypto`` becomes _CryptoProxy, so the SDK's checks run at the
+    capture time. Both honour only a clock pinned on the replaying thread and are inert for every other
+    thread. The original attributes are put back when the last open replay window closes (only when the
+    attribute is still the replacement installed here)."""
+    global _clock_windows
     from tinfoil.attestation import cert_utils, collateral_tdx, verify_sev
-    _sdkpatch.install_clock(collateral_tdx, cert_utils)
     with _install_lock:
-        if not isinstance(verify_sev.crypto, _CryptoProxy):
-            verify_sev.crypto = _CryptoProxy(verify_sev.crypto)
+        if _clock_windows == 0:
+            _clock_saved.clear()
+            for mod in (collateral_tdx, cert_utils):
+                if getattr(mod, "datetime", None) is datetime:
+                    _clock_saved[(mod, "datetime")] = datetime
+                    mod.datetime = _sdkpatch.PinnableDatetime
+            if not isinstance(verify_sev.crypto, _CryptoProxy):
+                _clock_saved[(verify_sev, "crypto")] = verify_sev.crypto
+                verify_sev.crypto = _CryptoProxy(verify_sev.crypto)
+        _clock_windows += 1
+    try:
+        yield
+    finally:
+        with _install_lock:
+            _clock_windows -= 1
+            if _clock_windows == 0:
+                for (mod, name), orig in _clock_saved.items():
+                    current = getattr(mod, name, None)
+                    if current is _sdkpatch.PinnableDatetime or isinstance(current, _CryptoProxy):
+                        setattr(mod, name, orig)
+                _clock_saved.clear()
 
 
 # ── stage attribution ────────────────────────────────────────────────────────────────────────
@@ -373,7 +401,8 @@ def replay(evidence: dict, *, expected_repo: str | None = TINFOIL_ROUTER_REPO,
         checks.failed("hardware_signature", "evidence: no usable captured_at / as_of")
         return _result(checks, out, when)
     try:
-        _replay(evidence, checks, out, when, Path(trust_root_dir) if trust_root_dir else None, opts)
+        with _clock_window():
+            _replay(evidence, checks, out, when, Path(trust_root_dir) if trust_root_dir else None, opts)
     except Exception as exc:  # defensive: anything unattributed fails the first unrun check
         for key in CHECK_KEYS:
             if not checks.touched(key):
@@ -445,7 +474,6 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
     from tinfoil.attestation import Document
     from tinfoil.attestation.types import PredicateType
 
-    _install_clocks()
     attempts: list = []
     claims = ev.get("claims") or {}
     att = ev.get("attestation") or {}

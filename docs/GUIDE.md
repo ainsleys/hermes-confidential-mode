@@ -152,8 +152,9 @@ hermes confidential status | grep '^Plugin:'
 5. **Set the vendor's API key.** The attested tier needs `TINFOIL_API_KEY` for Tinfoil or
    `NEAR_AI_API_KEY` for NEAR AI Cloud, exported in the shell that starts Hermes, written to
    `<hermes home>/.env`, or given through `model.api_key`. The plugin reads keys only through Hermes'
-   secret scope (`agent.secret_scope.get_secret`), so a key added only with `hermes auth` reads as not
-   set. Observe mode and the
+   secret scope (`agent.secret_scope.get_secret`), so a key added only with `hermes auth` (Hermes'
+   credential pool) reads as not set and the lock is refused until you export the key or write it to
+   `<hermes home>/.env`. Observe mode and the
    `on-host-only` tier need no key. Verification and pin approval work without a key, because the
    attestation endpoints are public, so the lock and `check` test the key of each vendor a route uses
    and refuse while one is missing. The test runs when you lock and in `check`, not on every turn. The lock and `check` show "set", "not set" or "not readable in this scope" (a
@@ -687,7 +688,7 @@ A revoke that doesn't take effect is reported as a failure and `hermes confident
 non-zero: for example a `config.yaml` Hermes didn't write (a managed install), in which case the reply
 names the line to delete, or a `grants_revoked.json` the plugin could not write, in which case the reply
 says that the running gateway applies the revoke on its next tool call and that a grant Hermes itself
-holds for this session ends when the session ends or Hermes restarts. Revoking only narrows, so it asks nobody. While locked, the tool gate refuses any tool call
+holds for this session ends when the session ends or Hermes restarts. A revoke only narrows what runs, so a revoke asks nobody. While locked, the tool gate refuses any tool call
 that names `hermes confidential`, revoke included, so run it from a terminal you opened or from chat.
 
 **Limits.** An `always` grant outlives the lock until you revoke it. An approval prompt already open
