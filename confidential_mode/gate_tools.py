@@ -58,17 +58,31 @@ DELEGATE_TOOL = "delegate_task"
 # host. While the profile is locked, a call whose command or code invokes the plugin's own CLI is refused,
 # because under a pseudo-terminal the agent could answer the pin or allow prompt itself.
 SELF_APPROVAL_TOOLS: frozenset[str] = frozenset({"terminal", "process_manage", "execute_code"})
-# Set in this process's environment by the tool hooks before any tool runs, so every tool subprocess
-# inherits it; TerminalAsker refuses to ask when it is set. A command can unset it (docs/LIMITATIONS.md).
-TOOL_PROCESS_ENV = "CONFIDENTIAL_MODE_TOOL_PROCESS"
+# File-writing on-host tools: while locked, a call that names one of the plugin's state files is refused.
+STATE_FILE_TOOLS: frozenset[str] = frozenset({"write_file", "patch"})
+# Set in this process's environment by the tool hooks before any tool runs (selfapproval.py): the id of the
+# process that ran the tool, inherited by every tool subprocess. Every asker refuses under it.
+from .selfapproval import TOOL_PROCESS_ENV, mark_tool_process  # noqa: E402,F401
 
 _QUOTES = str.maketrans("", "", "'\"\\`")
 _RE_CONFIDENTIAL = re.compile(r"(?<![a-z0-9_])confidential(?![a-z0-9_])")
+# a glob that a shell expands to "confidential" (confidentia?, conf*, c[o]nfidential)
+_RE_CONFIDENTIAL_GLOB = re.compile(r"(?<![a-z0-9_])c[a-z\[\]?*]*[?*\[][a-z\[\]?*]*(?![a-z0-9_])")
 _RE_CLI_VERB = re.compile(r"(?<![a-z0-9_])confidential\W+(pins|allow|off|on|lock|unlock|setup|approve|retire)"
                           r"(?![a-z0-9_])")
-_RE_PLUGIN_IMPORT = re.compile(r"confidential_mode\W{1,3}(pins|consent|ledger|state|commands)\b|"
-                               r"(from|import)\s+confidential_mode\b")
+_RE_PLUGIN_PACKAGE = re.compile(r"confidential_mode")
 _RE_PLUGIN_FILES = re.compile(r"(?<![a-z0-9_])(pins\.yaml|ledger\.sqlite|allowlist\.yaml)(?![a-z0-9_])")
+_RE_ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+
+
+def _ansi_c(text: str) -> str:
+    """Expand bash ANSI-C quoting ($'\x63onfidential') so the scan sees the word it spells."""
+    def dec(m: "re.Match") -> str:
+        try:
+            return m.group(1).encode("latin-1", "backslashreplace").decode("unicode_escape")
+        except Exception:  # noqa: BLE001
+            return m.group(0)
+    return _RE_ANSI_C.sub(dec, text)
 
 
 def _strings(value: Any, depth: int = 0) -> Iterable[str]:
@@ -86,36 +100,30 @@ def _strings(value: Any, depth: int = 0) -> Iterable[str]:
 
 
 def invokes_confidential_cli(args: Any) -> Optional[str]:
-    """Why the call's text reaches the plugin's own CLI or its state files, or None. Every string in the
-    arguments is scanned (``command`` for terminal, ``data`` for process_manage, ``code`` for execute_code,
-    and any other field), lower-cased, with quote characters and backslashes removed. Detected:
-    ``hermes ... confidential`` in any form that names Hermes (``hermes confidential``, ``hermes -p x
-    confidential``, ``python -m hermes_cli.main confidential``, a path to the hermes script); the word
-    ``confidential`` followed by one of its verbs (an alias or symlink of hermes); an import of the
-    plugin's ``confidential_mode`` package; a mention of ``pins.yaml``, ``ledger.sqlite`` or
-    ``allowlist.yaml``. Not detectable: a command assembled at run time (variables, ``eval``, base64, a
-    command split across several process_manage writes) and a script written by another tool and run
-    later. TerminalAsker's own refusal (TOOL_PROCESS_ENV) is the second line for those."""
+    """Why the call's text reaches the plugin's own CLI, package or state files, or None. Every string in
+    the arguments is scanned (``command`` for terminal, ``data`` for process_manage, ``code`` for
+    execute_code, and any other field), after expanding ANSI-C quoting, lower-cased, with quote characters
+    and backslashes removed. Detected: ``hermes`` together with the word ``confidential`` or a glob that can
+    expand to it; the word ``confidential`` followed by one of its verbs (an alias or symlink of hermes); any
+    mention of the ``confidential_mode`` package (import, importlib, a path); a mention of ``pins.yaml``,
+    ``ledger.sqlite`` or ``allowlist.yaml``. Not detectable: a command assembled at run time (variables,
+    ``eval``, base64, a command split across several process_manage writes) and a script run later from a
+    file another tool wrote without naming those words. selfapproval.py is the second line for those."""
     for raw in _strings(args):
-        text = raw.casefold().translate(_QUOTES)
-        if "hermes" in text and _RE_CONFIDENTIAL.search(text):
+        text = _ansi_c(raw).casefold().translate(_QUOTES)
+        if "hermes" in text and (_RE_CONFIDENTIAL.search(text) or _RE_CONFIDENTIAL_GLOB.search(text)):
             return "names hermes and its confidential command"
         if _RE_CLI_VERB.search(text):
             return "invokes the confidential command"
-        if _RE_PLUGIN_IMPORT.search(text):
-            return "imports the confidential_mode package"
+        if _RE_PLUGIN_PACKAGE.search(text):
+            return "names the confidential_mode package"
         if _RE_PLUGIN_FILES.search(text):
             return "names a confidential-mode state file"
     return None
 
 
-def mark_tool_process() -> None:
-    """Set TOOL_PROCESS_ENV in this process (inherited by every tool subprocess). Never raises."""
-    try:
-        if os.environ.get(TOOL_PROCESS_ENV) != "1":
-            os.environ[TOOL_PROCESS_ENV] = "1"
-    except Exception:
-        pass
+def names_state_file(args: Any) -> bool:
+    return any(_RE_PLUGIN_FILES.search(raw.casefold()) for raw in _strings(args))
 
 
 # Our approve directive's rule_key. Hermes prefixes it with ``plugin_rule:`` (tools/approval.py:1226);
@@ -849,9 +857,14 @@ class _Policy:
             if why:
                 return CallDecision("refuse", "self_approval",
                                     f"confidential mode: {info.name} was blocked because its command {why}. While "
-                                    "locked, no tool may run the confidential command or touch its files: pins and "
-                                    "tool grants are approved by a person, on a terminal or chat surface the agent "
-                                    "does not drive.")
+                                    "locked, no terminal, process or code tool may run the confidential command: "
+                                    "pins and tool grants are approved by a person, on a terminal or chat surface "
+                                    "the agent does not drive.")
+        if info.name in STATE_FILE_TOOLS and names_state_file(args):
+            return CallDecision("refuse", "self_approval",
+                                f"confidential mode: {info.name} was blocked because it names one of the plugin's "
+                                "state files (pins.yaml, ledger.sqlite, allowlist.yaml), which no tool may write "
+                                "while locked.")
         if info.name in TERMINAL_BACKEND_TOOLS:
             try:
                 backend = self.terminal_backend(task_id)

@@ -15,6 +15,8 @@ import io
 import json
 import os
 import pty
+import shutil
+import tempfile
 import subprocess
 import sys
 import textwrap
@@ -38,7 +40,7 @@ class _Ledger:
 
 def _allowlist():
     tools = {n: ToolInfo(n, n, Origin.BUILTIN, Route.ON_HOST)
-             for n in ("terminal", "process_manage", "execute_code", "read_file")}
+             for n in ("terminal", "process_manage", "execute_code", "read_file", "write_file", "patch")}
     return Allowlist(tools=tools)
 
 
@@ -63,6 +65,11 @@ ATTACKS = [
     ("execute_code", {"code": "from confidential_mode.pins import PinStore"}),
     ("terminal", {"command": "sqlite3 ~/.hermes/plugin-data/x/ledger.sqlite .dump"}),
     ("terminal", {"command": "sed -i s/a/b/ ~/.hermes/plugin-data/x/pins.yaml"}),
+    ("terminal", {"command": "hermes $'\\x63onfidential' pins approve", "pty": True}),          # ANSI-C quoting
+    ("terminal", {"command": "hermes confidentia? pins approve", "pty": True}),                  # a glob
+    ("execute_code", {"code": "import importlib; importlib.import_module('confidential_mode.provider')"}),
+    ("write_file", {"path": "/Users/x/.hermes/plugin-data/p/pins.yaml", "content": "version: 3"}),
+    ("patch", {"path": "ledger.sqlite", "old_string": "a", "new_string": "b"}),
 ]
 
 
@@ -93,7 +100,7 @@ def test_unlocked_profile_is_not_refused_but_still_marks_the_process():
     assert os.environ.get(gate_tools.TOOL_PROCESS_ENV) is None
     assert pre(tool_name="terminal", args={"command": "hermes confidential pins"}, session_id="s",
                tool_call_id="c1") is None
-    assert os.environ.get(gate_tools.TOOL_PROCESS_ENV) == "1"
+    assert os.environ.get(gate_tools.TOOL_PROCESS_ENV) == str(os.getpid()), "the marker names the marking process"
 
 
 def test_read_file_is_not_a_self_approval_tool():
@@ -141,6 +148,143 @@ def test_pty_approve_from_a_tool_subprocess_is_refused():
 def test_pty_control_without_the_marker_reads_the_answer():
     err = _run_under_pty({})
     assert "PICK='approve'" in err, err
+
+
+# ── every asker path, and a real nested hermes process ─────────────────────────────────────────────────
+
+class _Store:
+    def __init__(self):
+        self.applied = []
+
+    def pending(self):
+        return {"vendor": "tinfoil", "code_fingerprint": "c" * 64, "enclave_fingerprint": "e" * 64}
+
+    def apply(self, p, **kw):
+        self.applied.append(p)
+
+
+class _ChatAsker:
+    """A chat surface's ctx (Hermes' clarify panel): it answers whatever it is asked."""
+
+    def __init__(self):
+        self.asked = []
+
+    def ask_choice(self, q, choices):
+        self.asked.append(q)
+        return "approve"
+
+
+def test_chat_surface_asker_in_a_tool_subprocess_is_refused(monkeypatch):
+    """A nested hermes chat answers through ctx, not TerminalAsker: the marker of another process refuses."""
+    monkeypatch.setenv(gate_tools.TOOL_PROCESS_ENV, str(os.getpid() + 100000))
+    store, ledger, ctx = _Store(), _Ledger(), _ChatAsker()
+    out = consent.approve_pending_pin(ctx, store, ledger, session_key="k", session_id="s", platform="cli")
+    assert out.startswith("Refused:") and ctx.asked == [] and store.applied == []
+    assert [e["decision"] for e in ledger.events] == ["self_approval"]
+    allow = gate_tools.Allowlist(tools={"web_search": ToolInfo("web_search", "web", Origin.BUILTIN, Route.ASK)})
+    out = consent.allow_tool(ctx, allow, ledger, "web_search", session_key="k")
+    assert out.startswith("Refused:") and ctx.asked == [] and not allow.is_added("web_search")
+    assert ledger.events[-1]["kind"] == "tool_refused" and ledger.events[-1]["decision"] == "self_approval"
+
+
+def test_marking_process_refuses_while_a_tool_subprocess_is_alive():
+    """The gateway runs a nested chat client's slash command itself (marker == its own pid): it refuses while a
+    process a tool started (carrying its marker) is still running, and asks again once it has ended."""
+    from tools.environments.local import _make_run_env
+    gate_tools.mark_tool_process()
+    assert os.environ[gate_tools.TOOL_PROCESS_ENV] == str(os.getpid())
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], env=_make_run_env({}))
+    try:
+        deadline = __import__("time").time() + 10
+        from confidential_mode.selfapproval import live_tool_descendants
+        while child.pid not in live_tool_descendants(os.getpid()) and __import__("time").time() < deadline:
+            __import__("time").sleep(0.1)
+        store, ledger, ctx = _Store(), _Ledger(), _ChatAsker()
+        out = consent.approve_pending_pin(ctx, store, ledger, session_key="k", session_id="s", platform="telegram")
+        assert out.startswith("Refused:") and str(child.pid) in out and ctx.asked == []
+    finally:
+        child.kill()
+        child.wait()
+    ctx = _ChatAsker()
+    consent.approve_pending_pin(ctx, _Store(), _Ledger(), session_key="k", session_id="s", platform="telegram")
+    assert len(ctx.asked) == 1, "no tool process left: the person's own surface is asked"
+
+
+def _nested_home(tmp_root: Path) -> Path:
+    home = tmp_root
+    (home / "plugins").mkdir(parents=True)
+    os.symlink(str(PLUGIN_ROOT), home / "plugins" / "confidential-mode")
+    (home / "config.yaml").write_text("_config_version: 52\nplugins:\n  enabled: [confidential-mode]\n"
+                                      "telemetry:\n  shared_metrics: {enabled: false, send: false, offer_version: 2}\n")
+    return home
+
+
+def _run_nested_hermes(home: Path, env: dict, argv: list, answer: bytes = b"1\n") -> str:
+    """Run a real ``hermes`` (python -m hermes_cli.main) under a pty and answer its terminal prompt."""
+    import select
+    import time
+    master, slave = pty.openpty()
+    proc = subprocess.Popen([sys.executable, "-m", "hermes_cli.main", *argv], stdin=slave, stdout=slave,
+                            stderr=slave, env={**env, "HERMES_HOME": str(home)}, cwd=str(Path.home() / "hermes-agent"),
+                            start_new_session=True)
+    os.close(slave)
+    buf, answered, end = b"", False, time.time() + 120
+    try:
+        while time.time() < end and proc.poll() is None:
+            ready, _, _ = select.select([master], [], [], 0.3)
+            if ready:
+                try:
+                    buf += os.read(master, 65536)
+                except OSError:
+                    break
+            if b"Choice:" in buf and not answered:
+                os.write(master, answer)
+                answered = True
+        if proc.poll() is None:
+            proc.kill()
+    finally:
+        os.close(master)
+    return buf.decode(errors="replace")
+
+
+def _stage_tinfoil_pin(home: Path) -> Path:
+    from confidential_mode.pins import PinStore
+    from confidential_mode.verify.base import VerificationResult
+    data = next((home / "plugin-data").glob("agent-plugin-confidential-mode-*"))
+    store = PinStore(data / "pins.yaml")
+    store.stage(VerificationResult("tinfoil", "tinfoilsh/confidential-model-router", "router.test", "c1" * 32,
+                                   "e1" * 48, "v9.9.9", "test", 0.0, {}))
+    return data / "pins.yaml"
+
+
+def test_real_nested_hermes_under_a_pty_from_a_tool_subprocess_is_refused(tmp_path):
+    """The agent's route: a tool subprocess (environment built by Hermes' own local backend, so the marker is
+    inherited, not passed by hand) runs `hermes confidential pins approve` under a pty and types "1"."""
+    from tools.environments.local import _make_run_env
+    home = _nested_home(Path(tempfile.mkdtemp(prefix="h", dir="/tmp")))
+    try:
+        _run_nested_hermes(home, {k: v for k, v in os.environ.items() if k != gate_tools.TOOL_PROCESS_ENV},
+                           ["confidential", "status"])   # creates the plugin's data directory
+        pins = _stage_tinfoil_pin(home)
+        before = pins.read_bytes()
+        pre, _, _ = _hooks()
+        pre(tool_name="terminal", args={"command": "bash"}, session_id="s", tool_call_id="c1")   # marks this process
+        env = _make_run_env({})
+        assert env.get(gate_tools.TOOL_PROCESS_ENV) == str(os.getpid())
+        out = _run_nested_hermes(home, env, ["confidential", "pins", "approve"])
+        assert "Refused:" in out and "Choice:" not in out, out[-2000:]
+        assert pins.read_bytes() == before, "nothing was applied"
+        import sqlite3
+        db = next(home.glob("plugin-data/confidential-mode/ledger.sqlite"))
+        rows = sqlite3.connect(db).execute("select kind, decision from events where kind='pin_denied'").fetchall()
+        assert ("pin_denied", "self_approval") in rows
+        # control: the same command from a terminal no tool started asks, reads "1" and pins
+        os.environ.pop(gate_tools.TOOL_PROCESS_ENV, None)
+        clean = {k: v for k, v in _make_run_env({}).items() if k != gate_tools.TOOL_PROCESS_ENV}
+        out = _run_nested_hermes(home, clean, ["confidential", "pins", "approve"])
+        assert "Choice:" in out and "Pinned tinfoil build v9.9.9" in out, out[-2000:]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def test_cli_approve_inside_a_tool_process_is_refused_and_ledgered(tmp_path):

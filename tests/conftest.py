@@ -27,3 +27,7 @@ def _no_tool_process_marker():
     os.environ.pop(_TOOL_PROCESS_ENV, None)
     yield
     os.environ.pop(_TOOL_PROCESS_ENV, None)
+
+
+# No test fetches from GitHub: staging and `pins review` see a fetch failure unless the test injects texts.
+os.environ["CONFIDENTIAL_MODE_NO_FETCH"] = "1"

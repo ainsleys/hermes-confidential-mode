@@ -40,14 +40,33 @@ _COMMIT = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _REPO_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*")
 
-# Socket and privilege tags (each is a reason a service can reach more than its own container).
+# Socket and privilege tags (each is a reason a service can reach more than its own container). A missing
+# tag is not evidence of anything: the tags read the compose text only, not the image or what runs.
 TAG_DSTACK = "holds dstack.sock"
 TAG_DOCKER = "holds docker.sock"
+TAG_RUNDIR = "mounts a run directory (every socket in it)"
 TAG_PRIVILEGED = "privileged"
+TAG_CAP_ADD = "adds capabilities"            # shown as "adds capabilities: SYS_ADMIN, ..."
+TAG_DEVICES = "maps host devices"
+TAG_NET_HOST = "network_mode: host"
+TAG_PID_HOST = "pid: host"
+TAG_IPC_HOST = "ipc: host"
 TAG_ROOT = "runs as root"
+TAG_IMAGE_USER = "user not set (the image's default user, often root)"
 TAG_INLINE = "built from dockerfile_inline"
 TAG_UNPINNED = "image not pinned by digest"
-TAG_ORDER = (TAG_DSTACK, TAG_DOCKER, TAG_PRIVILEGED, TAG_ROOT, TAG_INLINE, TAG_UNPINNED)
+TAG_ORDER = (TAG_DSTACK, TAG_DOCKER, TAG_RUNDIR, TAG_PRIVILEGED, TAG_CAP_ADD, TAG_DEVICES, TAG_NET_HOST, TAG_PID_HOST,
+             TAG_IPC_HOST, TAG_ROOT, TAG_IMAGE_USER, TAG_INLINE, TAG_UNPINNED)
+_RUN_DIRS = ("/var/run", "/run", "/var/run/", "/run/")
+
+
+def _tag_rank(tag: str) -> int:
+    for n, t in enumerate(TAG_ORDER):
+        if tag == t or tag.startswith(t + ":"):
+            return n
+    return len(TAG_ORDER)
+
+
 TEXT_NOT_FETCHED = "text not fetched"
 
 
@@ -103,7 +122,12 @@ def store_compose(cdir: Path, sha256: str, data: bytes) -> None:
         raise
 
 
+NO_FETCH_ENV = "CONFIDENTIAL_MODE_NO_FETCH"   # set (to anything) to keep the plugin from fetching from GitHub
+
+
 def _http_get(url: str, *, timeout: float = 20.0, accept: str = "*/*") -> bytes:
+    if os.environ.get(NO_FETCH_ENV):
+        raise OSError(f"fetching is turned off ({NO_FETCH_ENV} is set)")
     import httpx
     with httpx.Client(timeout=timeout, follow_redirects=False) as client:
         r = client.get(url, headers={"accept": accept, "user-agent": "confidential-mode pins review"})
@@ -147,6 +171,12 @@ def _yaml_load(text: str) -> Any:
     return yaml.safe_load(text)
 
 
+def _vol_source(v: Any) -> str:
+    if isinstance(v, Mapping):
+        return str(v.get("source", ""))
+    return str(v).split(":", 1)[0]
+
+
 def _vol_text(v: Any) -> str:
     if isinstance(v, Mapping):
         return f"{v.get('source', '')}:{v.get('target', '')}"
@@ -163,15 +193,28 @@ def service_tags(text: str) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for name, svc in services.items():
         svc = svc if isinstance(svc, Mapping) else {}
-        vols = [_vol_text(v) for v in (svc.get("volumes") or []) if v is not None]
+        raw_vols = [v for v in (svc.get("volumes") or []) if v is not None]
+        vols = [_vol_text(v) for v in raw_vols]
         tags = []
         if any("dstack.sock" in v for v in vols):
             tags.append(TAG_DSTACK)
         if any("docker.sock" in v for v in vols):
             tags.append(TAG_DOCKER)
+        if any(_vol_source(v).rstrip("/") in ("/var/run", "/run") for v in raw_vols):
+            tags.append(TAG_RUNDIR)
         if svc.get("privileged") is True:
             tags.append(TAG_PRIVILEGED)
-        if str(svc.get("user", "")).strip().split(":")[0] in ("root", "0"):
+        caps = svc.get("cap_add")
+        if caps:
+            tags.append(f"{TAG_CAP_ADD}: " + ", ".join(str(c) for c in (caps if isinstance(caps, list) else [caps])))
+        if svc.get("devices"):
+            tags.append(TAG_DEVICES)
+        for key, tag in (("network_mode", TAG_NET_HOST), ("pid", TAG_PID_HOST), ("ipc", TAG_IPC_HOST)):
+            if str(svc.get(key, "")).strip() == "host":
+                tags.append(tag)
+        if "user" not in svc:
+            tags.append(TAG_IMAGE_USER)
+        elif str(svc.get("user", "")).strip().split(":")[0] in ("root", "0"):
             tags.append(TAG_ROOT)
         build = svc.get("build")
         if isinstance(build, Mapping) and "dockerfile_inline" in build:
@@ -212,7 +255,7 @@ def map_tags(services_map: Optional[Mapping], cdir: Optional[Path]) -> tuple[Opt
     for key, v in services_map.items():
         per_file = parsed[v["file_sha256"]]
         if v.get("service") == WHOLE_FILE:
-            found = sorted({t for ts in per_file.values() for t in ts}, key=TAG_ORDER.index)
+            found = sorted({t for ts in per_file.values() for t in ts}, key=_tag_rank)
         elif v.get("service") in per_file:
             found = list(per_file[v["service"]])
         else:
@@ -222,14 +265,15 @@ def map_tags(services_map: Optional[Mapping], cdir: Optional[Path]) -> tuple[Opt
 
 
 def tag_summary(tags: Mapping[str, list]) -> list[str]:
-    """One line per tag: how many services carry it, and their names (keys without the file part)."""
+    """One line per tag: how many services carry it, and their names (keys without the file part). Tags with
+    a detail (the capabilities) are summed under their prefix and the detail stays on each name."""
     lines = []
     for tag in TAG_ORDER + ("not in its compose file",):
-        names = sorted(k.split("::", 1)[-1] for k, ts in tags.items() if tag in ts)
+        names = sorted(k.split("::", 1)[-1] + (f" ({t.split(': ', 1)[1]})" if t != tag else "")
+                       for k, ts in tags.items() for t in ts if t == tag or t.startswith(tag + ":"))
         if names:
             lines.append(f"{tag} ({len(names)} {'service' if len(names) == 1 else 'services'}): {', '.join(names)}")
     return lines
-
 
 
 # ── the brief ──────────────────────────────────────────────────────────────────────────────────────
@@ -237,11 +281,16 @@ def tag_summary(tags: Mapping[str, list]) -> list[str]:
 NEAR_QUESTIONS = (
     ("Q1", "For each pinned component whose old and new values differ, what changed? Name the component and "
            "say whether the change is explained by the diffs in this bundle."),
-    ("Q2", "Publisher and date: who authored each inner compose commit the per-service map names, and when? "
-           "Is every commit in the repository that GITHUB_REPO names in the measured compose?"),
+    ("Q2", "Publisher and date: who authored each inner compose commit the per-service map names, and when "
+           "(unsigned GitHub metadata)? Each file was fetched from GitHub under the repository URL GITHUB_REPO names, "
+           "at the logged commit, and its SHA-256 matches the log. That does not establish that the commit belongs to "
+           "that repository: GitHub serves a commit of any fork under the parent repository's URL. Say whether "
+           "anything here suggests a commit outside the repository's own history."),
     ("Q3", "Keys: did the verified signing address, the app_id or the KMS key change?"),
-    ("Q4", "Socket holders: which services hold dstack.sock or docker.sock, run privileged or run as root? "
-           "Did that set grow compared with the approved entry?"),
+    ("Q4", "Socket holders: which services hold dstack.sock or docker.sock, mount a run directory, run privileged, "
+           "add capabilities, map devices, share the host's network, pid or ipc namespace, or run as root (explicitly "
+           "or by the image's default user)? Did that set grow compared with the approved entry? A missing tag is not "
+           "evidence: the tags read the compose text only."),
     ("Q5", "Unpinned builds: which services are built from dockerfile_inline or use an image not pinned by "
            "digest? Did that set grow?"),
     ("Q6", "Outer compose: did the measured compose change beyond image digests (allowed_envs, "
@@ -416,7 +465,29 @@ def _inner_files(services: Optional[Mapping], old_services: Optional[Mapping], c
                                         f"{v.get('file')}@{str(v.get('commit'))[:12]}")
                           if otext is not None and text is not None else TEXT_NOT_FETCHED})
         item["diffs_from_approved"] = diffs
+        item["_text"] = text
         files[sha] = item
+    if not old_services:
+        # No baseline: the reviewer gets the text itself. For each file path, the commit most services run is
+        # shown in full and every other commit of that path as a diff against it.
+        from collections import Counter
+        counts = Counter(v.get("file_sha256") for v in (services or {}).values() if isinstance(v, Mapping))
+        by_path: dict = {}
+        for it in files.values():
+            by_path.setdefault(it["file"], []).append(it)
+        for items in by_path.values():
+            ref = max(items, key=lambda it: (it["_text"] is not None, counts.get(it["file_sha256"], 0)))
+            if ref["_text"] is not None:
+                ref["full_text"] = ref["_text"].splitlines()
+            for it in items:
+                if it is not ref:
+                    it["diff_from_reference"] = (
+                        {"reference_commit": ref["commit"],
+                         "diff": _diff(ref["_text"], it["_text"], f"{ref['file']}@{str(ref['commit'])[:12]}",
+                                       f"{it['file']}@{str(it['commit'])[:12]}")}
+                        if ref["_text"] is not None and it["_text"] is not None else TEXT_NOT_FETCHED)
+    for it in files.values():
+        it.pop("_text", None)
     return list(files.values())
 
 
@@ -430,7 +501,9 @@ def entry_review(entry: Any, approved: list, *, ledger: Any, cdir: Path, fetch: 
     obs = dict(getattr(entry, "observed", None) or {})
     old_obs = dict(getattr(base, "observed", None) or {}) if base is not None else {}
     pinned = set(getattr(entry, "pinned", ()) or ())
-    out: dict = {"cvm_role": getattr(entry, "cvm_role", None), "code_fingerprint": entry.code_fingerprint,
+    out: dict = {"baseline_status": ("none: no approved entry of this role, so the full texts are shown"
+                                     if base is None else "the latest approved entry of this role"),
+                 "cvm_role": getattr(entry, "cvm_role", None), "code_fingerprint": entry.code_fingerprint,
                  "enclave_fingerprint": entry.enclave_fingerprint, "pinned": sorted(pinned),
                  "instance_ids_seen": list(getattr(entry, "instance_ids_seen", ()) or ()),
                  "baseline": None if base is None else {
@@ -462,6 +535,16 @@ def entry_review(entry: Any, approved: list, *, ledger: Any, cdir: Path, fetch: 
         "fields": _field_changes(old_f, new_f) if new_f is not None else [],
         "diff": _diff(old_f.get("docker_compose_file") if old_f else None,
                       new_f.get("docker_compose_file") if new_f else None, "approved", "pending")}
+    if old_f is None and new_text is not None:
+        # no baseline text: the whole measured app_compose, one line per line of its pretty JSON
+        try:
+            doc = json.loads(new_text)
+            out["outer_compose"]["full_text"] = (
+                json.dumps({k: v for k, v in doc.items() if k != "docker_compose_file"}, indent=1,
+                           sort_keys=True, ensure_ascii=True).splitlines()
+                + ["docker_compose_file:"] + str(doc.get("docker_compose_file") or "").splitlines())
+        except Exception:  # noqa: BLE001
+            out["outer_compose"]["full_text"] = new_text.splitlines()
     if out["cvm_role"] == "gateway":
         return out
     out["compose_manager_image"] = {"reported_running": comps.get("cm_image_running"),
@@ -477,10 +560,15 @@ def entry_review(entry: Any, approved: list, *, ledger: Any, cdir: Path, fetch: 
     out["tags"] = tags
     out["tag_summary"] = tag_summary(tags) if tags is not None else []
     out["old_tags"] = old_tags
-    out["tags_status"] = ("shown" if tags is not None else
-                          "unavailable: " + "; ".join(f"{m['file']}@{str(m['commit'])[:12]}: {m['reason']}"
-                                                      for m in missing) +
-                          ". Run hermes confidential pins review again to retry the fetch.")
+    if tags is not None:
+        out["tags_status"] = "shown"
+    elif not services:
+        out["tags_status"] = "no service map: this CVM's report carried no compose-manager log"
+    else:
+        out["tags_status"] = ("unavailable: " + "; ".join(f"{m['file']}@{str(m['commit'])[:12]}: {m['reason']}"
+                                                          for m in missing)
+                              + (". Run hermes confidential pins review again to retry the fetch." if any(
+                                  m["reason"] == TEXT_NOT_FETCHED for m in missing) else "."))
     out["services_pinned"] = "services" in pinned
     return out
 
@@ -542,46 +630,58 @@ def _r(value: Any) -> str:
 
 
 def render_text(bundle: Mapping) -> str:
-    """The bundle as numbered lines (L0001 ...), so a reviewer can cite them. Every vendor string goes
-    through render_vendor (escaped and code-spanned)."""
-    raw: list[str] = ["Pin review bundle (" + bundle["schema"] + ", generated " + str(bundle["generated_at"]) + ")",
+    """The bundle as numbered lines (L0001 ...), so a reviewer can cite them. Only the plugin's own fixed
+    text (the rules, questions, format and labels) is printed as is; every value interpolated into a line
+    goes through render_vendor (escaped and code-spanned), whoever produced it, so no value can start a
+    new line or imitate a numbered one."""
+    brief_ = brief(str(b.get("vendor")) for b in bundle["pending"])   # the module's own text, never the bundle's
+    raw: list[str] = [f"Pin review bundle ({_r(bundle['schema'])}, generated {_r(bundle['generated_at'])})",
                       "", "Rules for the reviewer (fixed, and not vendor text):"]
-    raw += [f"  - {r}" for r in bundle["brief"]["rules"]]
-    raw += ["", "Questions:"] + [f"  {q['id']}: {q['text']}" for q in bundle["brief"]["questions"]]
-    raw += ["", "Required output format:"] + [f"  {x}" for x in bundle["brief"]["output_format"]]
+    raw += [f"  - {r}" for r in brief_["rules"]]
+    raw += ["", "Questions:"] + [f"  {q['id']}: {q['text']}" for q in brief_["questions"]]
+    raw += ["", "Required output format:"] + [f"  {x}" for x in brief_["output_format"]]
     if not bundle["pending"]:
         raw += ["", "No pin update is waiting for approval; there is nothing to review."]
     for b in bundle["pending"]:
-        raw += ["", f"== Pending {b['vendor']} identity {_r(b['identity'])}, staged {b['staged_at']}",
-                f"  whole-result code {b['code_fingerprint']} enclave {b['enclave_fingerprint']}"]
+        raw += ["", f"== Pending {_r(b['vendor'])} identity {_r(b['identity'])}, staged {_r(b['staged_at'])}",
+                f"  whole-result code {_r(b['code_fingerprint'])} enclave {_r(b['enclave_fingerprint'])}"]
         if "release" in b:
             rel = b["release"]
             raw += [f"  release {_r(b['release_tag'])} (previous {_r(rel['previous_release_tag'])}); "
                     f"published {_r(rel['release_published_at'])}; Rekor log index {_r(rel['rekor_log_index'])}",
                     f"  release URL {_r(rel['release_url'])}", f"  compare URL {_r(rel['compare_url'])}",
                     f"  platform {_r(rel['previous_platform'])} -> {_r(rel['platform'])}; code changed "
-                    f"{rel['code_changed']}; platform only {rel['platform_only']}"]
+                    f"{_r(rel['code_changed'])}; platform only {_r(rel['platform_only'])}"]
         raw.append(f"  approved set ({len(b['approved'])}):")
         for a in b["approved"]:
-            raw.append(f"    {_r(a['cvm_role'])} code {a['code_fingerprint']} enclave {a['enclave_fingerprint']} "
-                       f"approved {_r(a['approved_at'])} via {_r(a['approved_via'])}"
-                       + ("; not seen recently" if a["unseen_recently"] else ""))
+            raw.append(f"    {_r(a['cvm_role'])} code {_r(a['code_fingerprint'])} enclave "
+                       f"{_r(a['enclave_fingerprint'])} approved {_r(a['approved_at'])} via {_r(a['approved_via'])}"
+                       + ("; not seen recently" if a["unseen_recently"] is True else ""))
         for n, e in enumerate(b["entries"], 1):
             raw += _entry_text(n, e)
-    raw += ["", "To approve after review: " + bundle["approve_with"] + "."]
+    raw += ["", "To approve after review: hermes confidential pins approve --reviewed-by <name> --note <verdict>, "
+                "run by you in a terminal you opened."]
     width = len(str(len(raw)))
     return "\n".join(f"L{str(i).zfill(max(4, width))}  {line}" for i, line in enumerate(raw, 1))
 
 
+def _text_lines(label: str, lines: Any) -> list[str]:
+    out = [f"       {label}:"]
+    out += [f"         {_r(x)}" for x in (lines if isinstance(lines, list) else [lines])]
+    return out
+
+
 def _entry_text(n: int, e: Mapping) -> list[str]:
-    out = ["", f"  -- Entry {n}: {_r(e['cvm_role'])} code {e['code_fingerprint']} enclave {e['enclave_fingerprint']}",
-           f"     pins: {', '.join(e['pinned']) or '(the whole result)'}"]
+    out = ["", f"  -- Entry {n}: {_r(e['cvm_role'])} code {_r(e['code_fingerprint'])} enclave "
+               f"{_r(e['enclave_fingerprint'])}",
+           f"     pins: {_r(', '.join(e['pinned']) or '(the whole result)')}"]
     base = e.get("baseline")
-    out.append("     compared with: " + ("nothing (no approved entry of this role)" if base is None else
-                                         f"approved entry code {base['code_fingerprint']} ({_r(base.get('note') or 'per-CVM')})"))
+    out.append("     baseline: " + ("none (no approved entry of this role; the full texts are shown below)"
+                                    if base is None else
+                                    f"the approved entry code {_r(base['code_fingerprint'])} ({_r(base.get('note') or 'per-CVM')})"))
     for c in e.get("components") or []:
-        out.append(f"     component {c['name']}{' (pinned)' if c['pinned'] else ' (shown only)'}: old {_r(c['old'])} "
-                   f"new {_r(c['new'])}{'  CHANGED' if c['changed'] else ''}")
+        out.append(f"     component {_r(c['name'])}{' (pinned)' if c['pinned'] is True else ' (shown only)'}: old "
+                   f"{_r(c['old'])} new {_r(c['new'])}{'  CHANGED' if c['changed'] is True else ''}")
     if "signing_address" in e:
         out.append(f"     signing address (verified): old {_r(e['signing_address']['old'])} new "
                    f"{_r(e['signing_address']['new'])}")
@@ -590,19 +690,18 @@ def _entry_text(n: int, e: Mapping) -> list[str]:
         out.append(f"     outer compose: old {_r(oc['old_sha256'])} new {_r(oc['new_sha256'])}; text "
                    f"{_r(oc['new_text'])}")
         for f in oc["fields"]:
-            extra = ""
-            if "added" in f:
-                extra = f" added {_r(f['added'])} removed {_r(f['removed'])}"
-            out.append(f"       {f['name']}: {_r(f['new'])}{'  CHANGED from ' + _r(f['old']) if f['changed'] else ''}"
-                       f"{extra}")
+            extra = f" added {_r(f['added'])} removed {_r(f['removed'])}" if "added" in f else ""
+            out.append(f"       {_r(f['name'])}: {_r(f['new'])}"
+                       f"{'  CHANGED from ' + _r(f['old']) if f['changed'] is True else ''}{extra}")
         if oc.get("diff"):
-            out.append("       diff of docker_compose_file (approved -> pending):")
-            out += [f"         {_r(d)}" for d in oc["diff"]]
+            out += _text_lines("diff of docker_compose_file (approved -> pending)", oc["diff"])
+        if oc.get("full_text"):
+            out += _text_lines("full measured app_compose (no baseline)", oc["full_text"])
     cmi = e.get("compose_manager_image")
     if cmi:
         out.append(f"     compose-manager image: reported running {_r(cmi['reported_running'])}; measured "
-                   f"{_r(cmi['measured'])}{'  (the two differ)' if cmi['differ'] else ''}; approved entry's reported "
-                   f"{_r(cmi['old_reported_running'])}")
+                   f"{_r(cmi['measured'])}{'  (the two differ)' if cmi['differ'] is True else ''}; approved entry's "
+                   f"reported {_r(cmi['old_reported_running'])}")
     sv = e.get("services")
     if sv:
         new = sv.get("new") or {}
@@ -611,28 +710,34 @@ def _entry_text(n: int, e: Mapping) -> list[str]:
                       if "added" in sv else ""))
         tags = e.get("tags") or {}
         for k in sorted(new):
-            v = new[k]
+            v = new[k] if isinstance(new[k], Mapping) else {}
             out.append(f"       {_r(k)} {_r(v.get('tag'))} commit {_r(v.get('commit'))} file sha256:"
                        f"{_r(v.get('file_sha256'))}" + (f" tags {_r(tags.get(k))}" if k in tags else ""))
         old = sv.get("old")
         if isinstance(old, Mapping):
             out.append(f"     per-service map of the approved entry: {len(old)} services")
-            out += [f"       {_r(k)} {_r(old[k].get('tag'))} commit {_r(old[k].get('commit'))}" for k in sorted(old)]
-        out.append(f"     socket tags: {e.get('tags_status')}; services pinned: {e.get('services_pinned')}")
+            out += [f"       {_r(k)} {_r((old[k] or {}).get('tag'))} commit {_r((old[k] or {}).get('commit'))}"
+                    for k in sorted(old)]
+        out.append(f"     socket tags: {_r(e.get('tags_status'))}; services pinned: {_r(e.get('services_pinned'))}")
         out += [f"       {_r(t)}" for t in e.get("tag_summary") or []]
         for f in e.get("inner_composes") or []:
             meta = f.get("commit_meta") or {}
-            out.append(f"     inner compose {_r(f['file'])} at {_r(f['commit'])}: {f['status']}"
-                       + (f" ({_r(f.get('reason'))})" if f.get("reason") else "")
-                       + f"; URL {_r(f['url'])}")
+            out.append(f"     inner compose {_r(f['file'])} at {_r(f['commit'])}: {_r(f['status'])}"
+                       + (f" ({_r(f.get('reason'))})" if f.get("reason") else "") + f"; URL {_r(f['url'])}")
             out.append(f"       commit metadata (unsigned): {_r(meta.get('status'))} author {_r(meta.get('author'))} "
                        f"date {_r(meta.get('date'))} message {_r(meta.get('message'))}")
             for d in f.get("diffs_from_approved") or []:
                 if isinstance(d["diff"], list):
-                    out.append(f"       diff from the approved entry's {_r(d['old_commit'])}:")
-                    out += [f"         {_r(x)}" for x in d["diff"]]
+                    out += _text_lines(f"diff from the approved entry's commit {_r(d['old_commit'])}", d["diff"])
                 else:
-                    out.append(f"       diff from the approved entry's {_r(d['old_commit'])}: {d['diff']}")
+                    out.append(f"       diff from the approved entry's commit {_r(d['old_commit'])}: {_r(d['diff'])}")
+            ref = f.get("diff_from_reference")
+            if isinstance(ref, Mapping):
+                out += _text_lines(f"diff from the full text of commit {_r(ref['reference_commit'])}", ref["diff"] or [])
+            elif ref is not None:
+                out.append(f"       diff from the full text: {_r(ref)}")
+            if f.get("full_text"):
+                out += _text_lines("full text (no baseline)", f["full_text"])
     return out
 
 

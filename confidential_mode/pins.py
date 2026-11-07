@@ -26,8 +26,8 @@ instance_ids_seen, approved_by, approved_at, approved_via, approval_rule_key, re
   "MRTD:RTMR0:RTMR1:RTMR2". ``concurrent: true``.
 
 Match rule: a result matches when every CVM it reports has an approved entry with equal fingerprints.
-A record migrated from version 2 matches on the whole result's fingerprints (the version-2 rule) until
-the identity is approved again. Before the first version-3 save of a version-2 file, pins.yaml.v2.bak is
+A Tinfoil record migrated from version 2 matches exactly as before. A NEAR record migrated from version 2
+matches nothing, so NEAR asks once after the upgrade; approving the new entries removes it. Before the first version-3 save of a version-2 file, pins.yaml.v2.bak is
 written. A version-3 file is never written back as version 2; any other version matches nothing.
 
 Only consent.py (a person's answer) and provider._auto_apply (Tinfoil, replace only) call apply().
@@ -347,12 +347,13 @@ def entry_matches_view(e: PinEntry, v: CvmView) -> bool:
 def set_match(approved: Iterable[PinEntry], *, vendor: str, code: Any, enclave: Any,
               views: list[CvmView]) -> list[PinEntry] | None:
     """The approved entries a result matches, or None. With per-CVM views (NEAR) every CVM needs an entry
-    of its own role with equal fingerprints; a migrated whole-result record matches the whole result.
-    Without views (Tinfoil, older NEAR evidence) an entry matches the whole result's fingerprints."""
+    of its own role with equal fingerprints. Tinfoil entries match the whole result's fingerprints. A NEAR
+    record migrated from version 2 (role ``result``) matches nothing: its fingerprints cover less than a
+    per-CVM entry does, so NEAR asks once after the upgrade (Amendment 7)."""
     approved = [e for e in approved if e.vendor == vendor]
     if not (_nonempty(code) and _nonempty(enclave)):
         return None
-    whole = [e for e in approved if e.cvm_role in WHOLE_RESULT_ROLES
+    whole = [e for e in approved if e.cvm_role == ROLE_ROUTER
              and _nonempty(e.code_fingerprint) and _nonempty(e.enclave_fingerprint)
              and e.code_fingerprint == code and e.enclave_fingerprint == enclave]
     if whole:
@@ -682,6 +683,10 @@ class PinStore:
     def pending(self) -> PendingPin | None:
         return _latest(self.load_file())
 
+    def pending_for(self, vendor: str, router_repo: str) -> PendingPin | None:
+        idn = self.load_file().identity(vendor, router_repo)
+        return idn.pending_pin() if idn is not None else None
+
     def pending_all(self) -> list[PendingPin]:
         return [p for p in (i.pending_pin() for i in self.load_file().identities) if p is not None]
 
@@ -726,7 +731,7 @@ class PinStore:
             if v.role != "gateway":
                 tags, missing = map_tags(observed.get("services"), self.composes_dir)
                 observed["tags"], observed["tags_missing"] = tags, missing
-                if tags is not None:
+                if _services_pinnable(observed, tags):
                     pinned.append(SERVICES)
             e = PinEntry(vendor=result.vendor, router_repo=result.router_repo,
                          code_fingerprint=near_code_fingerprint(v.role, v.components, pinned),
@@ -755,6 +760,8 @@ class PinStore:
             ctx = _prompt_context(result)
             current = idn.approved[-1] if idn.approved else None
             views = result_views(result) if result.vendor == "near" else []
+            if result.vendor == "near" and not views:
+                raise PinStoreError("this NEAR evidence carries no per-CVM measurements; nothing can be pinned")
             if views:
                 entries = self._near_entries(result, idn)
                 if not entries:
@@ -810,7 +817,7 @@ class PinStore:
                     obs = dict(e.observed or {})
                     tags, missing = map_tags(obs.get("services"), self.composes_dir)
                     obs["tags"], obs["tags_missing"] = tags, missing
-                    pinned = set(e.pinned) | {SERVICES} if tags is not None else set(e.pinned) - {SERVICES}
+                    pinned = set(e.pinned) | {SERVICES} if _services_pinnable(obs, tags) else set(e.pinned) - {SERVICES}
                     new = replace(e, pinned=tuple(sorted(pinned)), observed=obs,
                                   code_fingerprint=near_code_fingerprint(e.cvm_role, e.components, pinned))
                     changed = changed or new != e or obs != (e.observed or {})
@@ -819,6 +826,25 @@ class PinStore:
             if changed:
                 self.save_file(pf)
             return [p for p in (i.pending_pin() for i in pf.identities) if p is not None]
+
+    def prefetch_composes(self, *, fetch: Any = None) -> list[PendingPin]:
+        """Fetch and hash-check the inner compose files every pending NEAR entry's service map names (public
+        GitHub texts, cached under pins/composes/), then refresh_pending(). Network errors are recorded on the
+        entries by refresh_pending ("text not fetched"); never raises for them."""
+        from .review import fetch_compose
+        cdir = self.composes_dir
+        try:
+            batches = self.pending_all()
+        except Exception:
+            return []
+        seen: set = set()
+        for pend in batches:
+            for ent in pend.entries:
+                for v in ((ent.observed or {}).get("services") or {}).values():
+                    if isinstance(v, Mapping) and v.get("file_sha256") not in seen:
+                        seen.add(v.get("file_sha256"))
+                        fetch_compose(cdir, v.get("commit"), v.get("file"), v.get("file_sha256"), fetch=fetch)
+        return self.refresh_pending()
 
     def apply(self, pending: PendingPin, *, approved_via: str,
               approval_rule_key: str = DEFAULT_APPROVAL_RULE_KEY, approved_by: str = "human",
@@ -845,6 +871,13 @@ class PinStore:
                 raise PinStoreError("pending pin changed since it was shown; not applied")
             if approved_by == "policy" and idn.concurrent:
                 raise PinStoreError("policy never adds to an approved set; a person must approve this")
+            unpinned = [e.cvm_role for e in stored.entries if e.vendor == "near" and str(e.cvm_role).startswith("model:")
+                        and e.components is not None and SERVICES not in e.pinned]
+            if unpinned:
+                # Fail closed (Amendment 7): a NEAR model entry is approved only with its service map pinned,
+                # which needs the socket tags of every service (`hermes confidential pins review` fetches them).
+                raise PinStoreError(f"the service map of {', '.join(unpinned)} is not pinned; its socket tags cannot "
+                                    "be shown until hermes confidential pins review fetches the inner compose files")
             if any(not (_nonempty(e.code_fingerprint) and _nonempty(e.enclave_fingerprint)) for e in stored.entries):
                 raise PinStoreError("refusing to apply an entry with an empty fingerprint")
             current = idn.approved[-1] if idn.approved else None
@@ -868,20 +901,25 @@ class PinStore:
             self.save_file(pf)
             return next((a for a in idn.approved if a.pin_key == fresh[0].pin_key), idn.approved[-1])
 
-    def retire(self, fingerprint: str) -> PinEntry:
+    def retire(self, fingerprint: str, router_repo: str | None = None) -> PinEntry:
         """Remove the one approved entry whose code (or enclave) fingerprint is ``fingerprint`` or starts
-        with it (at least 8 hex digits). Raises PinStoreError when none or several match."""
+        with it (at least 8 hex digits), in identity ``router_repo`` when given (one gateway entry can be
+        approved under several identities). Raises PinStoreError when none or several match."""
         fp = str(fingerprint or "").strip().lower()
         if len(fp) < 8 or any(c not in "0123456789abcdef" for c in fp):
             raise PinStoreError("give at least 8 hex digits of a code or enclave fingerprint")
         with self._mutating():
             pf = self.load_file()
             hits = [(i, e) for i in pf.identities for e in i.approved
-                    if e.code_fingerprint.startswith(fp) or e.enclave_fingerprint.startswith(fp)]
+                    if (router_repo is None or i.router_repo == router_repo)
+                    and (e.code_fingerprint.startswith(fp) or e.enclave_fingerprint.startswith(fp))]
             if not hits:
-                raise PinStoreError(f"no approved entry has a fingerprint starting {fp}")
+                raise PinStoreError(f"no approved entry has a fingerprint starting {fp}"
+                                    + (f" in identity {router_repo}" if router_repo else ""))
             if len(hits) > 1:
-                raise PinStoreError(f"{len(hits)} approved entries match {fp}; give more digits")
+                where = sorted({i.router_repo for i, _ in hits})
+                raise PinStoreError(f"{len(hits)} approved entries match {fp}; give more digits"
+                                    + (f", or name the identity ({', '.join(where)})" if len(where) > 1 else ""))
             idn, e = hits[0]
             idn.approved.remove(e)
             self.save_file(pf)
@@ -907,6 +945,12 @@ class PinStore:
             last = idn.approved[-1]
             idn.approved[-1] = replace(last, models_seen=last.models_seen + (model,))
             self.save_file(pf)
+
+
+def _services_pinnable(observed: Mapping, tags: Any) -> bool:
+    """A model entry pins its service map when every service is tagged, or when there is no map at all (no
+    compose-manager block: the absence itself is then pinned, value None)."""
+    return tags is not None or not observed.get("services")
 
 
 def _latest(pf: PinFile) -> PendingPin | None:

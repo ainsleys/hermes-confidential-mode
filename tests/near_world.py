@@ -155,19 +155,48 @@ def report(signer_hex: str, nonce: str, compose: str, *, tls_fp: str | None = No
     return rep
 
 
+# The inner compose files the default actions log names (prod/test.yaml at commits c1... and c2...). Their
+# SHA-256 is the log's file_sha256, so a test can cache them where `pins review` would (cache_inner_composes).
+INNER_V1 = """services:
+  proxy-test:
+    image: test/proxy@sha256:""" + "a1" * 32 + """
+    user: root
+    privileged: true
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+  model-test:
+    image: test/model@sha256:""" + "a2" * 32 + """
+    user: "1000"
+  nginx-test:
+    image: nginx@sha256:""" + "a3" * 32 + """
+    user: nginx
+"""
+INNER_V2 = INNER_V1.replace("a1" * 32, "b1" * 32)
+INNER_SHA = {"v1": hashlib.sha256(INNER_V1.encode()).hexdigest(), "v2": hashlib.sha256(INNER_V2.encode()).hexdigest()}
+
+
+def cache_inner_composes(cdir) -> None:
+    """Write INNER_V1 and INNER_V2 where PinStore.composes_dir expects them (as `pins review` would)."""
+    from pathlib import Path
+    d = Path(cdir)
+    d.mkdir(parents=True, exist_ok=True)
+    for text in (INNER_V1, INNER_V2):
+        (d / f"{hashlib.sha256(text.encode()).hexdigest()}.yaml").write_text(text)
+
+
 def default_cm_actions() -> list[dict]:
     """A small actions log: compose-manager started on the measured image, the model's services brought up,
     then the launcher's image swap (as every NEAR instance seen on 2026-11-07 shows)."""
     up = {"action": "compose_up", "tag": "v0.0.1", "commit": "c1" * 20, "file": "prod/test.yaml",
-          "file_sha256": "f1" * 32}
+          "file_sha256": INNER_SHA["v1"]}
     return [
         {"timestamp": "2026-11-01T00:00:00Z", "action": "compose_manager_started", "container": "compose-manager",
          "image": CM_IMAGE},
         {**up, "timestamp": "2026-11-01T00:01:00Z", "services": ["proxy-test", "model-test", "nginx-test"]},
         {"timestamp": "2026-11-01T00:02:00Z", "action": "docker_restart"},
         {**up, "timestamp": "2026-11-02T00:00:00Z", "action": "compose_stage", "tag": "v0.0.2", "commit": "c2" * 20,
-         "file_sha256": "f2" * 32, "services": ["proxy-test"]},
-        {**up, "timestamp": "2026-11-02T00:01:00Z", "tag": "v0.0.2", "commit": "c2" * 20, "file_sha256": "f2" * 32,
+         "file_sha256": INNER_SHA["v2"], "services": ["proxy-test"]},
+        {**up, "timestamp": "2026-11-02T00:01:00Z", "tag": "v0.0.2", "commit": "c2" * 20, "file_sha256": INNER_SHA["v2"],
          "services": ["proxy-test"]},
         {"timestamp": "2026-11-03T00:00:00Z", "action": "compose_manager_started", "container": "compose-manager",
          "image": CM_IMAGE_SWAPPED},

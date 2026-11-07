@@ -531,6 +531,14 @@ PROMPT_PATH_SERVICES: dict[str, dict[str, tuple[str, ...]]] = {
 # naming any other service fails cm_services. Files, tags and images are kept as raw strings and escaped
 # only when shown to a person (render_vendor).
 _SERVICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
+# A log's compose file path (Amendment 7): path characters only, relative, no ".." segment. Anything else fails
+# cm_services, so a file name never carries a newline, an escape sequence or a URL part into a prompt or a URL.
+_FILE_PATH = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")
+
+
+def _safe_file(file: Any) -> bool:
+    return (isinstance(file, str) and len(file) <= 512 and _FILE_PATH.fullmatch(file) is not None
+            and ".." not in file.split("/"))
 
 
 class CmCheckError(CheckError):
@@ -581,6 +589,8 @@ def deployment_map(actions: Any) -> tuple[dict, list]:
         services = a.get("services") if a.get("services") is not None else []
         if not isinstance(file, str) or not file or not isinstance(services, list):
             raise CmCheckError("cm_services", f"{where}: {kind} has no file or no services list")
+        if not _safe_file(file):
+            raise CmCheckError("cm_services", f"{where}: {kind} names a file that is not a plain relative path")
         if not all(isinstance(s, str) and _SERVICE_NAME.fullmatch(s) for s in services):
             raise CmCheckError("cm_services", f"{where}: {kind} names a service that is not a compose service name")
         tag = a.get("tag")

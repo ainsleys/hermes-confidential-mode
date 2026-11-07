@@ -112,7 +112,7 @@ def _pin_lines(rt: Any) -> list[str]:
         role = getattr(rec, "cvm_role", None)
         role_text = f" {render_if_needed(role)}" if role not in (None, "router") else ""
         lines.append(f"Pinned: {rec.vendor} {render_if_needed(rec.router_repo)}{role_text} code {_short(rec.code_fingerprint)} "
-                     f"enclave {_short(rec.enclave_fingerprint)} release {rec.release_tag or '(untagged)'} "
+                     f"enclave {_short(rec.enclave_fingerprint)} release {render_if_needed(rec.release_tag or '(untagged)')} "
                      f"(approved {rec.approved_at} via {rec.approved_via}"
                      + (f", reviewed by {render_if_needed(rec.reviewed_by)}" if getattr(rec, "reviewed_by", None) else "")
                      + f"; previous {_short(rec.previous)})")
@@ -121,7 +121,7 @@ def _pin_lines(rt: Any) -> list[str]:
     for pend in batches:
         ents = list(getattr(pend, "entries", ()) or ())
         lines.append(f"Pending pin: {pend.vendor} code {_short(pend.code_fingerprint)} enclave "
-                     f"{_short(pend.enclave_fingerprint)} release {pend.release_tag or '(untagged)'} "
+                     f"{_short(pend.enclave_fingerprint)} release {render_if_needed(pend.release_tag or '(untagged)')} "
                      f"staged {pend.staged_at}; {len(ents) or 1} {'entry' if len(ents) <= 1 else 'entries'}; "
                      "run /confidential pins approve (hermes confidential pins review builds a review bundle)")
         for ent in ents:
@@ -443,12 +443,13 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
                                            platform=surface or "unknown", **flags)
             except ConsentContextError as exc:
                 return f"Not asked: {exc}"
-        if rest[0] == "retire" and len(rest) == 2:
-            return retire_text(rt, rest[1], session_id=sid, surface=surface or "unknown")
+        if rest[0] == "retire" and len(rest) in (2, 3):
+            return retire_text(rt, rest[1], session_id=sid, surface=surface or "unknown",
+                               identity=rest[2] if len(rest) == 3 else None)
         if rest == ["review"] or rest == ["review", "--json"]:
             return ("The review bundle fetches the inner compose files from GitHub, so it runs only as a command "
                     "in a terminal you open yourself: hermes confidential pins review [--json].")
-        return "Usage: /confidential pins [approve|retire <fingerprint>]"
+        return "Usage: /confidential pins [approve|retire <fingerprint> [identity]]"
     if cmd == "receipts":
         fmt = "json" if "--json" in rest else "text"
         names = [a for a in rest if a != "--json"]
@@ -497,14 +498,15 @@ def _approve_flags(args: list) -> dict:
     return out
 
 
-def retire_text(rt: Any, fingerprint: str, *, session_id: str = "", surface: str = "unknown") -> str:
+def retire_text(rt: Any, fingerprint: str, *, session_id: str = "", surface: str = "unknown",
+                identity: Optional[str] = None) -> str:
     """`pins retire <fingerprint>`: remove one approved entry, write a pin_retired row, and clear the
     in-process consent cache so the entry's earlier pin_applied row no longer counts."""
     from .pins import PinStoreError
     if rt.pins is None:
         return "The pin store is not available; see /confidential status."
     try:
-        e = rt.pins.retire(fingerprint)
+        e = rt.pins.retire(fingerprint, identity) if identity else rt.pins.retire(fingerprint)
     except PinStoreError as exc:
         return f"Nothing retired: {exc}"
     row = {"ts": time.time(), "session_id": session_id or "", "kind": "pin_retired", "purpose": "pin",
@@ -550,11 +552,8 @@ class TerminalAsker:
     """ask_choice for `hermes confidential setup`: numbered prompt on the controlling terminal; anything
     other than an exact choice value or its number is no answer (None). Non-tty stdin => None.
 
-    Self-approval guard (Amendment 7): a process whose environment carries gate_tools.TOOL_PROCESS_ENV is
-    a Hermes tool subprocess (the tool hooks set the marker before any tool runs, and children inherit
-    it). Such a process may hold a pseudo-terminal the agent drives, so the asker refuses
-    (SelfApprovalRefused) and never reads an answer. A command can unset the marker; the gate's command
-    check is the first line (docs/LIMITATIONS.md)."""
+    Self-approval guard (Amendment 7): selfapproval.self_approval_reason() decides, as for every asker;
+    under a reason the asker raises SelfApprovalRefused and never reads an answer (docs/LIMITATIONS.md)."""
 
     def __init__(self, stdin=None, stdout=None, environ=None):
         self.stdin = stdin or sys.stdin
@@ -563,11 +562,10 @@ class TerminalAsker:
 
     def ask_choice(self, question: str, choices: list) -> Optional[str]:
         from .consent import SelfApprovalRefused
-        from .gate_tools import TOOL_PROCESS_ENV
-        if self.environ.get(TOOL_PROCESS_ENV):
-            raise SelfApprovalRefused(
-                "this process runs under a Hermes tool (its environment carries "
-                f"{TOOL_PROCESS_ENV}), so the agent may be driving this terminal")
+        from .selfapproval import self_approval_reason
+        reason = self_approval_reason(self.environ)
+        if reason:
+            raise SelfApprovalRefused(reason)
         try:
             if not self.stdin.isatty():
                 return None
@@ -1061,7 +1059,7 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
             if not getattr(args, "fingerprint", None):
                 out.write("Usage: hermes confidential pins retire <fingerprint>\n")
                 return 2
-            text = retire_text(rt, args.fingerprint, surface="cli")
+            text = retire_text(rt, args.fingerprint, surface="cli", identity=getattr(args, "identity", None))
             out.write(text.rstrip() + "\n")
             return 0 if text.startswith("Retired") else 1
         raw = "pins"
@@ -1118,6 +1116,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
         p.add_argument("--note", default=None, help="for approve: the reviewer's verdict (recorded on the entries)")
         p.add_argument("--json", action="store_true", help="for review: the bundle as JSON")
         p.add_argument("--no-fetch", action="store_true", help="for review: use cached inner compose files only")
+        p.add_argument("--identity", default=None,
+                       help="for retire: the identity (host#models) when one entry is approved under several")
         p = sub.add_parser("allow", help="allow an off-host tool for this lock (asks on this terminal)")
         p.add_argument("tool")
         p = sub.add_parser("replay", help="replay a receipt's attestation evidence offline")

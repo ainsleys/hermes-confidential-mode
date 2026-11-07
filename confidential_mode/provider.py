@@ -271,10 +271,7 @@ class VerificationCache:
                     return False, _fail_reason(e.last_error), None
                 if e.observed_result is not result:
                     e.observed_result = result
-                    try:
-                        e.pins.observe(result)
-                    except Exception:
-                        pass
+                    _background(e, "observe", lambda r=result: e.pins.observe(r))   # its fsync is off e.lock
                 if e.pins.match(result) is True:
                     if not _consent_recorded(e, result):
                         _hold(e.adapter, REASON_NO_CONSENT)
@@ -287,8 +284,9 @@ class VerificationCache:
                     had_pin = False
                 reason = REASON_PIN_MISMATCH if had_pin else REASON_NO_PIN
                 _hold(e.adapter, reason)
-                try:
-                    before = e.pins.pending()
+                try:   # this identity's own batch: another identity's batch is not "before" (Amendment 7)
+                    before = (e.pins.pending_for(result.vendor, result.router_repo)
+                              if hasattr(e.pins, "pending_for") else e.pins.pending())
                 except Exception:
                     before = None
                 try:
@@ -302,6 +300,8 @@ class VerificationCache:
                         if e.pins.match(result) is True and _consent_recorded(e, result):
                             _release(e.adapter)
                             return True, "attested enclave verified; platform-only pin applied by policy", result
+                if _needs_composes(staged) and hasattr(e.pins, "prefetch_composes"):
+                    _background(e, "prefetch", lambda s=staged: _prefetch(provider, e, s))
                 if _ckey(staged) != _ckey(before):  # a new pending batch, not a re-stage or a display refresh
                     _emit(e, {"kind": "pin_staged", "provider": provider, "purpose": "verify",
                               "host": result.enclave_host,
@@ -336,6 +336,41 @@ def _sync_profile_base_url(e: _Entry) -> None:
 
 
 AUTO_PLATFORM_ONLY = "auto_platform_only"
+
+
+def _background(e: _Entry, name: str, fn: Callable[[], Any]) -> None:
+    """Run ``fn`` on one daemon thread per (entry, name); a call while one runs is dropped (coalesced)."""
+    running = e.__dict__.setdefault("_bg", {})
+    t = running.get(name)
+    if t is not None and t.is_alive():
+        return
+
+    def run():
+        try:
+            fn()
+        except Exception:
+            logger.debug("attested: background %s failed", name, exc_info=True)
+    t = threading.Thread(target=run, name=f"confidential-{name}", daemon=True)
+    running[name] = t
+    t.start()
+
+
+def _needs_composes(pending) -> bool:
+    return any(str(getattr(x, "cvm_role", "")).startswith("model:") and getattr(x, "components", None) is not None
+               and "services" not in (getattr(x, "pinned", ()) or ()) for x in (getattr(pending, "entries", ()) or ()))
+
+
+def _prefetch(provider: str, e: _Entry, staged) -> None:
+    """Fetch the inner compose files of a staged NEAR batch (public GitHub texts) so that its service map
+    can be pinned; a batch whose consent key changed gets its own pin_staged row."""
+    before = _ckey(staged)
+    for after in e.pins.prefetch_composes():
+        if after.key == staged.key and _ckey(after) != before:
+            _emit(e, {"kind": "pin_staged", "provider": provider, "purpose": "verify", "host": after.enclave_host,
+                      "detail": {"vendor": after.vendor, "router_repo": after.router_repo,
+                                 "code_fingerprint": after.code_fingerprint,
+                                 "enclave_fingerprint": after.enclave_fingerprint, "entries": _entry_rows(after),
+                                 "reason": "the inner compose files were fetched: the service map is now pinned"}})
 
 
 def _ckey(pending) -> Any:
@@ -378,7 +413,8 @@ def _auto_apply(provider: str, e: _Entry, pending) -> bool:
     ok = _emit(e, {"kind": "pin_applied", "provider": provider, "purpose": "verify", "host": pending.enclave_host,
                    "decision": AUTO_PLATFORM_ONLY,
                    "detail": {"vendor": pending.vendor, "router_repo": pending.router_repo,
-                              "cvm_role": getattr(entry, "cvm_role", None), "approved_via": AUTO_PLATFORM_ONLY,
+                              "cvm_role": getattr(entry, "cvm_role", None) or "router",
+                              "approved_via": AUTO_PLATFORM_ONLY,
                               "code_fingerprint": entry.code_fingerprint,
                               "enclave_fingerprint": entry.enclave_fingerprint,
                               "previous_enclave_fingerprint": pending.previous_enclave_fingerprint,
@@ -403,16 +439,26 @@ def _consent_recorded(e: _Entry, result: VerificationResult) -> bool:
     except Exception:
         entries = None
     if entries:
-        keys = [(result.vendor, x.code_fingerprint, x.enclave_fingerprint) for x in entries]
+        keys = [(result.vendor, x.router_repo, x.cvm_role, x.code_fingerprint, x.enclave_fingerprint)
+                for x in entries]
     else:
-        keys = [(result.vendor, result.code_fingerprint, result.enclave_fingerprint)]
+        keys = [(result.vendor, result.router_repo, None, result.code_fingerprint, result.enclave_fingerprint)]
     try:
         _scan_consent(e)
     except Exception:
         logger.warning("attested: consent ledger unreadable; refusing", exc_info=True)
         return False
-    # a row without a vendor (written before rows named one) counts for its fingerprints under any vendor
-    return all(e.consented.get(k, e.consented.get((None,) + k[1:])) is True for k in keys)
+    return all(_consented(e, k) for k in keys)
+
+
+def _consented(e: _Entry, k: tuple) -> bool:
+    """A row naming identity and role decides for exactly that entry; an older row that names only the
+    fingerprints (and maybe the vendor) counts when no such row exists (a row without a vendor counts
+    under any vendor)."""
+    if k in e.consented:
+        return e.consented[k] is True
+    vendor, _, _, code, enclave = k
+    return e.consented.get((vendor, code, enclave), e.consented.get((None, code, enclave))) is True
 
 
 def _scan_consent(e: _Entry) -> None:
@@ -435,8 +481,12 @@ def _scan_consent(e: _Entry) -> None:
                 d = json.loads(d)
             if not isinstance(d, dict):
                 continue
-            e.consented[(d.get("vendor") or None, d.get("code_fingerprint"), d.get("enclave_fingerprint"))] = \
-                kind == "pin_applied"
+            if d.get("router_repo") and d.get("cvm_role"):
+                key = (d.get("vendor") or None, d["router_repo"], d["cvm_role"], d.get("code_fingerprint"),
+                       d.get("enclave_fingerprint"))
+            else:   # written before rows named the identity and role (Amendment 7)
+                key = (d.get("vendor") or None, d.get("code_fingerprint"), d.get("enclave_fingerprint"))
+            e.consented[key] = kind == "pin_applied"
         if len(rows) < 5000:
             return
 

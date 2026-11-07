@@ -12,7 +12,7 @@ from confidential_mode import consent, provider
 from confidential_mode.pins import (BACKUP_SUFFIX, SCHEMA_VERSION, PinStore, PinStoreError, consent_key,
                                     near_code_fingerprint)
 from confidential_mode.verify.base import VerificationResult
-from tests.near_world import MODEL, NearWorld
+from tests.near_world import INNER_SHA, MODEL, NearWorld, cache_inner_composes
 
 try:
     import hermes_yaml as yaml
@@ -138,10 +138,13 @@ def test_tinfoil_entry_fingerprints_are_byte_identical_and_have_no_components(tm
 
 # ── NEAR: per-CVM entries, an approved set ───────────────────────────────────────────────────────
 
-def _near(tmp_path, world=None, **kw):
+def _near(tmp_path, world=None, cache=True, **kw):
+    """A NEAR verification; ``cache`` puts the inner compose files where `pins review` would."""
     world = world or NearWorld()
     for k, v in kw.items():
         setattr(world, k, v)
+    if cache:
+        cache_inner_composes(tmp_path / "pins" / "composes")
     return world, world.adapter(tmp_path, encrypt=False).verify()
 
 
@@ -155,8 +158,8 @@ def test_near_stages_one_entry_per_cvm_with_named_components(tmp_path):
     model = next(e for e in pend.entries if e.cvm_role != "gateway")
     assert set(gw.components) == {"app_id", "compose", "os_image", "kms_id"}
     assert set(model.components) == {"app_id", "compose", "os_image", "kms_id", "services", "cm_image_running"}
-    assert set(model.pinned) == {"app_id", "compose", "os_image", "kms_id", "cm_image_running"}, \
-        "services are shown for review only while their socket tags cannot be shown"
+    assert set(model.pinned) == {"app_id", "compose", "os_image", "kms_id", "cm_image_running", "services"}, \
+        "with the inner compose files cached the whole service map is pinned with its tags"
     assert model.code_fingerprint == near_code_fingerprint(model.cvm_role, model.components, model.pinned)
     assert store.match(res) is False
     ledger = Ledger()
@@ -184,20 +187,116 @@ def test_approving_one_near_instance_does_not_approve_another(tmp_path):
     assert len(store.approved_entries()) == 3
 
 
-def test_a_changed_service_map_is_new_only_when_services_are_pinned(tmp_path):
+def test_a_services_pinned_entry_refuses_a_changed_map_and_the_log_image(tmp_path):
     world, res1 = _near(tmp_path)
     store, ledger = PinStore(tmp_path / "pins.yaml"), Ledger()
     store.stage(res1)
     _approve(store, ledger)
+    assert store.match(res1) is True
     world.cm_actions = world.cm_actions + [{"action": "compose_up", "timestamp": "t", "tag": "v9", "commit": "c9" * 20,
-                                            "file": "prod/test.yaml", "file_sha256": "f9" * 32,
+                                            "file": "prod/test.yaml", "file_sha256": INNER_SHA["v1"],
                                             "services": ["proxy-test"]}]
     res2 = world.adapter(tmp_path, encrypt=False).verify()
-    assert store.match(res2) is True, "the service map is shown for review only on this entry"
+    assert store.match(res2) is False, "a redeployed service changes the pinned map"
     world.cm_actions = world.cm_actions[:-1] + [{"timestamp": "t", "action": "compose_manager_started",
                                                  "container": "compose-manager", "image": "x/cm@sha256:" + "9" * 64}]
     res3 = world.adapter(tmp_path, encrypt=False).verify()
     assert store.match(res3) is False, "the compose-manager image the log reports is pinned"
+
+
+def test_a_near_model_entry_without_its_map_pinned_cannot_be_approved(tmp_path):
+    world, res = _near(tmp_path, cache=False)
+    store, ledger = PinStore(tmp_path / "pins.yaml"), Ledger()
+    pend = store.stage(res)
+    model = next(e for e in pend.entries if e.cvm_role != "gateway")
+    assert "services" not in model.pinned
+    with pytest.raises(PinStoreError, match="service map"):
+        store.apply(pend, approved_via="cli")
+    out = _approve(store, ledger)
+    assert out.startswith("Not asked: the service map") and "pins review" in out
+    assert ledger.rows[-1].decision == "services_unpinned" and store.approved_entries() == []
+    cache_inner_composes(tmp_path / "pins" / "composes")
+    assert _approve(store, ledger).startswith("Pinned 2 NEAR entries"), "the approve command fetches (cache) first"
+
+
+def test_a_migrated_near_record_matches_nothing_so_near_asks_once(tmp_path):
+    world, res = _near(tmp_path)
+    path = tmp_path / "pins.yaml"
+    path.write_text(yaml.safe_dump({"version": 2, "pins": [{
+        "vendor": "near", "router_repo": res.router_repo, "code_fingerprint": res.code_fingerprint,
+        "enclave_fingerprint": res.enclave_fingerprint, "release_tag": None, "models_seen": [], "approved_by": "human",
+        "approved_at": "2026-11-07T00:00:00Z", "approved_via": "cli", "approval_rule_key": "k", "previous": None}],
+        "pending": None}))
+    store, ledger = PinStore(path), Ledger()
+    assert store.match(res) is False, "the version-2 rule does not carry over for NEAR"
+    store.stage(res)
+    asker = Asker("deny")
+    consent.approve_pending_pin(asker, store, ledger, session_key="t", session_id="s", platform="cli")
+    assert "migrated from pins file version 2: it matches nothing now" in asker.asked[0]
+    _approve(store, ledger)
+    assert store.match(res) is True and all(e.cvm_role != "result" for e in store.approved_entries())
+
+
+def test_a_gateway_entry_shared_by_two_identities_retires_per_identity(tmp_path):
+    from types import SimpleNamespace
+    from confidential_mode import commands
+    world, res1 = _near(tmp_path)
+    store, ledger = PinStore(tmp_path / "pins.yaml"), Ledger()
+    store.stage(res1)
+    _approve(store, ledger)
+    world2 = NearWorld(models=(MODEL, "other/model"))
+    world2.gateway_key, world2.model_key, world2.ita, world2.tls_der, world2.tls_fp = (
+        world.gateway_key, world.model_key, world.ita, world.tls_der, world.tls_fp)
+    res2 = world2.adapter(tmp_path, encrypt=False).verify()
+    store.stage(res2)
+    _approve(store, ledger)
+    gws = [e for e in store.approved_entries() if e.cvm_role == "gateway"]
+    assert len(gws) == 2 and gws[0].code_fingerprint == gws[1].code_fingerprint
+    rt = SimpleNamespace(pins=store, ledger=ledger)
+    out = commands.retire_text(rt, gws[0].code_fingerprint, surface="cli")
+    assert out.startswith("Nothing retired") and "name the identity" in out
+    out = commands.retire_text(rt, gws[0].code_fingerprint, surface="cli", identity=res2.router_repo)
+    assert out.startswith("Retired")
+    e = provider._Entry(adapter=None, pins=store, ttl_seconds=60, failure_backoff_seconds=1, consent_ledger=ledger)
+    assert store.match(res1) is True and provider._consent_recorded(e, res1) is True, \
+        "retiring the entry of one identity leaves the other identity's copy consented"
+    assert store.match(res2) is False
+
+
+def test_approve_reaches_every_pending_batch_oldest_first(tmp_path):
+    world, res = _near(tmp_path)
+    store, ledger = PinStore(tmp_path / "pins.yaml"), Ledger()
+    store.stage(_tinfoil("c1" * 32, "e1" * 48, "v1"))
+    import time
+    time.sleep(1.1)
+    store.stage(res)
+    asker = Asker()
+    out = consent.approve_pending_pin(asker, store, ledger, session_key="t", session_id="s", platform="cli")
+    assert len(asker.asked) == 2 and "Vendor: tinfoil" in asker.asked[0] and "Vendor: near" in asker.asked[1]
+    assert out.splitlines()[0].startswith("Pinned tinfoil build v1") and out.splitlines()[1].startswith("Pinned 2 NEAR")
+    assert store.pending_all() == []
+
+
+def test_pin_staged_is_written_only_when_the_identity_batch_changes(tmp_path):
+    class Pins(PinStore):
+        pass
+    store, rows = PinStore(tmp_path / "pins.yaml"), []
+    world, near_res = _near(tmp_path)
+    store.stage(near_res)                                   # a newer batch of another identity
+    tin = _tinfoil("c1" * 32, "e1" * 48, "v1")
+
+    class Adapter:
+        vendor = "tinfoil"
+
+        def verify(self):
+            return tin
+    cache = provider.VerificationCache()
+    cache.register("p", Adapter(), store, ttl_seconds=0.0001, on_event=rows.append)
+    for _ in range(3):
+        cache.invalidate("p")
+        cache.ensure("p", wait_seconds=5)
+    staged = [r for r in rows if r["kind"] == "pin_staged"]
+    assert len(staged) == 1, "one pin_staged row for the Tinfoil batch, not one per check"
 
 
 def test_hand_written_approved_entry_without_consent_row_does_not_count(tmp_path):
@@ -254,20 +353,24 @@ def test_auto_apply_cannot_add_to_a_concurrent_set(tmp_path):
 
 
 def test_stale_pending_refreshes_shown_lines_and_keeps_the_answer_valid(tmp_path):
-    world, res1 = _near(tmp_path)
-    store = PinStore(tmp_path / "pins.yaml")
+    """While the service map is shown only (its files are not fetched yet), a re-verification with the same
+    pinned values and a different map keeps the batch (same consent key) and refreshes the shown lines. Once
+    the files are cached the map joins the pinned values, and the person is asked about the latest map."""
+    world, res1 = _near(tmp_path, cache=False)
+    store, ledger = PinStore(tmp_path / "pins.yaml"), Ledger()
     first = store.stage(res1)
-    # same pinned values, a different reported (shown-only) service map
     world.cm_actions = world.cm_actions + [{"action": "compose_up", "timestamp": "t", "tag": "v9", "commit": "c9" * 20,
-                                            "file": "prod/test.yaml", "file_sha256": "f9" * 32,
+                                            "file": "prod/test.yaml", "file_sha256": INNER_SHA["v1"],
                                             "services": ["nginx-test"]}]
     res2 = world.adapter(tmp_path, encrypt=False).verify()
     second = store.stage(res2)
     assert consent_key(second) == consent_key(first) and second.staged_at == first.staged_at
     assert second.components != first.components, "the shown-for-review lines are refreshed"
     assert any("v9" in c for c in store.pending().components)
-    assert store.apply(first, approved_via="cli").cvm_role in ("gateway", f"model:{MODEL}"), \
-        "an answer to the earlier prompt still applies: equality is keyed on fingerprints"
+    cache_inner_composes(tmp_path / "pins" / "composes")
+    asker = Asker()
+    consent.approve_pending_pin(asker, store, ledger, session_key="t", session_id="s", platform="cli")
+    assert "services: pinned" in asker.asked[0] and store.match(res2) is True and store.match(res1) is False
 
 
 def test_pins_approve_with_nothing_pending_is_a_no_op_with_a_message(tmp_path):
@@ -297,7 +400,7 @@ def test_prompt_lists_every_pending_entry_and_the_approved_set_with_unseen_flags
     asker = Asker()
     consent.approve_pending_pin(asker, store, ledger, session_key="t", session_id="s", platform="cli")
     assert "Entries to approve (2):" in asker.asked[0] and "TRUST ON FIRST USE" in asker.asked[0]
-    assert "services: shown for review only, not pinned" in asker.asked[0]
+    assert "services: pinned, the whole map of 3 services" in asker.asked[0] and "holds dstack.sock" in asker.asked[0]
     for _ in range(25):
         store.observe(_tinfoil("00" * 32, "00" * 48, None))   # another identity: counts nothing here
     pf = store.load_file()

@@ -52,12 +52,21 @@ class SelfApprovalRefused(RuntimeError):
     """Raised by an asker that will not ask because the agent may be the one answering (Amendment 7)."""
 
 
-SELF_APPROVAL_REPLY = ("Refused: this command runs inside a Hermes tool, so the agent could answer the prompt "
-                       "itself. Run it yourself in a terminal you opened, outside Hermes.")
+SELF_APPROVAL_REPLY = ("Refused: the agent could answer this prompt itself. Approve from a terminal you opened "
+                       "outside Hermes, with no process started by a Hermes tool still running")
 
 
 def _self_approval(error: Optional[str]) -> bool:
     return bool(error) and str(error).startswith(SelfApprovalRefused.__name__ + ":")
+
+
+def _guard(asker: Any) -> Optional[str]:
+    """selfapproval.self_approval_reason() for this asker: every asker path checks it before asking (the chat
+    surface's ctx included), so no tool-driven prompt is ever answered. An asker may carry its own
+    ``environ`` (TerminalAsker in tests); otherwise this process's environment is read."""
+    from .selfapproval import self_approval_reason
+    env = getattr(asker, "environ", None)
+    return self_approval_reason(env if isinstance(env, dict) else None)
 
 
 def _refuse_on_event_loop(what: str) -> None:
@@ -250,10 +259,10 @@ REPORTED_NOT_PINNED = ("Shown for review only, not pinned: the instance id, and 
 ENTRIES_HEADING = ("Approving adds every entry below to the approved set for this identity. A verification "
                    "passes when each CVM it reports matches an approved entry, so one approval never covers a "
                    "different configuration.")
-SERVICES_NOT_PINNED = ("services: shown for review only, not pinned. The socket tags are unavailable: {n} inner "
-                       "compose {files} named in the log {are} not fetched (text not fetched). Run the command "
-                       "hermes confidential pins review to fetch and hash-check them; the prompt then pins the "
-                       "whole service map with its tags.")
+SERVICES_NOT_PINNED = ("services: not pinned, so this entry cannot be approved yet. The socket tags are unavailable: "
+                       "{why}. Approval is unavailable until the command hermes confidential pins review fetches and "
+                       "hash-checks the inner compose files; the prompt then pins the whole service map with its "
+                       "tags.")
 RETIRE_HINT = ("not seen in the last {n} verifications; if the vendor no longer runs it, retire it with "
                "hermes confidential pins retire {fp}")
 
@@ -292,15 +301,25 @@ def _entry_lines(n: int, ent: Any) -> list[str]:
     if role != "gateway":
         from .review import tag_summary
         tags = obs.get("tags")
+        missing = obs.get("tags_missing") or []
         if "services" in pinned and isinstance(tags, dict):
             lines.append(f"     services: pinned, the whole map of {len(tags)} services, with the socket tags of every "
-                         "service from the hash-checked inner compose files:")
+                         "service from the hash-checked inner compose files (a missing tag is not evidence):")
             lines.extend(f"       {_display(t)}" for t in (tag_summary(tags) or ["no service carries a tag"]))
+        elif "services" in pinned:
+            lines.append("     services: no service map (this CVM's report carried no compose-manager log); the "
+                         "absence is pinned")
         else:
-            missing = obs.get("tags_missing") or []
-            k = len(missing) or 1
-            lines.append("     " + SERVICES_NOT_PINNED.format(n=k, files="file" if k == 1 else "files",
-                                                             are="is" if k == 1 else "are"))
+            n_missing = sum(1 for m in missing if m.get("reason") == "text not fetched")
+            unparsed = [m for m in missing if m.get("reason") != "text not fetched"]
+            parts = []
+            if n_missing:
+                parts.append(f"{n_missing} inner compose {'file' if n_missing == 1 else 'files'} named in the log "
+                             f"{'is' if n_missing == 1 else 'are'} not fetched (text not fetched)")
+            if unparsed:
+                parts.append(f"{len(unparsed)} fetched {'file does' if len(unparsed) == 1 else 'files do'} not parse "
+                             "as a compose file")
+            lines.append("     " + SERVICES_NOT_PINNED.format(why="; ".join(parts) or "the tags were not computed"))
     ids = list(_field(ent, "instance_ids_seen", ()) or ())
     if ids:
         lines.append("     instances seen (shown only): " + ", ".join(_display(i) for i in ids))
@@ -322,7 +341,10 @@ def _approved_lines(approved: Optional[tuple]) -> list[str]:
                 f"{_text(_field(ent, 'approved_via'))}")
         if _field(ent, "reviewed_by", None):
             line += f", reviewed by {_display(_field(ent, 'reviewed_by'))}"
-        if old:
+        if _field(ent, "cvm_role", None) == "result":
+            line += ("; migrated from pins file version 2: it matches nothing now, and approving the entries "
+                     "above replaces it")
+        elif old:
             line += "; " + RETIRE_HINT.format(n=UNSEEN_VERIFICATIONS, fp=code[:16])
         lines.append(line)
     return lines
@@ -397,19 +419,86 @@ def _approved_set(store: Any, pending: Any) -> Optional[tuple]:
         return None
 
 
+SERVICES_UNPINNED_REPLY = ("Not asked: the service map of {roles} is not pinned, because its socket tags cannot be "
+                           "shown ({why}). Approval is unavailable until the command hermes confidential pins "
+                           "review fetches and hash-checks the inner compose files; run it in a terminal you "
+                           "opened, then approve again.")
+
+
+def _pending_batches(store: Any) -> list:
+    """Every pending batch, oldest first (a store without pending_all has at most one)."""
+    every = getattr(store, "pending_all", None)
+    if callable(every):
+        try:
+            return sorted(every(), key=lambda p: str(_field(p, "staged_at", "") or ""))
+        except Exception:
+            pass
+    one = store.pending()
+    return [one] if one is not None else []
+
+
+def _unpinned_services(pending: Any) -> list[str]:
+    """Roles of NEAR model entries whose service map is not pinned (approval is refused for them)."""
+    out = []
+    for ent in _field(pending, "entries", ()) or ():
+        role = str(_field(ent, "cvm_role", "") or "")
+        if role.startswith("model:") and isinstance(_field(ent, "components", None), dict) \
+                and "services" not in (_field(ent, "pinned", ()) or ()):
+            out.append(role)
+    return out
+
+
+def _tags_missing_why(pending: Any) -> str:
+    for ent in _field(pending, "entries", ()) or ():
+        for m in ((_field(ent, "observed", None) or {}).get("tags_missing") or []):
+            return str(m.get("reason") or "text not fetched")
+    return "text not fetched"
+
+
 def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, session_id: str,
                         platform: str, observers: Optional[list] = None, reviewed_by: Optional[str] = None,
                         review_note: Optional[str] = None) -> str:
-    """Ask the human to approve the staged pin; apply it only on an explicit Approve and only if the
-    pending pin is still the one the human saw (by consent key). Writes one ``pin_applied`` row per
-    approved entry. ``reviewed_by`` and ``review_note`` (the CLI's --reviewed-by and --note) are recorded
-    on the entries; the chat path passes neither. Returns the user-facing reply."""
+    """Ask the human to approve every pending batch, oldest first; apply a batch only on an explicit
+    Approve and only if it is still the one the human saw (by consent key). Writes one ``pin_applied`` row
+    per approved entry. ``reviewed_by`` and ``review_note`` (from --reviewed-by and --note) are recorded on
+    the entries, null without the flags. Refuses before asking anything when selfapproval says the agent
+    may be driving the prompt. Returns the user-facing reply (one paragraph per batch)."""
     _refuse_on_event_loop("approve_pending_pin")
-    pending = store.pending()
-    if pending is None:
+    reason = _guard(ctx)
+    if reason:
+        _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, decision="self_approval",
+                             detail={"session_key": session_key or "", "error": f"SelfApprovalRefused: {reason}"}))
+        return f"{SELF_APPROVAL_REPLY} ({reason}.) Nothing was applied."
+    prefetch = getattr(store, "prefetch_composes", None)
+    if callable(prefetch):
+        try:
+            prefetch()       # public GitHub texts; on failure the batch says why and is not asked
+        except Exception:
+            pass
+    batches = _pending_batches(store)
+    if not batches:
         return "No pin update is waiting for approval."
+    return "\n".join(_approve_batch(ctx, store, ledger, pending, session_key=session_key, session_id=session_id,
+                                    platform=platform, observers=observers, reviewed_by=reviewed_by,
+                                    review_note=review_note) for pending in batches)
+
+
+def _approve_batch(ctx: Any, store: Any, ledger: Any, pending: Any, *, session_key: str, session_id: str,
+                   platform: str, observers: Optional[list], reviewed_by: Optional[str],
+                   review_note: Optional[str]) -> str:
     vendor = str(_field(pending, "vendor", "") or "")
+    unpinned = _unpinned_services(pending)
+    if unpinned:
+        _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
+                             decision="services_unpinned",
+                             detail={"session_key": session_key or "", "vendor": vendor, "roles": unpinned,
+                                     "code_fingerprint": str(_field(pending, "code_fingerprint", "") or ""),
+                                     "enclave_fingerprint": str(_field(pending, "enclave_fingerprint", "") or "")}))
+        from .verify.near_checks import render_vendor
+        return SERVICES_UNPINNED_REPLY.format(roles=", ".join(render_vendor(r) for r in unpinned),
+                                              why=render_vendor(_tags_missing_why(pending)))
     base = {"session_key": session_key or "", "vendor": vendor,
+            "router_repo": str(_field(pending, "router_repo", "") or ""),
             "code_fingerprint": str(_field(pending, "code_fingerprint", "") or ""),
             "enclave_fingerprint": str(_field(pending, "enclave_fingerprint", "") or "")}
 
@@ -424,7 +513,7 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
                              decision="self_approval" if refused else
                              "no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
         if refused:
-            return SELF_APPROVAL_REPLY + " Pin update not applied; current pin kept."
+            return SELF_APPROVAL_REPLY + ". Pin update not applied; current pin kept."
         if raw is None:
             return "No answer (timed out, cancelled, or not one of the options): pin update denied; current pin kept."
         return "Pin update denied; current pin kept."
@@ -433,10 +522,10 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
     # (the second sees pending cleared or changed). PinStore.apply is additionally idempotent (W2).
     with _APPLY_LOCK:
         try:
-            current = store.pending()
+            current = next((b for b in _pending_batches(store) if _same_batch(b, pending)), None)
         except Exception as exc:
             current, detail["recheck_error"] = None, f"{type(exc).__name__}: {exc}"[:200]
-        if current is None or not _same_batch(current, pending):
+        if current is None:
             detail["reason"] = "pending pin changed while waiting for the answer"
             _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
                                  decision="stale", detail=detail))
@@ -471,8 +560,8 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
                 f"{_field(pending, 'router_repo', '')} (added to the approved set; "
                 + ", ".join(f"{_field(x, 'cvm_role', '')} code {_short(_field(x, 'code_fingerprint', ''))}"
                             for x in entries) + ").")
-    return (f"Pinned {vendor or 'enclave'} build "
-            f"{_field(record, 'release_tag', None) or _field(pending, 'release_tag', None) or ''}".rstrip()
+    tag = _field(record, 'release_tag', None) or _field(pending, 'release_tag', None) or ''
+    return (f"Pinned {vendor or 'enclave'} build {_display_if_needed(tag) if tag else ''}".rstrip()
             + f" (code {_short(base['code_fingerprint'])}, enclave {_short(base['enclave_fingerprint'])}).")
 
 
@@ -501,6 +590,13 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
     """Ask the human to add an off-host tool to the locked allowlist (no per-call prompt after).
     Hard-blocked tools (cronjob_manage, delegate_task routing, MCP-by-URL) cannot be added."""
     _refuse_on_event_loop("allow_tool")
+    reason = _guard(ctx)
+    if reason:
+        _ledger(ledger, _event("tool_refused", session_id=session_id, platform=platform, purpose=f"tool:{name}",
+                             decision="self_approval",
+                             detail={"tool": name, "session_key": session_key or "", "change": "allowlist_add",
+                                     "error": f"SelfApprovalRefused: {reason}"}))
+        return f"{SELF_APPROVAL_REPLY} ({reason}.) {name} was not added."
     info = allowlist.get(name)
     if info is None:
         return f"Unknown tool {name!r}; it was not registered when the session was locked."
@@ -523,7 +619,7 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
                              decision="self_approval" if refused else
                              "no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
         if refused:
-            return SELF_APPROVAL_REPLY + f" {name} was not added."
+            return SELF_APPROVAL_REPLY + f". {name} was not added."
         return f"{name} was not added; it still needs approval each call."
     allowlist.add(name)
     _ledger(ledger, _event("tool_allowed", session_id=session_id, platform=platform, purpose=f"tool:{name}",

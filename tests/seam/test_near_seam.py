@@ -66,6 +66,8 @@ def near(plugin, monkeypatch):
 
 
 def _approve(plugin):
+    from tests.near_world import cache_inner_composes
+    cache_inner_composes(plugin.rt.pins.composes_dir)    # as `pins review` would: the service map is then pinned
     with bind_asker(lambda question, labels: "Approve"):
         return plugin.slash("pins approve")
 
@@ -88,7 +90,11 @@ def test_lock_needs_a_human_approved_pin_then_a_turn_is_signed_and_ledgered(plug
     assert pending.vendor == "near" and pending.router_repo == f"{HOST}#{MODEL}"
     assert pending.components and pending.components[0].startswith("gateway compose sha256:")
     asked = []
+    from tests.near_world import cache_inner_composes
     with bind_asker(lambda q, labels: asked.append(q) or "Approve"):
+        assert plugin.slash("pins approve").startswith("Not asked: the service map"), "fail closed until fetched"
+        assert asked == []
+        cache_inner_composes(plugin.rt.pins.composes_dir)
         assert plugin.slash("pins approve").startswith("Pinned 2 NEAR entries")   # gateway and model (Amendment 7)
     consent = _sub(plugin, "consent")
     assert "Identity: cloud-api.near.ai#" in asked[0] and consent.PINNED_HEADING in asked[0]
@@ -96,7 +102,7 @@ def test_lock_needs_a_human_approved_pin_then_a_turn_is_signed_and_ledgered(plug
     assert "(recorded in RTMR3; pinned; the instance id is shown only)" in head
     # Amendment 7: each model entry pins the compose-manager image the log reports; the services stay
     # shown for review only until their socket tags can be shown
-    assert "compose-manager image reported by the log" in head and "services: shown for review only" in head
+    assert "compose-manager image reported by the log" in head and "services: pinned, the whole map" in head
     assert "  `  prod/test.yaml::proxy-test v0.0.2 commit " + "c2" * 20 in tail and "(the two differ)" in tail
     assert consent.REPORTED_NOT_PINNED in tail and "reported: " not in asked[0]
     out = plugin.slash("on attested")
