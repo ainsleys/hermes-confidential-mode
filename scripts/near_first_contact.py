@@ -85,8 +85,12 @@ def main(argv=None) -> int:
                             n = len((out.choices[0].message.content or "").encode())
                         print(f"\n{'streamed' if stream else 'unstreamed'} send: reply {n} bytes")
                     except Exception as exc:
+                        why = f"{exc} {exc.__cause__ or ''}"
+                        if stream and "streaming is refused while encrypting" in why:
+                            print("\nstreamed send: refused before sending, as designed (request encryption is on)")
+                            continue
                         print(f"\n{'streamed' if stream else 'unstreamed'} send FAILED: {type(exc).__name__}: "
-                              f"{str(exc)[:200]}")
+                              f"{why[:200]}")
                         continue
                     d = rows[-1]["detail"] if rows else {}
                     sig = d.get("signature") or {}

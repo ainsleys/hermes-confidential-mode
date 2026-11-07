@@ -91,6 +91,12 @@ class VerificationCache:
                 e.adapter.event_sink = lambda ev: _emit(e, {**ev, "provider": provider})
             except Exception:
                 pass
+        if hasattr(e.adapter, "on_stale"):
+            # NEAR: the gateway refused the model key (HTTP 421); the next ensure() re-verifies.
+            try:
+                e.adapter.on_stale = lambda: self.invalidate(provider)
+            except Exception:
+                pass
 
     def register(self, provider: str, adapter, pins: PinStore, ttl_seconds: float,
                  failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS, *,
@@ -667,7 +673,7 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
                           on_event: Callable[[dict], None] | None = None, ledger=None):
     """Wire the 'attested-near' profile into Hermes (same cache, pins file and ledger as Tinfoil's).
     No network at register. Reads confidential.near.{base_url, models, require_provider_tee,
-    require_tls_binding, accepted_tcb_statuses, signature_wait_seconds, streaming, context_length}."""
+    require_tls_binding, accepted_tcb_statuses, signature_wait_seconds, streaming, context_length, encrypt}."""
     import providers
     if config is None:
         from hermes_cli.config import load_config_readonly
@@ -677,6 +683,7 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
     data_dir = Path(data_dir)
     near = lambda *p, default=None: _cfg_get(config, "confidential", "near", *p, default=default)  # noqa: E731
     require_tee = near("require_provider_tee", default=True) is not False
+    encrypt = near("encrypt", default=True) is not False
     if adapter is None:
         from .verify.near import DEFAULT_ACCEPTED_TCB, DEFAULT_BASE_URL, DEFAULT_SIGNATURE_WAIT_SECONDS, NearAdapter
         tcb = near("accepted_tcb_statuses", default=list(DEFAULT_ACCEPTED_TCB))
@@ -684,7 +691,8 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
             data_dir=data_dir, base_url=str(near("base_url", default=DEFAULT_BASE_URL)), models=near_models(config),
             require_provider_tee=require_tee, require_tls_binding=near("require_tls_binding", default=True) is not False,
             accepted_tcb_statuses=[t for t in tcb if isinstance(t, str)] if isinstance(tcb, list) else DEFAULT_ACCEPTED_TCB,
-            signature_wait_seconds=float(near("signature_wait_seconds", default=DEFAULT_SIGNATURE_WAIT_SECONDS)))
+            signature_wait_seconds=float(near("signature_wait_seconds", default=DEFAULT_SIGNATURE_WAIT_SECONDS)),
+            encrypt=encrypt)
     if hasattr(adapter, "provider_name"):
         adapter.provider_name = NEAR_PROFILE_NAME
     if pins is None:
@@ -697,7 +705,9 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
             logger.warning("attested-near: no ledger; pins will not be cross-checked against consent", exc_info=True)
     # Unstreamed by default: NEAR's gateway re-signs streamed completions itself (gateway kind), so only an
     # unstreamed completion can carry a model-signed provider_tee signature.
-    streaming = near("streaming", default=False) is True
+    # While encrypting (confidential.near.encrypt, default true) streaming is refused by the transport, so
+    # the profile never asks Hermes to stream; confidential.near.streaming has no effect then.
+    streaming = near("streaming", default=False) is True and not encrypt
     profile = make_profile(
         adapter, pins, float(_cfg_get(config, "confidential", "verify_ttl_seconds", default=DEFAULT_TTL_SECONDS)),
         on_event=on_event, ledger=ledger, name=NEAR_PROFILE_NAME, display_name="NEAR AI Cloud (attested)",

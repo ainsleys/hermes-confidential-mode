@@ -161,7 +161,7 @@ def test_unstreamed_send_is_hashed_signed_and_verified_as_provider_tee(world, tm
 
 
 def test_streamed_send_hashes_every_sse_byte_and_gateway_kind_is_not_fully_attested(world, tmp_path):
-    ad, _, rows = _accepted(world, tmp_path)
+    ad, _, rows = _accepted(world, tmp_path, encrypt=False)
     stream = _client(ad).chat.completions.create(model=MODEL, messages=MSG, stream=True)
     text = "".join((c.choices[0].delta.content or "") for c in stream if c.choices)
     assert text == "NEAR-FAKE-REPLY"
@@ -174,13 +174,13 @@ def test_streamed_send_hashes_every_sse_byte_and_gateway_kind_is_not_fully_attes
 
 
 def test_streamed_gateway_signature_verifies_when_provider_tee_is_not_required(world, tmp_path):
-    ad, _, rows = _accepted(world, tmp_path, require_provider_tee=False)
+    ad, _, rows = _accepted(world, tmp_path, require_provider_tee=False, encrypt=False)
     list(_client(ad).chat.completions.create(model=MODEL, messages=MSG, stream=True))
     assert rows[0]["verdict"] == "verified" and rows[0]["detail"]["fully_attested"] is False
 
 
 def test_interrupted_stream_has_no_signature_and_says_so(world, tmp_path):
-    ad, _, rows = _accepted(world, tmp_path)
+    ad, _, rows = _accepted(world, tmp_path, encrypt=False)
     stream = _client(ad).chat.completions.create(model=MODEL, messages=MSG, stream=True)
     next(iter(stream))
     stream.close()                               # the consumer stops before [DONE]
@@ -191,7 +191,7 @@ def test_interrupted_stream_has_no_signature_and_says_so(world, tmp_path):
 
 
 def test_signature_404_is_retried_within_the_bound_then_reported_missing(world, tmp_path):
-    ad, _, rows = _accepted(world, tmp_path, signature_wait_seconds=30.0)
+    ad, _, rows = _accepted(world, tmp_path, signature_wait_seconds=30.0, encrypt=False)
     world.sig_404_left = 2
     _client(ad).chat.completions.create(model=MODEL, messages=MSG)
     assert rows[0]["verdict"] == "verified" and world.signature_fetches() == 3
@@ -203,7 +203,7 @@ def test_signature_404_is_retried_within_the_bound_then_reported_missing(world, 
 
 @pytest.mark.parametrize("mode,status", [("unavailable", "unavailable"), ("http500", "error")])
 def test_unavailable_or_failed_signature_fetch_is_explicit(world, tmp_path, mode, status):
-    ad, _, rows = _accepted(world, tmp_path)
+    ad, _, rows = _accepted(world, tmp_path, encrypt=False)
     world.sig_mode = mode
     _client(ad).chat.completions.create(model=MODEL, messages=MSG)
     assert rows[0]["detail"]["signature"]["status"] == status and rows[0]["verdict"] == "unverified"
@@ -247,7 +247,7 @@ def test_a_body_already_in_memory_is_hashed_once(world, tmp_path, gz):
 
 
 def test_async_send_is_signed_and_verified(world, tmp_path):
-    ad, _, rows = _accepted(world, tmp_path)
+    ad, _, rows = _accepted(world, tmp_path, encrypt=False)
 
     async def go():
         c = openai.AsyncOpenAI(api_key="sk-near-test", base_url=BASE, http_client=ad.async_http_for_loop(),

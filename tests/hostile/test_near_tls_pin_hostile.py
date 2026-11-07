@@ -262,7 +262,7 @@ def _sent(world, tmp_path, **kw):
 def test_send_whose_certificate_differs_is_unverified_and_not_fully_attested(tmp_path):
     world = NearWorld()
     world.chat_tls_der, _ = tls_cert()             # a valid signature, but over a connection to someone else
-    _, client, rows = _sent(world, tmp_path)
+    _, client, rows = _sent(world, tmp_path, encrypt=False)
     client.chat.completions.create(model=MODEL, messages=MSG)
     (row,) = rows
     d = row["detail"]
@@ -271,10 +271,19 @@ def test_send_whose_certificate_differs_is_unverified_and_not_fully_attested(tmp
     assert "TLS certificate of this send is not the one the gateway quote binds" in d["check"]["reason"]
 
 
+def test_encrypted_send_over_another_certificate_is_withheld(tmp_path):
+    world = NearWorld()
+    world.chat_tls_der, _ = tls_cert()
+    _, client, rows = _sent(world, tmp_path)
+    with pytest.raises(openai.APIConnectionError) as ei:
+        client.chat.completions.create(model=MODEL, messages=MSG)
+    assert "withheld" in str(ei.value.__cause__) and rows[0]["detail"]["fully_attested"] is False
+
+
 def test_send_whose_certificate_is_not_observable_is_unverified(tmp_path):
     world = NearWorld()
     world.chat_serve_tls = False
-    _, client, rows = _sent(world, tmp_path)
+    _, client, rows = _sent(world, tmp_path, encrypt=False)
     client.chat.completions.create(model=MODEL, messages=MSG)
     assert rows[0]["verdict"] == "unverified" and "not observable" in rows[0]["detail"]["check"]["reason"]
 
@@ -284,7 +293,7 @@ def test_receipt_of_a_send_over_another_certificate_is_not_fully_attested(tmp_pa
     from confidential_mode.receipts import build_receipt
     world = NearWorld()
     world.chat_tls_der, _ = tls_cert()
-    ad, client, rows = _sent(world, tmp_path)
+    ad, client, rows = _sent(world, tmp_path, encrypt=False)
     client.chat.completions.create(model=MODEL, messages=MSG)
     led = Ledger(tmp_path / "ledger.sqlite")
     led.append({"kind": "lock", "tier": "attested", "decision": "locked", "detail": {}})

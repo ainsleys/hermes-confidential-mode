@@ -364,6 +364,17 @@ def _sections(rows: list[dict]) -> dict:
         "signed_sends": by_kind(("send_signed",)),
     }
 
+# Added only when a receipt holds an encrypted NEAR send (W11, Amendment 5.1); checked by verify_chain then.
+NEAR_ENCRYPTION_NOTE = (
+    "Request encryption (NEAR AI Cloud). A send marked encrypted left this host with the listed request "
+    "fields as ciphertext, readable by any holder of the model key named, a key the plugin verified in that "
+    "send's evidence. That the request was encrypted, and which fields, is the plugin's own report (plugin "
+    "self-report): the receipt holds digests of the ciphertext, never its bytes. The signature check is "
+    "third-party checkable and covers the ciphertext digests. Every instance of a model shares that key, so "
+    "this does not establish that only an approved instance could read the request. The gateway still reads "
+    "the model id, the plaintext parameters, sizes and timing."
+)
+
 
 def _near_sends(rows: list[dict], evidence: list[dict]) -> tuple[list[dict], dict | None]:
     """Per NEAR send: digests, signature kind, the live verdict, and an offline replay verdict computed
@@ -389,7 +400,10 @@ def _near_sends(rows: list[dict], evidence: list[dict]) -> tuple[list[dict], dic
                     "live_verdict": r.get("verdict"), "live_reason": (d.get("check") or {}).get("reason"),
                     "replay_verdict": rep.get("verdict"), "replay_reason": rep.get("reason"),
                     "fully_attested": bool(live_tee and rep.get("verdict") == "pass" and rep.get("provider_tee")),
-                    "require_provider_tee": d.get("require_provider_tee") is not False})
+                    "require_provider_tee": d.get("require_provider_tee") is not False,
+                    "encrypted": d.get("encrypted") is True,
+                    "encrypted_fields": list(d.get("encrypted_fields") or []),
+                    "encryption_version": d.get("encryption_version"), "model_pub": d.get("model_pub")})
     summary = {"sends": len(out), "fully_attested": all(s["fully_attested"] for s in out),
                "not_fully_attested_sends": [s["row"] for s in out if not s["fully_attested"]],
                "replay_failures": [s["row"] for s in out if s["replay_verdict"] not in ("pass",)],
@@ -614,6 +628,8 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, on_host_extra_ho
         doc["sections"]["near_sends"] = near_sends
         doc["header"]["near"] = near_summary
         doc["near_closing"] = NEAR_CLOSING
+        if any(c.get("encrypted") for c in near_sends):
+            doc["near_encryption_note"] = NEAR_ENCRYPTION_NOTE
     leaks = forbidden_keys_in(doc)
     if leaks:  # unreachable after _redact; kept as the last line of defence
         raise ReceiptError(f"content-shaped keys in receipt: {', '.join(leaks[:5])}")
@@ -648,6 +664,8 @@ def verify_chain(receipt_json: str | Mapping) -> bool:
         if header.get("trust_roots_sha256") != trust_digest:
             return False
         if "near_closing" in doc and doc.get("near_closing") != NEAR_CLOSING:
+            return False
+        if "near_encryption_note" in doc and doc.get("near_encryption_note") != NEAR_ENCRYPTION_NOTE:
             return False
         return doc.get("closing") == CLOSING_PARAGRAPH
     except Exception:
@@ -894,6 +912,11 @@ def render_text(doc: Mapping) -> str:
             add(f"      response sha256 {_p(c['response_sha256']) or '(none: body incomplete)'}")
             if c["live_reason"] or c["replay_reason"]:
                 add(f"      {_p(c['replay_reason'] or c['live_reason'])}")
+            if c.get("encrypted"):
+                add(f"      request body sent as ciphertext for fields {_p(', '.join(c['encrypted_fields'])) or '(none)'} "
+                    f"(plugin self-report); encrypted to model key {_p(c.get('model_pub')) or '?'} (plugin self-report)")
+                if c["replay_verdict"] == "pass" and c["fully_attested"]:
+                    add("      signature verified over the ciphertext digests (third-party checkable)")
         if near["fully_attested"]:
             add(f"  Session fully attested: all {near['sends']} NEAR send(s) carry a provider_tee signature by a "
                 "verified model key that replays from this receipt.")
@@ -903,6 +926,9 @@ def render_text(doc: Mapping) -> str:
                 + ", ".join(f"#{i}" for i in near["not_fully_attested_sends"]))
         add("")
         add(NEAR_CLOSING)
+        if doc.get("near_encryption_note"):
+            add("")
+            add(doc["near_encryption_note"])
 
     add("")
     add(CLOSING_PARAGRAPH)

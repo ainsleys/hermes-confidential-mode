@@ -166,7 +166,9 @@ def test_cli_replay_checks_evidence_and_every_signed_response(plugin, near, tmp_
     with sendctx.send_context(session_id="sess-near", purpose="main", tier="attested"):
         client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "hi"}])
         near.sig_mode = "tamper_response"
-        client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "again"}])
+        with pytest.raises(Exception) as ei:   # D5: the encrypted reply is withheld; the row is still written
+            client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "again"}])
+        assert "withheld" in repr(ei.value) + repr(ei.value.__cause__)
     path = tmp_path / "receipt.json"
     path.write_text(plugin.slash("receipts sess-near --json"))
     parser = argparse.ArgumentParser()
@@ -186,3 +188,69 @@ def test_status_shows_the_near_verification(plugin, near):
     plugin.slash("on attested")
     out = plugin.slash("status")
     assert "NEAR verification:" in out and f"{HOST}#{MODEL}" in out
+
+
+# ── request encryption (W11) ─────────────────────────────────────────────────────────────────────
+
+def test_a_locked_turn_leaves_encrypted_and_the_receipt_separates_self_report_from_signature(plugin, near):
+    plugin.slash("on attested")
+    _approve(plugin)
+    assert plugin.slash("on attested").startswith("Locked")
+    import run_agent
+    agent = run_agent.AIAgent(model=MODEL, provider="attested-near", api_key="sk-near-seam", base_url=BASE,
+                              quiet_mode=True, skip_context_files=True, skip_memory=True, max_iterations=2)
+    result = agent.run_conversation("SEAM-SECRET-PROMPT")
+    assert "NEAR-FAKE-REPLY" in str(result.get("final_response"))
+    assert near.chat_bodies and all(b"SEAM-SECRET-PROMPT" not in b for b in near.chat_bodies)
+    assert any("SEAM-SECRET-PROMPT" in json.dumps(r) for r in near.decrypted_requests)
+    row = [e for e in plugin.rt.ledger.tail(0) if e.kind == "send_signed"][-1]
+    assert row.detail["encrypted"] is True and "messages[].content" in row.detail["encrypted_fields"]
+    text = plugin.slash(f"receipts {agent.session_id}")
+    assert "request body sent as ciphertext for fields messages[].content" in text
+    assert "(plugin self-report)" in text and "signature verified over the ciphertext digests (third-party checkable)" in text
+    doc = json.loads(plugin.slash(f"receipts {agent.session_id} --json"))
+    send = doc["sections"]["near_sends"][-1]
+    assert send["encrypted"] is True and send["model_pub"] == plugin.rt.near_adapter.model_public_key(MODEL)
+
+
+@pytest.mark.parametrize("extra,key", [
+    ("    encrypt: false\n", "confidential.near.encrypt"),
+    ("", "model.api_mode"),
+])
+def test_lock_refuses_encryption_off_or_a_non_chat_api_mode(plugin, near, extra, key):
+    cfg = NEAR_CONFIG + extra
+    if key == "model.api_mode":
+        cfg = cfg.replace(f"  default: {MODEL}\n", f"  default: {MODEL}\n  api_mode: codex_responses\n")
+    plugin.cfg.write_text(cfg)
+    out = plugin.slash("on attested")
+    assert out.startswith("Not locked") and key in out, out
+
+
+def test_lock_refuses_when_the_encryption_library_is_missing(plugin, near, monkeypatch):
+    e2 = _sub(plugin, "verify.near_e2ee")
+    monkeypatch.setattr(e2, "available", lambda: (False, "pynacl unavailable (ImportError): install pynacl==1.6.*"))
+    out = plugin.slash("on attested")
+    assert out.startswith("Not locked") and "confidential.near.encryption_library" in out and "pynacl" in out
+
+
+def test_create_client_for_attested_near_never_returns_an_unviewed_client(plugin, near):
+    """Review finding 9: Hermes builds a plain client only when create_client returns None or raises;
+    the profile returns a ConfidentialClient on the adapter's views, or a RefusingClient."""
+    profile = plugin.rt.near_profile
+    refused = profile.create_client(api_key="sk-near-seam", base_url=BASE)   # no pin yet
+    assert type(refused).__name__ == "RefusingClient"
+    plugin.slash("on attested")
+    _approve(plugin)
+    client = profile.create_client(api_key="sk-near-seam", base_url=BASE)
+    assert type(client).__name__ == "ConfidentialClient"
+    assert type(client._view._transport).__name__ == "_SyncView"
+    assert type(client._sync._client._transport).__name__ == "_SyncView"
+    import asyncio
+
+    async def go():
+        return type(client._async_client()._client._transport).__name__
+    assert asyncio.run(go()) == "_AsyncView"
+    import providers
+    providers_profile = providers.get_provider_profile("attested-near")
+    broken = providers_profile.create_client(api_key="sk-near-seam", base_url=BASE, timeout=object())
+    assert type(broken).__name__ in ("ConfidentialClient", "RefusingClient")

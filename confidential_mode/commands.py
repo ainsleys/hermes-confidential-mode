@@ -901,8 +901,10 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         for snd in near["sends"]:
             mark = "OK" if snd["verdict"] == "pass" else snd["verdict"].upper()
             tee = "provider_tee" if snd["provider_tee"] else (snd["kind"] or "no signature")
+            enc = ("  signature verified over the ciphertext digests (third-party checkable); request "
+                   "encrypted (plugin self-report)") if snd.get("encrypted") and snd["verdict"] == "pass" else ""
             out.write(f"  Row #{snd['row']}: {mark}  {tee}  id {snd['chat_id'] or '(none)'}"
-                      f"{'' if snd['verdict'] == 'pass' else '  ' + str(snd['reason'] or '')}\n")
+                      f"{'' if snd['verdict'] == 'pass' else '  ' + str(snd['reason'] or '')}{enc}\n")
             signed_failed += 0 if snd["verdict"] == "pass" else 1
         out.write("  Session fully attested: " + ("yes" if near["fully_attested"] else
                                                    "NO (not every NEAR send has a provider_tee signature that replays)")

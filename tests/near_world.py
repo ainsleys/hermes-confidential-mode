@@ -194,6 +194,13 @@ class NearWorld:
         self.gzip = False
         self.preread = False
         self._n = 0
+        # E2EE (NEAR guide, version 2): the "model" decrypts with its own key and encrypts to X-Client-Pub-Key.
+        self.decrypted_requests: list[dict] = []    # what the model saw, after decryption
+        self.e2ee_mode = "ok"       # ok | plaintext_response | tamper | swap_ephemeral | other_client | bad_hex
+        self.reply_tool_call: dict | None = None    # {"name": ..., "arguments": ...}: answer with a tool call
+        self.tool_call_content = None               # content on a tool-call turn: None, "" or "seal"
+        self.reply_text = "NEAR-FAKE-REPLY"
+        self.reply_reasoning: str | None = None
 
     # ── attestation ─────────────────────────────────────────────────────────────────────────────
     def _ok(self, payload) -> httpx.Response:
@@ -247,6 +254,77 @@ class NearWorld:
         body = json.dumps({"id": cid, "object": "chat.completion", "created": 1, "model": model,
                            "choices": [{"index": 0, "finish_reason": "stop",
                                         "message": {"role": "assistant", "content": "NEAR-FAKE-REPLY"}}],
+                           "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
+        return cid, body
+
+    # ── E2EE, the model's side ──────────────────────────────────────────────────────────────────
+    def model_x25519_secret(self) -> bytes:
+        from nacl.bindings import crypto_sign_ed25519_sk_to_curve25519
+        seed = self.model_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+                                            serialization.NoEncryption())
+        return crypto_sign_ed25519_sk_to_curve25519(seed + bytes.fromhex(pub_hex(self.model_key)))
+
+    def _e2ee_open_request(self, data: dict, headers) -> dict:
+        from confidential_mode.verify import near_e2ee as e2
+        sec = self.model_x25519_secret()
+        op = lambda v: e2.open(sec, v).decode("utf-8") if isinstance(v, str) and v else v  # noqa: E731
+        all_fields = headers.get("x-encrypt-all-fields") == "true"
+        out = json.loads(json.dumps(data))
+        for m in out.get("messages") or []:
+            m["content"] = op(m.get("content"))
+            if all_fields:
+                for k in ("name", "refusal"):
+                    if k in m:
+                        m[k] = op(m[k])
+                for tc in m.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    for k in ("name", "arguments"):
+                        if k in fn:
+                            fn[k] = op(fn[k])
+        if all_fields:
+            for t in out.get("tools") or []:
+                fn = t.get("function") or {}
+                for k in ("name", "description"):
+                    if k in fn:
+                        fn[k] = op(fn[k])
+                if "parameters" in fn:
+                    fn["parameters"] = json.loads(op(fn["parameters"]))
+            tc = out.get("tool_choice")
+            if isinstance(tc, dict):
+                tc["function"]["name"] = op(tc["function"]["name"])
+        return out
+
+    def _e2ee_completion(self, model: str, client_pub: str) -> tuple[str, bytes]:
+        from confidential_mode.verify import near_e2ee as e2
+        self._n += 1
+        cid = f"chatcmpl-{self._n}"
+        to = client_pub
+        if self.e2ee_mode == "other_client":
+            to = e2.ClientKey.generate().public_hex
+        seal = lambda text: e2.seal(to, text.encode("utf-8"))  # noqa: E731
+        msg: dict = {"role": "assistant"}
+        if self.reply_tool_call:
+            msg["content"] = seal("") if self.tool_call_content == "seal" else self.tool_call_content
+            msg["tool_calls"] = [{"id": "call_1", "type": "function",
+                                  "function": {"name": seal(self.reply_tool_call["name"]),
+                                               "arguments": seal(self.reply_tool_call["arguments"])}}]
+            finish = "tool_calls"
+        else:
+            msg["content"] = seal(self.reply_text)
+            finish = "stop"
+        if self.reply_reasoning is not None:
+            msg["reasoning_content"] = seal(self.reply_reasoning)
+        c = msg.get("content")
+        if self.e2ee_mode == "plaintext_response":
+            msg["content"] = self.reply_text
+        elif self.e2ee_mode == "tamper" and isinstance(c, str) and c:
+            msg["content"] = c[:-2] + ("00" if c[-2:] != "00" else "11")
+        elif self.e2ee_mode == "swap_ephemeral" and isinstance(c, str) and c:
+            msg["content"] = e2.ClientKey.generate().public_hex + c[64:]
+        elif self.e2ee_mode == "bad_hex" and isinstance(c, str) and c:
+            msg["content"] = "zz" + c[2:]
+        body = json.dumps({"id": cid, "object": "chat.completion", "created": 1, "model": model,
+                           "choices": [{"index": 0, "finish_reason": finish, "message": msg}],
                            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
         return cid, body
 
@@ -308,7 +386,19 @@ class NearWorld:
             data = json.loads(body)
             model = data.get("model")
             stream = data.get("stream") is True
-            cid, resp = self._sse(model) if stream else self._completion(model)
+            if request.headers.get("x-encryption-version"):
+                if request.headers.get("x-model-pub-key") != pub_hex(self.model_key):
+                    return httpx.Response(400, json={"error": {"message": "unknown model public key",
+                                                               "type": "invalid_request_error"}})
+                try:
+                    plain = self._e2ee_open_request(data, request.headers)
+                except Exception as exc:
+                    return httpx.Response(400, json={"error": {"message": f"decryption failed: {exc}",
+                                                               "type": "invalid_request_error"}})
+                self.decrypted_requests.append(plain)
+                cid, resp = self._e2ee_completion(model, request.headers["x-client-pub-key"])
+            else:
+                cid, resp = self._sse(model) if stream else self._completion(model)
             if self.stream_chunks is not None and stream:
                 resp = b"".join(self.stream_chunks)
             kind = "gateway" if stream else "provider_tee"

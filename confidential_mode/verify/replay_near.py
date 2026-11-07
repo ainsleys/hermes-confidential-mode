@@ -40,7 +40,13 @@ NOT_ESTABLISHED = (
     "token's TDX claims are the gateway's own",
     "which source code built the container images the measured docker-compose names (image provenance)",
     "that the gateway handles plaintext as its code claims: TLS terminates inside the gateway CVM, which "
-    "reads every request; the attestation says which code it runs, not what that code does",
+    "reads every request's model id, plaintext parameters, sizes and timing, and its message text too when a "
+    "send is not encrypted; the attestation says which code it runs, not what that code does",
+    "that a send marked encrypted left this host encrypted, or which fields were: that is the plugin's own "
+    "report (plugin self-report); the digests and the signature cover the ciphertext bytes, so a replay checks "
+    "the signature over the ciphertext digests (third-party checkable) and never sees the plaintext",
+    "that only an approved instance could read an encrypted request: it is encrypted to the model's signing "
+    "key, which every instance of that model shares, approved or not",
     "revocation or TCB changes after captured_at, and that captured_at is when the capture happened (the "
     "capturer asserts it)",
 )
@@ -180,6 +186,7 @@ def replay_receipt(doc: Mapping, *, quote_verifier=None, ita_roots=None) -> dict
                                  ita_roots=ita_roots, replayed=cache.get(nonce))
         tee = bool(res["verdict"] == "pass" and (res.get("signature") or {}).get("provider_tee_verified"))
         sends.append({"row": row.get("id"), "chat_id": d.get("chat_id"), "kind": res["kind"],
-                      "verdict": res["verdict"], "reason": res["reason"], "provider_tee": tee})
+                      "verdict": res["verdict"], "reason": res["reason"], "provider_tee": tee,
+                      "encrypted": d.get("encrypted") is True})
     return {"sends": sends, "all_pass": all(s["verdict"] == "pass" for s in sends),
             "fully_attested": bool(sends) and all(s["provider_tee"] for s in sends)}

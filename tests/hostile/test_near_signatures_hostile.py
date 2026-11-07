@@ -24,6 +24,9 @@ MSG = [{"role": "user", "content": "hi"}]
 
 
 def _send(world, tmp_path, *, n=1, stream=False, **kw):
+    """Plaintext mode (encrypt=False) unless a test asks: these cases test the signed-response record,
+    which must be explicit in either mode; the encrypted variants below also check the body is withheld."""
+    kw.setdefault("encrypt", False)
     ad = world.adapter(tmp_path, **kw)
     rows: list[dict] = []
     ad.event_sink = rows.append
@@ -53,6 +56,27 @@ def test_bent_signatures_are_unverified_live(tmp_path, mode, reason):
     (row,) = rows
     assert row["verdict"] == "unverified" and row["detail"]["fully_attested"] is False
     assert reason in row["detail"]["check"]["reason"], row["detail"]["check"]
+
+
+@pytest.mark.parametrize("mode", ["tamper_response", "wrong_key", "gateway_as_tee", "gateway_text_labelled_tee",
+                                  "tee_text_as_gateway", "absent_kind", "ecdsa", "bad_signature_bytes", "gateway",
+                                  "404", "unavailable", "http500"])
+def test_encrypted_response_is_withheld_unless_provider_tee_verifies(tmp_path, mode):
+    """D5: under encryption a response reaches the agent only after a verified provider_tee signature over
+    the ciphertext digests. A bent, missing or gateway-kind signature raises; the row still says why."""
+    world = NearWorld(sig_mode=mode)
+    ad = world.adapter(tmp_path)
+    rows: list[dict] = []
+    ad.event_sink = rows.append
+    ad.verify()
+    ad.release()
+    client = openai.OpenAI(api_key="sk-x", base_url=BASE, http_client=ad.sync_http_view(), max_retries=0)
+    with pytest.raises(openai.APIConnectionError) as ei:
+        client.chat.completions.create(model=MODEL, messages=MSG)
+    assert isinstance(ei.value.__cause__, VerifyError) and "withheld" in str(ei.value.__cause__)
+    (row,) = rows
+    assert row["verdict"] == "unverified" and row["detail"]["encrypted"] is True
+    assert row["detail"]["fully_attested"] is False
 
 
 def test_signature_replayed_from_another_chat_id_is_unverified(tmp_path):

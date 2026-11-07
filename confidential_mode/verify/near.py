@@ -46,6 +46,19 @@ header, retrying 404 until ``signature_wait_seconds`` (default 5 s) after the bo
 with near_checks.check_signature. A body closed before its end (an interrupted stream) gets no fetch,
 because NEAR records no signature for it. One ledger row of kind ``send_signed`` is written per
 exchange through ``event_sink``; the gate's send context (sendctx.py) supplies session and purpose.
+
+Request encryption (``encrypt``, config confidential.near.encrypt, default true; near_e2ee.py): the only
+POST that leaves is chat completions, rebuilt as a new request whose body has every field of NEAR's table
+sealed to the one verified model key (``model_public_key``), with a fresh Ed25519 client key held on the
+exchange. Streaming, non-text parts, unlisted top-level text and every other POST raise VerifyError
+before sending. The digests are over the ciphertext bytes, which is what NEAR signs (live probe,
+2026-11-07). The reply is buffered, hashed and finished first; it is decrypted and handed over only when
+the send is fully attested (a verified provider_tee signature over those digests, on the attested TLS
+connection). HTTP 421 means the gateway no longer accepts the model key: the adapter holds and asks the
+cache to re-verify.
+
+TLS: inference sends and signature fetches use pools pinned at the handshake to the SPKI fingerprint the
+accepted gateway quote binds (``pinned_ssl_context``); the attestation GETs use an unpinned pool.
 """
 from __future__ import annotations
 
@@ -82,6 +95,7 @@ DEFAULT_SIGNATURE_WAIT_SECONDS = 5.0
 SIGNABLE_SUFFIXES = ("/chat/completions", "/responses")
 NO_ALIASING_HEADER = "x-no-aliasing"
 MAX_ID_BUFFER = 8 * 1024 * 1024
+MAX_SEALED_BODY = 32 * 1024 * 1024   # an unstreamed encrypted response is buffered whole before release
 CHECK_KEYS = ("schema", "gateway_quote", "gateway_tls_binding", "ita_jwks", "ita_gateway_token",
               "model_quotes", "ita_model_tokens", "fingerprints")
 INFORMATIONAL_CHECKS = ("ita_model_tokens",)
@@ -469,7 +483,7 @@ class NearAdapter:
                  async_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
                  send_transport_factory: Callable[[], httpx.BaseTransport] | None = None,
                  quote_verifier: nc.QuoteVerifier | None = None, ita_roots: Mapping[str, str] | None = None,
-                 hold_until_accepted: bool = True, clock: Callable[[], float] = time.time,
+                 hold_until_accepted: bool = True, encrypt: bool = True, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep):
         parts = urlsplit(base_url or "")
         if parts.scheme != "https" or not parts.hostname or parts.query or parts.fragment:
@@ -482,6 +496,8 @@ class NearAdapter:
         self.require_tls_binding = bool(require_tls_binding)
         self.accepted_tcb = tuple(accepted_tcb_statuses or DEFAULT_ACCEPTED_TCB)
         self.signature_wait_seconds = max(0.0, float(signature_wait_seconds))
+        self.encrypt = bool(encrypt)   # confidential.near.encrypt; the preflight refuses a lock with it off
+        self.on_stale: Callable[[], None] | None = None   # set by the verification cache (provider.py)
         # Attestation GETs use an unpinned pool: their certificate is what the quote is checked against
         # (gateway_tls_binding). Inference sends and signature fetches (both carry the API key) use pools
         # whose every handshake is pinned to the verified gateway's TLS fingerprint. Tests inject one
@@ -707,29 +723,108 @@ class NearAdapter:
         if request.url.scheme != "https" or request.url.host != self.host:
             raise VerifyError(f"request to {request.url.host!r} is not the attested NEAR host")
 
+    def encryption_ready(self) -> tuple[bool, str]:
+        """(True, "") when request encryption can run (PyNaCl imports); else the reason."""
+        from . import near_e2ee
+        return near_e2ee.available()
+
+    def model_public_key(self, model: str | None) -> str:
+        """The one verified Ed25519 key of ``model`` (appraise refuses candidates naming different keys).
+        Requests are encrypted to it; it is taken only from a candidate that passed every check."""
+        a = self._appraisal
+        keys = (a.model_signers.get(model) if (a and model) else None) or []
+        if len(keys) != 1:
+            raise VerifyError(f"no single verified model key for {model!r}; refused before sending")
+        return keys[0]
+
+    def mark_stale(self, reason: str) -> None:
+        """The gateway says the model key this verification holds is no longer valid (HTTP 421): hold the
+        transport, drop the adapter's own acceptance and have the cache re-verify on the next call."""
+        self.hold(reason)
+        self.verified_mono = None
+        cb = self.on_stale
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                logger.warning("confidential-mode: could not invalidate the NEAR verification", exc_info=True)
+
     def begin_exchange(self, request: httpx.Request) -> "_Exchange | None":
-        if request.method != "POST" or not request.url.path.endswith(SIGNABLE_SUFFIXES):
+        """Classify one request before it is sent. Returns None for a request that carries no conversation
+        (GET), an _Exchange for a signable POST (whose ``request`` is what to send), and raises VerifyError
+        for anything refused. While encrypting, the only POST that leaves is chat completions, encrypted;
+        while ``require_provider_tee`` (or encrypting), any POST outside the signable set is refused
+        (codebase review medium 11: it would skip the model allowlist and the signature record)."""
+        path = request.url.path
+        if request.method in ("GET", "HEAD", "OPTIONS") and not request.content:
             return None
+        if request.method != "POST" or not path.endswith(SIGNABLE_SUFFIXES):
+            if self.encrypt or self.require_provider_tee:
+                raise VerifyError(f"{request.method} {path} is refused through attested-near: only chat "
+                                  "completions leave while encryption or require_provider_tee is on; "
+                                  "refused before sending")
+            return None
+        if self.encrypt and not path.endswith("/chat/completions"):
+            raise VerifyError(f"POST {path} is refused: NEAR's encryption does not cover the Responses API; "
+                              "only chat completions leave while confidential.near.encrypt is on")
         request.headers[NO_ALIASING_HEADER] = "true"
         request.headers["accept-encoding"] = "identity"
         body = request.content  # bytes for every request the OpenAI client builds (read() was called)
-        model, stream = None, False
+        model, stream, parsed = None, False, None
         try:
             parsed = json.loads(body)
             model = parsed.get("model") if isinstance(parsed.get("model"), str) else None
             stream = parsed.get("stream") is True
         except Exception:
-            pass
+            parsed = None
         if self.require_provider_tee and model not in self.models:
             raise VerifyError(f"model {model!r} is not an attested NEAR model on the allowlist "
                               "(confidential.near.models); refused before sending")
         acc = self._accepted
-        return _Exchange(adapter=self, path=request.url.path, model=model, stream=stream,
-                         request_sha256=hashlib.sha256(body).hexdigest(), request_bytes=len(body),
-                         authorization=request.headers.get("authorization"), context=sendctx.current() or {},
-                         attestation_nonce=((acc.evidence or {}).get("nonce") if acc else None),
-                         code_fingerprint=acc.code_fingerprint if acc else None,
-                         responses_api=request.url.path.endswith("/responses"))
+        ex = _Exchange(adapter=self, path=path, model=model, stream=stream,
+                       request_sha256="", request_bytes=0,
+                       authorization=request.headers.get("authorization"), context=sendctx.current() or {},
+                       attestation_nonce=((acc.evidence or {}).get("nonce") if acc else None),
+                       code_fingerprint=acc.code_fingerprint if acc else None,
+                       responses_api=path.endswith("/responses"))
+        if self.encrypt:
+            request, body = self._encrypt(request, parsed, model, stream, ex)
+        ex.request = request
+        ex.request_sha256, ex.request_bytes = hashlib.sha256(body).hexdigest(), len(body)
+        return ex
+
+    def _encrypt(self, request: httpx.Request, parsed: Any, model: str | None, stream: bool,
+                 ex: "_Exchange") -> tuple[httpx.Request, bytes]:
+        """A new request carrying the encrypted body (plan section 3). Any failure raises VerifyError
+        before a byte is sent; nothing is ever sent in plaintext instead."""
+        from . import near_e2ee as e2
+        try:
+            if not isinstance(parsed, dict):
+                raise VerifyError("the request body is not a JSON object")
+            if stream:
+                raise VerifyError("streaming is refused while encrypting: NEAR signs streamed completions "
+                                  "with the gateway key only, so decrypted streamed output would be "
+                                  "unauthenticated (send unstreamed)")
+            model_pub = self.model_public_key(model)
+            client = e2.ClientKey.generate()
+            new_body, report = e2.encrypt_request(parsed, model_pub)
+            raw = json.dumps(new_body, ensure_ascii=False).encode("utf-8")
+            headers = httpx.Headers({k: v for k, v in request.headers.multi_items()
+                                     if k.lower() not in ("content-length", "transfer-encoding")})
+            for k, v in e2.request_headers(client.public_hex, model_pub).items():
+                headers[k] = v
+            headers["accept-encoding"] = "identity"
+            new = httpx.Request(request.method, request.url, headers=headers, content=raw,
+                                extensions=dict(request.extensions))
+        except VerifyError as exc:
+            raise VerifyError(f"NEAR request refused before sending: {exc}") from exc
+        except e2.E2EEError as exc:
+            raise VerifyError(f"NEAR request refused before sending: {exc}") from exc
+        except Exception as exc:
+            raise VerifyError(f"NEAR request refused before sending: encryption failed "
+                              f"({type(exc).__name__})") from exc
+        ex.encrypted, ex.client_key, ex.model_pub, ex.e2ee_report = True, client, model_pub, report
+        return new, raw
 
     def fetch_signature(self, chat_id: str, authorization: str | None, *, deadline: float) -> dict:
         """{"status": "fetched", "json": {...}} or {"status": "missing"/"unavailable"/"error", "reason": ...}."""
@@ -815,6 +910,14 @@ class NearAdapter:
             "fully_attested": fully, "attestation_nonce": ex.attestation_nonce,
             "verify_code_fingerprint": ex.code_fingerprint, "tls_spki_sha256": ex.tls_spki_sha256,
             "tls_matches_attested": ex.tls_matches,
+            # Request encryption (plugin self-report): which fields left as ciphertext, to which model key.
+            "encrypted": ex.encrypted,
+            "encrypted_fields": list((ex.e2ee_report or {}).get("encrypted_fields") or []),
+            "encrypted_field_count": (ex.e2ee_report or {}).get("encrypted_count", 0),
+            "dropped_fields": list((ex.e2ee_report or {}).get("dropped_fields") or []),
+            "encryption_version": (ex.e2ee_report or {}).get("encryption_version") if ex.encrypted else None,
+            "client_pub": ex.client_key.public_hex if ex.client_key is not None else None,
+            "model_pub": ex.model_pub,
             "hashing": "sha256 of the exact request body; sha256 of the response body as received after content "
                        "decoding (SSE framing and [DONE] included)",
         }
@@ -824,6 +927,7 @@ class NearAdapter:
                "host": self.host, "model": ex.model or "", "bytes": ex.request_bytes,
                "tier": ctx.get("tier"), "verdict": check["verdict"],
                "decision": (check["kind"] or "missing") if data is not None else "missing", "detail": detail}
+        ex.detail = detail
         sink = self.event_sink
         if sink is not None:
             try:
@@ -872,6 +976,14 @@ class _Exchange:
     _decoder: Any = None
     _tail: bytes = b""
     saw_done: bool = False
+    request: Any = None                 # the httpx.Request actually sent (the encrypted one when encrypting)
+    encrypted: bool = False
+    client_key: Any = field(default=None, repr=False)   # this exchange's Ed25519 key; memory only
+    model_pub: str | None = None
+    e2ee_report: dict | None = None
+    detail: dict | None = None          # the send_signed row detail, once finished
+    keep_body: bool = False
+    body: bytearray = field(default_factory=bytearray)
 
     def on_response(self, response: httpx.Response) -> None:
         self.status = response.status_code
@@ -902,6 +1014,10 @@ class _Exchange:
             return
         self._hash.update(data)
         self.response_bytes += len(data)
+        if self.keep_body:
+            if len(self.body) + len(data) > MAX_SEALED_BODY:
+                raise VerifyError("encrypted NEAR response exceeds the buffer bound; refused")
+            self.body.extend(data)
         if self.stream and not self.saw_done:
             window = self._tail + data
             self.saw_done = b"data: [DONE]" in window
@@ -981,6 +1097,91 @@ def _already_read(response: httpx.Response, ex: "_Exchange") -> bool:
     return True
 
 
+_DROP_ON_RELEASE = ("content-length", "content-encoding", "transfer-encoding")
+
+
+def _release_sealed(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Response) -> httpx.Response:
+    """The tail of an encrypted exchange, after the body was buffered, hashed, completed and finished
+    (signature fetched and judged): refuse unless the send is fully attested (a verified provider_tee
+    signature over these ciphertext digests, over the attested TLS connection), then decrypt and hand back
+    a new response without the stale length and encoding headers. Never a synthesised status."""
+    from . import near_e2ee as e2
+    body = bytes(ex.body)
+    ex.body = bytearray()
+    try:
+        status = response.status_code
+        if status == 421:
+            adapter.mark_stale("NEAR reports the model encryption key is no longer valid (HTTP 421); re-verifying")
+            raise VerifyError("NEAR refused this exchange's model key (HTTP 421: the key is no longer valid); "
+                              "the verification was invalidated and the next call re-verifies")
+        headers = [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _DROP_ON_RELEASE]
+        if status != 200:
+            # An error carries no ciphertext and no conversation; the SDK raises on it.
+            return httpx.Response(status, headers=headers, content=body, extensions=response.extensions)
+        detail = ex.detail or {}
+        if detail.get("fully_attested") is not True:
+            reason = (detail.get("check") or {}).get("reason") or "no verified provider_tee signature"
+            raise VerifyError(f"NEAR response withheld: decrypted output is released only after a verified "
+                              f"provider_tee signature over the ciphertext ({reason})"[:400])
+        try:
+            plain, _report = e2.decrypt_response(json.loads(body), ex.client_key)
+        except ValueError as exc:  # E2EEError and JSONDecodeError
+            raise VerifyError(f"NEAR response refused: {exc}"[:400]) from exc
+        return httpx.Response(200, headers=headers, content=json.dumps(plain, ensure_ascii=False).encode("utf-8"),
+                              extensions=response.extensions)
+    finally:
+        ex.client_key = None
+
+
+def _sealed_sync(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Response) -> httpx.Response:
+    ex.keep_body = True
+    try:
+        if hasattr(response, "_content"):           # a body already in memory, already content-decoded
+            ex._decoder = None
+            ex._take(response._content)
+        else:
+            for chunk in response.stream:
+                ex.feed(chunk)
+        ex.complete()
+    except BaseException as exc:
+        ex.finish(f"{type(exc).__name__} while reading the body")
+        ex.client_key = None
+        raise
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+    ex.finish()
+    return _release_sealed(adapter, ex, response)
+
+
+async def _sealed_async(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Response, finish) -> httpx.Response:
+    ex.keep_body = True
+    try:
+        if hasattr(response, "_content"):
+            ex._decoder = None
+            ex._take(response._content)
+        else:
+            async for chunk in response.stream:
+                ex.feed(chunk)
+        ex.complete()
+    except BaseException as exc:
+        await finish(f"{type(exc).__name__} while reading the body")
+        ex.client_key = None
+        raise
+    finally:
+        try:
+            await response.aclose()
+        except Exception:
+            pass
+    await finish()
+    if not ex.finished:
+        ex.client_key = None
+        raise VerifyError("NEAR response withheld: the signature step did not finish in time")
+    return _release_sealed(adapter, ex, response)
+
+
 class _SyncView(httpx.BaseTransport):
     def __init__(self, adapter: NearAdapter):
         self._adapter = adapter
@@ -991,10 +1192,12 @@ class _SyncView(httpx.BaseTransport):
         a._check_request(request)
         request.read()
         ex = a.begin_exchange(request)
-        response = a._pool().handle_request(request)
+        response = a._pool().handle_request(ex.request if ex is not None else request)
         if ex is None:
             return response
         ex.on_response(response)
+        if ex.encrypted:
+            return _sealed_sync(a, ex, response)
         if _already_read(response, ex):
             ex.finish()
             return response
@@ -1042,14 +1245,10 @@ class _AsyncView(httpx.AsyncBaseTransport):
         a._check_request(request)
         await request.aread()
         ex = a.begin_exchange(request)
-        response = await a._async_pool().handle_async_request(request)
+        response = await a._async_pool().handle_async_request(ex.request if ex is not None else request)
         if ex is None:
             return response
         ex.on_response(response)
-        if _already_read(response, ex):
-            await asyncio.wait_for(asyncio.to_thread(ex.finish), a.signature_wait_seconds + 5.0)
-            return response
-        inner = response.stream
 
         async def finish(reason=None):
             if ex.finished:
@@ -1058,6 +1257,13 @@ class _AsyncView(httpx.AsyncBaseTransport):
                 await asyncio.wait_for(asyncio.to_thread(ex.finish, reason), a.signature_wait_seconds + 5.0)
             except Exception:
                 logger.warning("confidential-mode: NEAR signature step timed out", exc_info=True)
+
+        if ex.encrypted:
+            return await _sealed_async(a, ex, response, finish)
+        if _already_read(response, ex):
+            await asyncio.wait_for(asyncio.to_thread(ex.finish), a.signature_wait_seconds + 5.0)
+            return response
+        inner = response.stream
 
         class _Hashing(httpx.AsyncByteStream):
             def __init__(self_inner):

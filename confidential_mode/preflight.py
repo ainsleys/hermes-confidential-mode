@@ -529,6 +529,11 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                                  f"the {TERMINAL_BACKEND_ENV} environment variable; with no key, unset the variable)",
                                  env_backend))
 
+    # NEAR request encryption (W11, Amendment 5.1): every attested-near route speaks chat completions,
+    # encryption is on in the config and in the running adapter, and its library imports.
+    if tier == Tier.ATTESTED:
+        _near_encryption_items(config, tasks, plugins, add, provider_lookup)
+
     # attested profile presence
     if tier == Tier.ATTESTED:
         name = _s(attested_profile)
@@ -548,6 +553,56 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                            fingerprint=config_fingerprint(config, plugin_aux_tasks=plugin_aux_tasks,
                                                           builtin_aux_tasks=builtins, terminal_env=terminal_env),
                            aux_tasks=tuple(tasks))
+
+
+_NEAR = "attested-near"
+_CHAT_MODES = frozenset({"", "chat_completions"})
+
+
+def _near_encryption_items(config: Mapping, tasks: Sequence[str], plugins: Mapping[str, dict], add,
+                           provider_lookup: Callable[[str], object | None]) -> None:
+    block = _main_block(config)
+    routes = []
+    if _s(block.get("provider")).lower() == _NEAR:
+        routes.append(("model.api_mode", block.get("api_mode")))
+    for task in tasks:
+        cfg = _effective_aux(config, task, plugins)
+        if _s(cfg.get("provider")).lower() == _NEAR:
+            routes.append((f"auxiliary.{task}.api_mode", cfg.get("api_mode")))
+    deleg = config.get("delegation") if isinstance(config.get("delegation"), Mapping) else {}
+    if _s(deleg.get("provider")).lower() == _NEAR:
+        routes.append(("delegation.api_mode", deleg.get("api_mode")))
+    if not routes:
+        return
+    for key, mode in routes:
+        if _s(mode).lower() not in _CHAT_MODES:
+            add(key, mode, OFF_TIER, f"remove {key} or set it to chat_completions: NEAR encrypts chat completions "
+                                     "only, and the attested-near transport refuses every other API")
+    near_cfg = (config.get("confidential") or {}).get("near") if isinstance(config.get("confidential"), Mapping) else None
+    configured = near_cfg.get("encrypt", True) if isinstance(near_cfg, Mapping) else True
+    try:
+        profile = provider_lookup(_NEAR)
+    except Exception:
+        profile = None
+    adapter = getattr(profile, "_confidential_adapter", None)
+    running = getattr(adapter, "encrypt", None)
+    enc_fix = ("remove confidential.near.encrypt (default true) or set it to true, then restart Hermes: the "
+               "attested tier never sends NEAR requests unencrypted")
+    if _falsy(configured) or configured is None or running is False:
+        shown = configured if running is not False else f"{configured} (running adapter: off)"
+        add("confidential.near.encrypt", shown, OFF_TIER, enc_fix)
+    else:
+        add("confidential.near.encrypt", configured, IN_TIER)
+    try:
+        ready = adapter.encryption_ready() if callable(getattr(adapter, "encryption_ready", None)) else None
+        if ready is None:
+            from .verify.near_e2ee import available
+            ready = available()
+        ok, reason = bool(ready[0]), str(ready[1] or "")
+    except Exception as exc:
+        ok, reason = False, f"encryption check failed ({type(exc).__name__})"
+    add("confidential.near.encryption_library", "pynacl==1.6.*", IN_TIER if ok else MISSING,
+        reason or "install pynacl==1.6.* into Hermes' environment (docs/RUNNING_TESTS.md)")
 
 
 # ── fingerprint ──────────────────────────────────────────────────────────────────────────────────
