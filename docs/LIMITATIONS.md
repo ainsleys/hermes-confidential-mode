@@ -411,7 +411,7 @@ gateway and each NEAR-operated model run in Intel TDX virtual machines, which NE
 inside the model's CVM over `<model id>:<SHA-256 of the request body>:<SHA-256 of the response body>`.
 A `gateway` signature is made inside the gateway's CVM over `<request hash>:<response hash>` only.
 
-**The gap.** Seven things stay open after every NEAR check passes.
+**The gap.** Nine things stay open after every NEAR check passes.
 
 - **A gateway signature says nothing about the model.** The gateway signs its own output whenever it
   rewrites the bytes: on every streamed completion, when it resolves a model alias, and on the
@@ -432,9 +432,18 @@ A `gateway` signature is made inside the gateway's CVM over `<request hash>:<res
 - **The GPU verdict is not tied to the model CVM.** Intel Trust Authority's "model provider" token
   carries an NVIDIA GPU verdict next to TDX claims that are the gateway's own. Nothing in that token
   names the model CVM.
-- **The gateway reads your text.** TLS ends inside the gateway's CVM, which then reads the request to
-  route it. The attestation says which code the gateway runs. It does not say what that code does with
-  the text.
+- **The gateway still reads part of each request.** TLS ends inside the gateway's CVM, which then reads
+  the request to route it. With request encryption on (`confidential.near.encrypt`, the default), the
+  message text, tool definitions and tool calls reach the gateway as ciphertext. The gateway still reads
+  the model id, the plaintext parameters (for example `max_tokens`, `stop`, `response_format`, `user`
+  and `metadata`), the sizes and the timing. With encryption off it reads the whole request. The
+  attestation says which code the gateway runs. It does not say what that code does with what it reads.
+- **Encryption names a key, not an instance.** The plugin encrypts each request to the model key that it
+  verified in the attestation report. Every instance of that model shares that key, approved or not. So
+  the encryption does not establish that only an approved instance could read the request.
+- **"Encrypted" is the plugin's own report.** The ledger and the receipt say which fields left as
+  ciphertext. A third party can check the signature, and the signature covers the digests of the
+  ciphertext. Nobody but this host saw the plaintext, so nobody else can confirm that it was encrypted.
 
 **Why it exists.** These are properties of NEAR's protocol as NEAR documents it (docs.near.ai,
 verification pages, read 2026-11-07). They are not Hermes gaps.
@@ -446,10 +455,23 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   Incognito mode, with gateway signatures only. A request for one could reach a hosted provider behind
   the gateway, such as Anthropic or OpenAI.
 - It sends main calls unstreamed, so that a NEAR-operated model can sign them with `provider_tee`.
-  The setting is `confidential.near.streaming`, default false.
+  The setting is `confidential.near.streaming`, default false. While encryption is on, the plugin
+  refuses a streamed request before it is sent, whatever that setting says.
+- It encrypts every chat request to the verified model key before it leaves this host (NEAR's
+  encryption, version 2, with all fields on). It refuses the attested-tier lock while
+  `confidential.near.encrypt` is false, while an attested-near route sets an `api_mode` other than chat
+  completions, or while the `pynacl` package is missing. Before sending, it refuses image and other
+  non-text message parts, any POST other than chat completions, and any top-level request key that
+  would carry text in plaintext. NEAR's gateway would accept a request with a plaintext image part
+  (live probe, 2026-11-07). Refusing it is this plugin's policy.
+- It checks the TLS certificate of every inference and signature connection right after the
+  handshake, before any request byte is sent. The certificate's key must be the one the gateway's
+  quote binds. A send over any other certificate is refused.
 - It records every send's digests and signature in a `send_signed` ledger row. A send without a
   `provider_tee` signature that verifies is marked unverified, and the receipt says "SESSION NOT FULLY
-  ATTESTED". The send is not refused, because the response has already arrived when the signature is
+  ATTESTED". With encryption on, the reply of such a send never reaches the agent: the plugin decrypts
+  a reply only after a verified `provider_tee` signature over the encrypted bytes. With encryption
+  off, the send is not refused, because the response has already arrived when the signature is
   fetched.
 - It pins the measured docker-compose of the gateway and of every model instance it saw. A new
   instance with a different compose is a pin prompt. With two instances behind one model, you may be

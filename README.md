@@ -414,7 +414,9 @@ The plugin checks six things.
 - Each report's measured configuration matches the **docker-compose file** the report carries. The
   docker-compose file lists the container images the CVM runs.
 - The gateway's report names the TLS certificate this connection used. TLS is the encryption that
-  HTTPS uses. So the plugin knows the encrypted connection ends inside the gateway's CVM.
+  HTTPS uses. So the plugin knows the encrypted connection ends inside the gateway's CVM. The plugin
+  checks every later connection, for inference and for signatures, against that certificate. It does
+  so right after the TLS handshake, before it sends any byte of the request.
 - Intel Trust Authority, a service Intel runs, has signed a token that says the gateway's hardware is
   up to date. The plugin checks Intel's signature against Intel's published keys.
 
@@ -444,8 +446,42 @@ its end gets no signature at all. The ledger row then says so.
 
 `confidential.near.require_provider_tee` is true by default. A send whose signature is of the
 `gateway` kind, or is missing, is then recorded as unverified. The receipt then says the session is
-not fully attested. The send is not refused, because the response has already arrived when the
+not fully attested. With request encryption on, the reply of such a send never reaches the agent.
+With encryption off, the send is not refused, because the response has already arrived when the
 signature is checked.
+
+### Request encryption
+
+NEAR offers its own encryption of request fields, which it calls E2EE. The plugin uses version 2 of
+it, with every field NEAR covers. The setting is `confidential.near.encrypt`, and it is true by
+default. The attested-tier lock is refused while it is false.
+
+The plugin encrypts each chat request to the model's key. That key is the one the plugin verified in
+the model's attestation report. The message text, the tool definitions and the tool calls then leave
+this host as ciphertext. NEAR's model server encrypts its reply to a key the plugin makes for that one
+request.
+
+The plugin decrypts a reply only after NEAR's `provider_tee` signature over the encrypted bytes has
+verified. Anyone can encrypt a reply to the plugin's key, because that key is sent with the request,
+so decryption alone proves nothing.
+
+What this establishes, and what it does not:
+
+- The request left this host as ciphertext for the listed fields. It can be read by any holder of the
+  model key, which the plugin verified. Every instance of the model shares that key, approved or not.
+- The gateway no longer reads the message text. It still reads the model id, the plaintext
+  parameters, the sizes and the timing.
+- That a request was encrypted is the plugin's own report. The receipt says "plugin self-report" for
+  it. The signature check is different: anyone can re-check it from the receipt.
+
+The plugin refuses some requests before they are sent. It refuses images and other non-text parts in
+a message, because NEAR's encryption covers only text. It refuses streaming, because NEAR signs
+streamed replies with the gateway's key only. It refuses every NEAR API other than chat completions. So an image task, such as `auxiliary.vision`,
+cannot use `attested-near` while encryption is on.
+
+Encryption needs the `pynacl` package in the environment that runs Hermes. See
+[docs/RUNNING_TESTS.md](docs/RUNNING_TESTS.md). Without it, the lock is refused, and no request is
+sent unencrypted instead.
 
 ### What a receipt shows
 

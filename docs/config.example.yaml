@@ -101,8 +101,19 @@ confidential:
     require_provider_tee: true
 
     # true: the TLS certificate of the attestation connection must be the one the gateway's report
-    # binds. Default true.
+    # binds. Every inference and signature connection is also checked against that certificate's key
+    # right after the handshake, before any request byte is sent. A send over any other certificate is
+    # refused, or recorded as unverified when the certificate cannot be read. Default true.
     require_tls_binding: true
+
+    # true: every chat request is encrypted to the attested model's key before it leaves this host
+    # (NEAR's encryption, version 2, with all fields on). The gateway then sees the model id, the
+    # plaintext parameters, sizes and timing, not the message text. The plugin refuses, before sending:
+    # image or other non-text message parts, streaming, any POST other than chat completions, and any
+    # top-level request key that would carry text in plaintext. A reply is decrypted only after a
+    # verified provider_tee signature over the encrypted bytes. Needs the pynacl package
+    # (docs/RUNNING_TESTS.md). The attested-tier lock is refused while this is false. Default true.
+    encrypt: true
 
     # Intel TCB status values accepted for the gateway, from Intel Trust Authority's token.
     # Default [UpToDate].
@@ -113,7 +124,8 @@ confidential:
     signature_wait_seconds: 5
 
     # false: Hermes sends main calls unstreamed. NEAR's gateway re-signs streamed responses with its
-    # own key, so only unstreamed responses can carry a provider_tee signature. Default false.
+    # own key, so only unstreamed responses can carry a provider_tee signature. This key has no effect
+    # while encrypt is true: streaming is then always off. Default false.
     streaming: false
 
     # The context window reported to Hermes for attested-near (no /models probe). Default 65536.

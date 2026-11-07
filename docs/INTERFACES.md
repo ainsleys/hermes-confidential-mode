@@ -212,6 +212,44 @@ NEAR verification (`NearAdapter.verify`, one client nonce N per verify; attestat
 
 Signed responses: every POST to `/chat/completions` or `/responses` through the NEAR views is sent with `x-no-aliasing: true` and `accept-encoding: identity`; with `require_provider_tee` a model off the allowlist is refused before sending. The view hashes the exact request body and the response body as received (after any content decoding; for SSE every byte including `data:` framing, blank lines and `[DONE]`; after the OpenAI SDK stops at `[DONE]` the view drains the rest before hashing). When the body ends it fetches `GET /v1/signature/<id>?signing_algo=ed25519` with the request's own Authorization header, retrying 404 for at most `confidential.near.signature_wait_seconds` (default 5), and writes one `send_signed` row: chat id, digests, sizes, status, content encoding, signature hex, kind, signing key, signed text, the check (`verdict` verified/unverified with the reason), `require_provider_tee`, `fully_attested`, the attestation nonce that ties it to its evidence, and the TLS SPKI seen. An interrupted body gets no fetch and a row saying so. `attested-near` reports `supports_streaming: False` (config `confidential.near.streaming`, default false) because NEAR's gateway re-signs streamed completions with its own key.
 
+## Amendment 5.1 (2026-11-07): NEAR request encryption, the per-send TLS pin, the model-key binding
+
+Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only. Amendment 6 holds the codebase-review fixes; W12 takes 7.
+
+- New file `verify/near_e2ee.py`: NEAR E2EE version 2 (docs.near.ai/cloud/guides/e2ee-chat-completions,
+  read 2026-11-07), `seal`, `open`, `encrypt_request`, `decrypt_response`, `available`, `ClientKey`.
+  Dependency `pynacl==1.6.*` (pyproject; installed by hand, docs/RUNNING_TESTS.md).
+- Config `confidential.near.encrypt` (default true). `NearAdapter(encrypt=...)`, `encryption_ready()`,
+  `model_public_key(model)`, `mark_stale(reason)`, `on_stale` (wired by `VerificationCache.register`
+  to `invalidate`), `pinned_spki()`, `default_send_transport()`, `default_async_transport()`, and the
+  `send_transport_factory` argument. `supports_streaming` is false while encrypting.
+- Transport contract while encrypting: GET passes; the only POST is `/chat/completions`, rebuilt as a new
+  `httpx.Request` (encrypted body, fresh Content-Length, the original headers and extensions, the E2EE
+  headers with `X-Encrypt-All-Fields: true`); `stream: true`, non-text content parts, top-level keys
+  outside `near_e2ee.PLAINTEXT_KEYS` that carry text, `logprobs`, and every other POST raise
+  `VerifyError` before sending. While `require_provider_tee` (encrypting or not), POSTs outside the
+  signable set raise too. An unstreamed reply is buffered, hashed, completed, finished (signature fetch
+  and verdict); it is released only when the row is `fully_attested`, then decrypted, without
+  `content-length`/`content-encoding`. HTTP 421 (the gateway no longer accepts the model key) raises
+  `VerifyError`, holds the adapter and invalidates the cache entry. Errors other than 421 pass as errors.
+  Nothing is retried and no status is synthesised.
+- TLS pin: inference and signature connections use pools whose SSL context checks the peer SPKI SHA-256
+  against `pinned_spki()` right after the handshake (`pinned_ssl_context`). Attestation GETs keep an
+  unpinned pool. `check.tls_verified` joins the send check; a send whose certificate differs, or cannot be
+  read while `require_tls_binding`, is `unverified` and not `fully_attested`.
+- `near_checks.check_report(require_signing_public_key=)`: model candidates need `signing_public_key ==
+  signing_address`, 32 bytes of lower-case hex. `appraise` refuses a model whose verified candidates name
+  different keys; equal keys are one signer (`model_signers` lists unique keys). `Appraisal.cvms` and
+  `claims.cvms` record role, app_id, instance_id, compose_hash and signer per CVM.
+- `send_signed` detail gains `encrypted`, `encrypted_fields` (paths with `[]` for indices),
+  `encrypted_field_count`, `dropped_fields`, `encryption_version`, `client_pub`, `model_pub`.
+- Receipts: `near_sends[]` gains `encrypted`, `encrypted_fields`, `encryption_version`, `model_pub`; a
+  receipt with an encrypted send carries `near_encryption_note` (a constant, checked by `verify_chain`
+  when present). `replay_receipt` sends gain `encrypted`. `replay_near.NOT_ESTABLISHED` gains two items.
+- Preflight (attested tier, any attested-near route): `<route>.api_mode` must be chat completions;
+  `confidential.near.encrypt` must not be false in the config or in the running adapter;
+  `confidential.near.encryption_library` is `missing` when PyNaCl does not import.
+
 ## Amendment 6 (2026-11-07, after the independent codebase review): contract changes
 
 Each item names the review finding it resolves.
