@@ -692,3 +692,34 @@ def test_cli_verbs_parse(plugin):
     assert (a.session, a.json) == ("s1", True)
     assert parser.parse_args(["allow", "web_search"]).tool == "web_search"
     assert parser.parse_args(["off"]).confidential_action == "off"
+
+
+def test_near_setup_block_routes_no_vision_through_near(plugin, capsys):
+    """With encryption on, the NEAR transport refuses every image part, so `setup --vendor near` leaves
+    auxiliary.vision unset and prints a note naming the in-tier choices; every other task is on NEAR."""
+    out, cfg = _setup_block(plugin, capsys, "--vendor", "near", "--model", "Qwen/Qwen3.8-27B")
+    aux = cfg["auxiliary"]
+    assert cfg["model"] == {"provider": "attested-near", "default": "Qwen/Qwen3.8-27B"}
+    assert "vision" not in aux
+    assert aux and all(v == {"provider": "attested-near", "model": "Qwen/Qwen3.8-27B"} for v in aux.values())
+    assert cfg["confidential"]["near"]["models"] == ["Qwen/Qwen3.8-27B"]
+    assert out.index("auxiliary.vision is left unset") < out.index("# Add to config.yaml")
+    assert "# vision: not set here, and not routed through attested-near." in out
+    assert "#   vision: {provider: attested-tinfoil, model: gemma4-31b}" in out
+    locking = _sub(plugin, "locking")
+
+    def preflight(c):
+        return locking.run_tier_preflight("attested", config=c,
+                                          predicate=locking.structural_predicate("attested", config=c))
+    # As printed, the attested preflight refuses on vision alone, which is what the note says.
+    report = preflight(cfg)
+    failing = [i.key for i in report.items if i.verdict not in ("in_tier", "on_host", "disabled")]
+    assert failing == ["auxiliary.vision.provider"], failing
+    # Either in-tier choice the note names then passes the preflight structurally.
+    for vision in ({"provider": "attested-tinfoil", "model": "gemma4-31b"},
+                   {"provider": "attested-near", "model": "Qwen/Qwen3.8-27B"}):
+        fixed = {**cfg, "auxiliary": {**aux, "vision": vision}}
+        report = preflight(fixed)
+        assert report.ok, _sub(plugin, "preflight").format_report(report)
+    out, _ = _setup_block(plugin, capsys, "--vendor", "near", "--model", "m", "--vision-model", "v")
+    assert "#   vision: {provider: attested-tinfoil, model: v}" in out
