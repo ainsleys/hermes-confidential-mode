@@ -1002,10 +1002,20 @@ def _refusal_recorder(profile, cache: "VerificationCache | None" = None):
     return write
 
 
+#: The refusal reason when a client is built with no API key from any source (Amendment 11). The lock checks the
+#: key; a process that cannot read the key later (a service without the variable, a multiplexed gateway) refuses
+#: each call with this reason and a send_refused row, never a breach: nothing left the tier.
+REASON_KEY_UNREADABLE = "vendor key unreadable"
+
+
 def _create_client(profile, cache: VerificationCache, client_kwargs: dict):
-    api_key = client_kwargs.get("api_key") or api_key_for(getattr(profile, "_confidential_env_var", API_KEY_ENV))
+    env_var = getattr(profile, "_confidential_env_var", API_KEY_ENV)
+    api_key = client_kwargs.get("api_key") or api_key_for(env_var)
     base_url = profile.base_url
     on_refuse = _refusal_recorder(profile, cache)
+    if not (isinstance(api_key, str) and api_key.strip()):
+        return RefusingClient(f"{REASON_KEY_UNREADABLE}: {env_var} is not set or not readable in this process",
+                              base_url=base_url, on_refuse=on_refuse)
     try:
         ok, reason, _ = cache.ensure(profile.name)
         base_url = profile.base_url  # may have just been resolved from the placeholder

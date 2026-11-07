@@ -279,21 +279,58 @@ def secure_file(path: str | Path) -> None:
         pass
 
 
-def secure_data_files(roots: Iterable[str | Path], *, max_files: int = 10000) -> int:
+def secure_data_files(roots: Iterable[str | Path], *, max_files_per_root: int = 5000) -> int:
     """chmod 0600 every regular file under the plugin's data directories (existing installs created some
-    files 0644). Symlinks are not followed. Returns how many files were looked at. Never raises."""
+    files 0644), at most ``max_files_per_root`` per directory, so a large cache in one directory never keeps the
+    walk from the other. Symlinks are not followed. Returns how many files were looked at. Never raises. POSIX
+    only: on Windows chmod sets the read-only flag and nothing else."""
     seen = 0
     for root in roots:
+        here = 0
         try:
             for dirpath, _dirs, files in os.walk(str(root), followlinks=False):
                 for name in files:
                     secure_file(Path(dirpath) / name)
                     seen += 1
-                    if seen >= max_files:
-                        return seen
+                    here += 1
+                    if here >= max_files_per_root:
+                        break
+                if here >= max_files_per_root:
+                    break
         except Exception:
             continue
     return seen
+
+
+MODES_MARKER = "modes-checked"
+
+
+def needs_mode_walk(state_dir: Path, ledger_dir: Path, commit: str) -> bool:
+    """Whether the start-up chmod walk is due: once per installed commit (``modes-checked`` in the state
+    directory), or whenever a file the plugin always keeps has a wrong mode. Never raises."""
+    try:
+        if (Path(state_dir) / MODES_MARKER).read_text(encoding="utf-8").strip() != commit:
+            return True
+    except Exception:  # noqa: BLE001
+        return True
+    for f in (Path(ledger_dir) / LEDGER_FILENAME, Path(state_dir) / "pins.yaml", Path(state_dir) / "allowlist.yaml"):
+        try:
+            if f.is_file() and (f.stat().st_mode & 0o777) != DATA_FILE_MODE:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def mark_mode_walk(state_dir: Path, commit: str) -> None:
+    try:
+        path = Path(state_dir) / MODES_MARKER
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, DATA_FILE_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(commit + "\n")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _create_private(path: Path) -> None:

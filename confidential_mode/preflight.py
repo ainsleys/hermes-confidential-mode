@@ -287,14 +287,56 @@ def _falsy(value: Any) -> bool:
 ATTESTED_KEY_ENVS = {"attested-tinfoil": "TINFOIL_API_KEY", "attested-near": "NEAR_AI_API_KEY"}
 
 
-def api_key_present(env_var: str) -> bool:
-    """Whether Hermes' secret scope holds a non-empty ``env_var`` (agent.secret_scope.get_secret, as
-    provider.api_key_for reads it). Any error counts as absent. The value is never returned or logged."""
+KEY_SET, KEY_NOT_SET, KEY_UNSCOPED = "set", "not set", "not readable in this scope"
+
+
+def _route_api_keys(config: Mapping, profile: str) -> bool:
+    """Whether a route that names ``profile`` carries its own non-empty ``api_key`` (model.api_key, an
+    auxiliary task's, a fallback entry's or delegation's). Only presence is read."""
+    blocks: list = [_main_block(config)]
+    for cfg in _aux_section(config).values():
+        if isinstance(cfg, Mapping):
+            blocks.append(cfg)
+            chain = cfg.get("fallback_chain")
+            blocks.extend(e for e in (chain if isinstance(chain, list) else []) if isinstance(e, Mapping))
+    if isinstance(config.get("delegation"), Mapping):
+        blocks.append(config["delegation"])
+    return any(_s(b.get("provider")).lower() == profile and bool(_s(b.get("api_key"))) for b in blocks)
+
+
+def key_state(profile: str, env_var: str, config: Mapping | None = None) -> str:
+    """Whether the attested profile has an API key from any source Hermes hands the provider: Hermes' secret
+    scope (``agent.secret_scope.get_secret``, as provider.api_key_for reads it), a route's ``api_key`` in
+    config, or Hermes' credential pool for the profile (``hermes auth``; ``agent.credential_pool``). Returns
+    KEY_SET, KEY_NOT_SET, or KEY_UNSCOPED when the secret scope refuses the read in this process (a
+    multiplexed gateway with no scope) and no other source has a key. Never the value or its length."""
+    unscoped = False
     try:
         from agent.secret_scope import get_secret
-        return bool((get_secret(env_var) or "").strip())
-    except Exception:
-        return False
+        try:
+            if (get_secret(env_var) or "").strip():
+                return KEY_SET
+        except Exception as exc:  # noqa: BLE001
+            if type(exc).__name__ == "UnscopedSecretError":
+                unscoped = True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if _route_api_keys(config if isinstance(config, Mapping) else {}, profile):
+            return KEY_SET
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from agent.credential_pool import load_pool
+        if load_pool(profile).has_credentials():
+            return KEY_SET
+    except Exception:  # noqa: BLE001
+        pass
+    return KEY_UNSCOPED if unscoped else KEY_NOT_SET
+
+
+def api_key_present(env_var: str, profile: str = "", config: Mapping | None = None) -> bool:
+    return key_state(profile, env_var, config) == KEY_SET
 
 
 #: The FIX text when the cause of a failing attested route is a pin that is pending or missing
@@ -308,7 +350,8 @@ def pin_is_the_cause(reason: Any) -> bool:
 
 
 def key_fix(env_var: str) -> str:
-    return f"set {env_var} (export it or add it to Hermes' env file)"
+    return (f"set {env_var} (export the variable or add the variable to Hermes' env file), or give Hermes the "
+            "key through model.api_key or hermes auth")
 
 
 def _attested_providers_in_use(config: Mapping, tasks: Sequence[str], plugins: Mapping[str, dict]) -> list[str]:
@@ -332,7 +375,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                   isolation: Any = _ABSENT, provider_lookup: Callable[[str], object | None],
                   attested_profile: str | None, builtin_aux_tasks: Sequence[str] | None = None,
                   terminal_env: Any = _ABSENT,
-                  key_present: Callable[[str], bool] | None = None) -> PreflightReport:
+                  key_state: Callable[[str, str], str] | None = None) -> PreflightReport:
     """Classify every route in ``config`` for ``tier``. Never mutates ``config``.
 
     ``plugin_aux_tasks``: plugin task names, or the registration dicts from
@@ -342,7 +385,9 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     ``builtin_aux_tasks`` defaults to :func:`builtin_aux_task_names`.
     ``terminal_env``: the terminal backend Hermes resolves for this profile (locking passes
     ``resolved_terminal_backend()``); omitted => ``os.environ["TERMINAL_ENV"]``. ``None`` means unset.
-    ``key_present(env_var)``: whether an attested vendor's API key is set; default :func:`api_key_present`.
+    ``key_state(profile, env_var)``: KEY_SET, KEY_NOT_SET or KEY_UNSCOPED for each attested vendor a route
+    uses. None (the default) adds no key rows: the lock and `check` pass one, the per-turn recheck does not,
+    because a key the turn's process cannot read is a refusal of that call, not a config change (Amendment 11).
     """
     config = config if isinstance(config, Mapping) else {}
     if terminal_env is _ABSENT:
@@ -592,19 +637,18 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     if tier == Tier.ON_HOST:
         _extra_hosts_items(config, add, ctx.pass_verdict)
 
-    # The API key of each attested vendor a route uses (ux-pass-1 item 1). Present or not; never the value.
-    if tier == Tier.ATTESTED:
-        present = key_present or api_key_present
+    # The API key of each attested vendor a route uses (ux-pass-1 item 1). Lock and `check` only; never the value.
+    if tier == Tier.ATTESTED and key_state is not None:
         for profile in _attested_providers_in_use(config, tasks, plugins):
             env_var = ATTESTED_KEY_ENVS[profile]
             try:
-                ok = present(env_var) is True
+                state = key_state(profile, env_var)
             except Exception:
-                ok = False
-            # Not through add(): the key name reads as a secret there and both states would show "***". The
-            # value shown is only "set" or "not set".
-            items.append(PreflightItem(env_var, "set" if ok else "not set", IN_TIER if ok else OFF_TIER,
-                                       "" if ok else key_fix(env_var)))
+                state = KEY_NOT_SET
+            state = state if state in (KEY_SET, KEY_NOT_SET, KEY_UNSCOPED) else KEY_NOT_SET
+            ok = state == KEY_SET
+            # Not through add(): the key name reads as a secret there and every state would show "***".
+            items.append(PreflightItem(env_var, state, IN_TIER if ok else OFF_TIER, "" if ok else key_fix(env_var)))
 
     # attested profile presence
     if tier == Tier.ATTESTED:

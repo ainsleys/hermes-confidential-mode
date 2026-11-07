@@ -212,8 +212,20 @@ def test_unlocked_turn_is_observed_and_sent(plugin, monkeypatch):
 def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeypatch):
     out = plugin.slash("on on-host-only")
     # ux-pass-1 item 4: one line; the disclosure, the tool list and the preflight are in status --verbose.
-    assert out == ("Locked to this machine (on-host-only), custom/llama3 at 127.0.0.1. Off-host tools ask first. "
-                   "Details: hermes confidential status, docs/LIMITATIONS.md"), out
+    assert out == ("Locked to this machine (on-host-only), custom/llama3 at 127.0.0.1.\n"
+                   "Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls are "
+                   "recorded, not refused. Not active in safe-worker mode.\n"
+                   "Details: hermes confidential status --verbose; docs/LIMITATIONS.md"), out
+    status = plugin.slash("status")       # plain status carries the same four disclosures (Amendment 4 F12)
+    assert ("Limits: Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls are "
+            "recorded, not refused. Not active in safe-worker mode.") in status
+    # A listed host is not "this machine".
+    locking = importlib.import_module(f"{plugin.mod.__name__}.confidential_mode.locking")
+    tiers = importlib.import_module(f"{plugin.mod.__name__}.confidential_mode.tiers")
+    cfg = {"model": {"provider": "custom", "default": "llama3", "base_url": "http://gpu-box.lan:11434/v1"},
+           "confidential": {"on_host": {"extra_hosts": ["gpu-box.lan"]}}}
+    assert locking.lock_message(tiers.Tier.ON_HOST, cfg).startswith(
+        "Locked to listed host gpu-box.lan (on-host-only), custom/llama3 at gpu-box.lan.")
     verbose = plugin.slash("status --verbose")
     assert "ask you first, each call" in verbose and "Memory: on-host. Fallbacks: none." in verbose
     assert "safe-worker" in verbose and "recorded after the fact" in verbose

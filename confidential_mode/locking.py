@@ -162,9 +162,10 @@ def run_tier_preflight(tier: Tier | str, *, config: Mapping | None = None,
                        attested_ok: Callable[[str], Verdict] | None = None,
                        profile_base_url: Callable[[str], Any] | None = None,
                        builtin_aux_tasks: Optional[Sequence[str]] = None,
-                       terminal_env: Any = None):
+                       terminal_env: Any = None, check_keys: bool = False):
     """PreflightReport for ``tier`` over Hermes' loaded config (read-only). ``terminal_env``: the resolved
-    terminal backend; None => ``preflight.resolved_terminal_backend()`` (how Hermes' tools resolve it)."""
+    terminal backend; None => ``preflight.resolved_terminal_backend()`` (how Hermes' tools resolve it).
+    ``check_keys``: add the attested vendors' API key rows (lock and `check` only, never the per-turn recheck)."""
     tier = Tier(tier)
     config = _pf.load_core_config() if config is None else config
     if terminal_env is None:
@@ -174,7 +175,8 @@ def run_tier_preflight(tier: Tier | str, *, config: Mapping | None = None,
     return _pf.run_preflight(tier, predicate, config, plugin_aux_tasks=_plugin_aux(plugin_aux_tasks),
                              provider_lookup=provider_lookup or _pf.provider_lookup,
                              attested_profile=attested_profile_for(config) if tier is Tier.ATTESTED else None,
-                             builtin_aux_tasks=builtin_aux_tasks, terminal_env=terminal_env)
+                             builtin_aux_tasks=builtin_aux_tasks, terminal_env=terminal_env,
+                             key_state=(lambda p, e: _pf.key_state(p, e, config)) if check_keys else None)
 
 
 def fingerprint_matches(recorded: Any, config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
@@ -241,7 +243,11 @@ def _default_verification(provider: str):
 
 #: Who runs the model on the attested tier, by profile (the one-line lock confirmation names the vendor).
 VENDOR_NAMES = {PROFILE_NAME: "Tinfoil", NEAR_PROFILE_NAME: "NEAR AI Cloud"}
-LOCK_DETAILS = "Off-host tools ask first. Details: hermes confidential status, docs/LIMITATIONS.md"
+#: The lock reply's second line, and plain status's "Limits:" line: the four disclosures every lock states
+#: (Amendment 4 F12, Amendment 11). The full text, LOCK_TAIL, is in `status --verbose` and docs/LIMITATIONS.md.
+LOCK_DISCLOSURES = ("Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls are "
+                    "recorded, not refused. Not active in safe-worker mode.")
+LOCK_DETAILS = "Details: hermes confidential status --verbose; docs/LIMITATIONS.md"
 
 
 def short_age(seconds: float | None) -> str:
@@ -254,8 +260,8 @@ def short_age(seconds: float | None) -> str:
 
 def lock_message(tier: Tier, config: Mapping, *, verification: Any = None,
                  clock: Callable[[], float] = time.time) -> str:
-    """The one-line lock confirmation (ux-pass-1 item 4). The full disclosure paragraph, LOCK_TAIL, is in
-    `hermes confidential status --verbose` and docs/LIMITATIONS.md."""
+    """The three-line lock confirmation (Amendment 11): what is locked, the four disclosures, where the
+    details are."""
     provider, model, base_url = _main_route(config)
     if tier is Tier.ATTESTED:
         verified_at = getattr(verification, "verified_at_host_clock", None)
@@ -263,9 +269,25 @@ def lock_message(tier: Tier, config: Mapping, *, verification: Any = None,
         when = (f"verified {short_age(clock() - verified_at)} ago" if isinstance(verified_at, (int, float))
                 else "not verified yet")
         vendor = VENDOR_NAMES.get(provider, provider or "?")
-        return f"Locked to {vendor}, {model or '?'} at {host or '(enclave unresolved)'}; {when}. {LOCK_DETAILS}"
-    return (f"Locked to this machine ({tier.value}), {provider or '?'}/{model or '?'} at "
-            f"{host_of(base_url) or '(provider default)'}. {LOCK_DETAILS}")
+        head = f"Locked to {vendor}, {model or '?'} at {host or '(enclave unresolved)'}; {when}."
+    else:
+        host = host_of(base_url)
+        where = f"listed host {host}" if _is_listed_host(config, provider, base_url, model) else "this machine"
+        head = (f"Locked to {where} ({tier.value}), {provider or '?'}/{model or '?'} at "
+                f"{host or '(provider default)'}.")
+    return f"{head}\n{LOCK_DISCLOSURES}\n{LOCK_DETAILS}"
+
+
+def _is_listed_host(config: Mapping, provider: str, base_url: str, model: str) -> bool:
+    """Whether the main route's host is on-host only because it is listed in confidential.on_host.extra_hosts
+    (so the reply must not say "this machine"). Never raises; unknown reads as listed (the weaker claim)."""
+    try:
+        from .tiers import Destination
+        v = OnHostPredicate(extra_hosts=extra_hosts(config), profile_base_url=_pf.profile_base_url).classify(
+            Destination(provider=provider, base_url=base_url, model=model, api_mode="", purpose="main"))
+        return str(v.reason or "").startswith("listed on-host host")
+    except Exception:  # noqa: BLE001
+        return True
 
 
 # ── live main runtime (Amendment 4 F1) ───────────────────────────────────────────────────────────
@@ -359,7 +381,8 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
     aux = _plugin_aux(plugin_aux_tasks)
     predicate = predicate_for(tier, config=config, attested_ok=attested_ok, profile_base_url=profile_base_url)
     report = run_tier_preflight(tier, config=config, predicate=predicate, plugin_aux_tasks=aux,
-                                provider_lookup=provider_lookup, builtin_aux_tasks=builtin_aux_tasks)
+                                provider_lookup=provider_lookup, builtin_aux_tasks=builtin_aux_tasks,
+                                check_keys=True)
     if not report.ok:
         _append(ledger, LedgerEvent(
             kind="preflight_fail", purpose="lock", verdict="off_tier", decision="refused",

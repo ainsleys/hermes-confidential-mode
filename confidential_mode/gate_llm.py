@@ -374,6 +374,12 @@ class LlmGate:
             if isinstance(original, InterruptedError):
                 raise
             detail = {"reason_code": "provider_error", "error_type": type(original).__name__}
+            if type(original).__name__ == "ConfidentialRefused":
+                # The attested client's own refusal (client.py): its reason is the plugin's text, never content.
+                why = str(original)[:300]
+                detail["reason"] = why
+                if why.startswith("vendor key unreadable"):
+                    detail["reason_code"] = "vendor_key_unreadable"
             status = getattr(original, "status_code", None)
             if isinstance(status, int):
                 detail["status_code"] = status
@@ -390,7 +396,7 @@ class LlmGate:
         refusal, note = build_refusal(dest.api_mode, text, self.builders)
         d = {"reason_code": reason_code, **(detail or {})}
         if verdict is not None:
-            d["reason"] = verdict.reason
+            d.setdefault("reason", verdict.reason)   # a client refusal's own reason stays (vendor key unreadable)
         if note:
             d["note"] = note
         self.record("send_refused", dest, context, host=(verdict.host if verdict else "") or _host(dest.base_url),

@@ -231,8 +231,10 @@ def test_attested_lock_message_and_refusal_reason_without_network(plugin, monkey
     entry.result, entry.verified_mono = _result(plugin), time.monotonic()
     monkeypatch.setenv("TINFOIL_API_KEY", "test-key")
     out = plugin.slash("on attested")
-    assert out == ("Locked to Tinfoil, llama3-3-70b at router.tinfoil.invalid; verified 42 s ago. Off-host tools "
-                   "ask first. Details: hermes confidential status, docs/LIMITATIONS.md"), out
+    assert out == ("Locked to Tinfoil, llama3-3-70b at router.tinfoil.invalid; verified 42 s ago.\n"
+                   "Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls are "
+                   "recorded, not refused. Not active in safe-worker mode.\n"
+                   "Details: hermes confidential status --verbose; docs/LIMITATIONS.md"), out
     assert "LOCKED (attested)" in plugin.slash("status")
     assert "Fallbacks: none." in plugin.slash("status --verbose")
 
@@ -581,7 +583,7 @@ def test_cli_on_and_off_in_another_process_govern_the_running_gateway(plugin, mo
     from ._harness import Rec
     proc = _hermes(plugin, "on", "on-host-only")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.startswith("Locked to this machine (on-host-only)") and len(proc.stdout.splitlines()) == 1
+    assert proc.stdout.startswith("Locked to this machine (on-host-only)") and len(proc.stdout.splitlines()) == 3
     verbose = _hermes(plugin, "status", "--verbose")
     assert "confidential preflight: tier=on-host-only PASS" in verbose.stdout and "Tools:" in verbose.stdout
     tiers = _sub(plugin, "tiers")

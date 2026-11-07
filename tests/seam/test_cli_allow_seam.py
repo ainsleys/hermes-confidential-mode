@@ -66,12 +66,24 @@ def test_cli_lock_then_cli_allow_web_search_reaches_the_gateway(plugin, monkeypa
 
 
 def test_cli_allow_of_a_tool_only_the_gateway_registered_says_so(plugin, monkeypatch):
-    """An MCP tool the gateway connected is in the lock's tool list, but the CLI process has not registered
-    it, so the CLI refuses it and says where it can be allowed."""
-    gt = __import__(f"{plugin.mod.__name__}.confidential_mode.gate_tools", fromlist=["x"])
-    consent = __import__(f"{plugin.mod.__name__}.confidential_mode.consent", fromlist=["x"])
-    al = gt.Allowlist(tools={}, persisted_identity={"mcp_docs_search": ("mcp-docs", "m", "q")})
-    text = consent.unknown_tool_text(al, "mcp_docs_search")
-    assert text.startswith("mcp_docs_search is an MCP tool that the process which locked this profile registered")
-    assert "only the gateway connected it" in text and "/confidential allow mcp_docs_search" in text
-    assert consent.unknown_tool_text(al, "nope") == "Unknown tool 'nope'; it was not registered when the session was locked."
+    """Through a real CLI process. A tool the lock recorded but only the gateway registered (an MCP tool):
+    the CLI refuses and says to allow the tool from chat. A tool the lock never recorded: the CLI says no
+    allow can help and that a relock from chat records gateway-only tools."""
+    from tools.registry import registry
+    schema = {"name": "mcp_docs_search", "description": "x", "parameters": {"type": "object", "properties": {}}}
+    registry.register(name="mcp_docs_search", toolset="mcp-docs", schema=schema, handler=lambda a, **k: "{}")
+    try:
+        assert plugin.slash("on on-host-only").startswith("Locked")        # the gateway locks: records the tool
+        proc = _hermes(plugin, "allow", "mcp_docs_search")
+    finally:
+        registry.deregister("mcp_docs_search")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("mcp_docs_search is an MCP tool that the lock recorded, but this terminal "
+                                  "process has not registered mcp_docs_search"), proc.stdout
+    assert "In the chat session, run /confidential allow mcp_docs_search." in proc.stdout
+    proc = _hermes(plugin, "allow", "never_registered_tool")
+    assert proc.returncode == 1 and proc.stdout.startswith(
+        "Unknown tool 'never_registered_tool'; never_registered_tool was not registered when this lock was made."
+    ), proc.stdout
+    assert "relock from chat: /confidential off, then /confidential on <tier>." in proc.stdout
+    assert "/confidential allow never_registered_tool" not in proc.stdout

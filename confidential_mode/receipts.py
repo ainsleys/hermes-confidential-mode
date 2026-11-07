@@ -794,7 +794,7 @@ def _send_body(r: Mapping, attempt: Mapping | None = None) -> str:
     d = r["detail"] if isinstance(r.get("detail"), Mapping) else {}
     rb = d.get("response_bytes")
     if isinstance(rb, int) and not isinstance(rb, bool):
-        req += f", response {rb} bytes"
+        req += f", response {rb} bytes (re-serialised JSON)"
     elif attempt is not None or r.get("decision") == "allowed":
         req += ", response size unknown"
     rows = f"  (rows #{attempt['id']} attempt, #{r['id']} result)" if attempt is not None else ""

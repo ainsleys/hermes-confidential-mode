@@ -32,8 +32,11 @@ def test_a_lock_with_a_pin_pending_says_so_in_the_reply_and_in_status(plugin, mo
     entry.result, entry.verified_mono = _result(plugin), time.monotonic()
     plugin.rt.pins.stage(_result(plugin, code="ab" * 32))
     out = plugin.slash("on attested")
-    first, second = out.split("\n")
+    first, disclosures, details, second = out.split("\n")
     assert first.startswith("Locked to Tinfoil, llama3-3-70b at router.tinfoil.invalid; verified ")
+    assert disclosures == ("Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls "
+                           "are recorded, not refused. Not active in safe-worker mode.")
+    assert details == "Details: hermes confidential status --verbose; docs/LIMITATIONS.md"
     assert second.startswith("A pin update for tinfoil is pending (1 entry). This lock uses the approved builds")
     assert "hermes confidential pins review, then hermes confidential pins approve" in second
     assert "Locked with a pin pending: A pin update for tinfoil is pending" in plugin.slash("status")
@@ -45,7 +48,7 @@ def test_attested_lock_without_the_key_is_refused_by_the_preflight(plugin, monke
     monkeypatch.delenv("TINFOIL_API_KEY", raising=False)
     plugin.cfg.write_text(ATTESTED_CONFIG)
     out = plugin.slash("on attested")
-    assert out.startswith("Not locked") and "set TINFOIL_API_KEY (export it or add it to Hermes' env file)" in out
+    assert out.startswith("Not locked") and "set TINFOIL_API_KEY (export the variable or add the variable" in out
     assert plugin.rt.state.locked() == (False, None)
     parser, handler = _cli(plugin)
     assert handler(parser.parse_args(["check", "--tier", "attested"])) == 1          # check exits 1 on FAIL
@@ -111,7 +114,11 @@ def test_data_files_are_0600_and_an_old_0644_ledger_is_fixed_at_start(plugin):
     fresh = ledger.Ledger()
     fresh.tail(0)                                                        # opening it re-applies the mode
     assert stat.S_IMODE(os.stat(ledger_file).st_mode) == 0o600
+    # The registration walk runs once per commit, or again when a kept file's mode is wrong.
+    state_dir, commit = plugin.rt.ctx.state.data_dir, _sub(plugin, "_version").PLUGIN_COMMIT
+    assert ledger.needs_mode_walk(state_dir, ledger_file.parent, commit) is False      # done at registration
     os.chmod(ledger_file, 0o644)
+    assert ledger.needs_mode_walk(state_dir, ledger_file.parent, commit) is True
     ledger.secure_data_files([ledger_file.parent])                       # the registration step
     assert stat.S_IMODE(os.stat(ledger_file).st_mode) == 0o600
     status = plugin.slash("status")
@@ -156,10 +163,43 @@ def test_a_receipt_shows_each_send_once_and_a_denial_once(plugin, monkeypatch):
     assert len(doc["sections"]["send_pairs"]) == 1 and len(doc["sections"]["sends"]) == 2   # both rows kept
 
 
-def test_the_near_pin_prompt_explains_abliterated_variants(plugin):
+def test_the_near_pin_prompt_explains_abliterated_services_only_when_present(plugin):
     consent = _sub(plugin, "consent")
     pending = {"vendor": "near", "router_repo": "cloud-api.near.ai#m", "components": [], "entries": [],
                "platform": "tdx", "code_fingerprint": "c" * 64, "enclave_fingerprint": "e" * 64}
-    text = consent.pin_question(pending)
-    assert ('NEAR deploys "...-abliterated" variants of a model (refusal training removed) beside the base model, '
-            "and the plugin lists their services because they share the enclave.") in text
+    note = ('NEAR deploys services named "...-abliterated" in the same enclave as the base model. They share the '
+            "enclave and its quote socket, and the plugin lists them for that reason.")
+    assert note not in consent.pin_question(pending)
+    pending["components"] = ["model m service proxy-qwen38-27b-abliterated image x"]
+    assert note in consent.pin_question(pending)
+
+
+def test_a_key_unreadable_mid_lock_refuses_the_call_and_records_no_breach(plugin, monkeypatch):
+    """Review blocker 1: the key is checked at lock and in `check`, never in the per-turn recheck. A process
+    that cannot read the key later refuses each call ("vendor key unreadable"), with no breach row."""
+    from hermes_cli.plugins import invoke_hook
+    provider, tiers = _sub(plugin, "provider"), _sub(plugin, "tiers")
+    monkeypatch.setattr(provider, "attested_ok", lambda name: tiers.Verdict(True, "ok", "router.tinfoil.invalid"))
+    monkeypatch.setenv("TINFOIL_API_KEY", "test-key")
+    plugin.cfg.write_text(ATTESTED_CONFIG)
+    entry = provider.verification_cache.entry("attested-tinfoil")
+    entry.result, entry.verified_mono = _result(plugin), time.monotonic()
+    assert plugin.slash("on attested").startswith("Locked to Tinfoil")
+    monkeypatch.delenv("TINFOIL_API_KEY")
+    import agent.credential_pool as pool_mod
+    monkeypatch.setattr(pool_mod, "load_pool", lambda name: type("P", (), {"has_credentials": lambda self: False})())
+    results = invoke_hook("pre_llm_call", session_id="sess-k")
+    assert not any(isinstance(r, dict) and r.get("action") == "block" for r in results), results
+    client = provider._create_client(plugin.rt.profile, provider.verification_cache, {})
+    assert client.reason.startswith("vendor key unreadable: TINFOIL_API_KEY")
+    mw = plugin.mgr._middleware["llm_execution"][0]
+    monkeypatch.setattr(mw.gate, "attested_ok", lambda name: tiers.Verdict(True, "ok", "router.tinfoil.invalid"))
+    mw(request={"model": "llama3-3-70b", "messages": [{"role": "user", "content": "hi"}]},
+       next_call=lambda r: client.chat.completions.create(**r), session_id="sess-k", provider="attested-tinfoil",
+       base_url=plugin.rt.profile.base_url, model="llama3-3-70b", api_mode="chat_completions",
+       api_request_id="req-k", platform="cli")
+    rows = plugin.rt.ledger.session("sess-k")
+    assert not [e for e in rows if e.kind == "breach"]
+    refused = [e for e in rows if e.kind == "send_refused"]
+    assert len(refused) == 1 and refused[0].detail["reason_code"] == "vendor_key_unreadable"
+    assert refused[0].detail["reason"].startswith("vendor key unreadable")

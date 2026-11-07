@@ -231,6 +231,9 @@ def test_under_yolo_the_same_tool_is_blocked_and_no_prompt_occurs(hermes, monkey
         approval.disable_session_yolo(SK)
     assert OFF not in hermes.ran and hermes.prompts == []
     assert "bypassed" in out and "bypassed" in out2
+    # Amendment 11: interactive yolo names the bypass and its remedy, not an unattended run.
+    assert "approvals are bypassed (yolo or approvals off); turn the bypass off to be asked" in out
+    assert "unattended" not in out
     assert hermes.events() == [("tool_refused", "bypass_active")] * 2
     hermes.call(OFF, {"q": "x"})                            # mutant twin: yolo off -> asked
     assert len(hermes.prompts) == 1
@@ -242,6 +245,7 @@ def test_approvals_mode_off_blocks(hermes, monkeypatch):
     hermes.cfg.write_text(hermes.base_cfg + "approvals:\n  mode: off\n")
     out = hermes.call(OFF, {})
     assert OFF not in hermes.ran and hermes.prompts == [] and "bypassed" in out
+    assert "hermes confidential allow" in out and "/confidential allow" in out
 
 
 def test_unattended_approve_mode_blocks_where_hermes_would_auto_approve(hermes, monkeypatch):
@@ -253,7 +257,7 @@ def test_unattended_approve_mode_blocks_where_hermes_would_auto_approve(hermes, 
         out = hermes.call(OFF, {})
     finally:
         clear_session_vars(tok)
-    assert OFF not in hermes.ran and "bypassed" in out
+    assert OFF not in hermes.ran and "in an unattended run; to allow it, run: hermes confidential allow" in out
 
 
 def test_remembered_session_grant_allows_second_call_without_prompt(hermes, monkeypatch):

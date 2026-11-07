@@ -352,8 +352,8 @@ def _approved_lines(approved: Optional[tuple]) -> list[str]:
     return lines
 
 
-NEAR_ABLITERATED_NOTE = ("NEAR deploys \"...-abliterated\" variants of a model (refusal training removed) beside "
-                         "the base model, and the plugin lists their services because they share the enclave.")
+NEAR_ABLITERATED_NOTE = ("NEAR deploys services named \"...-abliterated\" in the same enclave as the base model. "
+                         "They share the enclave and its quote socket, and the plugin lists them for that reason.")
 
 
 def _near_pin_question(pending: Any, *, observers: Optional[list] = None, approved: Optional[tuple] = None) -> str:
@@ -388,7 +388,8 @@ def _near_pin_question(pending: Any, *, observers: Optional[list] = None, approv
         REPORTED_NOT_PINNED,
         "NEAR runs instances of one model with different measured configurations under one signing key, so a "
         "new instance can show up here as a change.",
-        NEAR_ABLITERATED_NOTE,
+        *([NEAR_ABLITERATED_NOTE] if "abliterated" in " ".join(comps).lower()
+          or any("abliterated" in str(_field(e, "components", "")).lower() for e in entries) else []),
         f"Platform: {_text(_value(pending, 'platform'))}",
         f"Whole-result code fingerprint: {_text(_value(pending, 'code_fingerprint'))}",
         f"Whole-result enclave fingerprint: {_text(_value(pending, 'enclave_fingerprint'))}",
@@ -593,18 +594,23 @@ def _apply(store: Any, pending: Any, surface: str, *, reviewed_by: Optional[str]
 
 
 def unknown_tool_text(allowlist: Any, name: str) -> str:
-    """Why ``name`` cannot be allowed from this process. A tool the locking process recorded but this process
-    has not registered (an MCP server only the gateway connected, a tool a plugin adds at run time) is named
-    as such, with the chat command that can allow it."""
+    """Why ``name`` cannot be allowed from this process (Amendment 11).
+
+    * The lock recorded the tool, but this process has not registered it (an MCP tool only the gateway
+      connected): allow the tool from chat, where the gateway has it.
+    * The lock never recorded the tool: no allow can help. A lock made from a terminal records no tool that
+      only the gateway connects, so the remedy is a relock from chat."""
     persisted = getattr(allowlist, "persisted_identity", None) or {}
     ident = persisted.get(name) if isinstance(persisted, dict) else None
     if ident is not None:
         toolset = str(ident[0]) if isinstance(ident, (tuple, list)) and ident else ""
         what = "an MCP tool" if toolset.startswith("mcp-") else "a tool"
-        return (f"{name} is {what} that the process which locked this profile registered, but this process "
-                f"has not registered it (only the gateway connected it), so it cannot be allowed from here. "
-                f"Run /confidential allow {name} in the chat session instead.")
-    return f"Unknown tool {name!r}; it was not registered when the session was locked."
+        return (f"{name} is {what} that the lock recorded, but this terminal process has not registered "
+                f"{name} (only the gateway connected {name}), so {name} cannot be allowed from here. In the chat "
+                f"session, run /confidential allow {name}.")
+    return (f"Unknown tool {name!r}; {name} was not registered when this lock was made. A lock made from a "
+            "terminal records no tool that only the gateway connects, such as an MCP tool. To record those tools, "
+            "relock from chat: /confidential off, then /confidential on <tier>.")
 
 
 def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key: str = "",

@@ -141,7 +141,7 @@ class Runtime:
         from tools.registry import registry
         # A CLI process (`hermes confidential allow`) has not imported the built-in tools; without them the
         # rebuild below would keep no built-in tool, and every allow would be refused as unregistered.
-        gt.ensure_builtin_tools(self.progress)
+        gt.ensure_tools_for_lock(self.allowlist_path, self.progress)
         predicate = _cm("locking").predicate_for(tier, config=self.load_config())
         # Amendment 4 F5 (W4): rebuild from the identities persisted at THIS lock; anything registered
         # after the lock, changed, or a missing/other-lock file is unclassified until a relock.
@@ -303,8 +303,12 @@ def _register(rt: Runtime) -> None:
 
     def data_modes():
         # Every plugin data file is 0600; files an earlier build created 0644 (the ledger) are fixed here.
-        ledger = _cm("ledger")
-        ledger.secure_data_files([ctx.state.data_dir, ledger.default_ledger_path().parent])
+        # Once per installed commit, or when a file the plugin always keeps has a wrong mode (Amendment 11).
+        ledger, commit = _cm("ledger"), _cm("_version").PLUGIN_COMMIT
+        ledger_dir, state_dir = ledger.default_ledger_path().parent, ctx.state.data_dir
+        if ledger.needs_mode_walk(state_dir, ledger_dir, commit):
+            ledger.secure_data_files([ledger_dir, state_dir])      # the ledger's directory first
+            ledger.mark_mode_walk(state_dir, commit)
     _step(rt, "data_modes", data_modes)
 
     def revocations():

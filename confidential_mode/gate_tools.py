@@ -385,22 +385,87 @@ def _read_added(path: Path) -> set[str]:
 # allowlist from the live registry
 # --------------------------------------------------------------------------------------------------
 
+#: The module whose import registers Hermes' browser reaper at exit (tools/browser_session.py:388). A CLI process
+#: that imports it only to classify tools must not reap the Chromium processes a running gateway owns.
+_BROWSER_REAPER_MODULE = "tools.browser_session"
+
+
+def _drop_browser_reaper(was_loaded: bool) -> None:
+    """Unregister the browser reaper's exit handler when this call imported its module. Never raises."""
+    import atexit
+    import sys
+    try:
+        mod = sys.modules.get(_BROWSER_REAPER_MODULE)
+        handler = getattr(mod, "_atexit_cleanup", None) if mod is not None else None
+        if not was_loaded and callable(handler):
+            atexit.unregister(handler)
+    except Exception:
+        pass
+
+
 def ensure_builtin_tools(progress: Any = None) -> None:
-    """Import Hermes' built-in tool modules so their registry entries exist in this process. Built-in tools
-    register themselves on import. A `hermes confidential` CLI process never builds an agent, so it never
-    imports them; an allowlist built or rebuilt from that registry would classify no built-in tool (review
-    finding: `hermes confidential allow web_search` refused every tool). Idempotent; never raises.
-    ``progress``: a progress.Progress; the phase line reports how many tools the registry holds."""
+    """Import every Hermes built-in tool module so the lock can classify them all. Built-in tools register
+    themselves on import, and a `hermes confidential` CLI process never builds an agent. Side effects
+    (INTERFACES Amendment 11): Hermes may rewrite its tool-discovery cache when the cache is stale, and the
+    imported modules register their exit handlers; the browser reaper's handler is removed again when this call
+    imported it. Idempotent; never raises. ``progress``: a progress.Progress for the "discovering tools" line."""
+    import sys
+    browser_loaded = _BROWSER_REAPER_MODULE in sys.modules
     try:
         from tools.registry import discover_builtin_tools, registry
         if progress is None or not getattr(progress, "enabled", False):
             discover_builtin_tools()
-            return
-        with progress.phase("discovering tools") as box:
-            discover_builtin_tools()
-            box["result"] = f"{len(registry.get_all_entries())} found"
+        else:
+            with progress.phase("discovering tools") as box:
+                discover_builtin_tools()
+                box["result"] = f"{len(registry.get_all_entries())} found"
     except Exception:
         pass
+    _drop_browser_reaper(browser_loaded)
+
+
+def ensure_tools_for_lock(path: Optional[Path], progress: Any = None) -> None:
+    """Import only the built-in tool modules the lock recorded (allowlist.yaml's ``module`` fields), for a
+    rebuild in a process that has not imported them (`hermes confidential allow`, `status --verbose`). Unlike
+    ensure_builtin_tools this never touches Hermes' tool-discovery cache. Never raises."""
+    import importlib
+    import sys
+    data = _read_json_or_yaml(Path(path)) if path is not None else None
+    tools = data.get("tools") if isinstance(data, dict) else None
+    names = sorted({t["module"] for t in tools if isinstance(t, dict) and isinstance(t.get("module"), str)
+                    and t["module"].startswith("tools.")}) if isinstance(tools, list) else []
+    missing = [n for n in names if n not in sys.modules]
+    if missing:
+        _import_modules(missing, progress)
+    # A handler defined outside the module that registers it: fall back to the full import for those tools.
+    try:
+        from tools.registry import registry
+        wanted = [t["name"] for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str)
+                  and str(t.get("module", "")).startswith("tools.")] if isinstance(tools, list) else []
+        if any(registry.get_entry(n) is None for n in wanted):
+            ensure_builtin_tools(progress)
+    except Exception:
+        pass
+
+
+def _import_modules(missing: list, progress: Any = None) -> None:
+    import importlib
+    import sys
+    browser_loaded = _BROWSER_REAPER_MODULE in sys.modules
+    try:
+        if progress is not None and getattr(progress, "enabled", False):
+            with progress.phase("loading the locked tools") as box:
+                for name in missing:
+                    with contextlib.suppress(Exception):
+                        importlib.import_module(name)
+                box["result"] = f"{len(missing)} modules"
+        else:
+            for name in missing:
+                with contextlib.suppress(Exception):
+                    importlib.import_module(name)
+    except Exception:
+        pass
+    _drop_browser_reaper(browser_loaded)
 
 
 def _default_mcp_configs() -> dict[str, dict]:
@@ -611,18 +676,24 @@ def rule_key_for(tool_name: str) -> str:
     return f"{RULE_KEY_PREFIX}{tool_name}"
 
 
+def _hermes_approval_state() -> tuple[bool, bool]:
+    """(bypassed, someone present): ``bypassed`` is yolo or approvals.mode off; ``someone present`` is a CLI,
+    gateway or ask surface that could answer. Mirrors ``_run_approval_gate`` (tools/approval.py:1071-1113).
+    Raises when Hermes cannot be read; each caller fails closed."""
+    from tools.approval import _presence, _yolo_active
+    from tools.approval_context import _get_approval_mode
+    bypassed = bool(_yolo_active() or _get_approval_mode() == "off")
+    _cb, is_cli, is_gateway, is_ask = _presence(None)
+    return bypassed, bool(is_cli or is_gateway or is_ask)
+
+
 def hermes_bypass_active(tool_name: str) -> bool:
-    """True when Hermes' approval gate would NOT put our approve directive in front of a human.
-    Mirrors ``_run_approval_gate`` (tools/approval.py:1071-1113) in order. Any error -> True (block)."""
+    """True when Hermes' approval gate would NOT put our approve directive in front of a human: a bypass, or
+    nobody to ask (Hermes then blocks, or under cron/unattended/single_query approve mode auto-approves; either
+    way no human decides, so we block ourselves). Any error -> True (block)."""
     try:
-        from tools.approval import _presence, _yolo_active
-        from tools.approval_context import _get_approval_mode
-        if _yolo_active() or _get_approval_mode() == "off":
-            return True
-        _cb, is_cli, is_gateway, is_ask = _presence(None)
-        # Nobody to ask: Hermes either blocks or (cron/unattended/single_query mode approve) auto-approves.
-        # Either way no human decides, so we block ourselves.
-        return not (is_cli or is_gateway or is_ask)
+        bypassed, present = _hermes_approval_state()
+        return bypassed or not present
     except Exception:
         return True
 
@@ -971,19 +1042,32 @@ class _Policy:
             return CallDecision("run", "allowlist")
         if self.bypass(tool_name):
             name = _printable(tool_name)
-            return CallDecision("refuse", "bypass_active", bypass_text(name))
+            return CallDecision("refuse", "bypass_active", bypass_text(name, hermes_bypass_is_interactive()))
         nbytes = call_bytes(args)
         n = max(1, math.ceil(nbytes / 1024))
         return CallDecision("ask", "remembered" if self.remembered(tool_name) else "ask",
                             ask_message(tool_name, nbytes), kb=n)
 
 
-def bypass_text(name: str) -> str:
-    """The tool result the model gets for an off-host tool under an approval bypass. It names the remedy, so
-    the model can tell the person the exact command (ux-pass-1 item 4)."""
+def hermes_bypass_is_interactive() -> bool:
+    """True when the bypass is yolo or approvals.mode off while a person is present (a CLI or gateway surface
+    that could be asked); False for a genuinely unattended run (one-shot, cron, no surface). Any error: False."""
+    try:
+        bypassed, present = _hermes_approval_state()
+        return bypassed and present
+    except Exception:
+        return False
+
+
+def bypass_text(name: str, interactive: bool = False) -> str:
+    """The tool result the model gets for an off-host tool under an approval bypass. It names the cause and the
+    remedy, so the model can tell the person the exact command (Amendment 11)."""
+    if interactive:
+        return (f"confidential mode: {name} was blocked because approvals are bypassed (yolo or approvals off); "
+                f"turn the bypass off to be asked, or run: hermes confidential allow {name} "
+                f"(in chat: /confidential allow {name})")
     return (f"confidential mode: {name} was blocked by confidential mode in an unattended run; to allow it, "
-            f"run: hermes confidential allow {name}, or run interactively to be asked. (Approvals are bypassed "
-            "here: a one-shot or unattended run, yolo, or approvals.mode off. Nobody can be asked.)")
+            f"run: hermes confidential allow {name}, or run interactively to be asked")
 
 
 def _refusal_ledgered(choice: Any) -> bool:
@@ -1012,15 +1096,45 @@ class ApprovalDecisions:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._choices: dict[str, Any] = {}
+        self._ledgered: set[str] = set()
         self._grants: set[str] = set()
+        self._asking = threading.local()
 
-    def record(self, key: str, choice: Any) -> None:
+    def record(self, key: str, choice: Any, *, ledgered: bool = False) -> None:
+        """``ledgered``: post_approval_response wrote this answer's row, so the middleware writes none."""
         with self._lock:
             self._choices[key] = choice
+            if ledgered:
+                self._ledgered.add(key)
+            else:
+                self._ledgered.discard(key)
 
     def pop(self, key: str) -> Any:
         with self._lock:
             return self._choices.pop(key, _MISSING)
+
+    def pop_ledgered(self, key: str) -> bool:
+        with self._lock:
+            if key in self._ledgered:
+                self._ledgered.discard(key)
+                return True
+            return False
+
+    @contextlib.contextmanager
+    def asking(self, tool_name: str, approval_id: str):
+        """The middleware's ask in progress on this thread. Hermes fires post_approval_response on the asking
+        thread; an answer that arrives with an empty tool_call_id is keyed on this approval id, so it is
+        recorded once and the middleware finds it (Amendment 11)."""
+        previous = getattr(self._asking, "value", None)
+        self._asking.value = (tool_name, approval_id)
+        try:
+            yield
+        finally:
+            self._asking.value = previous
+
+    def current_ask(self, tool_name: str) -> str:
+        value = getattr(self._asking, "value", None)
+        return value[1] if isinstance(value, tuple) and value[0] == tool_name else ""
 
     def grant(self, key: str) -> None:
         with self._lock:
@@ -1218,8 +1332,10 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         choice = dec.pop(key) if key is not None else _MISSING
         if choice is not _MISSING:                 # pre_tool_call asked (model_tools order)
             if type(choice) is str and choice in _ALLOW_CHOICES:
+                dec.pop_ledgered(key)
                 return run()                       # tool_allowed was ledgered by post_approval_response
-            return _unexpected(tool_name, args, session_id, base, choice, answered=_refusal_ledgered(choice))
+            return _unexpected(tool_name, args, session_id, base, choice,
+                               answered=dec.pop_ledgered(key) and _refusal_ledgered(choice))
         if d.decision == "remembered":
             ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id, decision="remembered",
                                  nbytes=args_bytes(args), surface="middleware", detail={**base, "kb": d.kb}))
@@ -1229,9 +1345,11 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         ledger.append(_event("tool_asked", tool_name=tool_name, session_id=session_id, decision="ask",
                              nbytes=args_bytes(args), surface="middleware",
                              detail={**base, "kb": d.kb, "message": d.message, "approval_id": approval_id}))
-        result = ask(tool_name, d.message, rule_key=rule_key_for(tool_name), approval_id=approval_id,
-                     session_id=session_id, turn_id=turn_id)
+        with dec.asking(tool_name, approval_id):
+            result = ask(tool_name, d.message, rule_key=rule_key_for(tool_name), approval_id=approval_id,
+                         session_id=session_id, turn_id=turn_id)
         choice = dec.pop(_call_key(tool_name, approval_id))
+        hook_wrote_row = dec.pop_ledgered(_call_key(tool_name, approval_id))
         approved = isinstance(result, dict) and result.get("approved") is True
         if approved and type(choice) is str and choice in _ALLOW_CHOICES:
             if key is None:
@@ -1243,13 +1361,14 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                 dec.drop_grant(key)
         if approved:
             return _unexpected(tool_name, args, session_id, {**base, "approval_id": approval_id},
-                               None if choice is _MISSING else choice, answered=_refusal_ledgered(choice))
+                               None if choice is _MISSING else choice,
+                               answered=hook_wrote_row and _refusal_ledgered(choice))
         decision = "no_surface" if (choice is _MISSING and isinstance(result, dict)
                                     and result.get("status") == "approval_required") else "denied"
         return _refuse(tool_name, args, session_id, decision,
                        str((result or {}).get("message") or f"confidential mode: {tool_name} was not approved"),
                        {**base, "choice": None if choice is _MISSING else _choice_repr(choice),
-                        "approval_id": approval_id}, answered=_refusal_ledgered(choice))
+                        "approval_id": approval_id}, answered=hook_wrote_row and _refusal_ledgered(choice))
 
     def _unexpected(tool_name, args, session_id, base, choice, *, answered=False):
         return _refuse(tool_name, args, session_id, "unexpected_choice",
@@ -1293,16 +1412,28 @@ def build_post_approval_response(is_locked: Callable[[], Any], ledger: Any,
             if not isinstance(pattern_key, str) or not pattern_key.startswith(PATTERN_KEY_PREFIX):
                 return None
             tool_name = pattern_key[len(PATTERN_KEY_PREFIX):]
-            if tool_call_id:                     # an id-less answer is never recorded (Amendment 4 F3)
-                dec.record(_call_key(tool_name, tool_call_id), choice)
+            # An answer with an empty id is keyed on the middleware's ask in progress, if any (Amendment 11).
+            call_id = tool_call_id or dec.current_ask(tool_name)
             pick = choice if type(choice) is str else ""
             allowed = pick in _ALLOW_CHOICES
-            detail = {"tool": tool_name, "choice": _choice_repr(choice), "tool_call_id": tool_call_id or "",
+            detail = {"tool": tool_name, "choice": _choice_repr(choice), "tool_call_id": call_id or "",
                       "session_key": session_key or "", "locked": _safe(is_locked)}
-            ledger.append(_event("tool_allowed" if allowed else "tool_refused", tool_name=tool_name,
-                                 session_id=session_id or "",
-                                 decision=pick if pick in KNOWN_CHOICES else "unexpected_choice",
-                                 surface=surface or None, detail=detail))
+            # The row first, then the choice: a row that could not be written leaves the middleware to write
+            # the refusal itself, so a denial is always recorded once and always stands.
+            wrote = False
+            try:
+                ledger.append(_event("tool_allowed" if allowed else "tool_refused", tool_name=tool_name,
+                                     session_id=session_id or "",
+                                     decision=pick if pick in KNOWN_CHOICES else "unexpected_choice",
+                                     surface=surface or None, detail=detail))
+                wrote = True
+            except Exception as exc:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).warning(
+                    "confidential-mode: could not ledger the answer for %s (%s); the middleware records it",
+                    _printable(tool_name), type(exc).__name__)
+            if call_id:                          # an id-less answer is never recorded (Amendment 4 F3)
+                dec.record(_call_key(tool_name, call_id), choice, ledgered=wrote)
         except Exception:
             pass
         return None

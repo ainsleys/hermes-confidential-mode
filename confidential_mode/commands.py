@@ -306,8 +306,9 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
         lines.append(f"Plugin registration problem: {step}: {err}")
     lines.append(plugin_identity())
     lines.append(data_paths_line(rt))
+    lines.append(f"Limits: {_locking.LOCK_DISCLOSURES}")
     if not verbose:
-        lines.append("Details: hermes confidential status --verbose, docs/LIMITATIONS.md")
+        lines.append(_locking.LOCK_DETAILS)
         return "\n".join(lines)
     lines.append(("While locked: " if locked is True else "When locked: ") + _locking.LOCK_TAIL)
     if locked is True:
@@ -400,7 +401,8 @@ def check_result(rt: Any, tier: Optional[str]) -> tuple[str, bool]:
         return f"Unknown tier {chosen!r} (one of: {', '.join(x.value for x in Tier)}).", False
     if t is Tier.ZDR:
         return f"zero-retention: {_locking.ZDR_REASON}.", False
-    report = _locking.run_tier_preflight(t, config=rt.load_config(), attested_ok=interactive_attested_ok(rt))
+    report = _locking.run_tier_preflight(t, config=rt.load_config(), attested_ok=interactive_attested_ok(rt),
+                                         check_keys=True)
     return _pf.format_report(report), report.ok is True
 
 

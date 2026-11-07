@@ -31,6 +31,7 @@ def test_shown_only_on_a_terminal_and_on_the_first_start_of_a_commit(tmp_path):
     assert progress.wanted(tmp_path, "abc", environ={}, stream=TTY()) is False
     assert progress.wanted(tmp_path, "def", environ={}, stream=TTY()) is True               # a new commit
     assert progress.wanted(tmp_path, "abc", environ={progress.ENV: "1"}, stream=TTY()) is True
+    assert progress.wanted(tmp_path, "abc", environ={progress.ENV: "1"}, stream=io.StringIO()) is True
     assert progress.wanted(tmp_path, "def", environ={progress.ENV: "0"}, stream=TTY()) is False
     quiet = io.StringIO()
     p = progress.Progress(False, stream=quiet)

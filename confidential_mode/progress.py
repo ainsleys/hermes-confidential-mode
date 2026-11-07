@@ -6,8 +6,8 @@ lines show what the plugin itself is doing then, one line per phase, for example
 step runs is Hermes' own work; the plugin cannot report on it (README, Install).
 
 The lines are written only to a terminal (stderr is a TTY), and only on the first start of each installed
-commit, so an ordinary start stays quiet. ``CONFIDENTIAL_MODE_PROGRESS=1`` shows them on every start, and
-``CONFIDENTIAL_MODE_PROGRESS=0`` never. No line carries a secret: phase names and counts only. Nothing here
+commit, so an ordinary start stays quiet. ``CONFIDENTIAL_MODE_PROGRESS=1`` shows them on every start, with or
+without a terminal, and ``CONFIDENTIAL_MODE_PROGRESS=0`` never. No line carries a secret: phase names and counts only. Nothing here
 raises.
 """
 from __future__ import annotations
@@ -38,10 +38,10 @@ def wanted(data_dir: Optional[Path], commit: str, *, environ=None, stream=None) 
     env = (environ if environ is not None else os.environ).get(ENV, "").strip()
     if env == "0":
         return False
+    if env == "1":
+        return True                      # an explicit request: shown without a terminal too
     if not _stream_is_tty(stream if stream is not None else sys.stderr):
         return False
-    if env == "1":
-        return True
     try:
         return data_dir is None or (Path(data_dir) / MARKER).read_text(encoding="utf-8").strip() != commit
     except Exception:  # noqa: BLE001
@@ -114,6 +114,7 @@ QUIET = Progress(False)
 def for_cli() -> Progress:
     """Progress for a command a person runs in a terminal (lock, allow): shown when stderr is a TTY, unless
     the environment variable is 0."""
-    if os.environ.get(ENV, "").strip() == "0":
+    env = os.environ.get(ENV, "").strip()
+    if env == "0":
         return QUIET
-    return Progress(_stream_is_tty(sys.stderr))
+    return Progress(env == "1" or _stream_is_tty(sys.stderr))

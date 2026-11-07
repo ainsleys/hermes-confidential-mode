@@ -389,6 +389,52 @@ def test_denied_and_no_surface_are_refused():
     assert r.ledger.kinds()[-1] == "tool_refused" and r.ledger.events[-1]["decision"] == "denied"
 
 
+class FlakyLedger(FakeLedger):
+    """Fails the hook's write of the human's answer (a busy SQLite file), and nothing else."""
+
+    def append(self, event):
+        if event["kind"] == "tool_refused" and event.get("surface") == "cli":
+            raise OSError("database is locked")
+        super().append(event)
+
+
+def test_a_refusal_the_hook_could_not_write_is_written_by_the_middleware(caplog):
+    """Amendment 11: the hook writes the row before recording the choice; when the write fails, the denial
+    stands, a warning is logged, and the middleware writes the one refusal row."""
+    r = Rig(answer="deny", hermes_approved=False, ledger=FlakyLedger())
+    with caplog.at_level("WARNING"):
+        assert refused(r.run("web_search")) and r.ran() == []
+    assert r.ledger.kinds() == ["tool_asked", "tool_refused"] and r.ledger.events[-1]["surface"] == "middleware"
+    assert "could not ledger the answer for web_search" in caplog.text
+
+
+def test_an_answer_with_an_empty_id_is_recorded_once():
+    """Hermes can fire post_approval_response without the observability context (an empty tool_call_id). The
+    answer is keyed on the middleware's ask in progress, so exactly one row is written."""
+    r = Rig(answer=None, hermes_approved=False)
+
+    def ask(tool_name, message, *, rule_key, approval_id, session_id="", turn_id=""):
+        r.post(pattern_key="plugin_rule:" + rule_key, choice="deny", session_id=session_id, tool_call_id="",
+               surface="cli")
+        return {"approved": False, "message": "BLOCKED: denied"}
+    from confidential_mode.gate_tools import build_tool_execution
+    mw = build_tool_execution(lambda: True, r.al, r.ledger, r.decisions, bypass_active=lambda n: False,
+                              delegation_ok=lambda a: True, remembered=lambda n: False, ask=ask)
+    out = mw(tool_name="web_search", args={}, next_call=lambda a: "{}", session_id="s", tool_call_id="c1")
+    assert refused(out)
+    assert r.ledger.kinds() == ["tool_asked", "tool_refused"] and r.ledger.events[-1]["decision"] == "deny"
+
+
+def test_bypass_text_names_the_cause():
+    from confidential_mode.gate_tools import bypass_text
+    assert bypass_text("web_search", True) == (
+        "confidential mode: web_search was blocked because approvals are bypassed (yolo or approvals off); turn "
+        "the bypass off to be asked, or run: hermes confidential allow web_search (in chat: /confidential allow "
+        "web_search)")
+    assert "in an unattended run; to allow it, run: hermes confidential allow web_search, or run interactively" \
+        in bypass_text("web_search", False)
+
+
 def test_answer_for_another_call_does_not_count():
     from confidential_mode.gate_tools import ApprovalDecisions
     r = Rig(answer=None, hermes_approved=True)
@@ -416,7 +462,9 @@ def test_kb_uses_json_dumps_default_escaping():
 def test_bypass_blocks_in_both_lines_and_never_asks():
     r = Rig(bypass=True, answer="once")
     d = r.hook(tool_name="web_search", args={"q": "x"}, session_id="s")
-    assert d["action"] == "block" and "bypassed" in d["message"]
+    # No Hermes surface in a unit test: the unattended wording, naming the command (Amendment 11).
+    assert d["action"] == "block" and "unattended run" in d["message"]
+    assert "hermes confidential allow web_search" in d["message"]
     assert refused(r.run("web_search", {"q": "x"})) and r.ran() == [] and r.calls["ask"] == []
     assert [e["decision"] for e in r.ledger.events] == ["bypass_active", "bypass_active"]
 

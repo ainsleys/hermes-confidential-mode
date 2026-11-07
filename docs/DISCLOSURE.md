@@ -160,7 +160,15 @@ config sends them. The plugin only writes ledger rows that describe them, as des
 ### What it writes
 
 Everything the plugin writes is under your Hermes home, scoped to the profile. The plugin creates each
-file with mode 0600, and sets mode 0600 again on existing files each time the plugin starts.
+file with mode 0600, and sets mode 0600 again on existing files once per installed commit. The modes are POSIX
+modes: on Windows, chmod sets only the read-only flag.
+
+`hermes confidential on` run in a terminal imports every Hermes built-in tool module, so the lock can classify
+each tool. Hermes may then rewrite its tool-discovery cache, `<hermes home>/cache/tool_discovery_cache.json`,
+when that cache is stale. The imported modules register their exit handlers; the plugin removes the browser
+reaper's handler again, so a terminal command never stops browser processes a running gateway owns.
+`hermes confidential allow` and `status --verbose` import only the tool modules the lock recorded. They fall
+back to the full import, and its cache rewrite, only when a recorded tool is still missing after that.
 
 | Path | Contents |
 |---|---|
@@ -172,6 +180,7 @@ file with mode 0600, and sets mode 0600 again on existing files each time the pl
 | The same directory, `allowlist.yaml` | This lock's tool identities: each tool's name, toolset, handler module and handler name. It also holds the tools you allowed with `/confidential allow`, tagged with the lock's identity. After a restart, the plugin rebuilds the allowlist from this file. `/confidential off` deletes it, so additions never outlive the lock. |
 | The same directory, `tinfoil_user_cache_secret` | A random 32-byte secret, stored as hex with file mode 0600. The SDK sends it as `user_cache_secret`, which keeps Tinfoil's prompt cache separate for you. The SDK's own default location is `~/.tinfoil/user_cache_secret`. The plugin never uses that path. |
 | The same directory, `trust-roots/<sha256>.json` | The Sigstore trust root used at verification. Each distinct trust root is stored once, named by the hash of its content. The evidence in the ledger also carries the trust root's bytes, so a receipt replays offline on any machine. The evidence records no local path. |
+| The same directory, `modes-checked` | The commit for which the plugin last set mode 0600 on every file in both data directories. The walk runs again on a new commit, or when the ledger, `pins.yaml` or `allowlist.yaml` has another mode. |
 | The same directory, `loaded-commit` | The commit that last started here. The plugin prints its start-up progress lines on the first start of a new commit only (README, Install). |
 | The same directory, `sdk-cache/` | The on-disk caches of the tinfoil SDK and of sigstore-python, redirected here. The next section explains how. |
 

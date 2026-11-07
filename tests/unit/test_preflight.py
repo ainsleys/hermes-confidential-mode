@@ -40,7 +40,7 @@ def run(cfg, tier=Tier.ON_HOST, pred=None, *, plugin=(), isolation="in_process",
         keys=("TINFOIL_API_KEY", "NEAR_AI_API_KEY")):
     return run_preflight(tier, pred or on_host_pred(), cfg, plugin_aux_tasks=list(plugin), isolation=isolation,
                          provider_lookup=lookup or (lambda n: object() if n in PROFILES else None),
-                         attested_profile=profile, key_present=lambda env: env in keys)
+                         attested_profile=profile, key_state=lambda p, env: "set" if env in keys else "not set")
 
 
 def item(report: PreflightReport, key):
@@ -317,7 +317,8 @@ def test_attested_tier_needs_the_vendor_api_key():
     r = run(attested_config(), tier=Tier.ATTESTED, pred=attested_pred(), profile="attested-tinfoil", keys=())
     i = item(r, "TINFOIL_API_KEY")
     assert not r.ok and i.verdict == "off_tier" and i.value_redacted == "not set"
-    assert i.fix == "set TINFOIL_API_KEY (export it or add it to Hermes' env file)"
+    assert i.fix == ("set TINFOIL_API_KEY (export the variable or add the variable to Hermes' env file), or give "
+                     "Hermes the key through model.api_key or hermes auth")
     # A NEAR route anywhere (here one auxiliary task) adds the NEAR row.
     both = AttestedPredicate({"attested-tinfoil", "attested-near"}, lambda _p: Verdict(True, "fresh", ""))
     cfg = attested_config(auxiliary={"vision": {"provider": "attested-tinfoil"},
@@ -328,15 +329,47 @@ def test_attested_tier_needs_the_vendor_api_key():
     assert "TINFOIL_API_KEY" not in [i.key for i in run(base_config(), keys=()).items]
 
 
-def test_default_key_check_reads_the_secret_scope_and_never_shows_the_value(monkeypatch):
+def test_key_state_reads_every_source_and_never_shows_the_value(monkeypatch):
+    """Amendment 11: the secret scope, a route's api_key in config, and Hermes' credential pool all count; an
+    unscoped read (a multiplexed gateway with no scope) is "not readable in this scope"."""
     from confidential_mode import preflight
+    import agent.credential_pool as pool_mod
+    import agent.secret_scope as scope
+    monkeypatch.delenv("TINFOIL_API_KEY", raising=False)
+    monkeypatch.setattr(pool_mod, "load_pool", lambda name: type("P", (), {"has_credentials": lambda self: False})())
+    cfg = attested_config()
+    assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "not set"
     monkeypatch.setenv("TINFOIL_API_KEY", "sk-secret-value")
-    assert preflight.api_key_present("TINFOIL_API_KEY") is True
+    assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "set"
+    r = run_preflight(Tier.ATTESTED, attested_pred(), cfg, plugin_aux_tasks=[], isolation="in_process",
+                      provider_lookup=lambda n: object(), attested_profile="attested-tinfoil",
+                      key_state=lambda p, e: preflight.key_state(p, e, cfg))
+    assert "sk-secret-value" not in format_report(r) and item(r, "TINFOIL_API_KEY").value_redacted == "set"
+    monkeypatch.setenv("TINFOIL_API_KEY", "  ")
+    assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "not set"
+    # model.api_key on the route that names the profile
+    keyed = attested_config(model={"provider": "attested-tinfoil", "default": "llama", "api_key": "sk-cfg"})
+    assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", keyed) == "set"
+    assert preflight.key_state("attested-near", "NEAR_AI_API_KEY", keyed) == "not set"   # another profile's
+    # the credential pool (hermes auth)
+    monkeypatch.setattr(pool_mod, "load_pool",
+                        lambda name: type("P", (), {"has_credentials": lambda self: name == "attested-tinfoil"})())
+    assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "set"
+    monkeypatch.setattr(pool_mod, "load_pool", lambda name: type("P", (), {"has_credentials": lambda self: False})())
+
+    def unscoped(name, default=None):
+        raise scope.UnscopedSecretError(name, "no scope")
+    monkeypatch.setattr(scope, "get_secret", unscoped)
+    assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "not readable in this scope"
+    r = run(cfg, tier=Tier.ATTESTED, pred=attested_pred(), profile="attested-tinfoil")
+    assert item(r, "TINFOIL_API_KEY").verdict == "in_tier"           # the injected state wins in this helper
+
+
+def test_no_key_rows_without_a_key_state():
+    """The per-turn recheck passes no key_state: a key the turn cannot read is not a config failure."""
     r = run_preflight(Tier.ATTESTED, attested_pred(), attested_config(), plugin_aux_tasks=[], isolation="in_process",
                       provider_lookup=lambda n: object(), attested_profile="attested-tinfoil")
-    assert "sk-secret-value" not in format_report(r) and str(len("sk-secret-value")) not in item(r, "TINFOIL_API_KEY").value_redacted
-    monkeypatch.setenv("TINFOIL_API_KEY", "  ")
-    assert preflight.api_key_present("TINFOIL_API_KEY") is False
+    assert "TINFOIL_API_KEY" not in [i.key for i in r.items] and r.ok
 
 
 def test_a_pending_pin_is_named_as_the_fix_not_the_route():
