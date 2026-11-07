@@ -6,8 +6,18 @@ requires-python = ">=3.11"
 dependencies = [
     # Exact: 0.15.0 requires openai>=3.26 and Hermes pins openai 2.54.0 (docs/C0-spikes.md, spike 2).
     "tinfoil==0.14.2",
-    # Provided by Hermes' own environment (httpx 0.28.1; hermes_yaml stands in for PyYAML there).
-    "httpx",
+    # Provided by Hermes' own environment (httpx 0.28.1; hermes_yaml stands in for PyYAML there). Bounded
+    # because the NEAR adapter reads httpx internals (httpx._decoders, Response._content).
+    "httpx>=0.28,<0.29",
+    # Imported directly by the plugin (review finding 26). tinfoil 0.14.2 already requires each of these;
+    # they are declared so a resolver sees them. sigstore is bounded because _sdkpatch.py and
+    # verify/tinfoil.py wrap sigstore._internal.tuf, which is private and changes between minor versions.
+    "cryptography>=42",
+    "openai>=1.63",
+    "requests>=2.31",
+    "urllib3>=2.8",
+    "pyopenssl>=25",
+    "sigstore>=4.5,<4.6",
 ]
 
 [project.optional-dependencies]

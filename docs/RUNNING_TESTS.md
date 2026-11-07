@@ -42,3 +42,16 @@ and `tests/fixtures/near_real_capture/` holds a real public capture that replays
 `scripts/near_first_contact.py` is the manual counterpart. It attests NEAR, sends one unstreamed and
 one streamed request when the key is set, writes what it recorded to a JSON file, and replays that
 file offline. It prints no secrets.
+
+## Real captures in the fixtures
+
+Two fixture directories hold real vendor responses, not synthetic ones.
+`tests/fixtures/real_capture_sev/` holds a Tinfoil verification captured from a live AMD SEV-SNP
+router. `tests/fixtures/near_real_capture/` holds NEAR AI Cloud's public attestation responses. Both
+name real hosts.
+
+Real captures age. Certificates expire, and Intel Trust Authority tokens carry an expiry time. The
+tests that replay them therefore pin the check time to the capture time (`as_of`), so they keep
+passing after the material expires. A replay without that pin fails once the material is past its
+expiry, which is the correct result for a live check.
+
