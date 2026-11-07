@@ -26,7 +26,7 @@ To **lock** a profile is to hold it to one **tier**, which is a rule about where
 The word is "lock" and not "seal", because sealing means something else in confidential computing.
 **On-host** means on the machine that runs Hermes, and **off-host** means anywhere else.
 The `on-host-only` tier accepts loopback and private-range hosts. The `attested` tier accepts only
-Tinfoil's verified enclave. A destination the rule accepts is "in-tier", and any other is "off-tier".
+Tinfoil's verified enclave, or NEAR AI Cloud's verified gateway and models (section 14). A destination the rule accepts is "in-tier", and any other is "off-tier".
 
 The **preflight** is the check the plugin runs over your config before it locks. It records a
 fingerprint of the routing config so that later changes can be detected.
@@ -383,6 +383,66 @@ host (`confidential_mode/tiers.py`). This is a limit of the plugin, not of Herme
 
 **Plan.** A tier inside the plugin whose rule accepts any destination that either existing rule
 accepts. The attested checks would stay unchanged for attested routes. No core change is needed.
+
+## 14. NEAR AI Cloud: what the signatures and the evidence leave open
+
+NEAR AI Cloud is the second attested vendor, under the provider name `attested-near`. Its
+**gateway** is the server at `cloud-api.near.ai` that takes your request and passes it to a model. The
+gateway and each NEAR-operated model run in Intel TDX virtual machines, which NEAR calls CVMs. A
+**signed response** is a signature NEAR returns for one completion. A `provider_tee` signature is made
+inside the model's CVM over `<model id>:<SHA-256 of the request body>:<SHA-256 of the response body>`.
+A `gateway` signature is made inside the gateway's CVM over `<request hash>:<response hash>` only.
+
+**The gap.** Seven things stay open after every NEAR check passes.
+
+- **A gateway signature says nothing about the model.** The gateway signs its own output whenever it
+  rewrites the bytes: on every streamed completion, when it resolves a model alias, and on the
+  Responses API. NEAR documents no link from that signature to the response the model produced.
+- **A model signature is not chained to the gateway.** NEAR documents that a `provider_tee` signature
+  does not bind the model-signed bytes to the gateway evidence or to the TLS connection.
+- **The instance is not named.** Every instance of one model shares one signing key, also across
+  instances with different measured configurations. On 2026-11-07 NEAR served Qwen/Qwen3.8-27B from at
+  least two instances whose measured docker-compose files differ, in an instance label and in a
+  compose-manager image digest.
+- **What runs after launch is not measured here.** The model CVM's docker-compose starts a
+  compose-manager, which can apply further deployment actions after launch. NEAR returns a separate
+  attestation for it, and the plugin does not check that attestation.
+- **The model CVM's patch level is not checked.** The plugin checks each model quote's signature
+  chain to Intel's SGX root offline. It does not fetch Intel's TCB collateral for it, so the model CVM's
+  TCB status, advisories and revocation are unknown. Only the gateway's TCB status is known, from
+  Intel Trust Authority's signed token.
+- **The GPU verdict is not tied to the model CVM.** Intel Trust Authority's "model provider" token
+  carries an NVIDIA GPU verdict next to TDX claims that are the gateway's own. Nothing in that token
+  names the model CVM.
+- **The gateway reads your text.** TLS ends inside the gateway's CVM, which then reads the request to
+  route it. The attestation says which code the gateway runs. It does not say what that code does with
+  the text.
+
+**Why it exists.** These are properties of NEAR's protocol as NEAR documents it (docs.near.ai,
+verification pages, read 2026-11-07). They are not Hermes gaps.
+
+**What the plugin does today.**
+
+- It refuses a NEAR model that is not on `confidential.near.models` before sending, while
+  `require_provider_tee` is true (the default). Models NEAR does not attest run in what NEAR calls
+  Incognito mode, with gateway signatures only. A request for one could reach a hosted provider behind
+  the gateway, such as Anthropic or OpenAI.
+- It sends main calls unstreamed, so that a NEAR-operated model can sign them with `provider_tee`.
+  The setting is `confidential.near.streaming`, default false.
+- It records every send's digests and signature in a `send_signed` ledger row. A send without a
+  `provider_tee` signature that verifies is marked unverified, and the receipt says "SESSION NOT FULLY
+  ATTESTED". The send is not refused, because the response has already arrived when the signature is
+  fetched.
+- It pins the measured docker-compose of the gateway and of every model instance it saw. A new
+  instance with a different compose is a pin prompt. With two instances behind one model, you may be
+  asked again when a later verification lands on the second instance.
+- The replay's `NOT_ESTABLISHED` list names every item above.
+
+**The change that would close it.** On NEAR's side: one signature chain from the model's bytes through
+the gateway to the bytes the client received; a signing key per instance, or the instance id inside
+the signed text; TCB status and GPU evidence bound to the model CVM's own quote. In the plugin: an
+approved-set pin that accepts any measured configuration a human has approved for this identity. That
+change is listed, not built.
 
 ## Smaller gaps, disclosed
 

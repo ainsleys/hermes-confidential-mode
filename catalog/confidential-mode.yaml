@@ -5,7 +5,8 @@ repo: https://github.com/ainsleys/hermes-confidential-mode
 sha: "<40-char sha at submission>"
 description: >-
   Locks a Hermes profile so that the model runs only on this host or a private-range host, or in a
-  Tinfoil enclave whose build you approved. A locked profile is held to one tier, on-host-only or
+  Tinfoil enclave or behind NEAR AI Cloud's attested gateway and models, whose builds you approved.
+  For NEAR it checks each response's signature and records whether a model TEE signed it. A locked profile is held to one tier, on-host-only or
   attested; a destination the tier accepts is in-tier, and anything else is off-tier.
 
   While locked, the plugin refuses main-loop model calls and fallbacks to any off-tier host before a
@@ -36,6 +37,10 @@ description: >-
   collateral, both of which are hardware collateral. It contacts tuf-repo-cdn.sigstore.dev for the
   Sigstore TUF trust root. It sends no telemetry. Tinfoil still sees the API key header, request
   sizes, timing and your IP address where it terminates TLS. Your DNS resolver sees every lookup.
+  With the attested-near provider, the plugin contacts cloud-api.near.ai for attestation reports,
+  Intel Trust Authority tokens, inference and response signatures, sending NEAR_AI_API_KEY only with
+  inference and signature requests, and portal.trustauthority.intel.com for Intel's token-signing
+  keys; NEAR's gateway reads every request it routes.
 
   Disclosure, files. Everything is under <HERMES_HOME>/plugin-data/. The plugin writes
   ledger.sqlite, which holds hosts, byte counts, verdicts and verification evidence. It never holds

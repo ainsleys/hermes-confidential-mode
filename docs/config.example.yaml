@@ -1,7 +1,8 @@
 # PLUGIN_NAME: confidential-mode  (working name; the config section below is `confidential:` either way)
 #
 # This is an example fragment of ~/.hermes/config.yaml for the attested tier. The attested tier
-# allows the model to run only in Tinfoil's verified enclave.
+# allows the model to run only in Tinfoil's verified enclave, or behind NEAR AI Cloud's verified
+# gateway (confidential.near below; `hermes confidential setup --vendor near` prints a NEAR block).
 #
 # Merge this fragment into your own config by hand. The plugin never writes your config.
 #
@@ -72,6 +73,45 @@ confidential:
     # A value lower than the documented window is safe. Hermes then compresses context earlier. A
     # higher value is not safe.
     context_length: 256000
+
+  near:
+    # NEAR AI Cloud, the second attested vendor (provider attested-near). These keys matter only when
+    # model.provider or an auxiliary task uses attested-near. README: "The attested tier with NEAR AI".
+    #
+    # The gateway URL. Attestation, inference and signature requests all go here. Default:
+    base_url: https://cloud-api.near.ai/v1
+
+    # Every NEAR model id Hermes may send. The plugin adds the ids that model.default and
+    # auxiliary.<task>.model name for attested-near. A request for any other model is refused before it
+    # is sent, while require_provider_tee is true. The pin covers exactly this list. Use full ids (NEAR
+    # signs the id it received). Default [].
+    models: [Qwen/Qwen3.8-27B]
+
+    # true: a send counts as verified only with a provider_tee signature, made by an attested model
+    # server's key over "<model id>:<request sha256>:<response sha256>". A gateway-kind or missing
+    # signature is recorded as unverified, and the receipt says the session is not fully attested.
+    # false: a verified gateway signature is enough, and models with no model attestation
+    # (NEAR's Incognito models) are allowed. Only the exact value false turns this off. Default true.
+    require_provider_tee: true
+
+    # true: the TLS certificate of the attestation connection must be the one the gateway's report
+    # binds. Default true.
+    require_tls_binding: true
+
+    # Intel TCB status values accepted for the gateway, from Intel Trust Authority's token.
+    # Default [UpToDate].
+    accepted_tcb_statuses: [UpToDate]
+
+    # How many seconds the plugin keeps asking for a response's signature after the response ended
+    # (NEAR may record it a moment later). The turn waits at most this long. Default 5.
+    signature_wait_seconds: 5
+
+    # false: Hermes sends main calls unstreamed. NEAR's gateway re-signs streamed responses with its
+    # own key, so only unstreamed responses can carry a provider_tee signature. Default false.
+    streaming: false
+
+    # The context window reported to Hermes for attested-near (no /models probe). Default 65536.
+    context_length: 65536
 
   on_host:
     # Extra hostnames or IP addresses that the on-host-only tier counts as on-host.

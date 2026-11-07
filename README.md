@@ -347,7 +347,8 @@ therefore cannot tell where they point. You have to set `model.base_url` and eac
 
 ### `attested`
 
-**Where the model may run.** The model must be reached through Tinfoil's confidential model router.
+**Where the model may run.** The model must be reached through Tinfoil's confidential model router,
+or through NEAR AI Cloud's attested gateway (see [The attested tier with NEAR AI](#the-attested-tier-with-near-ai)).
 The router runs in an AMD SEV-SNP or Intel TDX enclave. The plugin verifies the router before first
 use. It verifies the router again whenever the last successful verification is older than 300
 seconds.
@@ -371,6 +372,109 @@ This tier is not implemented. `/confidential on zero-retention` refuses.
 The tier is reserved for hosted providers that promise not to keep your data. Such a promise is a
 policy. Nothing the plugin can observe from your machine confirms it, so the plugin offers no check
 for it yet.
+
+## The attested tier with NEAR AI
+
+NEAR AI Cloud is a second vendor for the `attested` tier. Its provider name in Hermes is
+`attested-near`. You lock to it with the same command as for Tinfoil, `/confidential on attested`.
+
+### What NEAR runs
+
+NEAR AI Cloud has two parts. The **gateway** is the server at `cloud-api.near.ai` that receives your
+request. The gateway passes the request to a **model server**, which runs the model. NEAR runs both
+parts inside Intel TDX virtual machines. NEAR calls each such virtual machine a **CVM**, short for
+confidential virtual machine. Intel TDX is Intel's TEE technology.
+
+### What the plugin checks before the first send
+
+The plugin asks NEAR for an **attestation report** for the gateway and for each model you allow. An
+attestation report is a document signed by the CPU that says what the CVM runs. Each report includes a
+fresh random value from the plugin, called a **nonce**. The nonce proves the report was made for this
+request and was not copied from an earlier one.
+
+The plugin checks six things.
+
+- The CPU signature on each report traces back to Intel's root certificate.
+- Each report names the CVM's **signing key**, the key the CVM signs responses with.
+- Each report names the nonce the plugin sent.
+- Each report's measured configuration matches the **docker-compose file** the report carries. The
+  docker-compose file lists the container images the CVM runs.
+- The gateway's report names the TLS certificate this connection used. TLS is the encryption that
+  HTTPS uses. So the plugin knows the encrypted connection ends inside the gateway's CVM.
+- Intel Trust Authority, a service Intel runs, has signed a token that says the gateway's hardware is
+  up to date. The plugin checks Intel's signature against Intel's published keys.
+
+No API key is sent with these requests. NEAR documents its attestation endpoints as public.
+
+### Signed responses
+
+A **signed response** is a signature NEAR returns for one completion. A signature is made with a
+private key. Anyone with the matching public key can check it. The attestation report ties the public
+key to the CVM.
+
+For every send through `attested-near`, the plugin records two **digests**. A digest is a SHA-256
+hash. The first digest is of the exact bytes of the request. The second digest is of the exact bytes
+of the response. After the response arrives, the plugin fetches NEAR's signature for that completion.
+It waits at most 5 seconds for it. It checks the signature and writes one row to the ledger.
+
+NEAR signs with one of two kinds of key.
+
+- **`provider_tee`.** The model server's CVM signs `<model id>:<request digest>:<response digest>`.
+  This proves that an attested model server signed exactly these bytes for exactly this model.
+- **`gateway`.** The gateway's CVM signs `<request digest>:<response digest>`. This proves the attested
+  gateway sent these bytes. It says nothing about which model produced them.
+
+The gateway signs with its own key whenever it changes the bytes. That happens on every streamed
+response. The plugin therefore sends main calls to NEAR without streaming. A stream that stops before
+its end gets no signature at all. The ledger row then says so.
+
+`confidential.near.require_provider_tee` is true by default. A send whose signature is of the
+`gateway` kind, or is missing, is then recorded as unverified. The receipt then says the session is
+not fully attested. The send is not refused, because the response has already arrived when the
+signature is checked.
+
+### What a receipt shows
+
+The receipt lists every NEAR send with its two digests, the signature kind, the plugin's verdict at
+the time, and a **replay verdict**. A replay re-checks everything offline, from the receipt alone.
+`hermes confidential replay <receipt.json>` re-checks each attestation report and each signature.
+
+A receipt holds digests, not your text. A third party can tie a signature to a conversation only if
+they hold the exact request and response bytes and hash them.
+
+### Models
+
+You must list every NEAR model Hermes may use in `confidential.near.models`. The plugin also adds the
+models that `model.default` and the `auxiliary.<task>.model` keys name for `attested-near`. The plugin
+refuses a request for any other model before it is sent. The refusal matters because NEAR also serves
+hosted models, such as Anthropic's and OpenAI's, through the same gateway. NEAR calls those models
+**Incognito** models. For them only the gateway is attested.
+
+Use a model that NEAR runs itself and attests, such as `Qwen/Qwen3.8-27B`. Use its full id, because
+NEAR signs the id it received and refuses aliases from this plugin.
+
+### Pins for NEAR
+
+A pin for NEAR is keyed by the gateway host and the list of allowed models, for example
+`cloud-api.near.ai#Qwen/Qwen3.8-27B`. The code fingerprint covers the docker-compose file of the
+gateway and of every model server the report showed. The enclave fingerprint covers the firmware and
+kernel measurements of the same CVMs.
+
+A change to either fingerprint is refused until you approve it with `/confidential pins approve`, as
+for Tinfoil. NEAR may run one model on several CVMs with different docker-compose files. You may
+therefore be asked again when a later check reaches another CVM.
+
+### Setup
+
+```
+hermes confidential setup --vendor near --model Qwen/Qwen3.8-27B
+```
+
+This command checks the gateway and the model, asks you to approve the first pin, and prints a config
+block. It never writes your config. Set `NEAR_AI_API_KEY` for inference. The script
+`scripts/near_first_contact.py` runs the same checks and one signed send, and prints no secrets.
+
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 14, lists what the NEAR checks leave open.
 
 ## Look before you lock
 
@@ -1148,6 +1252,8 @@ cd ~/hermes-agent && PYTHONDONTWRITEBYTECODE=1 HERMES_HOME=$(mktemp -d) \
 
 The seam tests run against real Hermes modules at commit 84a0301. They use fakes at three boundaries
 only: the SDK, the network, and the person who answers prompts.
+
+The live NEAR tests in `tests/live/` are skipped unless `NEAR_AI_API_KEY` is set.
 
 Two commands check the plugin against the catalog rules: `hermes plugins validate --install-deps
 <plugin dir>` and `hermes plugins doctor --ci <plugin dir>`. See

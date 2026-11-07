@@ -72,6 +72,13 @@ When you use the attested provider, the plugin and the tinfoil SDK it drives con
 | `tdx-proxy.tinfoil.sh` | The SDK, for Intel TDX routers. | Intel's collateral from its provisioning certification service (PCS): TCB info, QE identity, the PCK revocation list and the root CA revocation list. TCB info is Intel's signed statement of current firmware versions. QE identity describes the quoting enclave that signs TDX reports. The two revocation lists name withdrawn certificates. These come from Intel's `api.trustedservices.intel.com` and `certificates.trustedservices.intel.com`, through Tinfoil's proxy. |
 | `tuf-repo-cdn.sigstore.dev` | sigstore-python, called by the SDK. | A refresh of the Sigstore trust root through TUF. The trust root is used to verify the release's Sigstore bundle. |
 
+When you use the `attested-near` provider (NEAR AI Cloud), the plugin itself contacts the hosts below. No NEAR SDK is involved.
+
+| Host | Who calls it | What for |
+|---|---|---|
+| `cloud-api.near.ai` (or `confidential.near.base_url`) | The plugin's NEAR adapter. | `/v1/attestation/report` and `/v1/attestation/ita-token` with a fresh nonce, without an API key (NEAR documents them as public). Then your inference requests, and `/v1/signature/<id>` for each response, both with `NEAR_AI_API_KEY`. TLS ends inside NEAR's gateway CVM, which reads every request it routes. |
+| `portal.trustauthority.intel.com` (`/certs`) | The plugin's NEAR adapter. | Intel Trust Authority's token-signing keys. The adapter never fetches keys from a URL the vendor names; the key chain must end at a pinned Intel root. |
+
 ### When it verifies again
 
 The plugin verifies the router again in three situations:

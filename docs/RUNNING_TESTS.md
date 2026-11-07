@@ -31,3 +31,14 @@ it has the same versions, and then add the SDK to it:
 
 `UV_PROJECT_ENVIRONMENT` tells uv to create the environment in `<dir>/.venv` instead of in Hermes'
 own `.venv`. The second command installs the SDK into that separate environment only.
+
+## Live NEAR AI Cloud tests
+
+`tests/live/test_near_live.py` talks to `cloud-api.near.ai` and spends tokens. It is skipped unless
+`NEAR_AI_API_KEY` is set. `NEAR_LIVE_MODEL` picks the model; the default is `Qwen/Qwen3.8-27B`.
+Every other NEAR test is offline: `tests/near_world.py` serves a synthetic NEAR with real signatures,
+and `tests/fixtures/near_real_capture/` holds a real public capture that replays offline.
+
+`scripts/near_first_contact.py` is the manual counterpart. It attests NEAR, sends one unstreamed and
+one streamed request when the key is set, writes what it recorded to a JSON file, and replays that
+file offline. It prints no secrets.
