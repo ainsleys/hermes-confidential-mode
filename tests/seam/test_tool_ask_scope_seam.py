@@ -191,24 +191,32 @@ def _one_shot(gate):
 
 
 def _cron(gate):
-    gate.monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    """Hermes' cron runner binds the session context (gateway.session_context), which wins over the
+    environment once any session context has been bound in the process."""
+    from gateway.session_context import set_session_vars
+    gate.session_tokens = set_session_vars(session_key=SK, cron_session="1")
 
 
 def _unattended_platform(gate):
+    from gateway.session_context import set_session_vars
     gate.monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
     gate.monkeypatch.setenv("HERMES_EXEC_ASK", "1")
-    gate.monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webhook")
+    gate.session_tokens = set_session_vars(session_key=SK, platform="webhook")
 
 
 @pytest.mark.parametrize("bypass", [_yolo, _approvals_off, _one_shot, _cron, _unattended_platform],
                          ids=["yolo", "approvals_off", "one_shot", "cron", "unattended_platform"])
 def test_a_lock_grant_never_applies_where_nobody_is_asked(gate, bypass):
     _granted_once_on_cli(gate)
+    gate.session_tokens = None
     bypass(gate)
     try:
         out = gate.call()
     finally:
         approval.disable_session_yolo(SK)
+        if gate.session_tokens is not None:
+            from gateway.session_context import clear_session_vars
+            clear_session_vars(gate.session_tokens)
     assert len(gate.ran) == 2, "the granted tool did not run under the bypass"
     assert "blocked" in out and len(gate.prompts) == 1
     assert gate.rows("tool_refused")[-1].decision == "bypass_active"
