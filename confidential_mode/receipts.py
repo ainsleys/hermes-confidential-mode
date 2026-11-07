@@ -571,6 +571,32 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
     return out
 
 
+def _evidence_item(ledger, row: Mapping) -> dict:
+    """One ``evidence`` entry: the row's evidence as stored, plus every blob it references (``blob_refs``,
+    Amendment 5.2) read from the ledger's blob store, so the receipt replays offline on its own. A blob the
+    store does not hold, or holds with other bytes, is listed under ``blobs_missing``; its replay fails."""
+    ev = row["detail"]["evidence"]
+    item = {"row_id": row["id"], "evidence": ev, "unverified_entry": is_unverified_entry(row)}
+    refs = ev.get("blob_refs")
+    if isinstance(refs, list) and refs:
+        getter = getattr(ledger, "blob", None)
+        blobs, missing = {}, []
+        for blob_id in refs:
+            text = None
+            try:
+                text = getter(blob_id) if callable(getter) else None
+            except Exception:
+                text = None
+            if isinstance(text, str) and hashlib.sha256(text.encode("utf-8")).hexdigest() == blob_id:
+                blobs[blob_id] = text
+            else:
+                missing.append(blob_id)
+        item["blobs"] = blobs
+        if missing:
+            item["blobs_missing"] = missing
+    return item
+
+
 def build_receipt(ledger, session_id: str, *, pins: Any = None, on_host_extra_hosts: Iterable[str] = (),
                   include_profile_rows: bool = True, ttl_seconds: float | None = None) -> dict:
     """The JSON receipt as a dict (``render(fmt="json")`` serialises this). ``ttl_seconds``: the
@@ -588,8 +614,7 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, on_host_extra_ho
     providers = sorted({(r["provider"], r["model"]) for r in sends if r["provider"] or r["model"]})
     enclave_hosts = [{"row_id": r["id"], "host": r["host"]} for r in rows
                      if r["kind"] == "send_observed" and r.get("tier") == "attested" and r["host"]]
-    evidence = [{"row_id": r["id"], "evidence": r["detail"]["evidence"], "unverified_entry": is_unverified_entry(r)}
-                for r in rows
+    evidence = [_evidence_item(ledger, r) for r in rows
                 if r["kind"] in ("verify_ok", "verify_fail") and isinstance(r["detail"].get("evidence"), Mapping)]
     doc = {
         "format": RECEIPT_FORMAT,
@@ -666,6 +691,12 @@ def verify_chain(receipt_json: str | Mapping) -> bool:
             row = by_id.get(item.get("row_id"))
             if row is None or canonical_json(row["detail"].get("evidence")) != canonical_json(item.get("evidence")):
                 return False
+            blobs = item.get("blobs", {})
+            refs = set((item.get("evidence") or {}).get("blob_refs") or [])
+            if not isinstance(blobs, Mapping) or not set(blobs) <= refs or any(
+                    not isinstance(t, str) or hashlib.sha256(t.encode("utf-8")).hexdigest() != k
+                    for k, t in blobs.items()):
+                return False   # an embedded blob must be one the row references, with the bytes of its id
         trust_digest = hashlib.sha256(canonical_json(doc["trust_roots"]).encode("utf-8")).hexdigest()
         if header.get("trust_roots_sha256") != trust_digest:
             return False

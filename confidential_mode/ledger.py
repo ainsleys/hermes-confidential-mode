@@ -10,7 +10,9 @@ WAL-aware ``open_db``. Tests inject a path or a connection factory instead.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -41,6 +43,10 @@ FORBIDDEN_DETAIL_KEYS = frozenset({
     "contents",
 })
 MAX_DETAIL_BYTES = 256 * 1024  # verification evidence can carry certificate chains
+# Content-addressed store for large evidence texts (NEAR app_compose files and compose-manager logs),
+# next to the ledger file: <data_dir>/evidence/blobs/<sha256>. A row keeps only the ids (Amendment 5.2).
+BLOB_SUBDIR = ("evidence", "blobs")
+MAX_BLOB_BYTES = 8 * 1024 * 1024
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -104,6 +110,70 @@ def _check_detail(value: Any, path: str = "detail") -> None:
 _EVENT_FIELDS = frozenset(_COLUMNS)
 
 
+class BlobStore:
+    """Write-once files named by the SHA-256 of their UTF-8 text. ``get`` returns None for a missing blob
+    or one whose bytes no longer hash to its name, so a replay that needs it fails closed."""
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root)
+
+    def _path(self, blob_id: str) -> Path | None:
+        if not isinstance(blob_id, str) or len(blob_id) != 64 or any(c not in "0123456789abcdef" for c in blob_id):
+            return None
+        return self.root / blob_id
+
+    def put(self, blob_id: str, text: str) -> None:
+        path = self._path(blob_id)
+        data = text.encode("utf-8") if isinstance(text, str) else None
+        if path is None or data is None or hashlib.sha256(data).hexdigest() != blob_id:
+            raise LedgerError("evidence blob does not hash to its id")
+        if len(data) > MAX_BLOB_BYTES:
+            raise LedgerError("evidence blob exceeds the blob size cap")
+        if path.exists() and self.get(blob_id) is not None:
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{blob_id}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+
+    def get(self, blob_id: str) -> str | None:
+        path = self._path(blob_id)
+        try:
+            data = path.read_bytes() if path is not None else None
+        except OSError:
+            return None
+        if data is None or hashlib.sha256(data).hexdigest() != blob_id:
+            return None
+        return data.decode("utf-8")
+
+
+def _blob_json(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
+def externalize_evidence(detail: dict, store: BlobStore | None) -> dict:
+    """A copy of ``detail`` whose ``evidence.blobs`` texts are written to ``store`` and replaced by
+    ``evidence.blob_refs`` (sorted ids). Each blob must hash to its id and pass the content-key scan. With
+    no store the detail is returned unchanged (blobs stay inline and count toward the size cap)."""
+    ev = detail.get("evidence")
+    if not isinstance(ev, Mapping) or not isinstance(ev.get("blobs"), Mapping):
+        return detail
+    for blob_id, text in ev["blobs"].items():
+        if not isinstance(text, str) or hashlib.sha256(text.encode("utf-8")).hexdigest() != blob_id:
+            raise LedgerError("evidence blob does not hash to its id")
+        _check_detail(_blob_json(text), f"detail.evidence.blobs[{blob_id[:12]}]")
+    if store is None:
+        return detail
+    for blob_id, text in ev["blobs"].items():
+        store.put(blob_id, text)
+    stripped = {k: v for k, v in ev.items() if k != "blobs"}
+    stripped["blob_refs"] = sorted(ev["blobs"])
+    return {**detail, "evidence": stripped}
+
+
 def coerce_event(event: Any) -> LedgerEvent:
     """LedgerEvent passes through; a Mapping with column-name keys becomes a LedgerEvent.
     Unknown keys are rejected (a typo must not silently drop a field); ``id`` is ignored;
@@ -143,17 +213,37 @@ class Ledger:
 
     def __init__(self, path: str | Path | None = None, *,
                  connect: Callable[[], sqlite3.Connection] | None = None,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, blob_dir: str | Path | None = None):
         if path is not None and connect is not None:
             raise ValueError("pass path or connect, not both")
         if path is not None:
             p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
             connect = lambda: sqlite3.connect(p, check_same_thread=False, timeout=5.0)  # noqa: E731
+            if blob_dir is None:
+                blob_dir = p.parent.joinpath(*BLOB_SUBDIR)
+        # blob_dir: given, next to the ledger file, or (default ledger) <plugin data dir>/evidence/blobs
+        # resolved on first use; an injected connection without blob_dir has no store.
+        self._blob_dir = Path(blob_dir) if blob_dir is not None else None
+        self._blob_default = path is None and connect is None
         self._connect = connect or _default_connect
         self._clock = clock
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
+
+    @property
+    def blobs(self) -> BlobStore | None:
+        """The evidence blob store, or None when this ledger has none."""
+        if self._blob_dir is None and self._blob_default:
+            try:
+                self._blob_dir = default_ledger_path().parent.joinpath(*BLOB_SUBDIR)
+            except Exception:
+                return None
+        return BlobStore(self._blob_dir) if self._blob_dir is not None else None
+
+    def blob(self, blob_id: str) -> str | None:
+        store = self.blobs
+        return store.get(blob_id) if store is not None else None
 
     def _db(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -173,6 +263,7 @@ class Ledger:
             raise LedgerError(f"unknown ledger kind {event.kind!r}")
         detail = dict(event.detail or {})
         _check_detail(detail)
+        detail = externalize_evidence(detail, self.blobs)
         encoded = json.dumps(detail, sort_keys=True, default=str)
         if len(encoded.encode("utf-8")) > MAX_DETAIL_BYTES:
             raise LedgerError("detail exceeds the ledger size cap")
