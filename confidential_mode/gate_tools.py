@@ -238,7 +238,14 @@ def lock_id_for(state: Any) -> str:
         since, fp = state.locked_since(), state.config_fingerprint()
     except Exception:
         return ""
-    return f"{since!r}|{fp}" if since is not None else ""
+    return lock_id_from(since, fp)
+
+
+def lock_id_from(since: Any, fingerprint: Any) -> str:
+    """``lock_id_for`` from the two values, before they are written (the lock persists the allowlist first)."""
+    if since is None:
+        return ""
+    return f"{float(since)!r}|{None if fingerprint is None else str(fingerprint)}"
 
 
 def _handler_identity(handler: Any) -> tuple[str, str]:

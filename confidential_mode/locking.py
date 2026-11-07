@@ -362,16 +362,23 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
     allowlist = allowlist_builder(registry, predicate=predicate, added_path=allowlist_path)
     allowlist_text = format_allowlist(allowlist)
 
-    state.lock(tier, report.fingerprint)
     # Amendment 4 F5/F6 (W4): persist this lock's tool identities, tagged with the lock, so a restart
-    # rebuilds from them (not from the live registry) and grants never outlive the lock.
+    # rebuilds from them (not from the live registry) and grants never outlive the lock. Review finding 9:
+    # the file is written BEFORE the lock flag, so another process (a running gateway) that sees the new
+    # lock always finds its allowlist on disk.
+    since = state.now()
     if hasattr(allowlist, "persist"):
-        from .gate_tools import lock_id_for
-        allowlist.lock_id = lock_id_for(state)
+        from .gate_tools import lock_id_from
+        allowlist.lock_id = lock_id_from(since, report.fingerprint)
         try:
             allowlist.persist(allowlist_path)
-        except Exception:
-            pass   # an unpersisted lock rebuilds as an empty allowlist after a restart: fail closed
+        except Exception as exc:  # noqa: BLE001 - the lock cannot be shared with other processes: refuse it
+            _append(ledger, LedgerEvent(kind="preflight_fail", purpose="lock:allowlist", verdict="error",
+                                        decision="refused", detail={"error_type": type(exc).__name__}, **base))
+            return LockResult(False, f"Not locked: the tool allowlist could not be written to {allowlist_path} "
+                              f"({type(exc).__name__}). Check that the plugin data directory is writable.",
+                              tier=tier, report=report)
+    state.lock(tier, report.fingerprint, since=since)
     verification_result = (verification or _default_verification)(attested_profile_for(config)) \
         if tier is Tier.ATTESTED else None
     message = lock_message(tier, config, verification=verification_result, clock=clock)

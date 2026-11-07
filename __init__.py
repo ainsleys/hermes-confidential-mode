@@ -115,10 +115,16 @@ class Runtime:
         with self._lock:
             cached = self._allowlist
             if cached is not None and getattr(cached, "lock_id", "") == lock_id:
-                if stamp != self._allowlist_stamp:
+                if stamp == self._allowlist_stamp:
+                    return cached
+                if getattr(cached, "tools", None):
                     _merge_added(cached, self.allowlist_path, lock_id)
                     self._allowlist_stamp = stamp
-                return cached
+                    return cached
+                # Review finding 9: an EMPTY cached allowlist for this lock (the file was missing or
+                # unreadable when this process first looked) is rebuilt from the file once it changes,
+                # not merged into; merging adds approvals only and would keep every tool blocked.
+                self._allowlist = None
         from tools.registry import registry
         predicate = _cm("locking").predicate_for(tier, config=self.load_config())
         # Amendment 4 F5 (W4): rebuild from the identities persisted at THIS lock; anything registered
@@ -126,7 +132,7 @@ class Runtime:
         allowlist = gt.Allowlist.load_persisted(self.allowlist_path, registry, predicate=predicate, lock_id=lock_id)
         with self._lock:
             current = self._allowlist
-            if current is None or getattr(current, "lock_id", "") != lock_id:
+            if current is None or getattr(current, "lock_id", "") != lock_id or not getattr(current, "tools", None):
                 self._allowlist, self._allowlist_stamp = allowlist, stamp
             allowlist = self._allowlist
         # Not kind "lock": receipts open a locked period at every lock row (Amendment 4 F7).

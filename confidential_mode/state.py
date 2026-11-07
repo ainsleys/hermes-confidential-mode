@@ -70,12 +70,16 @@ class ConfidentialState:
         except ValueError as exc:
             raise StateError(f"locked with unknown tier {tier_raw!r}") from exc
 
-    def lock(self, tier: Tier, config_fingerprint: str) -> None:
+    def now(self) -> float:
+        """The clock ``lock`` stamps ``locked_since`` with (so a caller can compute the lock id first)."""
+        return float(self._clock())
+
+    def lock(self, tier: Tier, config_fingerprint: str, *, since: float | None = None) -> None:
         tier = Tier(tier)
         # Tier first, flag last: a crash between writes leaves the profile unlocked-with-a-tier,
         # never locked-without-one.
         self._store.set(KEY_LOCKED_TIER, tier.value)
-        self._store.set(KEY_LOCKED_SINCE, float(self._clock()))
+        self._store.set(KEY_LOCKED_SINCE, float(self._clock() if since is None else since))
         self._store.set(KEY_CONFIG_FINGERPRINT, str(config_fingerprint))
         self._store.set(KEY_LOCKED, True)
 

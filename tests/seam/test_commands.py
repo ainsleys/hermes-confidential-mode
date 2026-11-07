@@ -583,6 +583,37 @@ def test_cli_on_and_off_in_another_process_govern_the_running_gateway(plugin, mo
     assert ok["final_response"] == "provider answered"
 
 
+def test_allowlist_is_on_disk_before_the_lock_flag_and_an_empty_cache_is_rebuilt(plugin):
+    """Review finding 9: the lock writes allowlist.yaml before the locked flag, and a process that cached an
+    empty allowlist for the current lock (file missing when it first looked) rebuilds once the file appears."""
+    import os
+    gt, state_mod = _sub(plugin, "gate_tools"), _sub(plugin, "state")
+    path = plugin.rt.allowlist_path
+    seen = {}
+    real_lock = state_mod.ConfidentialState.lock
+
+    def spy(self, tier, fp, **kw):
+        seen["file_before_flag"] = os.path.exists(path)
+        seen["lock_id_in_file"] = json.loads(open(path).read()).get("lock_id")
+        return real_lock(self, tier, fp, **kw)
+    state_mod.ConfidentialState.lock = spy
+    try:
+        assert plugin.slash("on on-host-only").startswith("Locked")
+    finally:
+        state_mod.ConfidentialState.lock = real_lock
+    assert seen["file_before_flag"] is True and seen["lock_id_in_file"] == gt.lock_id_for(plugin.rt.state)
+    # A second process (here: this runtime with its cache cleared) looks while the file is missing...
+    saved = open(path).read()
+    os.unlink(path)
+    plugin.rt._allowlist = None
+    assert plugin.rt.allowlist().tools == {}
+    # ...then the file appears for the same lock: the empty cache is rebuilt, not merged into.
+    open(path, "w").write(saved)
+    os.utime(path, ns=(time.time_ns() + 10**9, time.time_ns() + 10**9))
+    al = plugin.rt.allowlist()
+    assert al.get("read_file").route is gt.Route.ON_HOST and al.get("web_search").route is gt.Route.ASK
+
+
 def test_cli_on_refusal_and_receipts_exit_codes(plugin):
     plugin.cfg.write_text(BASE_CONFIG + "fallback_providers:\n  - provider: openrouter\n    model: x/y\n")
     proc = _hermes(plugin, "on", "on-host-only")
