@@ -104,6 +104,7 @@ from . import _sdkpatch
 from .base import PreparedVerification, VerificationResult, VerifyError
 
 VENDOR = "tinfoil"
+PROBE_TIMEOUT_SECONDS = 10.0  # the bodiless TLS probe at verification (confidential.tinfoil.tls_probe)
 ROUTER_REPO = "tinfoilsh/confidential-model-router"
 USER_CACHE_SECRET_FILE = "tinfoil_user_cache_secret"
 ENCLAVE_SOURCE_CONFIG = "config"
@@ -333,14 +334,14 @@ class TinfoilAdapter:
 
     # ── TLS pin per send (Amendment 13) ──────────────────────────────────────────────────────────
     def expected_tls_fp(self, sc=None) -> str | None:
-        """The TLS key fingerprint (SPKI SHA-256, hex) of the latest report the SDK verified, else the accepted
-        result's. None before any verification: the pinned context then refuses every connection."""
-        sc = sc if sc is not None else self._sc
-        fp = getattr(getattr(sc, "ground_truth", None), "public_key", None) if sc is not None else None
-        if fp:
-            return str(fp)
+        """The TLS key fingerprint (SPKI SHA-256, hex) of the result the plugin accepted: the one
+        commit_verification published, or a same-build re-verification _guarded_verify_locked accepted. Never
+        the SDK's own latest ground truth, which the SDK stores before the plugin has checked the build or the
+        pins. None before any accepted verification: the pinned context then refuses every connection.
+        ``sc`` is accepted for the callers' convenience and not read."""
         acc = self._accepted
-        return ((acc.evidence or {}).get("claims") or {}).get("tls_public_key_fp") if acc else None
+        fp = ((acc.evidence or {}).get("claims") or {}).get("tls_public_key_fp") if acc else None
+        return str(fp) if fp else None
 
     def pinned_context(self, sc=None):
         from .near import pinned_ssl_context
@@ -664,21 +665,44 @@ class TinfoilAdapter:
             return result
 
     def _probe_tls(self, http, result) -> None:
-        """Observation only (never fails a verify): which key terminated TLS on the EHBP connection?"""
+        """Before the result is accepted, open one bodiless connection to the enclave host, pinned to the TLS
+        key of the report being verified, with no API key or other header of the plugin's, and record the
+        certificate seen. A certificate other than the one the report binds fails the verification
+        (VerifyError) after a ``verify_fail`` row (purpose ``tls_pin``); any other probe failure is recorded
+        in the evidence and does not fail the verification. ``http`` (the new pool) is not used: the pool is
+        pinned to the accepted key, which this result is not yet."""
+        from .near import TLSPinMismatch, pinned_ssl_context
         ev = result.evidence if isinstance(result.evidence, dict) else None
         if ev is None:
             return
+        claims = ev.get("claims") or {}
+        want = claims.get("tls_public_key_fp")
         url = f"https://{result.enclave_host}/.well-known/tinfoil-attestation"
+        ctx = pinned_ssl_context(lambda: want, base=self.tls_base_context,
+                                 binds="the Tinfoil report being verified", source="Tinfoil")
         try:
-            with http.stream("GET", url) as resp:
-                der = peer_certificate_der(resp)
+            with httpx.Client(transport=httpx.HTTPTransport(verify=ctx), timeout=PROBE_TIMEOUT_SECONDS) as client:
+                with client.stream("GET", url) as resp:
+                    der = peer_certificate_der(resp)
         except Exception as exc:
+            pin = next((e for e in _chain(exc) if isinstance(e, TLSPinMismatch)), None)
+            if pin is not None:
+                sink = self.event_sink
+                if sink is not None:
+                    try:
+                        sink({"kind": "verify_fail", "purpose": "tls_pin", "host": result.enclave_host,
+                              "detail": {"vendor": VENDOR, "reason_code": "tls_pin_mismatch", "stage": "verification",
+                                         "error": str(pin)[:300], "expected_tls_key_fp": want,
+                                         "path": "/.well-known/tinfoil-attestation", "nothing_sent": True}})
+                    except Exception:  # noqa: BLE001
+                        pass
+                raise VerifyError("tls_pin_mismatch: the Tinfoil enclave's TLS certificate is not the one its "
+                                  "verified report binds; refusing this verification") from exc
             ev["tls_observation"] = {"captured": False, "reason": f"probe failed: {type(exc).__name__}: {exc}"[:300]}
             return
         if der is None:
             ev["tls_observation"] = {"captured": False, "reason": "transport exposes no TLS peer certificate"}
             return
-        claims = ev.get("claims") or {}
         obs = tls_observation(der, host=result.enclave_host, attestation=ev.get("attestation") or {},
                               tls_fp=claims.get("tls_public_key_fp"), hpke=claims.get("hpke_public_key"))
         ev["tls_cert_pem"] = obs.pop("cert_pem")

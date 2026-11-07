@@ -335,18 +335,27 @@ and signed responses.
   drives the tinfoil SDK in its `ehbp` transport mode. In that mode the SDK encrypts each request
   body to the enclave's attested HPKE key and builds the TLS connection under it as ordinary WebPKI
   TLS (tinfoil 0.14.2, `tinfoil/client.py:728-736` and `:806`; only the SDK's `tls` mode pins). The
-  plugin pins it instead: every Tinfoil connection, for a send or a request without a body, gets an
-  SSL context that checks the peer certificate's key against the TLS key the verified report binds,
-  inside the handshake and before any request byte (headers and the `Authorization` header included)
-  is written. The same holds for the transports the SDK rebuilds after a key rotation. A certificate
+  plugin pins the connection instead: every Tinfoil inference connection, for a send or a request
+  without a body, gets an SSL context that checks the peer certificate's key against the TLS key of
+  the verified report the plugin accepted (never a newer report the SDK holds before the plugin has
+  checked its build and pins), inside the handshake and before any request byte (headers and the
+  `Authorization` header included) is written. The same holds for the transports the SDK rebuilds after a key rotation. A certificate
   with another key closes the connection, fails the request, writes a `verify_fail` row
   (`reason_code: tls_pin_mismatch`) and asks for a re-verification, at most once per 30 seconds. So a
   TLS intermediary that the WebPKI accepts can no longer read the headers or the API key; the
   connection is refused instead.
 
-  After each verification the plugin's TLS probe (`confidential.tinfoil.tls_probe`) also records the
-  certificate the router presented, for the evidence; the replay's `tls_cert_binding` check re-reads
-  that certificate. The pin is what enforces.
+  Before each verification is accepted, the plugin's TLS probe (`confidential.tinfoil.tls_probe`)
+  opens one bodiless connection without the API key, pinned to the key of the report being verified,
+  and records the certificate the router presented, for the evidence; the replay's
+  `tls_cert_binding` check re-reads that certificate. A certificate with another key fails the
+  verification with a `verify_fail` row (purpose `tls_pin`), so the lock is refused. The pin on
+  inference connections is what enforces for sends.
+
+  Not pinned, by design: the SDK's own attestation fetch to the router, the collateral proxies
+  (`*.tinfoil.sh`), `atc.tinfoil.sh`, GitHub, Sigstore's TUF CDN and Intel Trust Authority. They use
+  ordinary WebPKI TLS, carry no API key, and what they return is checked by its signatures. On NEAR
+  the attestation report fetch is not pinned either, for the same reason.
 
   On NEAR the plugin pins TLS the same way: every inference and signature connection is checked against
   the certificate the gateway's quote binds, before any request byte is sent (section 14).

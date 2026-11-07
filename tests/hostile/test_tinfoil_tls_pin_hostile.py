@@ -30,7 +30,7 @@ def _hpke_hex() -> str:
     return key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
 
 
-def _real_sc(server, fp):
+def _real_sc(server, fp, ad=None):
     """A real tinfoil SecureClient (no network: explicit enclave and cache secret) with a verified ground truth
     whose TLS key is ``fp``; attestation itself is stubbed (``_require_hpke_public_key``)."""
     from tinfoil import client as tf_client
@@ -39,6 +39,8 @@ def _real_sc(server, fp):
     sc._ground_truth = SimpleNamespace(public_key=fp, hpke_public_key=_hpke_hex())
     hpke = sc._ground_truth.hpke_public_key
     sc._require_hpke_public_key = lambda: hpke
+    if ad is not None:
+        ad._accepted = _result(fp)     # the pin follows the accepted result, never the SDK's ground truth
     return sc
 
 
@@ -63,7 +65,7 @@ def _url(server, path="/v1/chat/completions"):
 
 def test_the_pinned_ehbp_transport_sends_on_the_attested_key(server):
     ad, _, _ = _adapter(server)
-    sc = _real_sc(server, server.fp)
+    sc = _real_sc(server, server.fp, ad)
     t = ad.pinned_ehbp_sync_transport(sc)
     with httpx.Client(transport=t) as c:
         try:
@@ -78,7 +80,7 @@ def test_the_pinned_ehbp_transport_sends_on_the_attested_key(server):
 def test_a_wrong_certificate_is_refused_before_any_byte_sync(server, body):
     """Sends and requests without a body alike (the EHBP passthrough path)."""
     ad, _, _ = _adapter(server)
-    sc = _real_sc(server, "ee" * 32)
+    sc = _real_sc(server, "ee" * 32, ad)
     t = ad.pinned_ehbp_sync_transport(sc)
     with httpx.Client(transport=t, headers={"Authorization": "Bearer sk-must-not-leave"}) as c:
         with pytest.raises(TLSPinMismatch, match="the verified Tinfoil report binds; refused before sending"):
@@ -92,7 +94,7 @@ def test_a_wrong_certificate_is_refused_before_any_byte_sync(server, body):
 
 def test_a_wrong_certificate_is_refused_before_any_byte_async(server):
     ad, _, _ = _adapter(server)
-    sc = _real_sc(server, "ee" * 32)
+    sc = _real_sc(server, "ee" * 32, ad)
 
     async def go():
         pool = ad._make_async_client(sc)
@@ -109,7 +111,7 @@ def test_a_wrong_certificate_is_refused_before_any_byte_async(server):
 
 def test_no_verified_tls_key_refuses_every_connection(server):
     ad, _, _ = _adapter(server)
-    sc = _real_sc(server, None)
+    sc = _real_sc(server, None, ad)
     with httpx.Client(transport=ad.pinned_ehbp_sync_transport(sc)) as c, pytest.raises(TLSPinMismatch):
         c.post(_url(server), content=b"x")
     _settle(server)
@@ -121,7 +123,7 @@ def test_the_sdk_rebuild_after_a_key_rotation_is_pinned_too(server):
     adapter's shadow on this SecureClient instance gives the rebuild the pinned inner transport."""
     from tinfoil import client as tf_client
     ad, _, _ = _adapter(server)
-    sc = _real_sc(server, "ee" * 32)
+    sc = _real_sc(server, "ee" * 32, ad)
     ad._pin_ehbp_builders(sc)
     assert "_build_ehbp_sync_transport" not in vars(tf_client.SecureClient) or \
         tf_client.SecureClient._build_ehbp_sync_transport is not sc._build_ehbp_sync_transport
@@ -144,7 +146,7 @@ def test_the_sdk_rebuild_after_a_key_rotation_is_pinned_too(server):
 def test_the_first_pool_the_sdk_builds_is_pinned(server):
     """make_secure_http_client (what verify() calls) goes through the shadowed builder."""
     ad, _, _ = _adapter(server)
-    sc = _real_sc(server, "ee" * 32)
+    sc = _real_sc(server, "ee" * 32, ad)
     ad._pin_ehbp_builders(sc)
     http = sc.make_secure_http_client()
     try:
@@ -158,7 +160,7 @@ def test_the_first_pool_the_sdk_builds_is_pinned(server):
 
 def test_a_mismatch_through_the_view_is_ledgered_held_and_re_verified_once(server):
     ad, rows, stale = _adapter(server)
-    sc = _real_sc(server, "ee" * 32)
+    sc = _real_sc(server, "ee" * 32, ad)
     ad._sc = sc
     ad._accepted = _result("ee" * 32)
     ad._sync_http = httpx.Client(transport=ad.pinned_ehbp_sync_transport(sc))
@@ -184,7 +186,7 @@ def test_a_mismatch_through_the_view_is_ledgered_held_and_re_verified_once(serve
 
 def test_a_matching_certificate_through_the_view_writes_no_row(server):
     ad, rows, stale = _adapter(server)
-    sc = _real_sc(server, server.fp)
+    sc = _real_sc(server, server.fp, ad)
     ad._sc = sc
     ad._accepted = _result(server.fp)
     ad._sync_http = httpx.Client(transport=ad.pinned_ehbp_sync_transport(sc))
@@ -215,8 +217,54 @@ def test_a_pool_with_an_unpinned_network_transport_is_refused(server):
     """Fail closed: a chain whose network transport the adapter could not pin (no EHBP layer to reach it)."""
     from confidential_mode.verify.base import VerifyError
     ad, _, _ = _adapter(server)
-    sc = _real_sc(server, server.fp)
+    sc = _real_sc(server, server.fp, ad)
     with pytest.raises(VerifyError, match="could not be pinned"):
         ad.pin_pool(httpx.Client(transport=httpx.HTTPTransport()), sc, is_async=False)
     assert ad.pin_pool(httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))), sc,
                        is_async=False) == 0
+
+
+def test_the_pin_follows_the_accepted_result_not_the_sdk_ground_truth(server):
+    """The SDK stores a new report's ground truth before the plugin has checked its build or the pins (a
+    re-verification refused for changed fingerprints, a background refresh the pins reject). New connections
+    pin to the accepted result's key only."""
+    ad, _, _ = _adapter(server)
+    sc = _real_sc(server, server.fp)              # the SDK's latest report: the server's key
+    ad._accepted = _result("ee" * 32)              # the plugin accepted another key
+    with httpx.Client(transport=ad.pinned_ehbp_sync_transport(sc),
+                      headers={"Authorization": "Bearer sk-must-not-leave"}) as c, pytest.raises(TLSPinMismatch):
+        c.post(_url(server), content=b"x")
+    _settle(server)
+    assert server.app_bytes == 0
+    ad._accepted = None                            # nothing accepted yet: every connection refused
+    with httpx.Client(transport=ad.pinned_ehbp_sync_transport(sc)) as c, pytest.raises(TLSPinMismatch):
+        c.post(_url(server), content=b"x")
+    assert ad.expected_tls_fp(sc) is None
+
+
+def _probe_result(server, fp):
+    r = _result(fp)
+    return VerificationResult(**{**r.__dict__, "enclave_host": f"localhost:{server.port}"})
+
+
+def test_a_probe_mismatch_fails_the_verification_with_a_tls_pin_row(server):
+    from confidential_mode.verify.base import VerifyError
+    ad, rows, _ = _adapter(server)
+    ad.tls_probe = True
+    result = _probe_result(server, "ee" * 32)
+    with pytest.raises(VerifyError, match="tls_pin_mismatch"):
+        ad._probe_tls(None, result)
+    assert [(r["kind"], r["purpose"], r["detail"]["reason_code"]) for r in rows] == \
+        [("verify_fail", "tls_pin", "tls_pin_mismatch")]
+    assert rows[0]["detail"]["stage"] == "verification" and rows[0]["detail"]["nothing_sent"] is True
+    assert ad._accepted is None
+    _settle(server)
+    assert server.app_bytes == 0
+
+
+def test_a_matching_probe_records_the_certificate_and_writes_no_row(server):
+    ad, rows, _ = _adapter(server)
+    result = _probe_result(server, server.fp)
+    ad._probe_tls(None, result)
+    assert rows == []
+    assert "tls_observation" in result.evidence and result.evidence["tls_observation"].get("captured") is not False

@@ -95,7 +95,9 @@ usage data anywhere.
 
 - **Tinfoil's attested router** is where TLS ends for Tinfoil. The plugin uses the tinfoil SDK's
   `ehbp` transport, which encrypts each request body to the enclave's attested HPKE key, and pins every
-  connection to the TLS key the verified report binds, before any request byte is written. The router
+  inference connection to the TLS key of the verified report the plugin accepted, before any request
+  byte is written. The SDK's attestation fetch to the router is ordinary WebPKI TLS, by design: the
+  report it returns is checked by its signatures, and that request carries no API key. The router
   reads your API key header, the request headers, sizes and timing. A TLS intermediary with any other
   certificate gets no request byte: the connection is refused and recorded
   ([LIMITATIONS.md](LIMITATIONS.md), section 9). Tinfoil's network and hosting see the request and

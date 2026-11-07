@@ -22,9 +22,10 @@ approved; `on-host-only` allows only your machine. While locked:
   refuses main-call fallbacks before any bytes leave.
 - The enclave is re-verified whenever its last verification is more than five minutes old, and a
   changed enclave build is refused on every turn until you approve the new build. On both vendors
-  every TLS connection is pinned to the TLS key the verified report binds, inside the handshake and
-  before any byte of the request (headers and API key included) leaves; a connection with another
-  certificate is refused, recorded and triggers a re-verification.
+  every inference connection is pinned to the TLS key of the verified report the plugin accepted,
+  inside the handshake and before any byte of the request (headers and API key included) leaves; a
+  connection with another certificate is refused, recorded and triggers a re-verification. The
+  attestation fetch itself is not pinned: what it returns is checked by its signatures.
 - On the attested tier your text is encrypted to the enclave's key before it leaves your machine:
   Tinfoil through the vendor's encrypted transport, NEAR with every message, tool definition and tool
   call encrypted to the model's key and every reply signed by it. The gateway between you and the

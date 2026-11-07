@@ -84,11 +84,12 @@ confidential:
     # higher value is not safe.
     context_length: 256000
 
-    # After each verification, send one request without a body over the verified connection and record
-    # the TLS certificate it saw and whether its key is the TLS key the attestation report commits to
-    # (the tls_observation in the evidence). This is an observation for the evidence and never fails a
-    # verification. Separately, and always on, the plugin pins every Tinfoil connection to the TLS key the
-    # verified report binds, before any request byte is sent (docs/LIMITATIONS.md section 9).
+    # Before each verification is accepted, open one connection without a body or API key, pinned to the
+    # TLS key of the report being verified, and record the certificate it saw (the tls_observation in the
+    # evidence). A certificate with another key fails the verification (a verify_fail row, purpose
+    # tls_pin); any other probe failure is only recorded. Separately, and always on, the plugin pins every
+    # Tinfoil inference connection to the TLS key of the accepted report, before any request byte is sent
+    # (docs/LIMITATIONS.md section 9).
     # Only the exact value false turns the probe off. Default true.
     tls_probe: true
 
