@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from ._version import PLUGIN_COMMIT, PLUGIN_VERSION
-from .ledger import FORBIDDEN_DETAIL_KEYS
+from .ledger import DETAIL_TOO_LARGE_KEY, FORBIDDEN_DETAIL_KEYS, is_truncated
 
 RECEIPT_FORMAT = "confidential-mode-receipt"
 RECEIPT_VERSION = 1
@@ -438,7 +438,8 @@ def _near_sends(rows: list[dict], evidence: list[dict]) -> tuple[list[dict], dic
                     "plaintext_keys": list(d.get("plaintext_keys") or []),
                     "plaintext_parts": dict(d.get("plaintext_parts") or {"count": 0, "types": {}}),
                     "plaintext_parts_note": d.get("plaintext_parts_note"),
-                    "reply_released": d.get("reply_released"), "withheld_reason": d.get("withheld_reason")})
+                    "reply_released": d.get("reply_released"), "withheld_reason": d.get("withheld_reason"),
+                    **({"detail_lost": True} if is_truncated(d) else {})})
     summary = {"sends": len(out), "fully_attested": all(s["fully_attested"] for s in out),
                "not_fully_attested_sends": [s["row"] for s in out if not s["fully_attested"]],
                "replay_failures": [s["row"] for s in out if s["replay_verdict"] not in ("pass",)],
@@ -574,6 +575,12 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
         v = cands[-1] if cands else None
         entry = {"send": r["id"], "verify": None, "ttl_seconds": ttl_seconds, "ttl_source": ttl_source,
                  "window_start": None, "window_end": None, "covered": False, "verify_unverified_entry": None}
+        if is_truncated(d):
+            # FI-6: the detail that names the verification and the HPKE key was too large and was not stored:
+            # coverage cannot be judged, so the send is never counted as covered.
+            entry["detail_lost"] = True
+            out.append(entry)
+            continue
         if "hpke_key_used" in d:
             entry["hpke_key_used"] = d.get("hpke_key_used")
         if "response_decrypted" in d:
@@ -785,7 +792,8 @@ def _reason(row: Mapping) -> str:
 
 def _line(row: Mapping, session_id: str, body: str) -> str:
     scope = "" if row["session_id"] == session_id else " [profile]"
-    return f"  #{row['id']} {ts_text(row['ts'])}{scope}  {body}"
+    lost = f"  [detail lost: {_p(row['detail'][DETAIL_TOO_LARGE_KEY])}]" if is_truncated(row.get("detail")) else ""
+    return f"  #{row['id']} {ts_text(row['ts'])}{scope}  {body}{lost}"
 
 
 def _send_body(r: Mapping, attempt: Mapping | None = None) -> str:
@@ -956,6 +964,9 @@ def render_text(doc: Mapping) -> str:
         c = coverage.get(r["id"])
         if c is None:
             return body
+        if c.get("detail_lost"):
+            return body + ("  NOT covered: the row's detail was too large and was not stored, so its verification "
+                           "and HPKE key cannot be checked")
         if c["verify"] is None:
             return (body + f"  NOT covered: no verify_ok row before this send (TTL {c['ttl_seconds']:g} s)"
                     + _hpke_text(c))

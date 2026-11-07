@@ -51,14 +51,17 @@ FORBIDDEN_DETAIL_KEYS = frozenset({
     "contents",
 })
 MAX_DETAIL_BYTES = 256 * 1024  # verification evidence can carry certificate chains
-# FI-6: strings a caller does not bound (a tool name the model chose, Hermes' compaction reason, a session or
-# tool call id) are clipped to this many characters before the row is built: every text column, and these
-# top-level detail keys. Verification evidence is never clipped.
+# FI-6: free-text strings a caller does not bound (a tool name the model chose, Hermes' compaction reason, an
+# error or message text) are clipped to this many characters before the row is built: the ``purpose`` column
+# (it carries the tool name) and these top-level detail keys. Hashes, fingerprints, session ids, tool call ids,
+# reason codes and verification evidence are never clipped. A clipped value ends in a marker naming its full
+# length and the first 16 hex digits of its SHA-256, so two different long values stay distinct.
 MAX_CALLER_CHARS = 1024
-CALLER_STRING_KEYS = frozenset({
-    "tool", "tool_call_id", "reason", "session_key", "old_session_id", "session_id", "kind", "raw_pick",
-    "choice", "error", "message", "name", "server", "url", "host", "model", "provider", "purpose",
-})
+FREE_TEXT_KEYS = frozenset({"tool", "reason", "error", "message", "raw_pick", "choice"})
+# A detail still over MAX_DETAIL_BYTES keeps its top-level fields that are numbers, booleans, None or strings of
+# at most this many characters (identities, fingerprints, codes), plus the marker key DETAIL_TOO_LARGE_KEY.
+MARKER_KEEP_CHARS = 512
+DETAIL_TOO_LARGE_KEY = "detail_too_large"
 # Content-addressed store for large evidence texts (NEAR app_compose files and compose-manager logs),
 # next to the ledger file: <data_dir>/evidence/blobs/<sha256>. A row keeps only the ids (Amendment 5.2).
 BLOB_SUBDIR = ("evidence", "blobs")
@@ -131,20 +134,60 @@ _EVENT_FIELDS = frozenset(_COLUMNS)
 
 
 def clip_text(value: Any, limit: int = MAX_CALLER_CHARS) -> Any:
-    """``value`` clipped to ``limit`` characters with a marker naming its full length; non-strings unchanged."""
+    """``value`` clipped to ``limit`` characters with a marker naming its full length and a digest; non-strings
+    unchanged."""
     if isinstance(value, str) and len(value) > limit:
-        return f"{value[:limit]}...(clipped, {len(value)} chars)"
+        digest = hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        return f"{value[:limit]}...(clipped, {len(value)} chars, sha256 {digest})"
     return value
 
 
 def clip_caller_strings(detail: dict) -> dict:
-    """A copy of ``detail`` whose top-level caller-string values (CALLER_STRING_KEYS) are clipped (FI-6)."""
-    return {k: clip_text(v) if k in CALLER_STRING_KEYS else v for k, v in detail.items()}
+    """A copy of ``detail`` whose top-level free-text values (FREE_TEXT_KEYS) are clipped (FI-6)."""
+    return {k: clip_text(v) if k in FREE_TEXT_KEYS else v for k, v in detail.items()}
 
 
-def too_large_marker(size: int) -> dict:
-    """The detail written in place of one still over MAX_DETAIL_BYTES after clipping (FI-6)."""
-    return {"detail_too_large": f"detail too large: {size} bytes, truncated"}
+def is_truncated(detail: Any) -> bool:
+    """True for a row whose detail was too large and was replaced by the marker (FI-6). Readers treat such a
+    row as unknown: never covered, never consent, "detail lost" rendered."""
+    return isinstance(detail, Mapping) and DETAIL_TOO_LARGE_KEY in detail
+
+
+def marker_detail(detail: Mapping, size: int) -> dict:
+    """The detail written in place of one still over MAX_DETAIL_BYTES after clipping: its short structural
+    top-level fields plus the marker."""
+    kept = {k: v for k, v in detail.items()
+            if k != DETAIL_TOO_LARGE_KEY and (v is None or isinstance(v, (bool, int, float))
+                                              or (isinstance(v, str) and len(v) <= MARKER_KEEP_CHARS))}
+    return {**kept, DETAIL_TOO_LARGE_KEY: f"detail too large: {size} bytes, truncated"}
+
+
+def _encode_detail(kind: str, detail: dict) -> tuple[str, bool]:
+    """(the encoded detail to store, whether it is the marker). Raises LedgerError for a verify_ok row or a
+    row with evidence over the cap (Amendment 5.2), and when even the structural fields exceed the cap."""
+    encoded = json.dumps(detail, sort_keys=True, default=str)
+    size = len(encoded.encode("utf-8"))
+    if size <= MAX_DETAIL_BYTES:
+        return encoded, False
+    if kind == "verify_ok" or "evidence" in detail:
+        # Amendment 5.2: a verify_ok row, or a row with evidence, that no receipt could show in full is
+        # refused by its caller (a verify_fail row says so), never written without its detail.
+        raise LedgerError("detail exceeds the ledger size cap")
+    encoded = json.dumps(marker_detail(detail, size), sort_keys=True, default=str)
+    if len(encoded.encode("utf-8")) > MAX_DETAIL_BYTES:
+        raise LedgerError("detail exceeds the ledger size cap, even its structural fields")
+    return encoded, True
+
+
+def would_truncate(event: Any) -> bool:
+    """Whether ``Ledger.append`` would store ``event`` (a LedgerEvent or a dict) with the marker detail. A
+    caller whose warning depends on the row's full detail (pins retire) checks this. Never raises."""
+    try:
+        ev = coerce_event(event)
+        detail = clip_caller_strings(dict(ev.detail or {}))
+        return _encode_detail(ev.kind, detail)[1]
+    except Exception:  # noqa: BLE001
+        return False
 
 
 class BlobStore:
@@ -460,22 +503,13 @@ class Ledger:
         detail = clip_caller_strings(detail)
         store = self.blobs
         detail, to_write = externalize_evidence(detail, store)
-        encoded = json.dumps(detail, sort_keys=True, default=str)
-        size = len(encoded.encode("utf-8"))
-        if size > MAX_DETAIL_BYTES:
-            if event.kind == "verify_ok" or "evidence" in detail:
-                # Amendment 5.2: a verify_ok row, or a row with evidence, that no receipt could show in full is
-                # refused by its caller (a verify_fail row says so), never written without its detail.
-                raise LedgerError("detail exceeds the ledger size cap")
-            encoded = json.dumps(too_large_marker(size), sort_keys=True)   # FI-6: written, never dropped
+        encoded, _marked = _encode_detail(event.kind, detail)   # FI-6: an oversized row is written, never dropped
         if event.bytes is not None and not isinstance(event.bytes, int):
             raise LedgerError("bytes must be an int or None")
         row = (
-            float(event.ts if event.ts is not None else self._clock()), clip_text(event.session_id or ""),
-            event.kind, clip_text(event.purpose or ""), clip_text(event.provider or ""),
-            clip_text(event.host or ""), clip_text(event.model or ""),
-            event.bytes, clip_text(event.tier), clip_text(event.verdict), clip_text(event.decision),
-            clip_text(event.surface), encoded,
+            float(event.ts if event.ts is not None else self._clock()), event.session_id or "",
+            event.kind, clip_text(event.purpose or ""), event.provider or "", event.host or "", event.model or "",
+            event.bytes, event.tier, event.verdict, event.decision, event.surface, encoded,
         )
         created: list[str] = []
         try:

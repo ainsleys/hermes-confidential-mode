@@ -630,6 +630,13 @@ def retire_text(rt: Any, fingerprint: str, *, session_id: str = "", surface: str
     except Exception as exc:  # noqa: BLE001
         note = (f" The pin_retired ledger row could not be written ({type(exc).__name__}); a hand-made copy of "
                 "this entry would still count as consented in another process.")
+    else:
+        from .ledger import would_truncate
+        if would_truncate(row):
+            # FI-6: the row was written with the too-large marker. It still withdraws consent for entries with
+            # these fingerprints, but not by identity, so the warning stays.
+            note = (" The pin_retired ledger row could not be written in full (its detail was too large); a "
+                    "hand-made copy of this entry would still count as consented in another process.")
     try:
         _provider_module(rt).clear_consent_cache()
     except Exception:  # noqa: BLE001

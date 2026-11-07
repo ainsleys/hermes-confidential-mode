@@ -650,6 +650,18 @@ def test_per_send_hpke_key_matching_the_covering_verify_row(ledger):
     assert f"hpke_key_used={'48' * 32} (matches H of verify #{vid})" in line and "response_decrypted=yes" in line
 
 
+def test_a_send_row_stored_with_the_too_large_marker_is_never_covered(ledger):
+    """FI-6 (review item 2): a send_observed row whose detail was too large has no verify_before, start time or
+    HPKE key; the receipt reports it as not covered, with the detail lost, never as covered."""
+    vid, send = _hpke_send(ledger, hpke_key_used="99" * 32,
+                           sends=[{"hpke_key_used": "99" * 32, "pad": "x" * 1000}] * 300)
+    doc = build_receipt(ledger, SID)
+    c = doc["sections"]["send_coverage"][0]
+    assert c["covered"] is False and c["detail_lost"] is True and c["verify"] is None
+    line = next(ln for ln in render(ledger, SID).splitlines() if f"#{send} " in ln and "main  host=" in ln)
+    assert "NOT covered: the row's detail was too large" in line and "[detail lost: detail too large: " in line
+
+
 def test_per_send_hpke_key_mismatch_is_flagged(ledger):
     vid, send = _hpke_send(ledger, hpke_key_used="99" * 32, response_decrypted=False)
     doc = build_receipt(ledger, SID)

@@ -95,28 +95,46 @@ def test_oversized_detail_rejected(ledger):
 
 
 def test_an_oversized_detail_without_evidence_is_written_with_a_marker(ledger):
-    """FI-6: a row still over the cap after clipping keeps its columns and gets a marker detail."""
-    from confidential_mode.ledger import MAX_DETAIL_BYTES
+    """FI-6: a row still over the cap after clipping keeps its columns and its short structural fields, and
+    gets the marker."""
+    from confidential_mode.ledger import MAX_DETAIL_BYTES, is_truncated
     rid = ledger.append(LedgerEvent(kind="tool_refused", decision="unclassified",
-                                    detail={"args_shape": ["x" * 1000] * 400}))
+                                    detail={"args_shape": ["x" * 1000] * 400, "tool_call_id": "c1",
+                                            "reason_code": "unclassified", "n": 3}))
     (row,) = [r for r in ledger.tail(0) if r.id == rid]
-    assert row.kind == "tool_refused" and row.decision == "unclassified"
-    (marker,) = row.detail.values()
+    assert row.kind == "tool_refused" and row.decision == "unclassified" and is_truncated(row.detail)
+    assert row.detail["tool_call_id"] == "c1" and row.detail["reason_code"] == "unclassified"
+    assert row.detail["n"] == 3 and "args_shape" not in row.detail
+    marker = row.detail["detail_too_large"]
     assert marker.startswith("detail too large: ") and marker.endswith(" bytes, truncated")
     assert int(marker.split()[3]) > MAX_DETAIL_BYTES
 
 
-def test_caller_strings_are_clipped_in_columns_and_detail(ledger):
-    """FI-6: a model-chosen tool name and Hermes' free text are clipped before the row is built."""
+def test_a_row_whose_structural_fields_alone_exceed_the_cap_is_refused(ledger):
+    """FI-6: the marker keeps short structural fields; when even those exceed the cap the row is refused."""
+    detail = {f"k{i}": "y" * 500 for i in range(600)}
+    with pytest.raises(LedgerError, match="structural"):
+        ledger.append(LedgerEvent(kind="tool_refused", detail=detail))
+    assert ledger.tail(0) == []
+
+
+def test_free_text_is_clipped_and_identifiers_are_not(ledger):
+    """FI-6: a model-chosen tool name and Hermes' free text are clipped before the row is built, with a digest
+    so different values stay distinct; session ids, tool call ids and fingerprints are never clipped."""
     from confidential_mode.ledger import MAX_CALLER_CHARS
     name = "t" * 300_000
-    ledger.append(LedgerEvent(kind="tool_refused", purpose=f"tool:{name}", session_id="s" * 5000,
-                              detail={"tool": name, "reason": "r" * 5000, "n": 1}))
-    row = ledger.tail(0)[-1]
-    assert len(row.purpose) < MAX_CALLER_CHARS + 50 and row.purpose.endswith("(clipped, 300005 chars)")
-    assert len(row.session_id) < MAX_CALLER_CHARS + 50
-    assert row.detail["tool"].startswith("ttt") and row.detail["tool"].endswith("(clipped, 300000 chars)")
-    assert row.detail["reason"].endswith("(clipped, 5000 chars)") and row.detail["n"] == 1
+    sid, call = "s" * 5000, "c" * 5000
+    ledger.append(LedgerEvent(kind="tool_refused", purpose=f"tool:{name}", session_id=sid,
+                              detail={"tool": name, "reason": "r" * 5000, "tool_call_id": call,
+                                      "code_fingerprint": "f" * 2000, "n": 1}))
+    ledger.append(LedgerEvent(kind="tool_refused", purpose=f"tool:{name}x", detail={"tool": name + "x"}))
+    a, b = ledger.tail(0)
+    assert len(a.purpose) < MAX_CALLER_CHARS + 80 and "(clipped, 300005 chars, sha256 " in a.purpose
+    assert a.purpose != b.purpose and a.detail["tool"] != b.detail["tool"]
+    assert a.detail["tool"].startswith("ttt") and "(clipped, 300000 chars, sha256 " in a.detail["tool"]
+    assert "(clipped, 5000 chars, sha256 " in a.detail["reason"] and a.detail["n"] == 1
+    assert a.session_id == sid and a.detail["tool_call_id"] == call and a.detail["code_fingerprint"] == "f" * 2000
+    assert len(ledger.session(sid)) == 1
 
 
 def test_non_int_bytes_rejected(ledger):

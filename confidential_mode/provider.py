@@ -723,6 +723,20 @@ def _scan_consent(e: _Entry) -> None:
                 d = json.loads(d)
             if not isinstance(d, dict):
                 continue
+            from .ledger import is_truncated
+            if is_truncated(d):
+                # FI-6: a row stored with the too-large marker. A pin_applied row grants nothing; a pin_retired
+                # row withdraws consent for every entry with the kept fingerprints, or for every entry when the
+                # fingerprints were not kept.
+                if kind == "pin_retired":
+                    code, enclave = d.get("code_fingerprint"), d.get("enclave_fingerprint")
+                    for k in list(e.consented):
+                        if not (code and enclave) or (k[-2], k[-1]) == (code, enclave):
+                            e.consented[k] = False
+                    if code and enclave:
+                        e.consented[(d.get("vendor") or None, code, enclave)] = False
+                        e.consented[(None, code, enclave)] = False
+                continue
             if d.get("router_repo") and d.get("cvm_role"):
                 key = (d.get("vendor") or None, d["router_repo"], d["cvm_role"], d.get("code_fingerprint"),
                        d.get("enclave_fingerprint"))

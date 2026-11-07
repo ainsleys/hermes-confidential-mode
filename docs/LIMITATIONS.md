@@ -844,11 +844,13 @@ Each item below is a smaller gap. Each one is stated in full.
   a corrupt file or a row over the size cap, blocks attested sends for Tinfoil and NEAR until a later
   verification writes its row. The plugin tries again after a 10-second backoff.
 
-- **Long caller strings are clipped in the ledger.** A tool name, tool call id, compaction reason or
-  other free text that Hermes or the model supplies is cut to 1024 characters in the ledger row, with a
-  note of its full length. A row whose detail is still over the 256 KB cap is written with the detail
-  replaced by "detail too large: <n> bytes, truncated". The refusal itself uses the full name; only the
-  record is shortened.
+- **Long caller strings are clipped in the ledger.** A tool name, compaction reason, error text or other
+  free text that Hermes or the model supplies is cut to 1024 characters in the ledger row, with a note of
+  its full length and a digest. Session ids, tool call ids, fingerprints and reason codes are kept whole. A
+  row whose detail is still over the 256 KB cap keeps only its short fields and is marked "detail too large:
+  <n> bytes, truncated". The receipt shows such a row as "detail lost" and never counts it as covered. A
+  marked pin row never grants consent, and a marked retire still withdraws it. The refusal itself uses the
+  full name; only the record is shortened.
 
 - **NEAR model entries need GitHub.** A NEAR model entry can be approved only with its service map
   pinned, and that needs the deployed docker-compose files from GitHub (section 14). While GitHub is

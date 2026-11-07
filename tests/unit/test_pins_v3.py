@@ -430,3 +430,54 @@ def test_cli_replay_learns_sets(tmp_path):
                             ita_roots=world.ita.roots)
     assert set_match(approved, vendor="near", code=rr.code_fingerprint, enclave=rr.enclave_fingerprint,
                      views=views_from_cvms(list(rr.cvms)))
+
+
+def test_a_pin_retired_row_stored_with_the_too_large_marker_still_withdraws_consent(tmp_path):
+    """FI-6 (review item 2): a pin_retired row whose detail was too large keeps its fingerprints, and the
+    consent scan withdraws consent for every entry with them; a marked pin_applied row grants nothing."""
+    from confidential_mode.ledger import Ledger as RealLedger, is_truncated
+    world, res = _near(tmp_path)
+    store, ledger = PinStore(tmp_path / "pins.yaml"), RealLedger(tmp_path / "ledger.sqlite")
+    store.stage(res)
+    _approve(store, ledger)
+    e = provider._Entry(adapter=None, pins=store, ttl_seconds=60, failure_backoff_seconds=1, consent_ledger=ledger)
+    assert provider._consent_recorded(e, res) is True
+    model = next(x for x in store.approved_entries() if x.cvm_role != "gateway")
+    ledger.append({"kind": "pin_retired", "purpose": "pin", "decision": "retire",
+                   "detail": {"vendor": model.vendor, "router_repo": "x" * 300_000, "cvm_role": model.cvm_role,
+                              "code_fingerprint": model.code_fingerprint,
+                              "enclave_fingerprint": model.enclave_fingerprint}})
+    assert is_truncated(ledger.tail(0)[-1].detail)
+    assert store.match(res) is True                     # the entry is still in pins.yaml
+    fresh = provider._Entry(adapter=None, pins=store, ttl_seconds=60, failure_backoff_seconds=1,
+                            consent_ledger=ledger)
+    assert provider._consent_recorded(fresh, res) is False
+
+
+def test_a_marked_pin_applied_row_grants_nothing(tmp_path):
+    from confidential_mode.ledger import Ledger as RealLedger
+    world, res = _near(tmp_path)
+    store, ledger = PinStore(tmp_path / "pins.yaml"), RealLedger(tmp_path / "ledger.sqlite")
+    pend = store.stage(res)
+    store.apply(pend, approved_via="hand")
+    for x in store.approved_entries():
+        ledger.append({"kind": "pin_applied", "purpose": "pin", "decision": "approve",
+                       "detail": {"vendor": x.vendor, "router_repo": x.router_repo, "cvm_role": x.cvm_role,
+                                  "code_fingerprint": x.code_fingerprint,
+                                  "enclave_fingerprint": x.enclave_fingerprint, "pad": ["y" * 1000] * 300}})
+    e = provider._Entry(adapter=None, pins=store, ttl_seconds=60, failure_backoff_seconds=1, consent_ledger=ledger)
+    assert provider._consent_recorded(e, res) is False
+
+
+def test_retire_warns_when_its_row_is_stored_with_the_marker(tmp_path):
+    """FI-6 (review item 2): the 'could not be written' warning on retire is kept for a marked row."""
+    from types import SimpleNamespace
+    from confidential_mode import commands
+    from confidential_mode.ledger import Ledger as RealLedger
+    ledger = RealLedger(tmp_path / "ledger.sqlite")
+    entry = SimpleNamespace(vendor="near", router_repo="x" * 300_000, cvm_role="model",
+                            code_fingerprint="c" * 64, enclave_fingerprint="e" * 64)
+    pins = SimpleNamespace(retire=lambda fp: entry)
+    out = commands.retire_text(SimpleNamespace(pins=pins, ledger=ledger), "c" * 12, surface="cli")
+    assert out.startswith("Retired") and "could not be written in full" in out, out
+    assert ledger.tail(0)[-1].kind == "pin_retired"
