@@ -1,4 +1,4 @@
-"""Seam tests for `revoke <tool>` / `revoke --all` (INTERFACES Amendment 9, backlog U06) on the plugin loaded
+"""Seam tests for `revoke <tool>` / `revoke --all` (INTERFACES Amendment 10, backlog U06) on the plugin loaded
 by real discovery, with Hermes' real approval state and config.yaml. The human is a fake approval callback."""
 from __future__ import annotations
 

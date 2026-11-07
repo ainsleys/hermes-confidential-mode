@@ -619,7 +619,7 @@ MCP_BAD = """\
 """
 
 MCP_HOSTED = ["web-srv", "both", "Web_Srv2", "metadata", "hexloop", "shortloop", "lookalike", "nipio", "userinfo",
-              "backslash", "loc-lan"]  # loc-lan: a private-range host is off-tier unless listed (Amendment 9)
+              "backslash", "loc-lan"]  # loc-lan: a private-range host is off-tier unless listed (Amendment 10)
 MCP_ON_HOST = ["loc-host", "loc-v4", "loc-v6"]
 MCP_UNREADABLE = ["bad-type", "bad-schemeless", "bad-empty", "bad-string-entry", "bad-port"]
 
@@ -640,7 +640,7 @@ def test_mcp_hosted_url_server_tool_is_blocked(hermes, server):
 
 @pytest.mark.parametrize("server", MCP_ON_HOST)
 def test_mcp_localhost_url_server_tool_is_allowed(hermes, server):
-    """Control (Amendment 1, narrowed by Amendment 9): a loopback URL server is on-host; its tools pass the gate."""
+    """Control (Amendment 1, narrowed by Amendment 10): a loopback URL server is on-host; its tools pass the gate."""
     hermes.write_cfg(MCP_CFG)
     name = _mcp(hermes, server, "fetch")
     g = lock(hermes)

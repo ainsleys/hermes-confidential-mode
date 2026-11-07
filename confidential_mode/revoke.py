@@ -1,5 +1,5 @@
 """`revoke <tool>` and `revoke --all`: withdraw the tool grants confidential mode is responsible for
-(INTERFACES Amendment 9, backlog U06).
+(INTERFACES Amendment 10, backlog U06).
 
 A grant that lets an off-host tool run without a prompt while locked lives in one of three places:
 

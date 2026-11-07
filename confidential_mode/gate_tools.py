@@ -222,7 +222,7 @@ class Allowlist:
             with self._lock:
                 self.added.add(name)
             return
-        # Amendment 9: under the file lock, start from the names on disk for this lock, so a name another
+        # Amendment 10: under the file lock, start from the names on disk for this lock, so a name another
         # process revoked while this process waited for the human is not written back.
         from .revoke import allowed_on_disk, file_lock
         with file_lock(self.added_path):

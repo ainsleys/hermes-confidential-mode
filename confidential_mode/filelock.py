@@ -1,4 +1,4 @@
-"""Bounded advisory file locks for the plugin's state files (Amendment 9, review N1).
+"""Bounded advisory file locks for the plugin's state files (Amendment 10, review N1).
 
 A lock is a thread lock plus ``flock`` on ``<file>.lock``. Both are tried without blocking, a bounded number
 of times, so a process that holds a lock file (an agent could hold one from a terminal) cannot hang a

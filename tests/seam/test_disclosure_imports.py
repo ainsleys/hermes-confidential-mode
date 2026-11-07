@@ -1,5 +1,5 @@
 """DISCLOSURE.md states how many private core import sites `hermes plugins validate` reports. This test
-compares that number with the validator's own count, so the document cannot drift (Amendment 9 review)."""
+compares that number with the validator's own count, so the document cannot drift (Amendment 10 review)."""
 import re
 from pathlib import Path
 

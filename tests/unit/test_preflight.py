@@ -654,7 +654,7 @@ def test_resolved_terminal_backend_reads_the_profile_scope_not_the_process_envir
         reset_terminal_scope(token)
 
 
-# --- Amendment 9 (backlog D03): on-host means loopback plus exact listed hosts ------------------------
+# --- Amendment 10 (backlog D03): on-host means loopback plus exact listed hosts ------------------------
 
 def _listed_pred(hosts):
     return OnHostPredicate(extra_hosts=hosts, profile_base_url=lambda p: PROFILES.get(p, ""))

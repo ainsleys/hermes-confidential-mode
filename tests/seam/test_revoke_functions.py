@@ -1,4 +1,4 @@
-"""Amendment 9 (U06): revoke.py's Hermes-facing functions against Hermes' real config.yaml and approval state
+"""Amendment 10 (U06): revoke.py's Hermes-facing functions against Hermes' real config.yaml and approval state
 (no plugin loaded). The plugin-level paths are in test_revoke_seam.py."""
 from __future__ import annotations
 

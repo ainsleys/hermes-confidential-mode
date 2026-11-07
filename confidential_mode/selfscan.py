@@ -34,8 +34,8 @@ line ends. Refused:
   a ``w`` file in a sed or awk script. Read-only are the text tools, ``jq``/``yq``, ``sqlite3 -readonly``,
   sed and perl without ``-i``, and the git subcommands that only read (log, diff, show, status, ...).
 
-A state file is ``pins.yaml``, ``ledger.sqlite`` or ``allowlist.yaml`` (with their lock, journal and
-backup siblings), or ``state.json`` inside a ``plugin-data`` directory; a glob that could match one counts.
+A state file is ``pins.yaml``, ``ledger.sqlite``, ``allowlist.yaml`` or ``grants_revoked.json`` (with their
+lock, journal and backup siblings; Amendment 10 adds the last and the ``.lock`` files of the revoke path), or ``state.json`` inside a ``plugin-data`` directory; a glob that could match one counts.
 A state path counts when it is relative (the working directory is not known here), lies inside a
 ``plugin-data`` directory, or lies inside the Hermes home outside this plugin's source tree. The plugin's
 data directory is a ``plugin-data`` directory whose next segment names confidential mode (or a glob), or
@@ -89,9 +89,11 @@ WRAPPERS = frozenset({"sudo", "doas", "env", "exec", "command", "builtin", "nohu
                       "arch", "then", "do", "else", "if", "while", "until"})
 SUBST = "__confidential_mode_substitution__"
 _RE_PYTHON = re.compile(r"^(python|pypy)(\d+(\.\d+)*)?(\.exe)?$")
-_STATE_NAMES = re.compile(r"^(pins\.yaml(\.lock|\.v2\.bak)?|ledger\.sqlite(-wal|-shm|-journal)?|allowlist\.yaml)$")
+_STATE_NAMES = re.compile(r"^(pins\.yaml(\.lock|\.v2\.bak)?|ledger\.sqlite(-wal|-shm|-journal)?|allowlist\.yaml(\.lock)?"
+                          r"|grants_revoked\.json(\.lock)?)$")   # Amendment 10: the revoke files and their locks
 _STATE_PLAIN = ("pins.yaml", "pins.yaml.lock", "pins.yaml.v2.bak", "ledger.sqlite", "ledger.sqlite-wal",
-                "ledger.sqlite-shm", "ledger.sqlite-journal", "allowlist.yaml")
+                "ledger.sqlite-shm", "ledger.sqlite-journal", "allowlist.yaml", "allowlist.yaml.lock",
+                "grants_revoked.json", "grants_revoked.json.lock")
 _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", "\n", "(", ")", ";;", ";&", "!", "{", "}"})
 _REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "<>", ">&"})
 _RE_ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")

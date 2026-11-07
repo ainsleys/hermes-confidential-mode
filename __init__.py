@@ -69,7 +69,7 @@ class Runtime:
         self.errors: list[tuple[str, str]] = []
         self._allowlist: Any = None
         self._allowlist_stamp: Any = None
-        self.revocations: Any = None             # revoke.RevocationWatcher (Amendment 9)
+        self.revocations: Any = None             # revoke.RevocationWatcher (Amendment 10)
         self._lock = threading.Lock()
         self._aux_seen: deque = deque(maxlen=512)
         self.last_live: Optional[dict] = None      # last live main runtime seen by pre_llm_call (status)
@@ -176,7 +176,7 @@ class Runtime:
 
 def _merge_added(allowlist: Any, path: Any, lock_id: str) -> None:
     """Take the human-approved additions persisted for the SAME lock as ``allowlist.added``: additions
-    another process approved are added, and names another process revoked (Amendment 9) are dropped.
+    another process approved are added, and names another process revoked (Amendment 10) are dropped.
     Only names still on the ask route count; a file for another lock changes nothing."""
     import json
     try:

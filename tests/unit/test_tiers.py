@@ -43,7 +43,7 @@ def test_on_host_addresses(host):
     assert is_on_host(host)
 
 
-# Amendment 9 (backlog D03): each neighbour range is off-tier unless the exact host is listed.
+# Amendment 10 (backlog D03): each neighbour range is off-tier unless the exact host is listed.
 NEIGHBOURS = [
     ("10.1.2.3", "10.0.0.0/8"), ("172.16.0.1", "172.16.0.0/12"), ("172.31.255.255", "172.16.0.0/12"),
     ("192.168.0.1", "192.168.0.0/16"), ("100.64.0.1", "100.64.0.0/10"), ("100.127.255.255", "100.64.0.0/10"),
@@ -271,7 +271,7 @@ def test_attested_rejects_malformed_base_url():
     assert not p.classify(dest("https://inference.tinfoil.sh\\@evil/v1", provider="attested-tinfoil")).in_tier
 
 
-# ---- the machine's own host name (Amendment 9) -----------------------------------------------------
+# ---- the machine's own host name (Amendment 10) -----------------------------------------------------
 
 def _own(monkeypatch, name, answer):
     import confidential_mode.tiers as t

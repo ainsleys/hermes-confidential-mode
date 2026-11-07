@@ -359,7 +359,7 @@ def test_mcp_localhost_url_is_on_host(monkeypatch, base):
     # Amendment 1 (A5): URL servers classify by host_of(url) with the active predicate.
     base["mcp_servers"]["localhttp"] = {"url": "http://localhost:8000/mcp"}
     assert_ok(run(Tier.ON_HOST, base, monkeypatch))
-    # Amendment 9: a private-range URL server is off-tier unless its exact host is listed.
+    # Amendment 10: a private-range URL server is off-tier unless its exact host is listed.
     base["mcp_servers"]["lanhttp"] = {"url": "http://192.168.1.20:8000/mcp", "command": "x"}
     assert_flagged(run(Tier.ON_HOST, base, monkeypatch), "mcp_servers", "lanhttp")
 

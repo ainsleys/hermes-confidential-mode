@@ -586,7 +586,7 @@ class PinStore:
     @contextlib.contextmanager
     def _mutating(self):
         """Thread lock plus an advisory lock file, so a CLI and a gateway never interleave a read-modify-write.
-        Bounded (filelock.exclusive, Amendment 9 review N1): a lock held elsewhere raises PinStoreError naming
+        Bounded (filelock.exclusive, Amendment 10 review N1): a lock held elsewhere raises PinStoreError naming
         pins.yaml.lock instead of hanging; every caller already fails closed on PinStoreError."""
         from .filelock import LockBusy, exclusive
         try:

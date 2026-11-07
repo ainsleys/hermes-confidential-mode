@@ -471,7 +471,7 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
         except ConsentContextError as exc:
             return f"Not asked: {exc}"
     if cmd == "revoke":
-        # Amendment 9 (U06): narrows only, so no consent prompt and no self-approval refusal.
+        # Amendment 10 (U06): narrows only, so no consent prompt and no self-approval refusal.
         if rest == ["--all"]:
             return _revoke.revoke(rt, None, revoke_all=True, session_id=sid, surface=surface)[1]
         if len(rest) != 1 or rest[0].startswith("-"):

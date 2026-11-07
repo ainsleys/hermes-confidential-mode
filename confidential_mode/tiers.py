@@ -49,7 +49,7 @@ from urllib.parse import urlsplit
 #: off-tier unless the user lists it in ``confidential.on_host.extra_hosts``.
 ON_HOST_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
 
-#: D03 (Amendment 9): only loopback is on-host by rule. A private, carrier-grade NAT, link-local or
+#: D03 (Amendment 10): only loopback is on-host by rule. A private, carrier-grade NAT, link-local or
 #: unique-local address can be another machine, so those ranges are off-tier unless the exact host is
 #: listed in ``confidential.on_host.extra_hosts``.
 _ON_HOST_NETWORKS = tuple(ipaddress.ip_network(n) for n in ("127.0.0.0/8", "::1/128"))
@@ -366,7 +366,7 @@ class OnHostPredicate:
     In-tier: loopback literals (127.0.0.0/8, ::1, IPv4-mapped loopback), the names in ``ON_HOST_NAMES``,
     the machine's own host name when it resolves only to loopback, and exact hosts listed in
     ``confidential.on_host.extra_hosts``. Everything else is off-tier, including private, carrier-grade
-    NAT, link-local and unique-local addresses (Amendment 9, backlog D03).
+    NAT, link-local and unique-local addresses (Amendment 10, backlog D03).
 
     An empty ``base_url`` is resolved through ``profile_base_url(provider)`` (a URL string, or a
     profile object with ``base_url``); an on-host result is in-tier, anything else off-tier. Hermes'

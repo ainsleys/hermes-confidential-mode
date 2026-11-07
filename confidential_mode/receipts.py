@@ -367,7 +367,7 @@ def _sections(rows: list[dict]) -> dict:
         "compactions": by_kind(("compaction",)),
         "notices": by_kind(("notice",)),
         "signed_sends": by_kind(("send_signed",)),
-        "grants_revoked": by_kind(("grant_revoked",)),   # Amendment 9
+        "grants_revoked": by_kind(("grant_revoked",)),   # Amendment 10
     }
 
 # Added only when a receipt holds an encrypted NEAR send (W11, Amendment 5.1); checked by verify_chain then.

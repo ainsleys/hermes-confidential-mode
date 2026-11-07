@@ -160,7 +160,7 @@ def test_genuinely_on_host_is_in_tier(monkeypatch, url):
     assert v.in_tier is True, f"{url!r} should be on-host per contract: {v}"
 
 
-#: Amendment 9 (backlog D03): private, carrier-grade NAT, link-local and unique-local hosts can be another
+#: Amendment 10 (backlog D03): private, carrier-grade NAT, link-local and unique-local hosts can be another
 #: machine, so they are off-tier unless the exact host is listed.
 NEIGHBOUR_UNLESS_LISTED = [
     "http://10.0.0.1/v1",
@@ -248,7 +248,7 @@ def test_unencoded_zone_id_does_not_crash(monkeypatch):
 
 
 def test_ipv4_mapped_loopback_is_on_host_and_mapped_private_is_not(monkeypatch):
-    # Amendment 1, narrowed by Amendment 9: IPv4-mapped loopback is on-host; mapped private is off-tier
+    # Amendment 1, narrowed by Amendment 10: IPv4-mapped loopback is on-host; mapped private is off-tier
     # unless listed, and a listed plain address also covers its mapped spelling.
     assert classify(on_host(monkeypatch), dest("http://[::ffff:127.0.0.1]/v1")).in_tier is True
     assert classify(on_host(monkeypatch), dest("http://[::ffff:7f00:1]/v1")).in_tier is True
@@ -505,7 +505,7 @@ def test_zdr_stub_is_always_off(monkeypatch):
         assert "not implemented" in v.reason
 
 
-# --------------------------------------------------------------------------- ON_HOST: Amendment 9 (D03)
+# --------------------------------------------------------------------------- ON_HOST: Amendment 10 (D03)
 
 def test_hostname_that_resolves_to_a_private_address_is_off_tier(no_dns, monkeypatch):
     # A name is never resolved to decide the tier (the no_dns fixture fails on any lookup), so a name an

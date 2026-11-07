@@ -52,7 +52,7 @@ class TierPredicate(Protocol):
     def classify(self, dest: Destination) -> Verdict: ...
 ```
 
-ON_HOST predicate: in_tier iff base_url host is loopback, "localhost", this machine's host name resolving only to loopback, or an exact host in `confidential.on_host.extra_hosts` (Amendment 9; private ranges are off-tier unless listed). Empty base_url for a provider whose profile base_url is on-host counts as on-host; otherwise off-tier. ATTESTED predicate: in_tier iff dest.provider is a registered attested profile AND VerificationCache.fresh(provider) AND pins match (W2 exposes `attested_ok(provider) -> Verdict`). ZDR predicate: deferred; stub returns off-tier with reason "zero-retention tier not implemented".
+ON_HOST predicate: in_tier iff base_url host is loopback, "localhost", this machine's host name resolving only to loopback, or an exact host in `confidential.on_host.extra_hosts` (Amendment 10; private ranges are off-tier unless listed). Empty base_url for a provider whose profile base_url is on-host counts as on-host; otherwise off-tier. ATTESTED predicate: in_tier iff dest.provider is a registered attested profile AND VerificationCache.fresh(provider) AND pins match (W2 exposes `attested_ok(provider) -> Verdict`). ZDR predicate: deferred; stub returns off-tier with reason "zero-retention tier not implemented".
 
 ```python
 # confidential_mode/verify/base.py
@@ -412,7 +412,7 @@ Image parts on NEAR (U02; replaces Amendment 8):
 
 ## Amendment 10 (2026-11-07): the on-host tier is loopback plus listed hosts; revoke for tool grants
 
-Owner tier3-b (branch `tier3-b`). Amendment 8 above (W14, NEAR vision) is unrelated; branch tier3-a carries its own amendment, which is renumbered at merge. This amendment narrows Amendment 1's on-host set and adds one command. Revised after its adversarial review (`scratchpad/review/tier3-b-review.md`).
+Owner tier3-b (branch `tier3-b`). Numbered 10 because tier3-a's Amendment 9 merged first; the two are independent, except that Amendment 9's self-approval scan (selfscan.py) also names this amendment's state files (`allowlist.yaml.lock`, `grants_revoked.json`, `grants_revoked.json.lock`) and refuses `hermes confidential revoke` from a tool while locked. This amendment narrows Amendment 1's on-host set and adds one command. Revised after its adversarial review (`scratchpad/review/tier3-b-review.md`).
 
 - On-host rule (backlog D03). `tiers.OnHostPredicate` admits loopback literals (`127.0.0.0/8`, `::1`, and the IPv4-mapped form of a loopback address), the names in `ON_HOST_NAMES`, this machine's own host name when every address the name resolves to is loopback, and the exact hosts in `confidential.on_host.extra_hosts`. Private IPv4 ranges (`10/8`, `172.16/12`, `192.168/16`), carrier-grade NAT (`100.64/10`), IPv4 link-local (`169.254/16`), IPv6 link-local (`fe80::/10`) and IPv6 unique-local (`fc00::/7`) are off-tier unless the exact host is listed. The off-tier reason for such a host names the range and the key `confidential.on_host.extra_hosts`, and the preflight row's fix carries that reason.
 - The own host name. `tiers.own_hostname_is_loopback(host)` resolves `socket.gethostname()` only when the destination host equals that name, one lookup at a time, with a two-second timeout. An error, a timeout, an empty answer or any non-loopback address gives off-tier, cached for the process. A loopback answer is rechecked once it is older than 60 seconds. No other name is ever resolved by the plugin.

@@ -122,3 +122,32 @@ def test_python_mentions_are_allowed(code):
 def test_write_file_into_the_data_directory_is_refused():
     assert s.file_tool_reason({"path": f"{PD}/evidence/blobs/abc", "content": "x"})
     assert s.file_tool_reason({"path": "/Users/x/hermes-confidential-mode/docs/README.md", "content": "x"}) is None
+
+
+# Amendment 10: the revoke path's state files and every state-file lock. Holding or replacing a lock file
+# could stall a revoke (filelock bounds the wait, and the revoke then fails), so a write to one is refused.
+REVOKE_STATE = ["allowlist.yaml.lock", "grants_revoked.json", "grants_revoked.json.lock", "pins.yaml.lock"]
+
+
+@pytest.mark.parametrize("name", REVOKE_STATE)
+@pytest.mark.parametrize("form", ["echo x > {p}", "touch {p}", "cp /tmp/x {p}", "flock {p} sleep 999",
+                                  "tee {p} < /dev/null"])
+def test_writes_to_revoke_state_files_are_refused(name, form):
+    assert s.shell_reason(form.format(p=f"{PD}/{name}")), (name, form)
+
+
+@pytest.mark.parametrize("name", REVOKE_STATE)
+def test_file_tools_and_python_writes_to_revoke_state_files_are_refused(name):
+    assert s.file_tool_reason({"path": f"{PD}/{name}", "content": "x"}), name
+    assert s.python_reason(f"open('{PD}/{name}', 'w').write('x')"), name
+
+
+@pytest.mark.parametrize("name", REVOKE_STATE)
+def test_reading_a_revoke_state_file_is_allowed(name):
+    assert s.shell_reason(f"cat {PD}/{name}") is None, name
+
+
+def test_revoke_from_a_tool_is_refused_while_locked():
+    # README (Amendment 10): revoke runs from a terminal the person opened, or from chat.
+    assert s.shell_reason("hermes confidential revoke web_search")
+    assert s.shell_reason("hermes confidential revoke --all")

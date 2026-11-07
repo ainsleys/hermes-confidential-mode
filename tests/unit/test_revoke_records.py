@@ -1,4 +1,4 @@
-"""Amendment 9 (U06): revocation records and the watcher, pure logic over files."""
+"""Amendment 10 (U06): revocation records and the watcher, pure logic over files."""
 import json
 
 from confidential_mode import revoke as rv

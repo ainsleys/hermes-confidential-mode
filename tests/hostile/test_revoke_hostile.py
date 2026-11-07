@@ -1,4 +1,4 @@
-"""Hostile tests for `revoke` (INTERFACES Amendment 9, backlog U06), on the plugin loaded by real discovery
+"""Hostile tests for `revoke` (INTERFACES Amendment 10, backlog U06), on the plugin loaded by real discovery
 with Hermes' real config.yaml and approval state. Revoke must remove only what confidential mode wrote, must
 change nothing when there is nothing to revoke, and must never raise into Hermes."""
 from __future__ import annotations

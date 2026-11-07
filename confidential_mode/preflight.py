@@ -534,7 +534,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     if tier == Tier.ATTESTED:
         _near_encryption_items(config, tasks, plugins, add, provider_lookup)
 
-    # Amendment 9 (backlog D03): each listed extra on-host host must be one exact host.
+    # Amendment 10 (backlog D03): each listed extra on-host host must be one exact host.
     if tier == Tier.ON_HOST:
         _extra_hosts_items(config, add, ctx.pass_verdict)
 
@@ -733,7 +733,7 @@ def config_fingerprint(config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
         # Review finding 2: normalized, so an unset variable and "local" fingerprint the same (a CLI process
         # that never bridged terminal.* into the environment must agree with the gateway that did).
     }
-    # Amendment 9: the listed extra on-host hosts widen the on-host tier, so a change to them is a config
+    # Amendment 10: the listed extra on-host hosts widen the on-host tier, so a change to them is a config
     # change. Absent or empty adds nothing, so a lock made without the key keeps its fingerprint.
     extra = _extra_hosts_raw(config)
     if extra not in (None, []):

@@ -55,7 +55,7 @@ ENTRIES = [(n, "core", _builtin_handler) for n in sorted(ON_HOST_TOOLS)] + [
     ("ghost_query", "mcp-ghost", _builtin_handler),          # no config anywhere
     ("both_query", "mcp-both", _builtin_handler),            # url AND command: url wins
     ("lh_query", "mcp-lh", _builtin_handler),                # http://localhost URL: on-host
-    ("lan_query", "mcp-lan", _builtin_handler),              # RFC1918 URL: off-tier unless listed (Amendment 9)
+    ("lan_query", "mcp-lan", _builtin_handler),              # RFC1918 URL: off-tier unless listed (Amendment 10)
     ("obf_query", "mcp-obf", _builtin_handler),              # obfuscated loopback: off-tier
     ("plug_tool", "someplugin", _plugin_handler_factory()),
     ("named_plug", "other", _builtin_handler),               # plugin by manager name list
@@ -539,7 +539,7 @@ def test_persisted_allowlist_is_mode_0600_and_leaves_no_temp_file(tmp_path):
     al.persist()
     al.add("web_search")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    # allowlist.yaml.lock is the advisory lock file (Amendment 9), empty and kept, as pins.yaml.lock is.
+    # allowlist.yaml.lock is the advisory lock file (Amendment 10), empty and kept, as pins.yaml.lock is.
     assert sorted(p.name for p in tmp_path.iterdir()) == ["allowlist.yaml", "allowlist.yaml.lock"]
 
 
@@ -742,7 +742,7 @@ def test_mcp_url_uses_injected_predicate():
     # OnHostPredicate extra_hosts are honoured
     assert _mcp_only("http://mcpbox.lan/mcp", OnHostPredicate(extra_hosts=["mcpbox.lan"])).route is Route.ON_HOST
     assert _mcp_only("http://mcpbox.lan/mcp").route is Route.BLOCK_MCP_URL
-    # Amendment 9: a private-range MCP host is on-host only when its exact address is listed
+    # Amendment 10: a private-range MCP host is on-host only when its exact address is listed
     assert _mcp_only("http://10.0.0.5:9/mcp", OnHostPredicate(extra_hosts=["10.0.0.5"])).route is Route.ON_HOST
     assert _mcp_only("http://10.0.0.6:9/mcp", OnHostPredicate(extra_hosts=["10.0.0.5"])).route is Route.BLOCK_MCP_URL
 
