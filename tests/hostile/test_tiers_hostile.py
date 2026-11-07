@@ -150,19 +150,7 @@ GENUINELY_ON_HOST = [
     "HTTP://127.0.0.1/v1",                     # scheme is case-insensitive
     "https://localhost/v1",
     "http://[::1]:8080/v1",
-    "http://10.0.0.1/v1",
-    "http://10.255.255.255/v1",
-    "http://172.16.0.1/v1",
-    "http://172.31.255.255/v1",
-    "http://192.168.1.1/v1",
-    "http://192.168.1.1",                      # scheme present, no path
-    "http://100.64.0.1/v1",                    # CGNAT / tailscale
-    "http://100.127.255.255/v1",
-    "http://[fe80::1]/v1",
-    "http://[fe80::1%25en0]:11434/v1",         # link-local with zone id (RFC 6874 encoding)
-    "http://[febf::1]/v1",                     # top of fe80::/10
-    "http://[fc00::1]/v1",
-    "http://[fd12:3456::1]/v1",
+    "http://[::ffff:127.0.0.1]/v1",            # IPv4-mapped IPv6 loopback
 ]
 
 
@@ -170,6 +158,34 @@ GENUINELY_ON_HOST = [
 def test_genuinely_on_host_is_in_tier(monkeypatch, url):
     v = classify(on_host(monkeypatch), dest(url))
     assert v.in_tier is True, f"{url!r} should be on-host per contract: {v}"
+
+
+#: Amendment 9 (backlog D03): private, carrier-grade NAT, link-local and unique-local hosts can be another
+#: machine, so they are off-tier unless the exact host is listed.
+NEIGHBOUR_UNLESS_LISTED = [
+    "http://10.0.0.1/v1",
+    "http://10.255.255.255/v1",
+    "http://172.16.0.1/v1",
+    "http://172.31.255.255/v1",
+    "http://192.168.1.1/v1",
+    "http://192.168.1.1",
+    "http://100.64.0.1/v1",
+    "http://100.127.255.255/v1",
+    "http://[fe80::1]/v1",
+    "http://[fe80::1%25en0]:11434/v1",
+    "http://[febf::1]/v1",
+    "http://[fc00::1]/v1",
+    "http://[fd12:3456::1]/v1",
+    "http://[::ffff:10.0.0.1]/v1",
+    "http://[::ffff:192.168.1.1]:8080/v1",
+]
+
+
+@pytest.mark.parametrize("url", NEIGHBOUR_UNLESS_LISTED)
+def test_neighbour_ranges_are_off_tier_unless_listed(monkeypatch, url):
+    v = classify(on_host(monkeypatch), dest(url))
+    assert v.in_tier is False, f"{url!r} is a neighbour address, not this host: {v}"
+    assert "confidential.on_host.extra_hosts" in v.reason and "range" in v.reason, v.reason
 
 
 def test_scheme_missing_fails_closed(monkeypatch):
@@ -231,12 +247,18 @@ def test_unencoded_zone_id_does_not_crash(monkeypatch):
     classify(on_host(monkeypatch), dest("http://[fe80::1%en0]/v1"))
 
 
-def test_ipv4_mapped_private_is_on_host(monkeypatch):
-    # Amendment 1: IPv4-mapped private/loopback IPv6 is on-host.
-    for url in ("http://[::ffff:127.0.0.1]/v1", "http://[::ffff:10.0.0.1]/v1",
-                "http://[::ffff:192.168.1.1]:8080/v1"):
-        assert classify(on_host(monkeypatch), dest(url)).in_tier is True, url
-    assert classify(on_host(monkeypatch), dest("http://[::ffff:169.254.169.254]/v1")).in_tier is False
+def test_ipv4_mapped_loopback_is_on_host_and_mapped_private_is_not(monkeypatch):
+    # Amendment 1, narrowed by Amendment 9: IPv4-mapped loopback is on-host; mapped private is off-tier
+    # unless listed, and a listed plain address also covers its mapped spelling.
+    assert classify(on_host(monkeypatch), dest("http://[::ffff:127.0.0.1]/v1")).in_tier is True
+    assert classify(on_host(monkeypatch), dest("http://[::ffff:7f00:1]/v1")).in_tier is True
+    for url in ("http://[::ffff:10.0.0.1]/v1", "http://[::ffff:192.168.1.1]:8080/v1",
+                "http://[::ffff:169.254.169.254]/v1"):
+        assert classify(on_host(monkeypatch), dest(url)).in_tier is False, url
+    assert classify(on_host(monkeypatch, extra_hosts=["10.0.0.1"]), dest("http://[::ffff:10.0.0.1]/v1")).in_tier is True
+    # Not loopback, though they embed 127.0.0.1: IPv4-compatible, NAT64 and 6to4 spellings.
+    for url in ("http://[::127.0.0.1]/v1", "http://[64:ff9b::7f00:1]/v1", "http://[2002:7f00:1::1]/v1"):
+        assert classify(on_host(monkeypatch), dest(url)).in_tier is False, url
 
 
 @pytest.mark.parametrize("url", [
@@ -481,3 +503,76 @@ def test_zdr_stub_is_always_off(monkeypatch):
         v = classify(pred, d)
         assert v.in_tier is False
         assert "not implemented" in v.reason
+
+
+# --------------------------------------------------------------------------- ON_HOST: Amendment 9 (D03)
+
+def test_hostname_that_resolves_to_a_private_address_is_off_tier(no_dns, monkeypatch):
+    # A name is never resolved to decide the tier (the no_dns fixture fails on any lookup), so a name an
+    # attacker points at 10.0.0.5 stays off-tier even when 10.0.0.5 itself is listed.
+    monkeypatch.setattr(tiers.socket, "gethostname", lambda: "this-box")
+    pred = on_host(monkeypatch, extra_hosts=["10.0.0.5"])
+    for url in ("http://model.internal.example/v1", "http://10.0.0.5.nip.io/v1", "http://ten-0-0-5.lan/v1"):
+        v = classify(pred, dest(url))
+        assert v.in_tier is False, url
+        assert "confidential.on_host.extra_hosts" in v.reason
+
+
+def test_own_hostname_resolving_to_a_private_address_is_off_tier(monkeypatch):
+    tiers._OWN_HOSTNAME_CACHE.clear()
+    monkeypatch.setattr(tiers.socket, "gethostname", lambda: "this-box")
+    monkeypatch.setattr(tiers, "_resolve_all", lambda name: ["192.168.1.20"])
+    assert classify(on_host(monkeypatch), dest("http://this-box:8000/v1")).in_tier is False
+    monkeypatch.setattr(tiers, "_resolve_all", lambda name: ["127.0.0.1", "10.0.0.2"])
+    tiers._OWN_HOSTNAME_CACHE.clear()
+    assert classify(on_host(monkeypatch), dest("http://this-box:8000/v1")).in_tier is False
+
+
+def test_own_hostname_resolver_that_hangs_fails_closed(monkeypatch):
+    import threading
+    tiers._OWN_HOSTNAME_CACHE.clear()
+    gate = threading.Event()
+    monkeypatch.setattr(tiers.socket, "gethostname", lambda: "this-box")
+    monkeypatch.setattr(tiers, "_OWN_HOSTNAME_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(tiers, "_resolve_all", lambda name: (gate.wait(5), ["127.0.0.1"])[1])
+    try:
+        assert classify(on_host(monkeypatch), dest("http://this-box/v1")).in_tier is False
+        assert "this-box" not in tiers._OWN_HOSTNAME_CACHE   # a timeout is not cached as an answer
+    finally:
+        gate.set()
+
+
+@pytest.mark.parametrize("url", [
+    "http://10.0.0.5/api.openai.com/v1",            # private IP host, public-looking name in the path
+    "http://192.168.1.7/localhost/v1",
+    "http://api.openai.com/10.0.0.5/v1",            # the reverse: public host, private IP in the path
+    "http://api.openai.com/v1?host=127.0.0.1",
+    "http://api.openai.com#@127.0.0.1",
+])
+def test_private_ip_and_public_name_in_the_path_is_off_tier(monkeypatch, url):
+    v = classify(on_host(monkeypatch, extra_hosts=["api.openai.com.evil"]), dest(url))
+    assert v.in_tier is False, (url, v)
+
+
+def test_ipv4_mapped_ipv6_loopback_is_loopback(monkeypatch):
+    for url in ("http://[::ffff:127.0.0.1]:11434/v1", "http://[::ffff:127.255.255.254]/v1",
+                "http://[0:0:0:0:0:ffff:7f00:1]/v1"):
+        v = classify(on_host(monkeypatch), dest(url))
+        assert v.in_tier is True, (url, v)
+
+
+@pytest.mark.parametrize("entry", ["10.0.0.0/8", "10.0.0.0/24", "192.168.1.0/255.255.255.0", "fd00::/8",
+                                   "10.0.0.*", "*", "*.lan", "10.0.0.1-10.0.0.255", "10.0.0.1-255",
+                                   "0.0.0.0/0", "::/0", "10/8", "localhost/8"])
+def test_listed_range_entry_is_refused(monkeypatch, entry):
+    pred = on_host(monkeypatch, extra_hosts=[entry])
+    for url in ("http://10.0.0.1/v1", "http://10.0.0.9/v1", "http://192.168.1.5/v1", "http://[fd00::1]/v1",
+                "http://gpu.lan/v1", "https://api.example.com/v1"):
+        assert classify(pred, dest(url)).in_tier is False, (entry, url)
+    assert tiers.extra_host_problem(entry) != ""
+
+
+def test_a_bad_entry_does_not_disable_the_good_ones(monkeypatch):
+    pred = on_host(monkeypatch, extra_hosts=["10.0.0.0/8", "gpu.lan"])
+    assert classify(pred, dest("http://gpu.lan/v1")).in_tier is True
+    assert classify(pred, dest("http://10.0.0.1/v1")).in_tier is False

@@ -286,7 +286,8 @@ _PIN_FIELDS = ("vendor", "router_repo", "code_fingerprint", "enclave_fingerprint
                "previous_enclave_fingerprint", "cvm_role", "reviewed_by")
 
 
-_ON_HOST_RULE = "loopback, RFC1918, 100.64.0.0/10, fe80::/10, fc00::/7, localhost, plus confidential.on_host.extra_hosts"
+_ON_HOST_RULE = ("loopback (127.0.0.0/8, ::1), localhost, this machine's host name when it resolves only to loopback, "
+                 "plus the exact hosts in confidential.on_host.extra_hosts")
 
 
 def _on_host_endpoints_used(rows: Iterable[dict]) -> list[str]:

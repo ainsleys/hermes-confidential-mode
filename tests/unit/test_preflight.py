@@ -170,7 +170,7 @@ def test_vision_main_inherits_main():
 
 
 def test_vision_auto_with_on_host_base_url_is_explicit_custom():
-    cfg = base_config(auxiliary={"vision": {"provider": "auto", "base_url": "http://10.0.0.9:8000/v1"}})
+    cfg = base_config(auxiliary={"vision": {"provider": "auto", "base_url": "http://127.0.0.9:8000/v1"}})
     r = run(cfg)
     assert item(r, "auxiliary.vision.provider").verdict == "on_host"
     assert item(r, "auxiliary.vision.base_url").verdict == "on_host"
@@ -183,10 +183,10 @@ def test_vision_explicit_remote_off_tier():
 
 def test_aux_explicit_provider_and_base_url():
     ok = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL},
-                                "compression": {"provider": "custom", "base_url": "http://192.168.1.4:8080/v1"}})
+                                "compression": {"provider": "custom", "base_url": "http://127.0.0.4:8080/v1"}})
     r = run(ok)
     assert item(r, "auxiliary.compression.provider").verdict == "on_host"
-    assert item(r, "auxiliary.compression.base_url").value_redacted == "http://192.168.1.4:8080/v1"
+    assert item(r, "auxiliary.compression.base_url").value_redacted == "http://127.0.0.4:8080/v1"
     bad = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL},
                                  "compression": {"provider": "custom", "base_url": "https://api.example.com/v1"}})
     r = run(bad)
@@ -446,7 +446,7 @@ def test_mcp_url_server_classified_by_host():
                                    "empty": {"url": ""}})
     r = run(cfg)
     assert item(r, "mcp_servers.lh.url").verdict == "on_host"
-    assert item(r, "mcp_servers.lan.url").verdict == "on_host"   # url wins over command
+    assert item(r, "mcp_servers.lan.url").verdict == "off_tier"  # url wins over command; private range unless listed
     assert item(r, "mcp_servers.bad.url").verdict == "off_tier"
     assert item(r, "mcp_servers.empty.url").verdict == "off_tier"
 
@@ -465,7 +465,7 @@ def test_delegation_inherits_main_when_unset():
 
 
 def test_delegation_explicit_routes():
-    ok = run(base_config(delegation={"provider": "custom", "model": "q", "base_url": "http://10.0.0.3/v1"}))
+    ok = run(base_config(delegation={"provider": "custom", "model": "q", "base_url": "http://127.0.0.3/v1"}))
     assert item(ok, "delegation.base_url").verdict == "on_host"
     assert ok.ok, format_report(ok)
     for deleg in ({"provider": "openrouter", "model": "x"}, {"base_url": "https://api.example.com/v1"},
@@ -652,3 +652,61 @@ def test_resolved_terminal_backend_reads_the_profile_scope_not_the_process_envir
         assert pf.resolved_terminal_backend() == "ssh"
     finally:
         reset_terminal_scope(token)
+
+
+# --- Amendment 9 (backlog D03): on-host means loopback plus exact listed hosts ------------------------
+
+def _listed_pred(hosts):
+    return OnHostPredicate(extra_hosts=hosts, profile_base_url=lambda p: PROFILES.get(p, ""))
+
+
+@pytest.mark.parametrize("url,rng", [
+    ("http://10.0.0.9:8000/v1", "10.0.0.0/8"), ("http://172.20.1.2/v1", "172.16.0.0/12"),
+    ("http://192.168.1.4:8080/v1", "192.168.0.0/16"), ("http://100.101.102.103/v1", "100.64.0.0/10"),
+    ("http://[fe80::2%25en0]/v1", "fe80::/10"), ("http://[fd00::2]/v1", "fc00::/7"),
+])
+def test_private_range_row_names_the_range_and_the_key(url, rng):
+    r = run(base_config(model={"provider": "custom", "default": "q", "base_url": url}))
+    row = item(r, "model.base_url")
+    assert row.verdict == "off_tier" and not r.ok
+    assert rng in row.fix and "confidential.on_host.extra_hosts" in row.fix, row.fix
+
+
+def test_listed_private_host_passes_and_shows_its_row():
+    cfg = base_config(model={"provider": "custom", "default": "q", "base_url": "http://192.168.1.4:8080/v1"},
+                      confidential={"on_host": {"extra_hosts": ["192.168.1.4"]}})
+    r = run(cfg, pred=_listed_pred(["192.168.1.4"]))
+    assert r.ok, format_report(r)
+    assert item(r, "model.base_url").verdict == "on_host"
+    assert item(r, "confidential.on_host.extra_hosts[0]").verdict == "on_host"
+
+
+@pytest.mark.parametrize("entry", ["192.168.1.0/24", "10.0.0.*", "*.lan", "http://gpu-box.lan", "gpu-box.lan:8000",
+                                   "10.0.0.1-10.0.0.9", 42])
+def test_extra_hosts_range_or_junk_entry_fails_the_lock(entry):
+    cfg = base_config(confidential={"on_host": {"extra_hosts": ["gpu-box.lan", entry]}})
+    r = run(cfg, pred=_listed_pred(["gpu-box.lan", entry]))
+    assert not r.ok
+    assert item(r, "confidential.on_host.extra_hosts[0]").verdict == "on_host"
+    bad = item(r, "confidential.on_host.extra_hosts[1]")
+    assert bad.verdict == "off_tier" and "exact host" in bad.fix, bad.fix
+
+
+def test_extra_hosts_not_a_list_fails_the_lock():
+    r = run(base_config(confidential={"on_host": {"extra_hosts": "gpu-box.lan"}}))
+    assert not r.ok and item(r, "confidential.on_host.extra_hosts").verdict == "off_tier"
+
+
+def test_extra_hosts_rows_only_on_the_on_host_tier():
+    cfg = base_config(confidential={"on_host": {"extra_hosts": ["10.0.0.0/8"]}})
+    r = run(cfg, tier=Tier.ATTESTED, pred=attested_pred(), profile="attested-tinfoil")
+    assert not [i for i in r.items if i.key.startswith("confidential.on_host")]
+
+
+def test_fingerprint_covers_extra_hosts():
+    a = base_config()
+    assert config_fingerprint(a) == config_fingerprint(base_config(confidential={"on_host": {"extra_hosts": []}}))
+    b = base_config(confidential={"on_host": {"extra_hosts": ["gpu-box.lan"]}})
+    c = base_config(confidential={"on_host": {"extra_hosts": ["gpu-box.lan", "10.0.0.5"]}})
+    assert len({config_fingerprint(a), config_fingerprint(b), config_fingerprint(c)}) == 3
+    assert config_fingerprint(b, version=1) != config_fingerprint(a, version=1)

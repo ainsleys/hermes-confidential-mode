@@ -202,7 +202,7 @@ def test_on_host_tier_trust_roots(ledger):
     ledger.append(_ev("send_observed", purpose="main", provider="custom", host="127.0.0.1", bytes=10,
                       tier="on-host-only", decision="allowed"))
     text = render(ledger, SID, pins=None, on_host_extra_hosts=["gpu-box.lan"])
-    assert "On-host endpoint set: loopback, RFC1918" in text
+    assert "On-host endpoint set: loopback (127.0.0.0/8, ::1)" in text and "RFC1918" not in text
     assert "Extra on-host names: gpu-box.lan" in text and "On-host endpoints used: 127.0.0.1" in text
     assert "Pin " not in text
 

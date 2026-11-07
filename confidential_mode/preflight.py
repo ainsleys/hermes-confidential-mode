@@ -534,6 +534,10 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     if tier == Tier.ATTESTED:
         _near_encryption_items(config, tasks, plugins, add, provider_lookup)
 
+    # Amendment 9 (backlog D03): each listed extra on-host host must be one exact host.
+    if tier == Tier.ON_HOST:
+        _extra_hosts_items(config, add, ctx.pass_verdict)
+
     # attested profile presence
     if tier == Tier.ATTESTED:
         name = _s(attested_profile)
@@ -553,6 +557,36 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                            fingerprint=config_fingerprint(config, plugin_aux_tasks=plugin_aux_tasks,
                                                           builtin_aux_tasks=builtins, terminal_env=terminal_env),
                            aux_tasks=tuple(tasks))
+
+
+EXTRA_HOSTS_KEY = "confidential.on_host.extra_hosts"
+_EXTRA_HOSTS_FIX = ("list one exact host name or IP address per entry; ranges, wildcards, URLs and ports are "
+                    "not allowed, and the entry is ignored until fixed")
+
+
+def _extra_hosts_raw(config: Mapping) -> Any:
+    conf = config.get("confidential") if isinstance(config, Mapping) else None
+    on_host = conf.get("on_host") if isinstance(conf, Mapping) else None
+    return on_host.get("extra_hosts") if isinstance(on_host, Mapping) else None
+
+
+def _extra_hosts_items(config: Mapping, add, pass_verdict: str) -> None:
+    """One row per ``confidential.on_host.extra_hosts`` entry: a valid exact host passes, anything else
+    (a range, a wildcard, a URL, a port, a non-string) fails the lock. A non-list value fails as a whole."""
+    from .tiers import extra_host_problem
+    raw = _extra_hosts_raw(config)
+    if raw is None or raw == []:
+        return
+    if not isinstance(raw, list):
+        add(EXTRA_HOSTS_KEY, raw, OFF_TIER, f"{EXTRA_HOSTS_KEY} must be a list; {_EXTRA_HOSTS_FIX}")
+        return
+    for i, entry in enumerate(raw):
+        problem = extra_host_problem(entry)
+        key = f"{EXTRA_HOSTS_KEY}[{i}]"
+        if problem:
+            add(key, entry if isinstance(entry, str) else repr(entry), OFF_TIER, f"{key} {problem}; {_EXTRA_HOSTS_FIX}")
+        else:
+            add(key, entry, pass_verdict)
 
 
 _NEAR = "attested-near"
@@ -699,6 +733,11 @@ def config_fingerprint(config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
         # Review finding 2: normalized, so an unset variable and "local" fingerprint the same (a CLI process
         # that never bridged terminal.* into the environment must agree with the gateway that did).
     }
+    # Amendment 9: the listed extra on-host hosts widen the on-host tier, so a change to them is a config
+    # change. Absent or empty adds nothing, so a lock made without the key keeps its fingerprint.
+    extra = _extra_hosts_raw(config)
+    if extra not in (None, []):
+        view[EXTRA_HOSTS_KEY] = extra
     if version >= 2:
         view["terminal.backend"] = (normalize_backend(config["terminal"].get("backend"))
                                     if isinstance(config.get("terminal"), Mapping)

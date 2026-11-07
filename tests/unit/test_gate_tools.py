@@ -55,7 +55,7 @@ ENTRIES = [(n, "core", _builtin_handler) for n in sorted(ON_HOST_TOOLS)] + [
     ("ghost_query", "mcp-ghost", _builtin_handler),          # no config anywhere
     ("both_query", "mcp-both", _builtin_handler),            # url AND command: url wins
     ("lh_query", "mcp-lh", _builtin_handler),                # http://localhost URL: on-host
-    ("lan_query", "mcp-lan", _builtin_handler),              # RFC1918 URL: on-host
+    ("lan_query", "mcp-lan", _builtin_handler),              # RFC1918 URL: off-tier unless listed (Amendment 9)
     ("obf_query", "mcp-obf", _builtin_handler),              # obfuscated loopback: off-tier
     ("plug_tool", "someplugin", _plugin_handler_factory()),
     ("named_plug", "other", _builtin_handler),               # plugin by manager name list
@@ -85,7 +85,7 @@ def test_on_host_set_is_exactly_the_contract():
         "terminal", "process_manage", "execute_code", "read_file", "write_file", "patch", "search_files",
         "skills_list", "skill_view", "skill_manage", "todo_list", "memory", "clarify", "session_search"}
     al = allowlist()
-    assert set(al.on_host) - {"lh_query", "lan_query", "on_host_query"} == ON_HOST_TOOLS
+    assert set(al.on_host) - {"lh_query", "on_host_query"} == ON_HOST_TOOLS
 
 
 def test_registry_driven_classification():
@@ -103,7 +103,7 @@ def test_registry_driven_classification():
     assert al.get("on_host_query").mcp_transport == "stdio"
     assert al.get("ghost_query").mcp_transport == "unknown"
     assert r["lh_query"] is Route.ON_HOST and al.get("lh_query").mcp_host == "localhost"
-    assert r["lan_query"] is Route.ON_HOST
+    assert r["lan_query"] is Route.BLOCK_MCP_URL
     assert r["obf_query"] is Route.BLOCK_MCP_URL
     assert al.get("plug_tool").origin is Origin.PLUGIN      # hermes_plugins.* handler module
     assert al.get("named_plug").origin is Origin.PLUGIN     # plugin manager's tool-name list
@@ -125,8 +125,8 @@ def test_on_host_name_overridden_by_plugin_is_not_on_host():
 def test_format_allowlist_lists_every_bucket():
     al = allowlist()
     text = format_allowlist(al)
-    assert "on-host (runs without asking): 17" in text
-    assert "blocked (MCP server URL off-tier or unreadable): 4" in text
+    assert "on-host (runs without asking): 16" in text
+    assert "blocked (MCP server URL off-tier or unreadable): 5" in text
     assert "blocked (scheduled jobs): 1" in text
     assert "remote_query  [mcp-remote; mcp; server=remote, transport=url, host=mcp.example.com]" in text
     for name in al.tools:
@@ -212,10 +212,10 @@ def test_unlocked_passes_everything_and_ledgers_nothing():
 
 def test_locked_on_host_tools_run_silently_even_under_bypass():
     r = Rig(bypass=True)
-    for name in sorted(ON_HOST_TOOLS) + ["lh_query", "lan_query", "on_host_query"]:
+    for name in sorted(ON_HOST_TOOLS) + ["lh_query", "on_host_query"]:
         assert r.hook(tool_name=name, args={}, session_id="s") is None
         r.run(name)
-    assert len(r.ran()) == len(ON_HOST_TOOLS) + 3 and r.ledger.events == [] and r.calls["bypass"] == []
+    assert len(r.ran()) == len(ON_HOST_TOOLS) + 2 and r.ledger.events == [] and r.calls["bypass"] == []
 
 
 @pytest.mark.parametrize("backend", ["ssh", "modal", "docker", "daytona", "vercel_sandbox", "my_plugin_backend"])
@@ -717,7 +717,7 @@ def _mcp_only(url, predicate=None):
 
 @pytest.mark.parametrize("url,route", [
     ("http://127.0.0.1:8000/mcp", Route.ON_HOST), ("http://[::1]:8000/mcp", Route.ON_HOST),
-    ("http://192.168.1.4/mcp", Route.ON_HOST), ("https://api.example.com/mcp", Route.BLOCK_MCP_URL),
+    ("http://192.168.1.4/mcp", Route.BLOCK_MCP_URL), ("https://api.example.com/mcp", Route.BLOCK_MCP_URL),
     ("http://169.254.169.254/mcp", Route.BLOCK_MCP_URL), ("http://127.1/mcp", Route.BLOCK_MCP_URL),
     ("http://localhost\\@evil.com/mcp", Route.BLOCK_MCP_URL), ("", Route.BLOCK_MCP_URL),
 ])
@@ -741,6 +741,9 @@ def test_mcp_url_uses_injected_predicate():
     # OnHostPredicate extra_hosts are honoured
     assert _mcp_only("http://mcpbox.lan/mcp", OnHostPredicate(extra_hosts=["mcpbox.lan"])).route is Route.ON_HOST
     assert _mcp_only("http://mcpbox.lan/mcp").route is Route.BLOCK_MCP_URL
+    # Amendment 9: a private-range MCP host is on-host only when its exact address is listed
+    assert _mcp_only("http://10.0.0.5:9/mcp", OnHostPredicate(extra_hosts=["10.0.0.5"])).route is Route.ON_HOST
+    assert _mcp_only("http://10.0.0.6:9/mcp", OnHostPredicate(extra_hosts=["10.0.0.5"])).route is Route.BLOCK_MCP_URL
 
     class Raises:
         def classify(self, dest):
