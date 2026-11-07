@@ -685,7 +685,8 @@ recorded on the approved entries, from the terminal or from a chat surface; with
 is recorded as none.
 
 The reviewer must never run a `confidential` command. While the profile is locked, the tool gate
-refuses tool calls whose arguments name the plugin's command line, module or state files. Every approval
+refuses tool calls that would run the plugin's command line, import its package or write its state
+files. Every approval
 prompt refuses when the process carries the tool marker, which terminal, process_manage and execute_code
 children inherit. An agent that unsets the marker, assembles the command at run time, or attaches
 through the gateway socket can still approve a pin; the ledger records each approval with its surface.
@@ -924,12 +925,16 @@ runs without asking, in these contexts too.
 - `delegate_task` when the call names a route. A route is any field that would send the child agent
   somewhere else: a profile, a provider, a base URL, an ACP command, or a backend other than the
   default. (An ACP command launches an external agent through the Agent Client Protocol.)
-- A `terminal`, `process_manage` or `execute_code` call whose arguments name the plugin's command
-  line, its module or its state files (`pins.yaml`, `ledger.sqlite`, `allowlist.yaml`). A
-  `write_file` or `patch` call that names one of those files is refused too. The ledger records each
-  refusal with the decision `self_approval`. The check reads the text of the call, so a command
-  assembled at run time passes it. [Reviewing a pending pin](#reviewing-a-pending-pin) says what else
-  guards the approval prompt.
+- A `terminal`, `process_manage` or `execute_code` call that would run `hermes confidential`, type
+  `/confidential`, import the plugin's `confidential_mode` package, or write one of the plugin's state
+  files (`pins.yaml`, `ledger.sqlite`, `allowlist.yaml` or its `state.json`). A `write_file` or `patch`
+  call whose target is one of those files is refused too. The ledger records each refusal with the
+  decision `self_approval`. Text that only mentions the command, the package or a file passes. For
+  example, `grep "confidential off" docs/README.md`, `cat` of the pins file, and an edit to this
+  plugin's own source all run. The check reads the text of the call, so a command assembled at run
+  time passes it. [LIMITATIONS.md](docs/LIMITATIONS.md), section 15, lists the forms the check
+  refuses. [Reviewing a pending pin](#reviewing-a-pending-pin) says what else guards the approval
+  prompt.
 
 Plain delegation on the default backend is allowed. The child agent inherits the locked profile, so
 it stays inside the tier.

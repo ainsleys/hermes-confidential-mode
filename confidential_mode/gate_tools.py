@@ -37,7 +37,6 @@ import inspect
 import json
 import math
 import os
-import re
 import threading
 import time
 import uuid
@@ -66,25 +65,6 @@ STATE_FILE_TOOLS: frozenset[str] = frozenset({"write_file", "patch"})
 # attaches through the gateway socket can still approve.
 from .selfapproval import TOOL_PROCESS_ENV, mark_tool_process  # noqa: E402,F401
 
-_QUOTES = str.maketrans("", "", "'\"\\`")
-_RE_CONFIDENTIAL = re.compile(r"(?<![a-z0-9_])confidential(?![a-z0-9_])")
-_RE_CLI_VERB = re.compile(r"(?<![a-z0-9_])confidential\W+(pins|allow|off|on|lock|unlock|setup|approve|retire)"
-                          r"(?![a-z0-9_])")
-_RE_PLUGIN_PACKAGE = re.compile(r"(?<![a-z0-9_])confidential_mode(?![a-z0-9_])")
-_RE_PLUGIN_FILES = re.compile(r"(?<![a-z0-9_])(pins\.yaml|ledger\.sqlite|allowlist\.yaml)(?![a-z0-9_])")
-_RE_ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
-
-
-def _ansi_c(text: str) -> str:
-    """Expand bash ANSI-C quoting ($'\x63onfidential') so the scan sees the word it spells."""
-    def dec(m: "re.Match") -> str:
-        try:
-            return m.group(1).encode("latin-1", "backslashreplace").decode("unicode_escape")
-        except Exception:  # noqa: BLE001
-            return m.group(0)
-    return _RE_ANSI_C.sub(dec, text)
-
-
 def _strings(value: Any, depth: int = 0) -> Iterable[str]:
     if depth > 8:
         return
@@ -99,31 +79,34 @@ def _strings(value: Any, depth: int = 0) -> Iterable[str]:
             yield from _strings(v, depth + 1)
 
 
-def invokes_confidential_cli(args: Any) -> Optional[str]:
-    """Why the call's text reaches the plugin's own CLI, package or state files, or None. Every string in
-    the arguments is scanned (``command`` for terminal, ``data`` for process_manage, ``code`` for
-    execute_code, and any other field), after expanding ANSI-C quoting, lower-cased, with quote characters
-    and backslashes removed. Detected: ``hermes`` together with the word ``confidential`` (a whole word); the
-    word ``confidential`` followed by one of its verbs (an alias or symlink of hermes); any
-    mention of the ``confidential_mode`` package (import, importlib, a path); a mention of ``pins.yaml``,
-    ``ledger.sqlite`` or ``allowlist.yaml``. Not detectable: a command assembled at run time (variables,
-    ``eval``, base64, a shell glob, a command split across several process_manage writes) and a script run
-    later from a file another tool wrote without naming those words. selfapproval.py is the second line."""
+def invokes_confidential_cli(args: Any, tool: Optional[str] = None) -> Optional[str]:
+    """Why the call would run the plugin's own CLI, import its package or write its state files, or None
+    (selfscan.py has the forms, Amendment 9). terminal strings are read as shell, execute_code strings as
+    Python, and process_manage input (a shell or a Python prompt may be reading it) as both; with no tool
+    named, every string is read both ways. Text that only mentions the word, the package name or a path is
+    not refused. Not detectable: a command assembled at run time, a script that imports the package
+    indirectly, and a command split across several process_manage writes. selfapproval.py is the second
+    line."""
+    from . import selfscan
+    as_shell = tool in (None, "terminal", "process_manage")
+    as_python = tool in (None, "execute_code", "process_manage")
     for raw in _strings(args):
-        text = _ansi_c(raw).casefold().translate(_QUOTES)
-        if "hermes" in text and _RE_CONFIDENTIAL.search(text):
-            return "names hermes and its confidential command"
-        if _RE_CLI_VERB.search(text):
-            return "invokes the confidential command"
-        if _RE_PLUGIN_PACKAGE.search(text):
-            return "names the confidential_mode package"
-        if _RE_PLUGIN_FILES.search(text):
-            return "names a confidential-mode state file"
+        if as_shell:
+            why = selfscan.shell_reason(raw)
+            if why:
+                return why
+        if as_python:
+            why = selfscan.python_reason(raw)
+            if why:
+                return why
     return None
 
 
 def names_state_file(args: Any) -> bool:
-    return any(_RE_PLUGIN_FILES.search(raw.casefold()) for raw in _strings(args))
+    """A write_file or patch call whose target path (or a V4A patch's file) is one of the plugin's state
+    files where the plugin keeps them (selfscan.is_state_path)."""
+    from . import selfscan
+    return selfscan.file_tool_reason(args) is not None
 
 
 # Our approve directive's rule_key. Hermes prefixes it with ``plugin_rule:`` (tools/approval.py:1226);
@@ -853,7 +836,7 @@ class _Policy:
         # what the lock saw.
         from .preflight import LOCAL_BACKEND, TERMINAL_BACKEND_KEY, TERMINAL_BACKEND_TOOLS
         if info.name in SELF_APPROVAL_TOOLS:
-            why = invokes_confidential_cli(args)
+            why = invokes_confidential_cli(args, info.name)
             if why:
                 return CallDecision("refuse", "self_approval",
                                     f"confidential mode: {info.name} was blocked because its command {why}. While "
@@ -862,9 +845,9 @@ class _Policy:
                                     "the agent does not drive.")
         if info.name in STATE_FILE_TOOLS and names_state_file(args):
             return CallDecision("refuse", "self_approval",
-                                f"confidential mode: {info.name} was blocked because it names one of the plugin's "
-                                "state files (pins.yaml, ledger.sqlite, allowlist.yaml), which no tool may write "
-                                "while locked.")
+                                f"confidential mode: {info.name} was blocked because it targets one of the plugin's "
+                                "state files (pins.yaml, ledger.sqlite, allowlist.yaml or its state.json), which no "
+                                "tool may write while locked.")
         if info.name in TERMINAL_BACKEND_TOOLS:
             try:
                 backend = self.terminal_backend(task_id)

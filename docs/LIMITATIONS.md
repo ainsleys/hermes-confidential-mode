@@ -608,8 +608,8 @@ In Hermes 84a0301 a chat client is attached to one gateway process, which runs e
 and also runs the slash commands typed into any attached client. A nested chat that a tool started
 attaches to that same gateway, and the gateway cannot tell which client answers a prompt.
 
-**What the plugin does today.** While the profile is locked, the tool gate refuses tool calls whose
-arguments name the plugin's command line, module or state files. Every approval prompt refuses when the
+**What the plugin does today.** While the profile is locked, the tool gate refuses tool calls that
+would run the plugin's command line, import its package or write its state files. Every approval prompt refuses when the
 process carries the tool marker. The marker reaches terminal, process_manage and execute_code children.
 An agent that unsets the marker, assembles the command at run time, or attaches through the gateway
 socket can approve a pin. Such an approval is recorded with approved_via, and the ledger shows it. A
@@ -618,13 +618,41 @@ agent session as the agent's work unless they remember answering.
 
 The details:
 
-- The tool gate scans every string in the arguments of `terminal`, `process_manage` and
-  `execute_code` calls, after expanding bash's `$'...'` quoting and removing quote characters and
-  backslashes. It refuses the word `confidential` together with `hermes`, or followed by one of its
-  verbs (`pins`, `allow`, `off`, `on`, `lock`, `unlock`, `setup`, `approve`, `retire`); the token
-  `confidential_mode`; and the file names `pins.yaml`, `ledger.sqlite` and `allowlist.yaml`. It also
-  refuses `write_file` and `patch` calls that name one of those files. Each refusal writes a
-  `tool_refused` row with the decision `self_approval`.
+- The tool gate reads the arguments of `terminal` calls as shell commands, `execute_code` calls as
+  Python, and `process_manage` input as both. It first expands bash's `$'...'` quoting. It splits shell
+  text into single commands at `;`, `&&`, `||`, `|`, `&`, parentheses and line ends. It refuses these
+  forms:
+  - a `hermes` program, by name or by path, or `python -m hermes_cli.main`, with a later argument
+    `confidential` or one starting with `/confidential`, also after `sudo`, `env`, `uv run` and similar
+    wrappers;
+  - a command whose first argument is `confidential` and whose second is one of its verbs (`pins`,
+    `allow`, `off`, `on`, `lock`, `unlock`, `setup`, `approve`, `retire`, `status`, `check`,
+    `receipts`, `replay`), which covers an alias or a renamed copy of `hermes`, unless the command is a
+    text tool such as `echo` or `grep`;
+  - a line that types the slash command `/confidential`;
+  - Python code that imports `confidential_mode`, in `execute_code`, after `python -c`, in a script
+    file `python` runs, or fed to Python through a heredoc or a pipe; also `python -m
+    confidential_mode...`;
+  - Python code that starts a process with one of the forms above, or that imports `hermes_cli` and
+    passes `confidential`;
+  - any of the forms above inside `bash -c`, `$(...)`, backticks, `eval`, or text piped into a shell;
+  - a redirection or `tee` into a state file, and any command other than a read-only one (`cat`,
+    `grep`, `head`, `ls`, `sed` without `-i`, `git` and similar) that names a state file.
+
+  A state file is `pins.yaml`, `ledger.sqlite` or `allowlist.yaml`, with their lock, journal and backup
+  files, or `state.json` inside a `plugin-data` directory. A path counts when it is relative, because
+  the gate does not know the working directory, when it lies inside a `plugin-data` directory, or when
+  it lies inside the Hermes home outside this plugin's source tree. The gate also refuses `write_file`
+  and `patch` calls whose target path, or a multi-file patch's file, is such a state file. Each refusal
+  writes a `tool_refused` row with the decision `self_approval`.
+- The gate lets text through that only mentions the command, the package or a file. Examples are
+  `grep "confidential off" docs/README.md`, `echo 'mark confidential on purpose'`, `git diff
+  confidential_mode/`, `cat` of the pins file, and `write_file` or `patch` on this plugin's own source.
+  A test run such as `pytest` imports the package without naming it, so the gate does not see that
+  import.
+- The gate cannot see a command built at run time, for example from a variable, base64 or a computed
+  `eval`. It cannot see a script that imports the package indirectly. It cannot see a command split
+  across several `process_manage` writes.
 - The tool marker is the environment variable `XDG_CONFIDENTIAL_MODE_TOOL_PROCESS`. The plugin's tool
   hooks set it, once, to the id of the Hermes process, before any tool runs. The `XDG_` prefix is one
   Hermes passes into execute_code's restricted environment. A prompt in the process that set the

@@ -350,9 +350,11 @@ whole profile. While locked, the plugin blocks the following.
   Under yolo mode, `approvals.mode: off`, or an unattended context such as cron, `-q` or no surface
   at all, the ask becomes a block.
 
-- **Tool calls that name the plugin's own commands or state files.** A `terminal`, `process_manage`
-  or `execute_code` call whose arguments name the plugin's command line, module or state files is
-  refused. So is a `write_file` or `patch` call that names a state file.
+- **Tool calls that run the plugin's own commands or write its state files.** A `terminal`,
+  `process_manage` or `execute_code` call that would run `hermes confidential`, type `/confidential`,
+  import the `confidential_mode` package, or write a state file is refused. So is a `write_file` or
+  `patch` call whose target is a state file. A call that only mentions the command, the package or a
+  file runs. [LIMITATIONS.md](LIMITATIONS.md), section 15, lists the forms.
 
 - **Tools that are always blocked.** These are the following:
   - `cronjob_manage`, because a scheduled job would run later, outside the locked session;

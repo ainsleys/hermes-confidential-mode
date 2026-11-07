@@ -69,6 +69,45 @@ ATTACKS = [
     ("execute_code", {"code": "import importlib; importlib.import_module('confidential_mode.provider')"}),
     ("write_file", {"path": "/Users/x/.hermes/plugin-data/p/pins.yaml", "content": "version: 3"}),
     ("patch", {"path": "ledger.sqlite", "old_string": "a", "new_string": "b"}),
+    # Amendment 9: more real forms the narrowed scan still refuses
+    ("terminal", {"command": "bash -c 'hermes confidential pins approve'"}),
+    ("terminal", {"command": "echo \"$(hermes confidential pins)\""}),
+    ("terminal", {"command": "echo `hermes confidential off`"}),
+    ("terminal", {"command": "sudo -E hermes confidential off"}),
+    ("terminal", {"command": "env A=1 ~/.local/bin/hermes confidential pins approve"}),
+    ("terminal", {"command": "/opt/hermes/bin/hermes --profile work confidential allow web_search"}),
+    ("terminal", {"command": "uv run hermes confidential pins approve"}),
+    ("terminal", {"command": "ls; hermes confidential off"}),
+    ("terminal", {"command": "ls\nhermes confidential off"}),
+    ("terminal", {"command": "true && python3 -m hermes_cli.main confidential pins approve"}),
+    ("terminal", {"command": "hermes chat -q '/confidential pins approve'"}),
+    ("terminal", {"command": "hermes $'conf\\x69dential' off"}),
+    ("terminal", {"command": "echo hermes confidential pins approve | sh"}),
+    ("terminal", {"command": "cat <<EOF | bash\nhermes confidential pins approve\nEOF"}),
+    ("terminal", {"command": "find . -maxdepth 0 -exec sh -c 'hermes confidential off' \\;"}),
+    ("terminal", {"command": "python3 -c 'import confidential_mode.pins'"}),
+    ("terminal", {"command": "python -c \"from plugin.confidential_mode import consent\""}),
+    ("terminal", {"command": "python -m confidential_mode.commands"}),
+    ("terminal", {"command": "python - <<'EOF'\nfrom confidential_mode.pins import PinStore\nEOF"}),
+    ("terminal", {"command": "python3 <<< 'import confidential_mode'"}),
+    ("terminal", {"command": "echo 'import confidential_mode' | python3"}),
+    ("terminal", {"command": "echo x > ~/.hermes/plugin-data/confidential-mode/pins.yaml"}),
+    ("terminal", {"command": "printf '{}' >> ~/.hermes/plugin-data/confidential-mode/state.json"}),
+    ("terminal", {"command": "cp /tmp/p ~/.hermes/plugin-data/confidential-mode/allowlist.yaml"}),
+    ("terminal", {"command": "cat /tmp/rows | tee ~/.hermes/plugin-data/c/ledger.sqlite"}),
+    ("terminal", {"command": "cd ~/.hermes/plugin-data/confidential-mode && rm ledger.sqlite"}),
+    ("terminal", {"command": "sed -i.bak s/a/b/ pins.yaml"}),
+    ("process_manage", {"action": "submit", "session_id": "p1", "data": "/confidential pins approve"}),
+    ("process_manage", {"action": "submit", "session_id": "p1", "data": "import confidential_mode.pins"}),
+    ("execute_code", {"code": "import os\nos.system('hermes confidential pins approve')"}),
+    ("execute_code", {"code": "import subprocess\nsubprocess.run('python -m hermes_cli.main confidential off', shell=True)"}),
+    ("execute_code", {"code": "from hermes_cli.main import main\nmain(['confidential', 'pins', 'approve'])"}),
+    ("execute_code", {"code": "__import__('confidential_mode.consent')"}),
+    ("execute_code", {"code": "import sqlite3\nsqlite3.connect('/h/.hermes/plugin-data/c/ledger.sqlite')"}),
+    ("write_file", {"path": "~/.hermes/plugin-data/confidential-mode/state.json", "content": "{}"}),
+    ("write_file", {"path": "allowlist.yaml", "content": "tools: []"}),
+    ("patch", {"mode": "patch", "patch": "*** Begin Patch\n*** Update File: /h/.hermes/plugin-data/c/pins.yaml\n"
+                                          "@@\n-a\n+b\n*** End Patch"}),
 ]
 
 
@@ -85,7 +124,30 @@ def test_gate_refuses_the_confidential_cli_from_a_tool_while_locked(tool, args):
     assert len(rows) == 2 and {r["decision"] for r in rows} == {"self_approval"}
 
 
-@pytest.mark.parametrize("cmd", ["ls -la", "grep -r confidential docs/", "git log --oneline", "printf '1\\n'"])
+@pytest.mark.parametrize("cmd", [
+    "ls -la", "grep -r confidential docs/", "git log --oneline", "printf '1\\n'",
+    # Amendment 9: text and paths that only mention the word, the package or a state file
+    'grep "confidential off" docs/README.md',
+    "grep -rn 'hermes confidential pins approve' docs",
+    "rg 'hermes confidential' README.md",
+    "echo 'mark confidential on purpose'",
+    "echo confidential off",
+    "echo hermes confidential pins approve",
+    "cat confidential_mode/gate_tools.py",
+    "sed -n 1,40p ~/hermes-confidential-mode/confidential_mode/gate_tools.py",
+    "sed -i s/a/b/ ~/hermes-confidential-mode/confidential_mode/gate_tools.py",
+    "git diff confidential_mode/ docs/LIMITATIONS.md",
+    "git commit -m 'hermes confidential: narrow the tool gate'",
+    "ls ~/.hermes/plugins/confidential-mode/confidential_mode",
+    "cat ~/.hermes/plugin-data/confidential-mode/pins.yaml",
+    "grep -c verify_ok ~/.hermes/plugin-data/confidential-mode/ledger.sqlite",
+    "head -5 docs/config.example.yaml",
+    "grep -rn confidential_mode .",
+    "cd ~/hermes-agent && uv run pytest ~/hermes-confidential-mode/tests -q",
+    "python -m pytest tests/unit -q -k confidential",
+    "python3 -c 'print(1)'",
+    "cp ~/hermes-confidential-mode/docs/config.example.yaml /tmp/x.yaml",
+])
 def test_gate_lets_ordinary_commands_run(cmd):
     pre, mw, ledger = _hooks()
     assert pre(tool_name="terminal", args={"command": cmd}, session_id="s", tool_call_id="c1") is None
@@ -100,6 +162,36 @@ def test_unlocked_profile_is_not_refused_but_still_marks_the_process():
     assert pre(tool_name="terminal", args={"command": "hermes confidential pins"}, session_id="s",
                tool_call_id="c1") is None
     assert os.environ.get(gate_tools.TOOL_PROCESS_ENV) == str(os.getpid()), "the marker names the marking process"
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("execute_code", {"code": "print(open('docs/README.md').read().count('confidential off'))"}),
+    ("execute_code", {"code": "import re\nprint(re.findall('hermes confidential', open('README.md').read()))"}),
+    ("write_file", {"path": "/Users/x/hermes-confidential-mode/confidential_mode/gate_tools.py",
+                    "content": "# hermes confidential pins approve; pins.yaml; import confidential_mode\n"}),
+    ("patch", {"path": "/Users/x/hermes-confidential-mode/confidential_mode/selfscan.py",
+               "old_string": "pins.yaml", "new_string": "ledger.sqlite"}),
+    ("write_file", {"path": "/Users/x/hermes-confidential-mode/docs/README.md",
+                    "content": "Run `hermes confidential off` to unlock.\n"}),
+    ("write_file", {"path": "/tmp/pins.yaml", "content": "a: 1"}),
+    ("read_file", {"path": "/Users/x/hermes-confidential-mode/docs/LIMITATIONS.md"}),
+    ("process_manage", {"action": "submit", "session_id": "p1", "data": "grep 'confidential off' docs/README.md"}),
+])
+def test_gate_lets_tools_that_only_mention_the_plugin_run(tool, args):
+    pre, mw, ledger = _hooks()
+    assert pre(tool_name=tool, args=args, session_id="s", tool_call_id="c1") is None, (tool, args)
+    assert mw(tool_name=tool, args=args, next_call=lambda a: "ran", session_id="s", tool_call_id="c1") == "ran"
+    assert not [e for e in ledger.events if e["kind"] == "tool_refused"]
+
+
+def test_a_python_script_that_imports_the_package_is_refused_and_one_that_does_not_runs(tmp_path):
+    bad, good = tmp_path / "bad.py", tmp_path / "good.py"
+    bad.write_text("import sys\nfrom confidential_mode import consent\n")
+    good.write_text("print('confidential off')\n")
+    pre, _, _ = _hooks()
+    d = pre(tool_name="terminal", args={"command": f"python3 {bad}"}, session_id="s", tool_call_id="c1")
+    assert d and d["action"] == "block"
+    assert pre(tool_name="terminal", args={"command": f"python3 {good}"}, session_id="s", tool_call_id="c2") is None
 
 
 def test_read_file_is_not_a_self_approval_tool():

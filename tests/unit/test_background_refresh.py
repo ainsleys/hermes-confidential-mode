@@ -242,7 +242,7 @@ def test_an_adapter_without_prepare_keeps_the_inline_path(world, tmp_path):
 
 
 def test_the_thread_is_a_daemon_and_stops_on_unlock_close_invalidate_and_a_lost_lock(world):
-    cache, clock, state = world["cache"], world["clock"], world["state"]
+    cache, state = world["cache"], world["state"]
     ad = world["make"]([_result()], threads=True)
     assert cache.ensure(P)[0] is True
     r = _refresher(cache)
