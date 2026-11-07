@@ -114,6 +114,8 @@ confidential:
     # top-level request key that would carry text in plaintext. A reply is decrypted only after a
     # verified provider_tee signature over the encrypted bytes. Needs the pynacl package
     # (docs/RUNNING_TESTS.md). The attested-tier lock is refused unless this is absent or exactly true.
+    # Settings whose value is a mapping, such as extra_body entries (a reasoning effort, stream_options,
+    # logit_bias), are refused while this is true: they would leave as plaintext.
     # The reply is sealed to a per-request key named in a header NEAR's signature does not cover, so a
     # gateway that swaps that key can read a reply; the plugin then withholds it and marks the send
     # unverified (docs/LIMITATIONS.md section 14). Default true.

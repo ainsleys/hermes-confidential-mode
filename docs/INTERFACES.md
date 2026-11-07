@@ -238,9 +238,15 @@ Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only.
 - Refusals from the NEAR views are `verify.near.NearRefusal`, a `VerifyError` and an `openai.OpenAIError`:
   the OpenAI SDK re-raises it as is, without its own retries. The attested profiles set
   `ProviderProfile.classify_api_error = provider.classify_refusal`, which Hermes' error classifier
-  consults (`agent/error_classifier.py` `_profile_verdict`) and which marks a NearRefusal
-  `provider_policy_blocked`, `retryable: False`, `should_fallback: False`, so Hermes' loop does not
-  resend it either. Transport errors (timeouts, resets) are not refusals: the SDK and Hermes may retry
+  consults (`agent/error_classifier.py` `_profile_verdict`). NearRefusal carries `status_code` and a
+  clipped `body` when the gateway answered with an HTTP error. The hook maps 429 to `rate_limit`, 503
+  and 529 to `overloaded`, other 5xx to `server_error` (all retryable), and a 400 or 413 whose body says
+  the context is too long to `context_overflow` (`should_compress`). Every other NearRefusal (421,
+  other 4xx, non-200 success-shaped replies, withheld or undecryptable replies, refusals before
+  sending) is `provider_policy_blocked`, `retryable: False`. None falls back. A retry is a new encrypted
+  exchange; it never changes what is released.
+- `mark_stale` and a new TLS fingerprint swap in a fresh send pool for new requests; the old pool is
+  closed when its last in-flight request finishes. Transport errors (timeouts, resets) are not refusals: the SDK and Hermes may retry
   them, each attempt is a new exchange with a new client key, and each gets its own `send_signed` row.
   No status is synthesised.
 - An encrypted exchange's `send_signed` row is written once both the signature verdict and the release

@@ -478,11 +478,18 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   `provider_tee` signature that verifies is marked unverified, and the receipt says "SESSION NOT FULLY
   ATTESTED". With encryption on, the reply of such a send never reaches the agent: the plugin decrypts
   a reply only after a verified `provider_tee` signature over the encrypted bytes. Only an HTTP 200
-  reply that verifies and decrypts is handed over; any other status is refused. Neither the OpenAI SDK
-  nor Hermes resends a refused request. A timeout or a reset is not a refusal, so Hermes may retry it;
-  each attempt is a new request and gets its own ledger row.
+  reply that verifies and decrypts is handed over; any other status is refused. Hermes retries only a
+  rate limit (429), a server error (5xx) or a context-length error (which it first compresses), and a
+  timeout or a reset. A reply that fails its checks, an HTTP 421 and every other refusal are not
+  resent. Each attempt is a new encrypted request and gets its own ledger row.
 - The model key is not part of a pin yet. Within one Hermes process, a re-verification that reports a
-  different model key is refused. A restart accepts the new key without a prompt. With encryption
+  different model key is refused. So when NEAR rotates a model key, NEAR requests are refused until
+  Hermes restarts. The restart accepts the new key without a prompt, until pins cover the key
+  (planned).
+- Settings whose value is a mapping, such as `extra_body` entries, are refused while encryption is on,
+  unless the plugin knows the key. Examples are a reasoning setting (`reasoning: {"effort": ...}`),
+  `stream_options` and `logit_bias`. A mapping would leave this host in plaintext, so every NEAR request
+  that carries one is refused before it is sent. With encryption
   off, the send is not refused, because the response has already arrived when the signature is
   fetched.
 - It pins the measured docker-compose of the gateway and of every model instance it saw. A new

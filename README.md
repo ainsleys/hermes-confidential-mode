@@ -463,8 +463,9 @@ request. That key travels in a request header, `X-Client-Pub-Key`, which NEAR's 
 cover.
 
 The plugin decrypts a reply only after NEAR's `provider_tee` signature over the encrypted bytes has
-verified. Only an HTTP 200 reply that verifies and decrypts reaches Hermes. Any other reply is refused,
-and Hermes does not resend the request. Anyone can encrypt a reply to the plugin's key, because that key is sent with the request,
+verified. Only an HTTP 200 reply that verifies and decrypts reaches Hermes. Any other reply is refused.
+Hermes resends a request only after a rate limit, a server error or a context-length error, as it does
+for any provider. Each resend is a new encrypted request. A reply that fails its checks is never resent. Anyone can encrypt a reply to the plugin's key, because that key is sent with the request,
 so decryption alone proves nothing.
 
 What this establishes, and what it does not:
