@@ -10,8 +10,14 @@ description: >-
   you lock (attested enclaves, or this machine only), encrypts what leaves, asks before a tool sends the
   conversation off the machine, and logs every call so you can render a receipt anyone can replay
   offline. The attested tier needs TINFOIL_API_KEY or NEAR_AI_API_KEY; shell and code execution are not
-  inspected, a stray side call is recorded rather than stopped, and a receipt is a self-report beyond its
-  signed evidence. Disclosure: docs/DISCLOSURE.md.
+  inspected, a stray side call is recorded rather than stopped, and a receipt is a self-report beyond
+  its signed evidence. Disclosure: it contacts only the vendor's enclave or gateway (Tinfoil's router
+  and *.tinfoil.sh collateral proxies, or cloud-api.near.ai), Intel Trust Authority, Sigstore's TUF
+  root, and GitHub for NEAR pin review; no telemetry. It writes only under <HERMES_HOME>/plugin-data/
+  (ledger, evidence blobs, pins.yaml, allowlist.yaml, state) and reads config.yaml and auth.json
+  read-only. It reads TINFOIL_API_KEY, NEAR_AI_API_KEY, TERMINAL_ENV, CONFIDENTIAL_MODE_PROGRESS and
+  CONFIDENTIAL_MODE_NO_FETCH, stores no credential, and runs no shell command or subprocess. 31 private
+  core import sites (docs/DISCLOSURE.md).
 maintainer: ainsleys
 tier: community
 category: models
