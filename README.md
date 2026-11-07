@@ -1,38 +1,89 @@
 <!-- PLUGIN_NAME: confidential-mode  (working name; swap it here, in the title, and in the install lines) -->
 # confidential-mode
 
-confidential-mode is a plugin for Hermes Agent. It does two things.
+confidential-mode is a plugin for Hermes Agent. Hermes is an agent harness: the program that runs
+the loop around a language model, sends your messages to the model, runs the tools the model asks
+for, and sends the results back.
 
-First, it shows you every place your conversation leaves your machine. It keeps a log of every model
-call Hermes makes, with the host the call went to and how many bytes it carried. The log is a file on
-the machine that runs Hermes. You can watch that log live in a terminal.
+## The problem in one paragraph
 
-Second, it lets you lock a Hermes profile. While a profile is locked, the plugin allows the model to
-run in only one of two kinds of place. The first kind is a host whose network address is loopback or
-in a private range. The second kind is a Tinfoil enclave whose build you have approved. Locked mode
-refuses any other destination before Hermes sends a single byte to it. The plugin says "lock" and not
-"seal" because sealing already means something else in confidential computing: sealed storage and
-sealing keys belong to the enclave hardware, and this plugin does not redefine them.
+Six kinds of request carry your text out of a Hermes profile. The main chat goes to the provider you
+picked. Hermes also makes side calls, nineteen kinds of them at the pinned commit: it writes a title
+for the session, compresses old conversation, rewrites your question before searching memory,
+describes images, runs background reviews, and more. Each side call is a separate request carrying
+some of your text, and each goes to whatever provider that task is configured for. A fallback
+provider takes over quietly when the main request fails. Tools such as web fetch and messaging send
+text to whatever site the agent decides to call. Shell and code execution run on this host and can
+reach the network. Memory is written to whatever store is configured. Choosing a verified provider
+for the main chat covers the main chat only.
+
+![Figure 1. With a verified provider alone, the main chat is verified and five other routes carry
+text to hosts nobody checks.](docs/images/routes-figure-1-verified-provider-alone.svg)
+
+## What the plugin does
+
+The plugin does four things for a Hermes profile.
+
+1. **It shows you every route.** It keeps a log of every model call Hermes makes, with the host the
+   call went to and how many bytes it carried, never the text. The log is a file on the machine that
+   runs Hermes. You can watch that log live in a terminal, and this works before you lock anything.
+
+2. **It locks the profile to one tier.** A tier is a rule for which destinations are acceptable.
+   The `on-host-only` tier accepts a host whose network address is loopback or in a private range.
+   The `attested` tier accepts a Tinfoil enclave whose build you have approved. Before locking, the
+   plugin checks every configured route: the main model, every side call, delegation, text to
+   speech, MCP servers and fallbacks. If any route leads off-tier, the lock is refused and the
+   plugin prints which key to change.
+
+3. **While locked, it guards or refuses four of the five remaining routes.** Side calls must
+   resolve to the same tier as the main chat and are rechecked every turn. No fallback provider may
+   be configured, and a failed request ends the turn instead of being rerouted. Off-host tools ask
+   you before each call; an answer of `session` or `always` stops the asking, and an `always` answer
+   is written to Hermes' own allowlist and outlives the lock. Memory must be the built-in store.
+
+4. **It writes a receipt for each session.** The receipt lists where the text went, attaches the
+   enclave evidence captured at each verification, and ends with a fixed paragraph naming what the
+   receipt cannot prove. Anyone holding the receipt can replay the enclave evidence offline, without
+   contacting Tinfoil. The rest of the receipt is the plugin's own record.
+
+![Figure 2. With the plugin, preflight checks every configured route, side calls go to the verified
+enclave, fallback is refused, tools ask, memory stays on the host, shell and code stay open, and a
+ledger records model sends and tool answers.](docs/images/routes-figure-2-with-the-plugin.svg)
+
+## What the plugin cannot do
+
+Shell, code execution, and MCP servers started as a command on this host stay open. They run on
+this machine and can reach the network, and the plugin does not inspect them. Hermes itself asks
+before shell or code commands it flags as dangerous, and nothing else. The receipt names these
+routes as unproven.
+
+A side call that goes off-tier in the middle of a turn, for example after a runtime model switch,
+is recorded as a breach. The plugin cannot stop that call, because Hermes' auxiliary calls do not
+pass through the middleware a plugin can block. The limitations section at the end of this README
+lists every gap of this kind, with the Hermes change that would close each.
 
 A private-range address is not the same thing as a machine you control. A neighbour in a cloud
-provider's private network has a private-range address too, and so does a carrier-grade NAT address.
-The plugin cannot tell those apart from your own machine.
+provider's private network has a private-range address too, and so does a carrier-grade NAT
+address. The plugin cannot tell those apart from your own machine.
 
-While a profile is locked, the plugin also does the following:
+## Why "lock" and not "seal"
 
-- It refuses main model calls and fallbacks whose destination is outside the locked tier. It does
-  this before the request is sent.
-- It asks you before any tool call that would send data off the machine. If you answer `always`,
-  it stops asking for that tool until you remove the grant from Hermes' `command_allowlist`.
-- It refuses to lock at all while any of Hermes' side jobs (compression, title generation, vision,
-  memory and others) is configured to go somewhere outside the tier.
-- It writes every send, refusal, question and answer to an on-host log. You can watch that log live,
-  and you can turn one session's part of it into a receipt.
+The plugin says "lock" because sealing already means something else in confidential computing:
+sealed storage and sealing keys belong to the enclave hardware, and this plugin does not redefine
+them. A plugin named `sealed`, an encrypted secrets store, also exists in the Hermes catalog.
 
-The closest everyday comparison is Little Snitch, the macOS firewall that asks before an application
-connects to the network. confidential-mode applies the same pattern to your agent. Traffic is denied
-by default. A tool that wants to send data gets an allow-once prompt. You can keep a list of the tools
-you have allowed. Everything is logged.
+## Where this fits
+
+The closest everyday comparison is Little Snitch, the macOS firewall that asks before an
+application connects to the network. confidential-mode applies the same pattern to your agent:
+every destination is logged, off-host tools get an allow-once prompt while locked, and you can keep
+a list of the tools you have allowed.
+
+Five earlier pull requests tried to add confidential inference to Hermes core. Each added a
+verified provider for the main chat, and each was closed with the instruction to ship it as a
+plugin. This plugin ships that verified provider as asked, and adds the routing checks, the tool
+gate, the ledger and the receipt that make the privacy claim about the whole session rather than
+about one endpoint.
 
 The plugin was built and tested against Hermes commit 84a0301 and version 0.14.2 of the tinfoil
 Python SDK. It is an entry for the Nous Research Hermes Agent Plugin Hackathon.
