@@ -298,13 +298,16 @@ def _measure(q: Mapping) -> str:
     return ":".join(str(q.get(k) or "") for k in ("mrtd", "rtmr0", "rtmr1", "rtmr2"))
 
 
-def _cvm(role: str, rep: Mapping, ident: Mapping | None = None, cm: Mapping | None = None) -> dict:
+def _cvm(role: str, rep: Mapping, ident: Mapping | None = None, cm: Mapping | None = None,
+         quote: Mapping | None = None) -> dict:
     """What identifies one CVM in the evidence. With v2 evidence, app_id, instance_id, os_image_hash and
     kms_id come from the RTMR3 boot events (``ident``), and a model CVM adds what its compose-manager
-    reported (``cm``)."""
+    reported (``cm``). ``measurement`` is that CVM's own "MRTD:RTMR0:RTMR1:RTMR2" from its verified quote
+    (per-CVM pin entries, Amendment 7)."""
     ident = ident or {}
     cm = cm or {}
-    return {"role": role, "app_id": ident.get("app_id", rep.get("app_id")),
+    return {"role": role, "measurement": _measure(quote) if quote is not None else None,
+            "app_id": ident.get("app_id", rep.get("app_id")),
             "instance_id": ident.get("instance_id", rep.get("instance_id")),
             "compose_hash": rep.get("compose_hash"), "signing_address": str(rep.get("signing_address") or "").lower(),
             "os_image_hash": ident.get("os_image_hash"), "kms_id": ident.get("kms_id"),
@@ -424,7 +427,7 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
             raise nc.CheckError("no gateway report captured")
         gwq = nc.check_report(gw, nonce=nonce, app_composes=composes, quote_verifier=qv,
                               tls_cert_fingerprint=gw.get("tls_cert_fingerprint"))
-        cvms = [_cvm("gateway", gw, ident(gw))]
+        cvms = [_cvm("gateway", gw, ident(gw), quote=gwq)]
         checks["gateway_quote"] = True
         out["gateway_signer"] = str(gw.get("signing_address")).lower()
     except Exception as exc:
@@ -527,8 +530,8 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
 
     if all(checks[k] is True or str(checks[k]).startswith("n/a") for k in ("gateway_quote", "model_quotes")):
         for m in models:
-            for i, (c, _) in enumerate(model_quotes.get(m, [])):
-                cvms.append(_cvm(f"model:{m}", c, idents.get((m, i)), cm_results.get((m, i))))
+            for i, (c, q) in enumerate(model_quotes.get(m, [])):
+                cvms.append(_cvm(f"model:{m}", c, idents.get((m, i)), cm_results.get((m, i)), quote=q))
         code = {"gateway": [gw.get("compose_hash")],
                 "models": {m: sorted({c.get("compose_hash") for c, _ in model_quotes.get(m, [])}) for m in models}}
         if not v1:

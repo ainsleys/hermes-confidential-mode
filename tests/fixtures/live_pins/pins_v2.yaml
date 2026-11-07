@@ -1,0 +1,62 @@
+version: 2
+pins:
+  - vendor: tinfoil
+    router_repo: tinfoilsh/confidential-model-router
+    code_fingerprint: 
+      284bd9e5d470c4812fad60fcec6f99bc0958cd5a1ef4d317a99f702e2913f5fb
+    enclave_fingerprint: 
+      fb8eabe68d3b977b05e48e7a41aff6bbb6dc576cbf5639360fbdf49f357f7d6698be2537f1a425975f89b8a73023022a
+    release_tag: v0.0.170
+    models_seen: []
+    approved_by: human
+    approved_at: '2026-11-06T14:35:07Z'
+    approved_via: cli-setup
+    approval_rule_key: confidential-mode:pin
+    previous: null
+    previous_enclave_fingerprint: null
+    platform: sev-snp
+pending:
+  vendor: tinfoil
+  router_repo: tinfoilsh/confidential-model-router
+  code_fingerprint: 
+    bcfaff463b2f9a8ab07975439941bf4f39eebd7d5f882f6322bf3c65b89dab84
+  enclave_fingerprint: 
+    f5bcc220a94d5c34c5c80db9593dcc88d7d1a19b43796c05ec4b6cdcf921c8176a56cb3d0224650b1250ee892a0ec438
+  release_tag: v0.0.171
+  enclave_host: router-0.tinfoil.sh
+  verifier: tinfoil/0.14.2
+  staged_at: '2026-11-07T07:25:47Z'
+  previous: 284bd9e5d470c4812fad60fcec6f99bc0958cd5a1ef4d317a99f702e2913f5fb
+  previous_enclave_fingerprint: 
+    fb8eabe68d3b977b05e48e7a41aff6bbb6dc576cbf5639360fbdf49f357f7d6698be2537f1a425975f89b8a73023022a
+  models_seen: []
+  platform: sev-snp
+  previous_platform: sev-snp
+  previous_release_tag: v0.0.170
+  release_published_at: '2026-11-06T21:08:05Z'
+  rekor_log_index: 3725017338
+  code_changed: true
+  hardware_measurements_verified: false
+  components: []
+last_applied:
+  vendor: tinfoil
+  router_repo: tinfoilsh/confidential-model-router
+  code_fingerprint: 
+    284bd9e5d470c4812fad60fcec6f99bc0958cd5a1ef4d317a99f702e2913f5fb
+  enclave_fingerprint: 
+    fb8eabe68d3b977b05e48e7a41aff6bbb6dc576cbf5639360fbdf49f357f7d6698be2537f1a425975f89b8a73023022a
+  release_tag: v0.0.170
+  enclave_host: router-0.tinfoil.sh
+  verifier: tinfoil/0.14.2
+  staged_at: '2026-11-06T14:35:00Z'
+  previous: null
+  previous_enclave_fingerprint: null
+  models_seen: []
+  platform: sev-snp
+  previous_platform: null
+  previous_release_tag: null
+  release_published_at: '2026-11-05T03:35:35Z'
+  rekor_log_index: 3692488892
+  code_changed: true
+  hardware_measurements_verified: false
+  components: []

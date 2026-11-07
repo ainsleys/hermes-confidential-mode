@@ -73,8 +73,12 @@ class _Entry:
     verify_lock: Any = field(default_factory=threading.Lock)
     inflight: threading.Event | None = None
     consent_ledger: Any = None      # Ledger-like (.tail); when set, a pin needs a matching pin_applied row
-    consented: set = field(default_factory=set)
-    auto_approve_platform_only: bool = False  # (vendor, code_fp, enclave_fp) already seen in the ledger
+    # (vendor, code_fp, enclave_fp) -> consented, from the ledger rows up to consent_scan_id (pin_applied
+    # makes a key consented, a later pin_retired takes it back; Amendment 7)
+    consented: dict = field(default_factory=dict)
+    consent_scan_id: int = 0
+    auto_approve_platform_only: bool = False
+    observed_result: Any = None     # the last result counted by PinStore.observe
 
 
 class VerificationCache:
@@ -265,6 +269,12 @@ class VerificationCache:
                 if result is None or not self.fresh(provider):
                     _hold(e.adapter, _fail_reason(e.last_error))
                     return False, _fail_reason(e.last_error), None
+                if e.observed_result is not result:
+                    e.observed_result = result
+                    try:
+                        e.pins.observe(result)
+                    except Exception:
+                        pass
                 if e.pins.match(result) is True:
                     if not _consent_recorded(e, result):
                         _hold(e.adapter, REASON_NO_CONSENT)
@@ -292,7 +302,7 @@ class VerificationCache:
                         if e.pins.match(result) is True and _consent_recorded(e, result):
                             _release(e.adapter)
                             return True, "attested enclave verified; platform-only pin applied by policy", result
-                if staged != before:  # a new pending pin, not an idempotent re-stage
+                if _ckey(staged) != _ckey(before):  # a new pending batch, not a re-stage or a display refresh
                     _emit(e, {"kind": "pin_staged", "provider": provider, "purpose": "verify",
                               "host": result.enclave_host,
                               "detail": {"vendor": staged.vendor, "router_repo": staged.router_repo,
@@ -301,6 +311,7 @@ class VerificationCache:
                                          "release_tag": staged.release_tag, "enclave_host": staged.enclave_host,
                                          "previous": staged.previous,
                                          "previous_enclave_fingerprint": staged.previous_enclave_fingerprint,
+                                         "entries": _entry_rows(staged),
                                          "reason": reason}})
                 return False, reason, result
         except Exception as exc:  # fail closed
@@ -327,6 +338,19 @@ def _sync_profile_base_url(e: _Entry) -> None:
 AUTO_PLATFORM_ONLY = "auto_platform_only"
 
 
+def _ckey(pending) -> Any:
+    from .pins import consent_key
+    return None if pending is None else consent_key(pending)
+
+
+def _entry_rows(pending) -> list:
+    """One {cvm_role, code_fingerprint, enclave_fingerprint, pinned} per entry of a pending batch."""
+    return [{"cvm_role": getattr(x, "cvm_role", None), "code_fingerprint": getattr(x, "code_fingerprint", None),
+             "enclave_fingerprint": getattr(x, "enclave_fingerprint", None),
+             "pinned": list(getattr(x, "pinned", ()) or ())}
+            for x in (getattr(pending, "entries", ()) or ())]
+
+
 def _auto_platform_only_ok(pending) -> bool:
     """confidential.pins.auto_approve_platform_only: the code fingerprint is unchanged, only the
     enclave (platform) fingerprint differs, and the SDK's SIGNED hardware-measurements check passed
@@ -350,11 +374,13 @@ def _auto_apply(provider: str, e: _Entry, pending) -> bool:
     except Exception as exc:
         logger.warning("attested: platform-only auto-approval failed: %s", exc)
         return False
+    entry = (getattr(pending, "entries", ()) or (pending,))[0]
     ok = _emit(e, {"kind": "pin_applied", "provider": provider, "purpose": "verify", "host": pending.enclave_host,
                    "decision": AUTO_PLATFORM_ONLY,
                    "detail": {"vendor": pending.vendor, "router_repo": pending.router_repo,
-                              "code_fingerprint": pending.code_fingerprint,
-                              "enclave_fingerprint": pending.enclave_fingerprint,
+                              "cvm_role": getattr(entry, "cvm_role", None), "approved_via": AUTO_PLATFORM_ONLY,
+                              "code_fingerprint": entry.code_fingerprint,
+                              "enclave_fingerprint": entry.enclave_fingerprint,
                               "previous_enclave_fingerprint": pending.previous_enclave_fingerprint,
                               "platform": pending.platform, "previous_platform": pending.previous_platform,
                               "release_tag": pending.release_tag, "policy": "auto_approve_platform_only"}})
@@ -364,41 +390,63 @@ def _auto_apply(provider: str, e: _Entry, pending) -> bool:
 
 
 def _consent_recorded(e: _Entry, result: VerificationResult) -> bool:
-    """F8: the pin in force must have a ``pin_applied`` (decision approve) ledger row with the same
-    fingerprints, i.e. it went through consent.py's ask_choice flow, not a direct PinStore.apply by other
-    in-process code. In-process code can still forge the row; this raises the bar (disclosed). Without a
+    """F8 and Amendment 7: every approved entry the result matches must have a ``pin_applied`` row (decision
+    approve, or the Tinfoil platform-only policy) with the entry's own fingerprints, and no later
+    ``pin_retired`` row for them. So the entry went through consent.py's flow, not a hand edit of pins.yaml
+    or a direct PinStore.apply. In-process code can still forge the row; this raises the bar (disclosed).
+    Rows are read incrementally and in order, so a retirement in another process counts here too. Without a
     consent ledger configured the check is skipped. A ledger read error refuses (fail closed)."""
     if e.consent_ledger is None:
         return True
-    key = (result.vendor, result.code_fingerprint, result.enclave_fingerprint)
-    if key in e.consented:
-        return True
     try:
-        since = 0
-        while True:
-            rows = e.consent_ledger.tail(since, limit=5000)
-            if not rows:
-                return False
-            for row in rows:
-                since = max(since, int(getattr(row, "id", since) or since))
-                if getattr(row, "kind", None) != "pin_applied" or \
-                        getattr(row, "decision", None) not in ("approve", AUTO_PLATFORM_ONLY):
-                    continue
-                d = getattr(row, "detail", None)
-                if isinstance(d, str):
-                    import json
-                    d = json.loads(d)
-                if not isinstance(d, dict):
-                    continue
-                if (d.get("code_fingerprint"), d.get("enclave_fingerprint")) == key[1:] and \
-                        (d.get("vendor") or key[0]) == key[0]:
-                    e.consented.add(key)
-                    return True
-            if len(rows) < 5000:
-                return False
+        entries = e.pins.matching_entries(result) if hasattr(e.pins, "matching_entries") else None
+    except Exception:
+        entries = None
+    if entries:
+        keys = [(result.vendor, x.code_fingerprint, x.enclave_fingerprint) for x in entries]
+    else:
+        keys = [(result.vendor, result.code_fingerprint, result.enclave_fingerprint)]
+    try:
+        _scan_consent(e)
     except Exception:
         logger.warning("attested: consent ledger unreadable; refusing", exc_info=True)
         return False
+    # a row without a vendor (written before rows named one) counts for its fingerprints under any vendor
+    return all(e.consented.get(k, e.consented.get((None,) + k[1:])) is True for k in keys)
+
+
+def _scan_consent(e: _Entry) -> None:
+    """Fold every ledger row after ``e.consent_scan_id`` into ``e.consented``, in id order."""
+    import json
+    while True:
+        rows = e.consent_ledger.tail(e.consent_scan_id, limit=5000)
+        if not rows:
+            return
+        for row in rows:
+            e.consent_scan_id = max(e.consent_scan_id, int(getattr(row, "id", e.consent_scan_id) or e.consent_scan_id))
+            kind = getattr(row, "kind", None)
+            if kind == "pin_applied":
+                if getattr(row, "decision", None) not in ("approve", AUTO_PLATFORM_ONLY):
+                    continue
+            elif kind != "pin_retired":
+                continue
+            d = getattr(row, "detail", None)
+            if isinstance(d, str):
+                d = json.loads(d)
+            if not isinstance(d, dict):
+                continue
+            e.consented[(d.get("vendor") or None, d.get("code_fingerprint"), d.get("enclave_fingerprint"))] = \
+                kind == "pin_applied"
+        if len(rows) < 5000:
+            return
+
+
+def clear_consent_cache(provider: str | None = None) -> None:
+    """Forget what the consent check has read from the ledger (after ``pins retire`` in this process)."""
+    for name, e in list(verification_cache._entries.items()):
+        if provider is None or name == provider:
+            with e.lock:
+                e.consented, e.consent_scan_id = {}, 0
 
 
 def _policy_check_detail(evidence) -> dict:

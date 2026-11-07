@@ -1,4 +1,4 @@
-"""Hostile tests for W2's PinStore (confidential_mode.pins, pins.yaml v2).
+"""Hostile tests for W2's PinStore (confidential_mode.pins, pins.yaml v3 since Amendment 7).
 
 Invariants held throughout: match() never returns True for anything but an intact, current, same-vendor
 pin with both fingerprints equal; a failed apply() leaves the file byte-identical and the previous pin
@@ -55,12 +55,12 @@ def test_missing_file_matches_nothing(cm, tmp_path):
     assert store.pending() is None
 
 
-def test_written_file_declares_version_2(cm, tmp_path):
+def test_written_file_declares_version_3(cm, tmp_path):
     store, path = _pinned_store(cm, tmp_path)
     doc = _yaml_load(path.read_text(encoding="utf-8"))
     assert isinstance(doc, dict), doc
     version = next((doc[k] for k in ("version", "schema_version", "schema") if k in doc), None)
-    assert str(version) == "2", f"pins.yaml has no v2 marker: {list(doc)}"
+    assert str(version) == "3", f"pins.yaml has no v3 marker: {list(doc)}"
     assert h.FP_CODE in path.read_text() and h.FP_ENCLAVE in path.read_text()
 
 
@@ -99,7 +99,7 @@ def _version_key(doc):
     pytest.fail(f"pins.yaml has no top-level version key: {list(doc)}")
 
 
-@pytest.mark.parametrize("version", [99, 3, 1, "2.0-evil", None])
+@pytest.mark.parametrize("version", [99, 4, 2, 1, "3", "2.0-evil", None])   # 2: a v3 file edited to v2
 def test_unknown_version_with_otherwise_matching_pin_matches_nothing(cm, tmp_path, version):
     store, path = _pinned_store(cm, tmp_path)
     assert store.match(_res(cm, **A)) is True  # control

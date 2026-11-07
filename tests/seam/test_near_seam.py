@@ -89,12 +89,14 @@ def test_lock_needs_a_human_approved_pin_then_a_turn_is_signed_and_ledgered(plug
     assert pending.components and pending.components[0].startswith("gateway compose sha256:")
     asked = []
     with bind_asker(lambda q, labels: asked.append(q) or "Approve"):
-        assert plugin.slash("pins approve").startswith("Pinned near build")
+        assert plugin.slash("pins approve").startswith("Pinned 2 NEAR entries")   # gateway and model (Amendment 7)
     consent = _sub(plugin, "consent")
     assert "Identity: cloud-api.near.ai#" in asked[0] and consent.PINNED_HEADING in asked[0]
     head, _, tail = asked[0].partition(consent.REPORTED_HEADING)
     assert "(recorded in RTMR3; pinned; the instance id is shown only)" in head
-    assert "image reported by the log" not in head
+    # Amendment 7: each model entry pins the compose-manager image the log reports; the services stay
+    # shown for review only until their socket tags can be shown
+    assert "compose-manager image reported by the log" in head and "services: shown for review only" in head
     assert "  `  prod/test.yaml::proxy-test v0.0.2 commit " + "c2" * 20 in tail and "(the two differ)" in tail
     assert consent.REPORTED_NOT_PINNED in tail and "reported: " not in asked[0]
     out = plugin.slash("on attested")
@@ -147,7 +149,7 @@ def test_changed_measurement_refuses_until_a_human_approves_it(plugin, near):
         with bind_asker(lambda q, labels: "Deny"):
             assert "denied" in plugin.slash("pins approve")
         assert provider.attested_ok("attested-near").in_tier is False
-        assert _approve(plugin).startswith("Pinned near build")
+        assert _approve(plugin).startswith("Pinned 1 NEAR entry")    # only the changed model CVM (Amendment 7)
         assert provider.attested_ok("attested-near").in_tier is True
     finally:
         w.MODEL_COMPOSE = old

@@ -32,6 +32,9 @@ KINDS = frozenset({
     # Amendment 5: one row per send through a vendor that signs responses (NEAR AI Cloud): digests,
     # signature, kind and the check's verdict ("verified" / "unverified").
     "send_signed",
+    # Amendment 7: `pins retire` removed an approved entry; a later consent check no longer counts the
+    # entry's earlier pin_applied row.
+    "pin_retired",
 })
 
 # Keys that carry conversation content in the provider request shapes Hermes sends

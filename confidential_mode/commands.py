@@ -34,7 +34,7 @@ from . import locking as _locking
 from .tiers import Tier
 
 PROFILE_NAME = _locking.PROFILE_NAME
-USAGE = ("Usage: /confidential on <on-host-only|attested>|off|status|check [tier]|pins [approve]|"
+USAGE = ("Usage: /confidential on <on-host-only|attested>|off|status|check [tier]|pins [approve|retire <fp>]|"
          "receipts [session]|allow <tool>|watch")
 RECEIPTS_PLACEHOLDER = ("Receipts are not available in this build yet (confidential_mode.receipts is missing). "
                         "The raw ledger is visible with /confidential watch or `hermes confidential watch`.")
@@ -101,24 +101,36 @@ def _pin_lines(rt: Any) -> list[str]:
         return ["Pins: unavailable (pin store not loaded)"]
     try:
         records, pending = pins.load()
+        every = pins.approved_entries() if callable(getattr(pins, "approved_entries", None)) else list(records.values())
+        batches = pins.pending_all() if callable(getattr(pins, "pending_all", None)) else [p for p in [pending] if p]
     except Exception as exc:  # noqa: BLE001
         return [f"Pins: unreadable ({type(exc).__name__}: {exc}); attested sends are refused until fixed"]
-    if not records:
+    from .verify.near_checks import render_if_needed, render_vendor
+    if not every:
         lines.append("Pinned: none")
-    for rec in records.values():
-        lines.append(f"Pinned: {rec.vendor} {rec.router_repo} code {_short(rec.code_fingerprint)} "
+    for rec in every:
+        role = getattr(rec, "cvm_role", None)
+        role_text = f" {render_if_needed(role)}" if role not in (None, "router") else ""
+        lines.append(f"Pinned: {rec.vendor} {render_if_needed(rec.router_repo)}{role_text} code {_short(rec.code_fingerprint)} "
                      f"enclave {_short(rec.enclave_fingerprint)} release {rec.release_tag or '(untagged)'} "
-                     f"(approved {rec.approved_at} via {rec.approved_via}; previous {_short(rec.previous)})")
-    if pending is None:
+                     f"(approved {rec.approved_at} via {rec.approved_via}"
+                     + (f", reviewed by {render_if_needed(rec.reviewed_by)}" if getattr(rec, "reviewed_by", None) else "")
+                     + f"; previous {_short(rec.previous)})")
+    if not batches:
         lines.append("Pending pin: none")
-    else:
-        lines.append(f"Pending pin: {pending.vendor} code {_short(pending.code_fingerprint)} enclave "
-                     f"{_short(pending.enclave_fingerprint)} release {pending.release_tag or '(untagged)'} "
-                     f"staged {pending.staged_at}; run /confidential pins approve")
-        if pending.components:
-            from .verify.near_checks import render_vendor
+    for pend in batches:
+        ents = list(getattr(pend, "entries", ()) or ())
+        lines.append(f"Pending pin: {pend.vendor} code {_short(pend.code_fingerprint)} enclave "
+                     f"{_short(pend.enclave_fingerprint)} release {pend.release_tag or '(untagged)'} "
+                     f"staged {pend.staged_at}; {len(ents) or 1} {'entry' if len(ents) <= 1 else 'entries'}; "
+                     "run /confidential pins approve (hermes confidential pins review builds a review bundle)")
+        for ent in ents:
+            if getattr(ent, "cvm_role", None) not in (None, "router"):
+                lines.append(f"  entry {render_if_needed(ent.cvm_role)} code {_short(ent.code_fingerprint, 16)} "
+                             f"enclave {_short(ent.enclave_fingerprint, 16)} pins {', '.join(ent.pinned) or '(whole result)'}")
+        if pend.components:
             lines.append("Pending pin components (every line; \"reported\" lines are shown for review, not pinned):")
-            lines.extend(f"  {render_vendor(c)}" for c in pending.components)
+            lines.extend(f"  {render_vendor(c)}" for c in pend.components)
     return lines
 
 
@@ -258,7 +270,7 @@ def pins_text(rt: Any, *, session_key: str = "") -> str:
         last = 0
         while True:
             rows = rt.ledger.tail(last)
-            history.extend(ev for ev in rows if ev.kind in ("pin_staged", "pin_applied", "pin_denied"))
+            history.extend(ev for ev in rows if ev.kind in ("pin_staged", "pin_applied", "pin_denied", "pin_retired"))
             if len(rows) < 1000:
                 break
             last = rows[-1].id
@@ -418,16 +430,25 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
     if cmd == "pins":
         if not rest:
             return pins_text(rt, session_key=skey)
-        if rest == ["approve"]:
+        if rest[0] == "approve":
             from .consent import ConsentContextError, approve_pending_pin
             if rt.pins is None:
                 return "The pin store is not available; see /confidential status."
             try:
+                flags = _approve_flags(rest[1:])
+            except ValueError as exc:
+                return f"Usage: /confidential pins approve [--reviewed-by <name>] [--note <text>] ({exc})"
+            try:
                 return approve_pending_pin(asker, rt.pins, rt.ledger, session_key=skey, session_id=sid,
-                                           platform=surface or "unknown")
+                                           platform=surface or "unknown", **flags)
             except ConsentContextError as exc:
                 return f"Not asked: {exc}"
-        return "Usage: /confidential pins [approve]"
+        if rest[0] == "retire" and len(rest) == 2:
+            return retire_text(rt, rest[1], session_id=sid, surface=surface or "unknown")
+        if rest == ["review"] or rest == ["review", "--json"]:
+            return ("The review bundle fetches the inner compose files from GitHub, so it runs only as a command "
+                    "in a terminal you open yourself: hermes confidential pins review [--json].")
+        return "Usage: /confidential pins [approve|retire <fingerprint>]"
     if cmd == "receipts":
         fmt = "json" if "--json" in rest else "text"
         names = [a for a in rest if a != "--json"]
@@ -461,6 +482,53 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
     return USAGE
 
 
+def _approve_flags(args: list) -> dict:
+    """--reviewed-by <name> and --note <text> (each at most once); anything else is a ValueError."""
+    out: dict = {}
+    it = iter(args)
+    for a in it:
+        name = {"--reviewed-by": "reviewed_by", "--note": "review_note"}.get(a)
+        if name is None or name in out:
+            raise ValueError(f"unexpected {a!r}")
+        try:
+            out[name] = next(it)
+        except StopIteration:
+            raise ValueError(f"{a} needs a value") from None
+    return out
+
+
+def retire_text(rt: Any, fingerprint: str, *, session_id: str = "", surface: str = "unknown") -> str:
+    """`pins retire <fingerprint>`: remove one approved entry, write a pin_retired row, and clear the
+    in-process consent cache so the entry's earlier pin_applied row no longer counts."""
+    from .pins import PinStoreError
+    if rt.pins is None:
+        return "The pin store is not available; see /confidential status."
+    try:
+        e = rt.pins.retire(fingerprint)
+    except PinStoreError as exc:
+        return f"Nothing retired: {exc}"
+    row = {"ts": time.time(), "session_id": session_id or "", "kind": "pin_retired", "purpose": "pin",
+           "provider": e.vendor, "host": "", "model": "", "bytes": None, "tier": None, "verdict": None,
+           "decision": "retire", "surface": surface or None,
+           "detail": {"vendor": e.vendor, "router_repo": e.router_repo, "cvm_role": e.cvm_role,
+                      "code_fingerprint": e.code_fingerprint, "enclave_fingerprint": e.enclave_fingerprint,
+                      "retired_via": surface or "unknown"}}
+    note = ""
+    try:
+        rt.ledger.append(row)
+    except Exception as exc:  # noqa: BLE001
+        note = (f" The pin_retired ledger row could not be written ({type(exc).__name__}); a hand-made copy of "
+                "this entry would still count as consented in another process.")
+    try:
+        _provider_module(rt).clear_consent_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    from .verify.near_checks import render_vendor
+    return (f"Retired {e.vendor} {render_vendor(e.router_repo)} {render_vendor(e.cvm_role)} entry code "
+            f"{_short(e.code_fingerprint, 16)} enclave {_short(e.enclave_fingerprint, 16)}. A verification that "
+            "reports it again asks for approval again." + note)
+
+
 def register_slash(ctx: Any, rt: Any) -> None:
     def confidential(raw_args: str = "", session_id: Optional[str] = None, session_key: Optional[str] = None,
                      platform: Optional[str] = None) -> str:
@@ -473,7 +541,7 @@ def register_slash(ctx: Any, rt: Any) -> None:
 
     ctx.register_command("confidential", confidential,
                          description="Confidential mode: lock, unlock, status, pins, receipts, allow, watch",
-                         args_hint="on <tier>|off|status|check|pins [approve]|receipts|allow <tool>|watch")
+                         args_hint="on <tier>|off|status|check|pins [approve|retire <fp>]|receipts|allow <tool>|watch")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────────────────────
@@ -766,20 +834,28 @@ def _default_pins_path(rt: Any) -> Optional[str]:
     return str(path) if path else None
 
 
-def _expected_for_row(*, flag: Optional[tuple], pin_records: Optional[dict], pins_path: Optional[str],
-                      vendor: str, expected_repo: str, claimed: tuple) -> tuple[Optional[tuple], str]:
-    """(expected fingerprints, source text). Order: --expected-fingerprints, the human-approved pin for
-    (vendor, expected repo), and only then the receipt's own claim (which checks the self-report against
-    itself and is labelled so)."""
+def _expected_for_row(*, flag: Optional[tuple], pin_records: Optional[Any], pins_path: Optional[str],
+                      vendor: str, expected_repo: str, claimed: tuple) -> tuple[Optional[tuple], str, list]:
+    """(expected fingerprints, source text, approved set). Order: --expected-fingerprints, the human-approved
+    pins for (vendor, expected repo), and only then the receipt's own claim (which checks the self-report
+    against itself and is labelled so). ``pin_records`` is a list of approved entries (or the older mapping).
+    When the approved set holds per-CVM entries (NEAR), no single pair is expected: the third value is the
+    set, and the caller checks every CVM of the replayed result against it (Amendment 7)."""
     if flag:
-        return flag, "--expected-fingerprints"
-    rec = (pin_records or {}).get((vendor, expected_repo))
-    if rec is not None:
+        return flag, "--expected-fingerprints", []
+    recs = pin_records.values() if isinstance(pin_records, dict) else (pin_records or [])
+    ents = [r for r in recs if (r.vendor, r.router_repo) == (vendor, expected_repo)]
+    if ents and any(getattr(r, "cvm_role", "router") not in ("router", "result") for r in ents):
+        return None, (f"the approved set in {pins_path} ({len(ents)} entries; every CVM of the row is checked "
+                      "against it)"), ents
+    if ents:
+        rec = ents[-1]
         return ((rec.code_fingerprint, rec.enclave_fingerprint),
-                f"the pin in {pins_path} (approved by {rec.approved_by} at {rec.approved_at} via {rec.approved_via})")
+                f"the pin in {pins_path} (approved by {rec.approved_by} at {rec.approved_at} via {rec.approved_via})",
+                [])
     if all(claimed):
-        return tuple(claimed), "taken from the receipt itself (not independent)"
-    return None, "none available (no flag, no pin for this vendor/repo, no claim in the receipt)"
+        return tuple(claimed), "taken from the receipt itself (not independent)", []
+    return None, "none available (no flag, no pin for this vendor/repo, no claim in the receipt)", []
 
 
 def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None, rt: Any = None) -> int:
@@ -803,7 +879,7 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
             from .pins import PinStore
             if pins_arg and not os.path.exists(pins_arg):
                 raise FileNotFoundError(pins_arg)
-            pin_records = PinStore(pins_path).load()[0]
+            pin_records = PinStore(pins_path).approved_entries()
         except Exception as exc:  # noqa: BLE001
             if pins_arg:
                 out.write(f"Cannot read pins {pins_arg!r}: {type(exc).__name__}: {exc}\n")
@@ -865,8 +941,9 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
             # when given explicitly.
             vendor, row_replay = "near", _near_replay_module().replay
             row_repo = expected_repo if expected_repo != DEFAULT_EXPECTED_REPO else str(ev.get("repo") or "")
-        fps, fps_source = _expected_for_row(flag=flag_fps, pin_records=pin_records, pins_path=pins_path,
-                                            vendor=vendor, expected_repo=row_repo, claimed=claimed)
+        fps, fps_source, approved_set = _expected_for_row(flag=flag_fps, pin_records=pin_records,
+                                                          pins_path=pins_path, vendor=vendor,
+                                                          expected_repo=row_repo, claimed=claimed)
         try:
             result, notes = _call_replay(row_replay, ev, expected_repo=row_repo, expected_fingerprints=fps,
                                          trusted_root=trusted_root, as_of=as_of,
@@ -889,7 +966,14 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         for name in ("expected_repo_id", "expected_owner_id"):
             if name in notes:
                 problems.append(f"this replay version cannot check --{name.replace('_', '-')}")
-        if fps is None:
+        if approved_set:
+            from .pins import set_match, views_from_cvms
+            hit = set_match(approved_set, vendor=vendor, code=getattr(result, "code_fingerprint", None),
+                            enclave=getattr(result, "enclave_fingerprint", None),
+                            views=views_from_cvms(list(getattr(result, "cvms", ()) or ())))
+            if not hit:
+                problems.append(f"a CVM in this row has no approved entry ({fps_source})")
+        elif fps is None:
             problems.append("no expected fingerprints: identity not checked")
         if "trusted_root" in notes:
             problems.append("this replay version cannot take --trusted-root; the evidence's own trust root was used")
@@ -969,8 +1053,24 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
             return 2
         raw, ok_prefix = f"receipts {shlex.quote(args.session)}" + (" --json" if args.json else ""), ""
     elif action == "pins":
-        raw = "pins approve" if getattr(args, "pins_action", None) == "approve" else "pins"
-        ok_prefix = "Pinned" if raw == "pins approve" else ""
+        pa = getattr(args, "pins_action", None)
+        if pa == "review":
+            from . import review
+            return review.cli_review(rt, args, out=out)
+        if pa == "retire":
+            if not getattr(args, "fingerprint", None):
+                out.write("Usage: hermes confidential pins retire <fingerprint>\n")
+                return 2
+            text = retire_text(rt, args.fingerprint, surface="cli")
+            out.write(text.rstrip() + "\n")
+            return 0 if text.startswith("Retired") else 1
+        raw = "pins"
+        if pa == "approve":
+            raw = "pins approve"
+            for flag, attr in (("--reviewed-by", "reviewed_by"), ("--note", "note")):
+                if getattr(args, attr, None):
+                    raw += f" {flag} {shlex.quote(str(getattr(args, attr)))}"
+        ok_prefix = "Pinned" if pa == "approve" else ""
     else:
         raw, ok_prefix = f"allow {shlex.quote(args.tool)}", ""
     text = handle_slash(rt, raw, session_id="", session_key="cli", platform="cli", asker=asker,
@@ -1009,8 +1109,14 @@ def register_cli(ctx: Any, rt: Any) -> None:
         p = sub.add_parser("receipts", help="render a session receipt")
         p.add_argument("session", nargs="?", default=None, help="session id")
         p.add_argument("--json", action="store_true", help="hash-chained JSON form")
-        p = sub.add_parser("pins", help="list pins; 'approve' approves the staged pin on this terminal")
-        p.add_argument("pins_action", nargs="?", choices=["approve"], default=None)
+        p = sub.add_parser("pins", help="list pins; 'approve' approves the staged pin on this terminal; 'review' "
+                                        "builds the review bundle; 'retire <fingerprint>' removes an approved entry")
+        p.add_argument("pins_action", nargs="?", choices=["approve", "review", "retire"], default=None)
+        p.add_argument("fingerprint", nargs="?", default=None, help="for retire: 8 or more hex digits of a fingerprint")
+        p.add_argument("--reviewed-by", default=None, help="for approve: who reviewed the bundle (recorded on the entries)")
+        p.add_argument("--note", default=None, help="for approve: the reviewer's verdict (recorded on the entries)")
+        p.add_argument("--json", action="store_true", help="for review: the bundle as JSON")
+        p.add_argument("--no-fetch", action="store_true", help="for review: use cached inner compose files only")
         p = sub.add_parser("allow", help="allow an off-host tool for this lock (asks on this terminal)")
         p.add_argument("tool")
         p = sub.add_parser("replay", help="replay a receipt's attestation evidence offline")
@@ -1051,7 +1157,7 @@ def register_cli(ctx: Any, rt: Any) -> None:
                 print(status_text(rt))
                 return 0
             print("Usage: hermes confidential setup|check|watch|status|on <tier>|off|receipts <session>|"
-                  "pins [approve]|allow <tool>|replay <receipt.json>")
+                  "pins [approve|review|retire <fp>]|allow <tool>|replay <receipt.json>")
             return 2
         except Exception as exc:  # noqa: BLE001
             print(f"confidential: error ({type(exc).__name__}: {exc})", file=sys.stderr)

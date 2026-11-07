@@ -51,8 +51,8 @@ CLOCK_LABEL = "(host clock)"
 
 # Kinds that describe the profile, not one session: included in every session receipt they overlap.
 PROFILE_KINDS = frozenset({"lock", "unlock", "verify_ok", "verify_fail", "pin_staged", "pin_applied",
-                           "pin_denied", "preflight_fail"})
-VERIFICATION_KINDS = ("verify_ok", "verify_fail", "pin_staged", "pin_applied", "pin_denied")
+                           "pin_denied", "pin_retired", "preflight_fail"})
+VERIFICATION_KINDS = ("verify_ok", "verify_fail", "pin_staged", "pin_applied", "pin_denied", "pin_retired")
 REFUSAL_KINDS = ("send_refused", "tool_refused", "preflight_fail")
 ANSWER_KINDS = ("tool_allowed", "tool_refused")
 
@@ -262,8 +262,11 @@ def _chain(rows: list[dict]) -> str:
 def _pin_records(pins: Any) -> list:
     if pins is None:
         return []
+    every = getattr(pins, "approved_entries", None)
     load = getattr(pins, "load", None)
-    if callable(load):
+    if callable(every):
+        records = every()          # the whole approved set of every identity (Amendment 7)
+    elif callable(load):
         records = load()[0]
     else:
         records = pins
@@ -280,7 +283,7 @@ def _get(obj: Any, name: str, default: Any = None) -> Any:
 
 _PIN_FIELDS = ("vendor", "router_repo", "code_fingerprint", "enclave_fingerprint", "release_tag", "models_seen",
                "approved_by", "approved_at", "approved_via", "approval_rule_key", "previous",
-               "previous_enclave_fingerprint")
+               "previous_enclave_fingerprint", "cvm_role", "reviewed_by")
 
 
 _ON_HOST_RULE = "loopback, RFC1918, 100.64.0.0/10, fe80::/10, fc00::/7, localhost, plus confidential.on_host.extra_hosts"
@@ -875,7 +878,8 @@ def render_text(doc: Mapping) -> str:
         if not tr["pins"]:
             add("  Pins: (none)")
         for p in tr["pins"]:
-            add(f"  Pin {_p(p['vendor'])} {_p(p['router_repo'])} release {_p(p['release_tag']) or '(untagged)'}")
+            role = f" {_p(p['cvm_role'])}" if p.get("cvm_role") not in (None, "router") else ""
+            add(f"  Pin {_p(p['vendor'])} {_p(p['router_repo'])}{role} release {_p(p['release_tag']) or '(untagged)'}")
             add(f"    code {_p(p['code_fingerprint'])}  measurement {_p(p['enclave_fingerprint'])}")
             add(f"    approved by {_p(p['approved_by'])} at {_p(p['approved_at'])} via {_p(p['approved_via'])} "
                 f"(rule {_p(p['approval_rule_key'])}); replaced {_p(p['previous']) or '(nothing)'}")

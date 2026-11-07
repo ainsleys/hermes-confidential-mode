@@ -22,7 +22,8 @@ FROZEN_KINDS = {"send_observed", "send_refused", "verify_ok", "verify_fail", "to
                 "tool_refused", "pin_staged", "pin_applied", "pin_denied", "lock", "unlock", "preflight_fail",
                 "breach", "compaction",
                 "session_start", "session_end",   # Amendment 4 F7
-                "send_signed"}                    # Amendment 5 (NEAR signed responses)
+                "send_signed",                    # Amendment 5 (NEAR signed responses)
+                "pin_retired"}                    # Amendment 7 (pins retire)
 
 
 @pytest.fixture

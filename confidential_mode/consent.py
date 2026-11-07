@@ -198,12 +198,14 @@ def _observations(pending: Any, observers: Optional[list]) -> list[str]:
     return lines or [f"independent observations: none reported ({len(observers)} configured)"]
 
 
-def pin_question(pending: Any, *, observers: Optional[list] = None, now: Optional[float] = None) -> str:
+def pin_question(pending: Any, *, observers: Optional[list] = None, now: Optional[float] = None,
+                 approved: Optional[tuple] = None) -> str:
     """The text a human judges before trusting an enclave build (Miller-frame review, "Pin prompt").
-    Every field falls back to "unknown" so the prompt works with older PendingPin shapes."""
+    Every field falls back to "unknown" so the prompt works with older PendingPin shapes. ``approved`` is
+    PinStore.approved_set() for the pending identity: (entries, unseen flags)."""
     now = time.time() if now is None else now
     if _value(pending, "vendor") == "near":
-        return _near_pin_question(pending, observers=observers)
+        return _near_pin_question(pending, observers=observers, approved=approved)
     url, compare = _release_urls(pending)
     rekor = _value(pending, "rekor_log_index")
     lines = [
@@ -241,8 +243,24 @@ REPORTED_HEADING = ("Reported after launch by each model CVM's compose-manager. 
                     "this instance reported this actions log for this nonce, and the log's hash is bound in a "
                     "hardware quote. The services below are what the operator's own tooling reported, not "
                     "proof of what runs:")
-REPORTED_NOT_PINNED = ("Shown for review only, not pinned: the instance id, the reported services and the "
-                       "compose-manager image reported by the log. A change in those alone does not ask again.")
+REPORTED_NOT_PINNED = ("Shown for review only, not pinned: the instance id, and the reported services unless an "
+                       "entry above says they are pinned. A change in those alone does not ask again. The "
+                       "compose-manager image the log reports is pinned for each model entry, although it is the "
+                       "operator's report and not a measurement.")
+ENTRIES_HEADING = ("Approving adds every entry below to the approved set for this identity. A verification "
+                   "passes when each CVM it reports matches an approved entry, so one approval never covers a "
+                   "different configuration.")
+SERVICES_NOT_PINNED = ("services: shown for review only, not pinned. The socket tags are unavailable: {n} inner "
+                       "compose {files} named in the log {are} not fetched (text not fetched). Run the command "
+                       "hermes confidential pins review to fetch and hash-check them; the prompt then pins the "
+                       "whole service map with its tags.")
+RETIRE_HINT = ("not seen in the last {n} verifications; if the vendor no longer runs it, retire it with "
+               "hermes confidential pins retire {fp}")
+
+
+def _display_if_needed(value: Any) -> str:
+    from .verify.near_checks import render_if_needed
+    return render_if_needed(value)
 
 
 def _display(value: Any) -> str:
@@ -251,20 +269,91 @@ def _display(value: Any) -> str:
     return render_vendor(value)
 
 
-def _near_pin_question(pending: Any, *, observers: Optional[list] = None) -> str:
+_COMPONENT_LABELS = {"app_id": "app_id", "compose": "compose sha256:", "os_image": "OS image", "kms_id": "KMS key sha256:",
+                     "services": "service map sha256:", "cm_image_running": "compose-manager image reported by the log"}
+
+
+def _component_text(name: str, value: Any) -> str:
+    label = _COMPONENT_LABELS.get(name, name)
+    return f"{label}{'' if label.endswith(':') else ' '}{_text(value)}"
+
+
+def _entry_lines(n: int, ent: Any) -> list[str]:
+    role = str(_field(ent, "cvm_role", "") or "")
+    lines = [f"  {n}. {_display(role.replace('model:', 'model ', 1))}: code {_text(_field(ent, 'code_fingerprint'))} "
+             f"enclave {_text(_field(ent, 'enclave_fingerprint'))}"]
+    comps = _field(ent, "components", None)
+    pinned = list(_field(ent, "pinned", ()) or ())
+    if not isinstance(comps, dict):
+        lines.append("     pinned: the whole result's fingerprints (no per-CVM components in this evidence)")
+        return lines
+    lines.append("     pinned: " + "; ".join(_display(_component_text(k, comps.get(k))) for k in sorted(pinned)))
+    obs = _field(ent, "observed", None) or {}
+    if role != "gateway":
+        from .review import tag_summary
+        tags = obs.get("tags")
+        if "services" in pinned and isinstance(tags, dict):
+            lines.append(f"     services: pinned, the whole map of {len(tags)} services, with the socket tags of every "
+                         "service from the hash-checked inner compose files:")
+            lines.extend(f"       {_display(t)}" for t in (tag_summary(tags) or ["no service carries a tag"]))
+        else:
+            missing = obs.get("tags_missing") or []
+            k = len(missing) or 1
+            lines.append("     " + SERVICES_NOT_PINNED.format(n=k, files="file" if k == 1 else "files",
+                                                             are="is" if k == 1 else "are"))
+    ids = list(_field(ent, "instance_ids_seen", ()) or ())
+    if ids:
+        lines.append("     instances seen (shown only): " + ", ".join(_display(i) for i in ids))
+    return lines
+
+
+def _approved_lines(approved: Optional[tuple]) -> list[str]:
+    if approved is None:
+        return ["Approved set: not available from this pin store"]
+    entries, unseen = approved
+    if not entries:
+        return ["Approved set: none (TRUST ON FIRST USE for this identity)"]
+    from .pins import UNSEEN_VERIFICATIONS
+    lines = [f"Approved set ({len(entries)} {'entry' if len(entries) == 1 else 'entries'}; all stay approved):"]
+    for ent, old in zip(entries, unseen):
+        code = str(_field(ent, "code_fingerprint", "") or "")
+        line = (f"  {_display(str(_field(ent, 'cvm_role', '') or ''))} code {_short(code)} enclave "
+                f"{_short(_field(ent, 'enclave_fingerprint'))}, approved {_text(_field(ent, 'approved_at'))} via "
+                f"{_text(_field(ent, 'approved_via'))}")
+        if _field(ent, "reviewed_by", None):
+            line += f", reviewed by {_display(_field(ent, 'reviewed_by'))}"
+        if old:
+            line += "; " + RETIRE_HINT.format(n=UNSEEN_VERIFICATIONS, fp=code[:16])
+        lines.append(line)
+    return lines
+
+
+def _near_pin_question(pending: Any, *, observers: Optional[list] = None, approved: Optional[tuple] = None) -> str:
     """NEAR has no release tag or Sigstore bundle: the prompt shows the identity (host and model allowlist),
-    what the pin covers, and, separately, what the compose-manager logs reported (Amendments 5, 5.2)."""
+    every entry to approve with what it pins, the whole approved set, and, separately, what the
+    compose-manager logs reported (Amendments 5, 5.2, 7)."""
     comps = [str(c) for c in (_value(pending, "components") or ())]
     pinned = [c for c in comps if not c.startswith((REPORTED_PREFIX, REPORTED_OTHER_PREFIX))]
     reported = [c for c in comps if c.startswith((REPORTED_PREFIX, REPORTED_OTHER_PREFIX))]
     if len(reported) > MAX_REPORTED_LINES:
         reported = [c for c in reported if not c.startswith(REPORTED_OTHER_PREFIX)]
     reported = [c.split(": ", 1)[1] for c in reported]
+    entries = list(_value(pending, "entries") or ())
     lines = [
         "Approve confidential pin update?",
-        _change_line(pending),
+        _change_line(pending) if approved is None else
+        ("TRUST ON FIRST USE: no approved entry for this identity yet" if not approved[0] else
+         f"NEW CVM CONFIGURATION: {len(entries) or 1} not covered by the approved set"),
         "Vendor: near (NEAR AI Cloud)",
-        f"Identity: {_text(_value(pending, 'router_repo'))} (gateway host # attested model allowlist)",
+        f"Identity: {_display_if_needed(_text(_value(pending, 'router_repo')))} (gateway host # attested model "
+        "allowlist)",
+    ]
+    if entries:
+        lines += [ENTRIES_HEADING, f"Entries to approve ({len(entries)}):"]
+        for n, ent in enumerate(entries, 1):
+            lines += _entry_lines(n, ent)
+    lines += _approved_lines(approved)
+    lines += [
         PINNED_HEADING,
         *([f"  {_display(c)}" for c in pinned] or ["  unknown"]),
         *([REPORTED_HEADING, *[f"  {_display(c)}" for c in reported]] if reported else []),
@@ -272,11 +361,11 @@ def _near_pin_question(pending: Any, *, observers: Optional[list] = None) -> str
         "NEAR runs instances of one model with different measured configurations under one signing key, so a "
         "new instance can show up here as a change.",
         f"Platform: {_text(_value(pending, 'platform'))}",
-        f"Code fingerprint old: {_text(_value(pending, 'previous'))}",
-        f"Code fingerprint new: {_text(_value(pending, 'code_fingerprint'))}",
-        f"Enclave fingerprint old: {_text(_value(pending, 'previous_enclave_fingerprint'))}",
-        f"Enclave fingerprint new: {_text(_value(pending, 'enclave_fingerprint'))}",
+        f"Whole-result code fingerprint: {_text(_value(pending, 'code_fingerprint'))}",
+        f"Whole-result enclave fingerprint: {_text(_value(pending, 'enclave_fingerprint'))}",
         *_observations(pending, observers),
+        "A reviewer can be given the bundle from the command hermes confidential pins review (run it yourself, "
+        "outside Hermes).",
         "Approving means trusting the pinned values above until they change again.",
     ]
     return "\n".join(lines)
@@ -291,10 +380,30 @@ def _event(kind: str, *, session_id: str, platform: str, decision: str, detail: 
     }
 
 
+def _same_batch(a: Any, b: Any) -> bool:
+    """Equal by consent key (fingerprints, release, host; Amendment 7), so a display refresh between the
+    prompt and the answer keeps the answer valid. Objects without a consent key compare by equality."""
+    from .pins import consent_key
+    return consent_key(a) == consent_key(b)
+
+
+def _approved_set(store: Any, pending: Any) -> Optional[tuple]:
+    get = getattr(store, "approved_set", None)
+    if not callable(get):
+        return None
+    try:
+        return get(_field(pending, "vendor", ""), _field(pending, "router_repo", ""))
+    except Exception:
+        return None
+
+
 def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, session_id: str,
-                        platform: str, observers: Optional[list] = None) -> str:
+                        platform: str, observers: Optional[list] = None, reviewed_by: Optional[str] = None,
+                        review_note: Optional[str] = None) -> str:
     """Ask the human to approve the staged pin; apply it only on an explicit Approve and only if the
-    pending pin is still the one the human saw. Returns the user-facing reply."""
+    pending pin is still the one the human saw (by consent key). Writes one ``pin_applied`` row per
+    approved entry. ``reviewed_by`` and ``review_note`` (the CLI's --reviewed-by and --note) are recorded
+    on the entries; the chat path passes neither. Returns the user-facing reply."""
     _refuse_on_event_loop("approve_pending_pin")
     pending = store.pending()
     if pending is None:
@@ -304,7 +413,8 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
             "code_fingerprint": str(_field(pending, "code_fingerprint", "") or ""),
             "enclave_fingerprint": str(_field(pending, "enclave_fingerprint", "") or "")}
 
-    raw, error = _ask(ctx, pin_question(pending, observers=observers), PIN_CHOICES)
+    raw, error = _ask(ctx, pin_question(pending, observers=observers, approved=_approved_set(store, pending)),
+                      PIN_CHOICES)
     detail = {**base, "raw_pick": _pick_repr(raw)}
     if error:
         detail["error"] = error
@@ -326,37 +436,64 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
             current = store.pending()
         except Exception as exc:
             current, detail["recheck_error"] = None, f"{type(exc).__name__}: {exc}"[:200]
-        if current is None or current != pending:
+        if current is None or not _same_batch(current, pending):
             detail["reason"] = "pending pin changed while waiting for the answer"
             _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
                                  decision="stale", detail=detail))
             return ("The pending pin changed while you were deciding, so nothing was applied. "
                     "Run /confidential pins approve again to review the new one.")
         try:
-            record = _apply(store, pending, platform or "unknown")
+            record = _apply(store, pending, platform or "unknown", reviewed_by=reviewed_by, review_note=review_note)
         except Exception as exc:
             detail["error"] = type(exc).__name__
             _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
                                  decision="apply_failed", detail=detail))
             return f"The pin could not be applied ({type(exc).__name__}); the current pin is unchanged."
     detail["approved_at"] = str(_field(record, "approved_at", "") or "")
-    _ledger(ledger, _event("pin_applied", session_id=session_id, platform=platform, provider=vendor,
-                         decision="approve", detail=detail))
+    detail["approved_via"] = platform or "unknown"
+    detail["reviewed_by"] = reviewed_by
+    entries = tuple(_field(pending, "entries", ()) or ())
+    if not entries:
+        _ledger(ledger, _event("pin_applied", session_id=session_id, platform=platform, provider=vendor,
+                             decision="approve", detail=detail))
+    for n, ent in enumerate(entries):     # one consent row per entry, keyed on the entry's own fingerprints
+        _ledger(ledger, _event("pin_applied", session_id=session_id, platform=platform, provider=vendor,
+                             decision="approve",
+                             detail={**detail, "batch_code_fingerprint": base["code_fingerprint"],
+                                     "batch_enclave_fingerprint": base["enclave_fingerprint"],
+                                     "cvm_role": _field(ent, "cvm_role", None),
+                                     "pinned": list(_field(ent, "pinned", ()) or ()),
+                                     "entry": f"{n + 1}/{len(entries)}",
+                                     "code_fingerprint": str(_field(ent, "code_fingerprint", "") or ""),
+                                     "enclave_fingerprint": str(_field(ent, "enclave_fingerprint", "") or "")}))
+    if vendor == "near" and entries:
+        return (f"Pinned {len(entries)} NEAR {'entry' if len(entries) == 1 else 'entries'} for "
+                f"{_field(pending, 'router_repo', '')} (added to the approved set; "
+                + ", ".join(f"{_field(x, 'cvm_role', '')} code {_short(_field(x, 'code_fingerprint', ''))}"
+                            for x in entries) + ").")
     return (f"Pinned {vendor or 'enclave'} build "
             f"{_field(record, 'release_tag', None) or _field(pending, 'release_tag', None) or ''}".rstrip()
             + f" (code {_short(base['code_fingerprint'])}, enclave {_short(base['enclave_fingerprint'])}).")
 
 
-def _apply(store: Any, pending: Any, surface: str) -> Any:
-    """store.apply(pending, approved_via=surface) when the store takes it, else store.apply(pending).
-    Decided by signature, not by catching TypeError, so an error inside apply is never retried."""
+def _apply(store: Any, pending: Any, surface: str, *, reviewed_by: Optional[str] = None,
+           review_note: Optional[str] = None) -> Any:
+    """store.apply(pending, approved_via=surface[, reviewed_by, review_note]) with the keywords the store
+    takes, else store.apply(pending). Decided by signature, not by catching TypeError, so an error inside
+    apply is never retried."""
     import inspect
     try:
         params = inspect.signature(store.apply).parameters
-        takes = "approved_via" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+        var_kw = any(p.kind is p.VAR_KEYWORD for p in params.values())
     except (TypeError, ValueError):
-        takes = False
-    return store.apply(pending, approved_via=surface) if takes else store.apply(pending)
+        params, var_kw = {}, False
+    kw: dict = {}
+    if "approved_via" in params or var_kw:
+        kw["approved_via"] = surface
+    for name, value in (("reviewed_by", reviewed_by), ("review_note", review_note)):
+        if value is not None and (name in params or var_kw):
+            kw[name] = value
+    return store.apply(pending, **kw)
 
 
 def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key: str = "",

@@ -1,4 +1,4 @@
-"""PinStore over pins.yaml v2: match / stage / pending / apply / previous / atomic write."""
+"""PinStore over pins.yaml v3 (Tinfoil, one entry per result): match / stage / pending / apply / previous / atomic write."""
 from __future__ import annotations
 
 import os
@@ -93,13 +93,14 @@ def test_apply_refuses_a_pending_that_was_swapped(tmp_path):
         _approve(store, replace(store.pending(), code_fingerprint="forged"))
 
 
-def test_file_is_v2_yaml_and_mode_0600(tmp_path):
+def test_file_is_v3_yaml_and_mode_0600(tmp_path):
     path = tmp_path / "pins.yaml"
     store = PinStore(path)
     _approve(store, store.stage(_result()))
     data = pins_mod.yaml.safe_load(path.read_text())
-    assert data["version"] == 2 and data["pending"] is None
-    (pin,) = data["pins"]
+    (idn,) = data["identities"]
+    assert data["version"] == 3 and idn["pending"] == [] and idn["pending_batch"] is None
+    (pin,) = idn["approved"]
     assert set(pin) >= {"vendor", "router_repo", "code_fingerprint", "enclave_fingerprint", "release_tag",
                         "models_seen", "approved_by", "approved_at", "approved_via", "approval_rule_key",
                         "previous"}
@@ -143,7 +144,7 @@ def test_save_is_atomic_temp_then_replace(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         store.stage(_result(code="c3"))
     assert path.read_text() == after_stage
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["pins.yaml"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["pins.yaml", "pins.yaml.lock"]   # lock file: flock only
 
 
 def test_note_model_labels_without_affecting_match(tmp_path):
