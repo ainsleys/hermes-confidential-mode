@@ -10,13 +10,16 @@ dependencies = [
     # because the NEAR adapter reads httpx internals (httpx._decoders, Response._content).
     "httpx>=0.28,<0.29",
     # Imported directly by the plugin (review finding 26). tinfoil 0.14.2 already requires each of these;
-    # they are declared so a resolver sees them. sigstore is bounded because _sdkpatch.py and
-    # verify/tinfoil.py wrap sigstore._internal.tuf, which is private and changes between minor versions.
-    "cryptography>=42",
-    "openai>=1.63",
-    "requests>=2.31",
-    "urllib3>=2.8",
-    "pyopenssl>=25",
+    # they are declared so a resolver sees them. Each has an upper bound (catalog rule 10): the next major
+    # above what Hermes 84a0301's uv.lock resolves (cryptography 50.0.2, openai 2.54.0, requests 2.34.2,
+    # urllib3 2.8.0), and for pyopenssl, which Hermes does not lock, the next major above the 26.4.0 tested.
+    # sigstore is bounded because _sdkpatch.py and verify/tinfoil.py wrap sigstore._internal.tuf, which is
+    # private and changes between minor versions.
+    "cryptography>=42,<51",
+    "openai>=1.63,<3",
+    "requests>=2.31,<3",
+    "urllib3>=2.8,<3",
+    "pyopenssl>=25,<27",
     "sigstore>=4.5,<4.6",
     # NEAR request encryption (verify/near_e2ee.py): Ed25519 to X25519 and XChaCha20-Poly1305 (libsodium).
     # Hermes' uv.lock already pins pynacl >=1.6,<1.7 as an override; installed by hand (docs/RUNNING_TESTS.md).
