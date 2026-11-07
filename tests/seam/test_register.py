@@ -240,6 +240,35 @@ def test_locked_off_tier_provider_is_refused_with_zero_provider_calls(plugin, mo
     assert len(rec.provider_calls) == 1
 
 
+def test_unreadable_live_runtime_blocks_the_turn_and_the_lock(plugin, monkeypatch):
+    """Review finding 8: when Hermes no longer exposes the live-runtime accessor, the per-turn check blocks
+    (it used to return no block) and the lock is refused. "Bound to no runtime" stays a pass."""
+    import sys
+    import types
+    locking = importlib.import_module(plugin.mod.__name__ + ".confidential_mode.locking")
+    moved = types.ModuleType("agent.auxiliary_client")          # an upgrade renamed _RUNTIME_MAIN_CONTEXT
+    with monkeypatch.context() as m:
+        m.setitem(sys.modules, "agent.auxiliary_client", moved)
+        with pytest.raises(locking.LiveRuntimeUnreadable):
+            locking.live_main_runtime()
+        out = plugin.slash("on on-host-only")
+    assert out.startswith("Not locked: this Hermes version does not expose the live model runtime"), out
+    assert ("preflight_fail", "refused") in plugin.kinds()
+    assert locking.live_main_runtime() is None                   # unbound outside a turn: not an error
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    rec = Rec()
+    agent = build_agent(monkeypatch, rec, ON_HOST_URL)
+
+    def unreadable():
+        raise locking.LiveRuntimeUnreadable("cannot import the live runtime accessor (ImportError)")
+    monkeypatch.setattr(locking, "live_main_runtime", unreadable)
+    result = agent.run_conversation("the merger terms are")
+    assert "does not expose the live model runtime" in (result["final_response"] or "")
+    assert rec.provider_calls == [] and rec.streaming_calls == []
+    assert ("send_refused", "refused") in plugin.kinds()
+    assert "UNREADABLE" in plugin.slash("status")
+
+
 def test_config_edit_after_lock_blocks_the_next_turn(plugin, monkeypatch):
     assert plugin.slash("on on-host-only").startswith("Locked")
     rec = Rec()

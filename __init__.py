@@ -345,7 +345,16 @@ def _live_runtime_check(rt: Runtime, locking: Any, tier: Any, session_id: str) -
     """Amendment 4 F1(a): the live main runtime (what "auto" aux tasks and the main call use) must be in-tier.
     It is published at agent/turn_context.py:1140, before this hook (:1236); turn-start compaction (:1245),
     memory prefetch (:1264) and titling (:1271) all run after it and are skipped when it blocks."""
-    runtime = locking.live_main_runtime()
+    try:
+        runtime = locking.live_main_runtime()
+    except Exception as exc:  # noqa: BLE001 - review finding 8: cannot read the runtime => block and record
+        rt.last_live = {"provider": "", "model": "", "host": "", "in_tier": False,
+                        "reason": f"live runtime unreadable ({type(exc).__name__})"}
+        rt.append({"kind": "send_refused", "session_id": session_id, "purpose": "main", "tier": tier.value,
+                   "verdict": "error", "decision": "refused",
+                   "detail": {"reason_code": "live_runtime_unreadable", "error_type": type(exc).__name__}})
+        return getattr(locking, "LIVE_RUNTIME_UNREADABLE_TEXT", None) or (
+            "Confidential mode: the live model runtime cannot be read, so this turn was not sent.")
     if not runtime:
         return None
     v = locking.classify_live_runtime(tier, runtime, config=rt.load_config())

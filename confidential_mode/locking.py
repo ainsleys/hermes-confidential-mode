@@ -230,16 +230,34 @@ def lock_message(tier: Tier, config: Mapping, *, verification: Any = None,
 
 # ── live main runtime (Amendment 4 F1) ───────────────────────────────────────────────────────────
 
+class LiveRuntimeUnreadable(RuntimeError):
+    """Hermes' live-runtime accessor cannot be read (moved or renamed by an upgrade). Callers fail closed."""
+
+
+LIVE_RUNTIME_UNREADABLE_TEXT = (
+    "Confidential mode: this Hermes version does not expose the live model runtime where the plugin reads it "
+    "(agent.auxiliary_client._RUNTIME_MAIN_CONTEXT), so the plugin cannot check which model this turn would use. "
+    "This turn was not sent. Update the plugin, or run /confidential off.")
+
+
 def live_main_runtime() -> Optional[dict]:
     """The live main runtime Hermes published for this context (agent/turn_context.py
     _publish_runtime_main -> agent.auxiliary_client.set_runtime_main, a ContextVar; hook workers run on a
     copied context, so pre_llm_call sees the turn's value). "auto" auxiliary tasks resolve to THIS, not to
-    config. None when unbound (slash commands outside a turn, other threads)."""
+    config. None when unbound (slash commands outside a turn, other threads).
+
+    Raises LiveRuntimeUnreadable when the accessor itself cannot be read (review finding 8): "bound to no
+    runtime" is None, "cannot read the runtime" is an error, and every caller fails closed on the error."""
     try:
         from agent.auxiliary_client import _RUNTIME_MAIN_CONTEXT
+    except Exception as exc:  # noqa: BLE001
+        raise LiveRuntimeUnreadable(f"cannot import the live runtime accessor ({type(exc).__name__})") from exc
+    try:
         runtime = _RUNTIME_MAIN_CONTEXT.get()
-    except Exception:  # noqa: BLE001
-        return None
+    except LookupError:
+        return None                       # a ContextVar without a default, unbound in this context
+    except Exception as exc:  # noqa: BLE001
+        raise LiveRuntimeUnreadable(f"cannot read the live runtime ({type(exc).__name__})") from exc
     if not isinstance(runtime, dict) or not (runtime.get("provider") or runtime.get("base_url")):
         return None
     return {k: runtime.get(k) or "" for k in ("provider", "model", "base_url", "api_mode", "requested_provider")}
@@ -308,7 +326,15 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
         return LockResult(False, "Not locked: the preflight found routes that would leave the tier.\n"
                           + _pf.format_report(report), tier=tier, report=report, fingerprint=report.fingerprint)
 
-    runtime = (live_runtime or live_main_runtime)()
+    try:
+        runtime = (live_runtime or live_main_runtime)()
+    except Exception as exc:  # noqa: BLE001 - cannot read the live runtime: refuse to lock (fail closed)
+        _append(ledger, LedgerEvent(kind="preflight_fail", purpose="lock:live_runtime", verdict="error",
+                                    decision="refused", detail={"reason": f"live runtime unreadable: {exc}"[:200]},
+                                    **base))
+        return LockResult(False, "Not locked: this Hermes version does not expose the live model runtime where "
+                          "the plugin reads it (agent.auxiliary_client._RUNTIME_MAIN_CONTEXT), so the plugin "
+                          "could not check it on each turn. Update the plugin.", tier=tier, report=report)
     if runtime:
         lv = classify_live_runtime(tier, runtime, config=config, provider_lookup=provider_lookup,
                                    profile_base_url=profile_base_url)

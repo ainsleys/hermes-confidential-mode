@@ -231,7 +231,10 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
 
 def _live_runtime_line(rt: Any) -> str:
     """The live main runtime (Amendment 4 F1): what the last locked turn ran on, or this context's binding."""
-    live = _locking.live_main_runtime()
+    try:
+        live = _locking.live_main_runtime()
+    except Exception as exc:  # noqa: BLE001
+        return f"Live runtime: UNREADABLE ({exc}); locked turns are refused until the plugin is updated"
     if live:
         from .tiers import host_of
         return (f"Live runtime (this context): {live.get('provider') or '?'} / {live.get('model') or '?'}"
