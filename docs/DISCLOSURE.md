@@ -1,8 +1,9 @@
 <!-- PLUGIN_NAME: confidential-mode  (working name; swap it here and in the title below) -->
 # confidential-mode: disclosure
 
-This file describes what the plugin does on your machine and on the network. It is written for rule
-13 of the Hermes plugin catalog, and for anyone deciding whether to install the plugin.
+This file describes what the plugin does on your machine and on the network. It is written for anyone
+deciding whether to install the plugin. It also meets rule 13 of the Hermes plugin catalog. That
+rule asks every listed plugin to disclose its network traffic, files, credentials and processes.
 
 Everything here describes the code at the pinned versions: Hermes commit 84a0301 and tinfoil SDK
 0.14.2. The catalog entry's `description` is a summary of this file. [LIMITATIONS.md](LIMITATIONS.md)
@@ -227,7 +228,7 @@ plugin-host child process. Hermes would not see them. The preflight refuses to l
 
 ### Core modules imported
 
-Catalog rule 9 asks plugins to list the Hermes core modules they import. Every import below is lazy,
+Rule 9 of the Hermes plugin catalog asks plugins to list the Hermes core modules they import. Every import below is lazy,
 which means it happens inside a function, not when the plugin loads.
 
 | Module | Names | Why |

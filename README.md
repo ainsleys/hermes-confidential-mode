@@ -36,7 +36,9 @@ The plugin does four things for a Hermes profile.
    speech, MCP servers, fallbacks and the terminal backend. If any route leads off-tier, the lock
    is refused and the plugin prints which key to change.
 
-3. **While locked, it guards or refuses four of the five remaining routes.** Side calls must
+3. **While locked, it guards or refuses four of the five other routes.** The five other routes are
+   side calls, fallbacks, tools, shell and code execution, and memory. Shell and code execution
+   stay open, as the next section explains. Side calls must
    resolve to the same tier as the main chat and are rechecked every turn. No fallback provider may
    be configured, and a failed request ends the turn instead of being rerouted. Off-host tools ask
    you before each call; an answer of `session` or `always` stops the asking, and an `always` answer
@@ -262,9 +264,11 @@ access blocked. It shows whether the stored bytes still check out.
 >   the router. The attestation covers the router only.
 > - **Connection metadata.** Tinfoil's network and hosting see the size of each request and
 >   response, their timing, and your IP address. EHBP encrypts the request body. It does not hide
->   any of these. The TLS connection itself ends inside the attested router (the plugin checks the
->   presented certificate against the key in the attestation report), so your API key header is
->   decrypted by the measured router code rather than by a separate front proxy.
+>   any of these. The TLS connection itself ends inside the attested router, so your API key header
+>   is decrypted by the measured router code rather than by a separate front proxy. The tinfoil SDK
+>   enforces this: its transport pins the TLS key from the attestation report on every connection.
+>   The plugin's own TLS probe only corroborates it. The probe records the certificate it saw and
+>   never fails a verification.
 > - **The vendor's collateral proxies.** These are `github-proxy.tinfoil.sh`, `kds-proxy.tinfoil.sh`
 >   and `tdx-proxy.tinfoil.sh`. The SDK fetches verification material through them. They therefore
 >   see that you verify, and when.
@@ -481,8 +485,10 @@ block. It never writes your config. Set `NEAR_AI_API_KEY` for inference. The scr
 
 ## Look before you lock
 
-Two commands let you see where your conversation goes without changing anything. Both work on an
-install that has never been locked.
+Two commands let you see where your conversation goes without locking anything. Both work on an
+install that has never been locked. `check --tier attested` is the one that changes something: it
+verifies the enclave over the network, writes `verify_ok` and `pin_staged` rows to the ledger, and may
+stage a pending pin in `pins.yaml`. It never applies a pin and never changes your config.
 
 ### `hermes confidential check`
 
@@ -586,7 +592,10 @@ unlock and lock again.
 **The live model runtime is checked on every turn.** Hermes can switch the model for one session
 without changing your config. `/model` does this, and so does the `--provider` flag. The plugin
 checks the live runtime at the start of every locked turn. If the live runtime is off-tier, the plugin
-ends the turn.
+ends the turn. The check runs in the `pre_llm_call` hook. Hermes skips that hook for an agent with
+persistence disabled, such as its background review agent. For such an agent the middleware still
+checks each main call's destination and the config fingerprint, but nothing checks the live runtime,
+so an auxiliary call it makes is only recorded.
 
 On gateway surfaces, the plugin refuses `/model` and `/moa` outright while locked.
 
@@ -1152,8 +1161,9 @@ plugin's code.
 
 **Why it exists.** By default, Hermes plugins share one Python interpreter. Hermes offers an
 alternative, `plugins.isolation: host`. Under host isolation, this plugin's provider and middleware
-register in a separate child process. They become invisible to Hermes, and Hermes gives no warning
-(C0 spike 2).
+register in a separate child process. They become invisible to Hermes, and Hermes gives no warning.
+The project's compatibility tests found this before any plugin code was written
+([docs/C0-spikes.md](docs/C0-spikes.md), spike 2).
 
 **What the plugin does today.** It refuses to lock unless isolation is `in_process` and its provider
 is visible to Hermes. It records each tool's handler at lock time.

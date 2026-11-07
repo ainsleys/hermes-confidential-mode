@@ -225,7 +225,8 @@ A policy plugin cannot require a particular order of middleware between plugins.
 **Why it exists.** Hermes loads plugins into its own process by default. It offers an alternative,
 `plugins.isolation: host`, which runs plugins in a separate child process. Under host isolation,
 however, this plugin's provider and middleware register in that child process. They are then invisible
-to Hermes, and Hermes gives no warning (C0 spike 2).
+to Hermes, and Hermes gives no warning. The project's compatibility tests found this before any
+plugin code was written ([C0-spikes.md](C0-spikes.md), spike 2).
 
 **What the plugin does today.** It refuses to lock unless isolation is `in_process` and the attested
 provider is visible in the process. At lock time it records each tool's handler, and it blocks any
@@ -458,12 +459,14 @@ change is listed, not built.
 Each item below is a smaller gap. Each one is stated in full.
 
 - **Persistence-disabled agents skip `pre_llm_call`.** Hermes skips `pre_llm_call` for agents with
-  persistence disabled (`agent/turn_context.py:858`). The plugin's middleware checks the config
-  fingerprint again as a second line of defence.
+  persistence disabled (`agent/turn_context.py:858`), such as the background review agent. The
+  plugin's middleware still checks each main call's destination and the config fingerprint. The
+  live-runtime check runs only in `pre_llm_call`, so it does not run for these agents. An auxiliary
+  call such an agent makes on a drifted runtime is recorded, not refused.
 
 - **A timing window around yolo.** If yolo mode is switched on or off between the hook's thread and the
-  agent's thread, there is a short window in which the two disagree. This window is accepted in
-  Amendment 2.
+  agent's thread, there is a short window in which the two disagree. The project accepted this window
+  when it fixed the interfaces (docs/INTERFACES.md, Amendment 2).
 
 - **The lock is profile-wide.** Concurrent gateway sessions on one profile share the same lock.
 
@@ -484,11 +487,18 @@ Each item below is a smaller gap. Each one is stated in full.
   `plugin_rule:confidential-mode:tool:<name>`. They survive an unlock. `/confidential pins` lists them.
   This build has no revoke command. To revoke a grant, remove its entry from `command_allowlist`.
 
-- **`/confidential allow` additions last for one lock only.** The plugin enforces this in four places.
-  It stores additions with the lock's identity in `allowlist.yaml`. A new lock starts with none
-  (`confidential_mode/gate_tools.py:452-454`). Each lock saves its additions tagged with its own
-  identity (`confidential_mode/locking.py:323-324`). `/confidential off` deletes the file
-  (`confidential_mode/commands.py:347-348`).
+- **`/confidential allow` additions last for one lock only.** The plugin stores additions in
+  `allowlist.yaml`, tagged with the lock's identity. A new lock starts with none. A file tagged with
+  another lock's identity adds nothing. `/confidential off` deletes the file. The file has mode 0600.
+  Anyone who can edit it can add a tool for the current lock without a prompt or a ledger row; that
+  is inside the stated trust boundary (section 6).
+
+- **The ledger grows without limit.** The plugin never deletes ledger rows. On the attested tier a
+  `verify_ok` row with its evidence (about 15 KB for Tinfoil, about 100 KB for NEAR) is written every
+  `confidential.verify_ttl_seconds` while sends continue. That is a few megabytes to tens of megabytes
+  a day. A receipt reads only its session's locked period, so rendering stays fast. To start a new
+  ledger, unlock, render the receipts you want to keep, stop Hermes, and move `ledger.sqlite` aside.
+  Hermes creates a new file at the next start.
 
 - **Pins need a consent record.** The attested check refuses a pin that has no matching `pin_applied`
   row in the ledger, with the message "pin has no consent record". Code in the same process can still
