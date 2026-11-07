@@ -736,8 +736,8 @@ T and H are the enclave's long-lived keys. They are not a per-session key.
 
 Each verification row says which checks its evidence replays under. The first is the vendor SDK, at
 a stated version. The second is the plugin's own restated policy check, identified by the SHA-256 of
-the file `confidential_mode/verify/policy_check.py`. This build does not ship that file, so the second
-check reads n/a.
+the file `confidential_mode/verify/policy_check.py`. That file ships with the plugin and imports
+nothing from the vendor SDK. A row captured before the file existed reads n/a for the second check.
 
 Sends were gated by the vendor SDK only. The restated check never decided whether a request was sent.
 
@@ -805,8 +805,10 @@ By default, the replay checks certificates as of the capture time recorded in th
 is also asserted by the capturer. Pass `--as-of <ISO time>` to choose the time yourself.
 
 The command also accepts `--expected-repo-id` and `--expected-owner-id`. These are the numeric GitHub
-repository and owner IDs in the Sigstore signing certificate. The replay in this build cannot check
-them yet. A row replayed with either flag therefore fails, with a note that says so.
+repository and owner IDs in the Sigstore signing certificate. A repository name can be renamed or
+re-created by a different owner; the numeric IDs cannot. When you pass them, the `repo_identity` check
+reports `name+id`. When you pass only the name, it reports `name`. The IDs for Tinfoil's router
+repository at the time of writing are 1077094187 (repository) and 168487856 (owner).
 
 #### From Python
 
@@ -845,6 +847,8 @@ string beginning with `fail:`, `n/a:` or `not_run:`. The result's `ok` is true o
 is `True` or `n/a`.
 
 - `repo_match` checks that the evidence names the expected repository.
+- `repo_identity` says how strongly that repository was identified: `name+id` when you supplied the
+  numeric GitHub repository and owner IDs and both matched the signing certificate, `name` otherwise.
 - `trust_root_source` is informational. It says whether you supplied the trust root or it was taken
   from the evidence.
 - `hardware_signature` checks that the report is signed by the CPU vendor's key.
@@ -861,8 +865,14 @@ is `True` or `n/a`.
 - `hardware_platform_match` checks, for TDX, that the hardware measurements match a signed entry in
   `tinfoilsh/hardware-measurements`. For SEV-SNP this check is n/a.
 - `report_data_keys` checks that the keys in the report equal the keys the client used.
-- `tls_cert_binding` checks that a captured TLS certificate binds the HPKE key and the report. The
-  plugin does not capture the TLS certificate on the EHBP connection, so this check is always n/a.
+- `tls_cert_binding` checks that the TLS certificate captured on the EHBP connection carries the
+  TLS public key the report commits to, and that its subject alternative names bind the HPKE key and
+  the attestation hash. A pass means the TLS connection ended inside the attested router. A row
+  captured before the plugin recorded certificates reads n/a.
+- `policy_check` re-runs the plugin's own restated Sigstore policy check, the standalone file named
+  above, over the captured bundle. It is independent of the vendor SDK.
+- `sev_check` re-verifies an AMD SEV-SNP report with the plugin's own standalone checker: the
+  signature, the certificate chain to AMD's root, and the report fields. For TDX this check is n/a.
 
 #### What a replay cannot establish
 

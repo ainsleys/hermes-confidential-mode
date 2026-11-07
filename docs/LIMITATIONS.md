@@ -430,8 +430,8 @@ Each item below is a smaller gap. Each one is stated in full.
   your approved pin, or from a flag. Two inputs still come from the evidence unless you supply them.
   The first is the trust root, which you can replace with `--trusted-root`. The second is the time
   certificates are checked at, which you can replace with `--as-of`. The numeric GitHub repository and
-  owner IDs cannot be checked by this build's replay. A row replayed with `--expected-repo-id` or
-  `--expected-owner-id` therefore fails.
+  owner IDs are checked only when you pass `--expected-repo-id` and `--expected-owner-id`; without
+  them the replay identifies the repository by name alone and the `repo_identity` check says `name`.
 
   When you call the Python function `replay()` without `expected_fingerprints`, it compares the
   fingerprints only with those recorded in the evidence. Compare the result's fingerprints with your
