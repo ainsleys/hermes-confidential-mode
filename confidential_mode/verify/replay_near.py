@@ -47,9 +47,10 @@ NOT_ESTABLISHED = (
     "log's hash is bound in a hardware quote, and that the per-service deployment map derived from the log "
     "is what the operator's own tooling reported. It does not establish that the inner compose is measured "
     "or that the reported services are the ones running",
-    "that the measured compose-manager wrote the actions log: the running compose-manager image is not the "
-    "image the measured docker-compose names (a launcher replaces it after boot; the cm_image check records "
-    "the two digests)",
+    "that the measured compose-manager wrote the actions log: the log reports a compose-manager image other "
+    "than the one the measured docker-compose names (it records a launcher swap on every instance seen); the "
+    "cm_image check records both images and never scores them, because the log is operator-reported, not "
+    "verified",
     "that the actions log came from the compose-manager at all: the inner services it deploys, the model "
     "proxies among them, hold the dstack quote socket and run privileged, so any of them can obtain a quote "
     "of this TD over report data it chooses",

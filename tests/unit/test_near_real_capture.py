@@ -27,7 +27,7 @@ RAW = json.loads((FIX / "raw_public_responses.json").read_text())
 GPU13 = json.loads((FIX / "model_candidate_gpu13.json").read_text())
 V1 = json.loads((FIX / "evidence_v1.json").read_text())["evidence"]
 MODEL = "Qwen/Qwen3.8-27B"
-CODE_FP = "6ef6502982be907451adb5bf556277d2c146fa2a9a4ef05bd852bdfc7a1ed246"
+CODE_FP = "2e7d4ed64e11370b39dd90a802f2fbf1982f0047f5406f12040c598b4dea60ac"   # v2: compose hashes + RTMR3 identity
 ENCLAVE_FP = "7b70f47f48848bb33537f916e67288d17d944eb945d579049b5b41cc1ed1df41"
 V1_CODE_FP = "111f9bf87dc011150753990dfbeae4bbeac9a5b603559055d23947edc663bc7b"
 V1_ENCLAVE_FP = "ce1f0519a96cbd217d59cd065e1f60698075576fb52338523779f5a5665f437d"
@@ -57,8 +57,9 @@ HAND_MAP = {
     f"{F}::qwen38-abliterated-registrar": _entry(F, "qwen38-abliterated-registrar", C539),
     f"{F}::otelcol-contrib": _entry(F, "otelcol-contrib", C539),
 }
-HAND_PROMPT_PATH = {k: HAND_MAP[k] for k in (f"{F}::*", f"{F}::model-sg-qwen38-27b-fp8-tp1-lora",
-                                             f"{F}::nginx-qwen38", f"{F}::proxy-qwen38-27b", f"{F}::qwen38-registrar")}
+# Listed first in the prompt: the whole-file deployment and the services the Qwen3.8 name list names.
+HAND_FIRST = [f"{F}::*", f"{F}::model-sg-qwen38-27b-fp8-tp1-lora", f"{F}::nginx-qwen38", f"{F}::proxy-qwen38-27b",
+              f"{F}::qwen38-registrar"]
 
 
 def _spki_of_report_cert(raw=RAW) -> str:
@@ -110,7 +111,7 @@ def test_real_capture_per_cvm_identity_comes_from_rtmr3():
     assert m["os_image_hash"] == "91fd5d69ccee3e5ea4f2aeb8c9b632c4358c4ecfc29ba1aa6fb1e402af209829"
     kid = json.loads(_cand(RAW)["info"]["key_provider_info"])["id"]
     assert m["kms_id"] == hashlib.sha256(bytes.fromhex(kid)).hexdigest() == gw["kms_id"]   # one KMS for both
-    assert gw["services"] is None and gw["cm_image_running"] is None
+    assert gw["services"] is None and gw["cm_image_reported"] is None
 
 
 def test_real_capture_per_service_map_matches_the_hand_derived_map():
@@ -118,20 +119,25 @@ def test_real_capture_per_service_map_matches_the_hand_derived_map():
     assert state == HAND_MAP
     assert [nc.image_ref(i) for i in images] == [CM_MEASURED, CM_RUNNING]
     m = near.appraise(evidence()).cvms[1]
-    assert m["services"] == HAND_PROMPT_PATH
-    assert m["services_scope"] == f"prompt path of {MODEL}"
+    assert m["services"] == HAND_MAP                       # the component is the whole map
+    assert m["services_sha256"] == nc.services_sha256(HAND_MAP)
+    assert m["services_first"] == HAND_FIRST and "name list" in m["services_scope"]
 
 
 def test_real_capture_records_the_image_mismatch_as_a_component_never_a_pass():
     a = near.appraise(evidence())
     m = a.cvms[1]
-    assert (m["cm_image_running"], m["cm_image_measured"]) == (CM_RUNNING, CM_MEASURED)
-    assert a.checks["cm_image"].startswith("recorded (not a pass)") and "cm_image" in near.INFORMATIONAL_CHECKS
-    line = next(c for c in a.components if "compose-manager running" in c)
-    assert line.startswith("reported: ") and "MISMATCH" in line and CM_RUNNING[:49] in line
+    assert (m["cm_image_reported"], m["cm_image_measured"]) == (CM_RUNNING, CM_MEASURED)
+    assert a.checks["cm_image"].startswith("recorded (not a pass") and "cm_image" in near.INFORMATIONAL_CHECKS
+    line = next(c for c in a.components if "compose-manager image reported by the log" in c)
+    assert line.startswith("reported: ") and "(the two differ)" in line and "operator-reported, not verified" in line
+    assert f"reported:   reported by the log: {CM_RUNNING}" in a.components                  # full digest
+    assert f"reported:   in the measured compose: {CM_MEASURED}" in a.components
+    assert not any("running" in c or "same as measured" in c for c in a.components)
     reported = [c for c in a.components if c.startswith("reported: ")]
     assert any("proxy-qwen38-27b v0.0.540 commit 75d31e6461dc" in c for c in reported)
-    assert not any("proxy-qwen38-27b-abliterated" in c for c in reported)   # another model id
+    others = [c for c in a.components if c.startswith("reported-other: ")]
+    assert any("proxy-qwen38-27b-abliterated v0.0.540" in c for c in others)   # shown, after the named ones
 
 
 def test_real_capture_replays_through_the_replay_module():
@@ -243,15 +249,16 @@ def test_partial_compose_up_sequence_names_the_commit_each_service_was_started_f
     res = nc.check_compose_manager(cm, nonce=nonce, model_quote=q, quote_verifier=nc.default_quote_verifier,
                                    model=MODEL, app_compose=cand["info"]["tcb_info"]["app_compose"])
     S = "prod/small-models.yaml"
-    got = {k: (v["tag"], v["commit"][:8]) for k, v in res["services"].items()}
+    got = {k: (res["services"][k]["tag"], res["services"][k]["commit"][:8]) for k in res["services_first"]}
     assert got == {f"{S}::model-downloader-qwen38": ("v0.0.513", "e99f50fc"),
                    f"{S}::model-sg-qwen38-27b-fp8-tp1-coloc": ("v0.0.539", "cab40870"),
                    f"{S}::nginx-qwen38": ("v0.0.540", "75d31e64"),
                    f"{S}::proxy-qwen38-27b": ("v0.0.540", "75d31e64"),
-                   f"{S}::qwen38-registrar": ("v0.0.539", "cab40870")}
-    assert res["services_reported"] == 46 and res["actions_count"] == 86
+                   f"{S}::qwen38-registrar": ("v0.0.539", "cab40870"),
+                   f"{S}::qwen38-lora-adapter-downloader": ("v0.0.516", "28a15af5")}
+    assert len(res["services"]) == res["services_reported"] == 46 and res["actions_count"] == 86
     assert res["cm_image_measured"].endswith("6e035c8fb99c1d31f41760d25af178683a658cca4afd73cd0d366fbb5bf884be")
-    assert res["cm_image_running"] == CM_RUNNING and res["cm_image_match"] is False
+    assert res["cm_image_reported"] == CM_RUNNING and res["cm_image_match"] is False
     with pytest.raises(nc.CmCheckError) as exc:   # the other instance's nonce is not this one's
         nc.check_compose_manager(cm, nonce=RAW["nonce"], model_quote=q, quote_verifier=nc.default_quote_verifier,
                                  model=MODEL, app_compose=None)
@@ -281,3 +288,36 @@ def test_v1_evidence_appraises_under_v1_rules_with_the_new_checks_not_run():
                            expected_fingerprints=(V1_CODE_FP, V1_ENCLAVE_FP))
     assert r.ok and r.not_established == replay_near.NOT_ESTABLISHED_V1
     assert any("compose_manager_attestation is not checked here" in x for x in r.not_established)
+
+
+def test_the_lora_adapter_downloader_the_engine_loads_from_is_in_the_component_and_listed_first():
+    # gpu13: model-sg-qwen38-27b-fp8-tp1-coloc mounts lora_adapter:/adapters and depends on this downloader
+    # (inner file at cab40870); a name-list restriction once dropped it. The whole map is the component.
+    cand = GPU13["candidate"]
+    q = nc.default_quote_verifier(bytes.fromhex(cand["intel_quote"]))
+    res = nc.check_compose_manager(cand["compose_manager_attestation"], nonce=GPU13["nonce"], model_quote=q,
+                                   quote_verifier=nc.default_quote_verifier, model=MODEL, app_compose=None)
+    key = "prod/small-models.yaml::qwen38-lora-adapter-downloader"
+    assert key in res["services"] and key in res["services_first"]
+    for other in ("proxy-glm53", "sage-dstack", "otelcol-contrib", "proxy-dsv41"):   # dstack.sock holders
+        assert f"prod/small-models.yaml::{other}" in res["services"]
+    edited = copy.deepcopy(res["services"])
+    edited["prod/small-models.yaml::proxy-glm53"]["tag"] = "v9"
+    assert nc.services_sha256(edited) != res["services_sha256"]   # any service's redeploy changes the component
+
+
+@pytest.mark.parametrize("field,value", [
+    ("app_id", "00" * 20), ("os_image_hash", "00" * 32),
+    ("key_provider_info", '{"name":"kms","id":"00"}'), ("instance_id", "11" * 20)])
+def test_an_info_value_other_than_its_rtmr3_boot_event_fails_on_real_data(field, value):
+    a = _mutated(lambda r: _cand(r)["info"].__setitem__(field, value))
+    assert not a.ok and f"info.{field} differs from the RTMR3" in a.checks["model_quotes"], a.checks
+
+
+def test_the_identity_is_pinned_by_the_v2_code_fingerprint():
+    a = near.appraise(evidence())
+    m = a.cvms[1]
+    code = {"gateway": [a.cvms[0]["compose_hash"]], "models": {MODEL: [m["compose_hash"]]},
+            "identity": {"gateway": [f"{a.cvms[0]['app_id']}:{a.cvms[0]['os_image_hash']}:{a.cvms[0]['kms_id']}"],
+                         "models": {MODEL: [f"{m['app_id']}:{m['os_image_hash']}:{m['kms_id']}"]}}}
+    assert a.code_fingerprint == nc.sha256_hex(nc.canonical(code).encode()) == CODE_FP

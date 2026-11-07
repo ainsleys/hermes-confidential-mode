@@ -28,12 +28,12 @@ What the checks establish, and with which key:
   * each model candidate's compose_manager_attestation (near_checks.check_compose_manager): its quote
     verifies and its event log replays; MRTD and RTMR0-3 equal the model quote's; report data is
     actions_hash || N with nonce_source "client"; the actions log hashes to actions_hash; the log replays
-    into a per-service map, restricted to the model's prompt-path services. This establishes that a TD of
+    into a per-service map, recorded whole (a per-model name list only orders it). This establishes that a TD of
     this instance reported this actions log for this nonce, that the log's hash is bound in a hardware
     quote, and that the map is what the operator's own tooling reported. It does not establish that the
-    inner compose is measured or that the reported services are the ones running. The running
-    compose-manager image is compared with the measured one and a mismatch is recorded (cm_image,
-    informational), never a pass. With require_provider_tee a candidate without the block fails.
+    inner compose is measured or that the reported services are the ones running. The compose-manager
+    image the log reports is recorded beside the measured one (cm_image, informational, never a pass).
+    With require_provider_tee a candidate without the block fails.
 Not established here (see replay_near.NOT_ESTABLISHED): the model CVM's TCB status, GPU evidence
 binding, image provenance, what runs after launch, and anything about a specific serving instance.
 
@@ -41,7 +41,9 @@ Identity mapping for pins (docs/INTERFACES.md Amendment 5):
   vendor              "near"
   router_repo         "<host>#<model,model,...>" (sorted allowlist), the identity a pin is keyed by
   code_fingerprint    SHA-256 of canonical JSON {"gateway": [compose_hash], "models": {M: sorted compose
-                      hashes}}: what MRCONFIGID measures, the docker-compose (image digests) each CVM runs
+                      hashes}}: what MRCONFIGID measures, the docker-compose (image digests) each CVM runs.
+                      v2 evidence adds "identity": {"gateway": ["app_id:os_image_hash:kms_id"], "models":
+                      {M: sorted such strings}}, as the RTMR3 boot events record them
   enclave_fingerprint SHA-256 of canonical JSON of "MRTD:RTMR0:RTMR1:RTMR2" per CVM (firmware, kernel,
                       initrd and command line), gateway and every model candidate, sorted
   release_tag         None: NEAR publishes no signed release tag for a deployment
@@ -115,9 +117,10 @@ MAX_ID_BUFFER = 8 * 1024 * 1024
 MAX_SEALED_BODY = 32 * 1024 * 1024   # an unstreamed encrypted response is buffered whole before release
 CHECK_KEYS = ("schema", "gateway_quote", "gateway_tls_binding", "ita_jwks", "ita_gateway_token",
               "model_quotes", *nc.CM_CHECK_KEYS, "ita_model_tokens", "fingerprints")
-# cm_image compares the running compose-manager image with the measured one: a mismatch is recorded and
-# shown in the pin prompt, never a pass and never a verification failure (NEAR's own launcher swaps the
-# image after boot on every instance seen, 2026-11-07).
+# cm_image records the compose-manager image the actions log reports beside the one the measured compose
+# names. It is never scored: the log is operator-reported, so neither an equal nor a different image is a
+# pass, and a difference never fails verification (the log records a launcher swap on every instance seen,
+# 2026-11-07).
 INFORMATIONAL_CHECKS = ("ita_model_tokens", "cm_image")
 CM_NOT_RUN_V1 = "n/a: not run (evidence schema v1 carries no compose-manager attestation)"
 
@@ -281,8 +284,9 @@ class Appraisal:
     components: tuple = ()
     tcb_status: str | None = None
     first_failure: str | None = None
-    # per CVM: role, app_id, instance_id, compose_hash, signing_address, os_image_hash, kms_id, services,
-    # services_scope, cm_image_running, cm_image_measured (v2 evidence; the last four are None for the gateway)
+    # per CVM: role, app_id, instance_id, compose_hash, signing_address, os_image_hash, kms_id, services (the
+    # whole per-service map), services_sha256, services_first, services_scope, cm_image_reported,
+    # cm_image_measured (v2 evidence; the services and image keys are None for the gateway)
     cvms: tuple = ()
 
 
@@ -296,16 +300,17 @@ def _measure(q: Mapping) -> str:
 
 def _cvm(role: str, rep: Mapping, ident: Mapping | None = None, cm: Mapping | None = None) -> dict:
     """What identifies one CVM in the evidence. With v2 evidence, app_id, instance_id, os_image_hash and
-    kms_id come from the RTMR3 events (``ident``), and a model CVM adds what its compose-manager reported
-    (``cm``). W12 pins these."""
+    kms_id come from the RTMR3 boot events (``ident``), and a model CVM adds what its compose-manager
+    reported (``cm``)."""
     ident = ident or {}
     cm = cm or {}
     return {"role": role, "app_id": ident.get("app_id", rep.get("app_id")),
             "instance_id": ident.get("instance_id", rep.get("instance_id")),
             "compose_hash": rep.get("compose_hash"), "signing_address": str(rep.get("signing_address") or "").lower(),
             "os_image_hash": ident.get("os_image_hash"), "kms_id": ident.get("kms_id"),
-            "services": cm.get("services"), "services_scope": cm.get("services_scope"),
-            "cm_image_running": cm.get("cm_image_running"), "cm_image_measured": cm.get("cm_image_measured")}
+            "services": cm.get("services"), "services_sha256": cm.get("services_sha256"),
+            "services_first": cm.get("services_first"), "services_scope": cm.get("services_scope"),
+            "cm_image_reported": cm.get("cm_image_reported"), "cm_image_measured": cm.get("cm_image_measured")}
 
 
 def _app_name(composes: Mapping, h: str | None) -> str:
@@ -324,33 +329,52 @@ def verified_blobs(evidence: Mapping) -> dict:
             if isinstance(k, str) and isinstance(v, str) and nc.sha256_hex(v.encode("utf-8")) == k}
 
 
-def _short_ref(ref: str | None) -> str:
-    if not ref:
-        return "(none recorded)"
-    repo, _, digest = ref.partition("@sha256:")
-    return f"{repo}@sha256:{digest[:16]}..." if digest else ref[:80]
+def _image_text(ref: str | None) -> str:
+    return ref if ref else "(none named)"
+
+
+# Component line prefixes. A line without one is pinned (it feeds the fingerprints). "reported: " lines are
+# what a model CVM's compose-manager log reported, shown for review and not pinned; "reported-other: " lines
+# are the services the per-model name list does not put first (the prompt may fold them into a count that
+# points at `hermes confidential pins`, which prints them all).
+REPORTED = "reported: "
+REPORTED_OTHER = "reported-other: "
+
+
+def _service_line(key: str, v: Mapping) -> str:
+    return (f"{key} {v.get('tag') if v.get('tag') is not None else '(no tag)'} commit {v.get('commit')} "
+            f"file sha256:{v.get('file_sha256')}")
 
 
 def _cvm_lines(c: Mapping) -> list[str]:
-    """Pin-prompt lines for one CVM. Lines that begin "reported: " are what the model CVM's compose-manager
-    reported after launch, not measurements; the prompt shows them under their own heading."""
+    """Pin-prompt lines for one CVM (v2 evidence). They hold raw values and full digests; whoever shows
+    them to a person renders each line with near_checks.render_vendor."""
     role = c["role"].replace("model:", "model ", 1)
-    iid = str(c.get("instance_id") or "?")[:12]
-    out = [f"{role} instance {iid}: app_id {c.get('app_id')}, os image {str(c.get('os_image_hash'))[:16]}..., "
-           f"KMS key sha256:{str(c.get('kms_id'))[:16]}... (recorded in RTMR3)"]
-    if c.get("services") is None:
+    iid = c.get("instance_id")
+    out = [f"{role} instance {iid}: app_id {c.get('app_id')}, OS image {c.get('os_image_hash')}, "
+           f"KMS key sha256:{c.get('kms_id')} (recorded in RTMR3; pinned; the instance id is shown only)"]
+    services = c.get("services")
+    if not isinstance(services, Mapping):
         return out
-    out.append(f"reported: {role} instance {iid}: services ({c.get('services_scope')}):"
-               + ("" if c["services"] else " none"))
-    for key, v in c["services"].items():
-        out.append(f"reported:   {key} {v.get('tag') or '(no tag)'} commit {str(v.get('commit'))[:12]} "
-                   f"file sha256:{str(v.get('file_sha256'))[:16]}...")
-    run, meas = c.get("cm_image_running"), c.get("cm_image_measured")
-    verdict = "same as measured" if run and run == meas else \
-        "MISMATCH: the running compose-manager is not the measured one"
-    out.append(f"reported: {role} instance {iid}: compose-manager running {_short_ref(run)}; measured "
-               f"{_short_ref(meas)} ({verdict})")
+    first = [k for k in (c.get("services_first") or []) if k in services]
+    others = [k for k in sorted(services) if k not in first]
+    out.append(f"{REPORTED}{role} instance {iid}: {len(services)} services in the log (whole map sha256:"
+               f"{c.get('services_sha256')}); {len(first)} {c.get('services_scope')}:")
+    out += [f"{REPORTED}  {_service_line(k, services[k])}" for k in first]
+    out.append(f"{REPORTED}{role} instance {iid}: {len(others)} other services (listed in full by "
+               "the command hermes confidential pins)" + (":" if others else ""))
+    out += [f"{REPORTED_OTHER}  {_service_line(k, services[k])}" for k in others]
+    rep, meas = c.get("cm_image_reported"), c.get("cm_image_measured")
+    out.append(f"{REPORTED}{role} instance {iid}: compose-manager image reported by the log; the log is "
+               "operator-reported, not verified" + ("" if rep and rep == meas else " (the two differ)") + ":")
+    out.append(f"{REPORTED}  reported by the log: {_image_text(rep)}")
+    out.append(f"{REPORTED}  in the measured compose: {_image_text(meas)}")
     return out
+
+
+def condensed_components(components) -> list[str]:
+    """The component lines without the REPORTED_OTHER ones (what a verify_ok row keeps inline)."""
+    return [c for c in components if not str(c).startswith(REPORTED_OTHER)]
 
 
 def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: nc.QuoteVerifier | None = None,
@@ -507,6 +531,12 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
                 cvms.append(_cvm(f"model:{m}", c, idents.get((m, i)), cm_results.get((m, i))))
         code = {"gateway": [gw.get("compose_hash")],
                 "models": {m: sorted({c.get("compose_hash") for c, _ in model_quotes.get(m, [])}) for m in models}}
+        if not v1:
+            # v2: the code fingerprint also pins each CVM's app_id, OS image and KMS key as RTMR3 records them.
+            # The instance id, the reported services and the log-reported image are shown, not pinned.
+            ids = lambda cs: sorted({f"{c['app_id']}:{c['os_image_hash']}:{c['kms_id']}" for c in cs})  # noqa: E731
+            code["identity"] = {"gateway": ids(cvms[:1]),
+                                "models": {m: ids([c for c in cvms if c["role"] == f"model:{m}"]) for m in models}}
         enclave = {"gateway": [_measure(gwq)],
                    "models": {m: sorted({_measure(q) for _, q in model_quotes.get(m, [])}) for m in models}}
         out["code_fingerprint"] = nc.sha256_hex(nc.canonical(code).encode("utf-8"))
@@ -571,9 +601,11 @@ def _compose_manager_checks(checks: dict, evidence: Mapping, blobs: Mapping, mod
             results[(model, i)] = res
             for k in steps:
                 per_step[k].append(("pass", ""))
-            if not res["cm_image_match"]:
-                per_step["cm_image"][-1] = ("recorded", f"{where}: running {_short_ref(res['cm_image_running'])} is "
-                                            f"not the measured {_short_ref(res['cm_image_measured'])}")
+            # never scored: the log is operator-reported, so an equal image reassures no more than a different one
+            per_step["cm_image"][-1] = ("recorded", f"{where}: image reported by the log "
+                                        f"{_image_text(res['cm_image_reported'])}; image in the measured compose "
+                                        f"{_image_text(res['cm_image_measured'])}"
+                                        + ("" if res["cm_image_match"] else " (the two differ)"))
     for k in steps:
         items = per_step[k]
         fails = [t for o, t in items if o == "fail"]
@@ -582,7 +614,8 @@ def _compose_manager_checks(checks: dict, evidence: Mapping, blobs: Mapping, mod
         elif any(o == "not_run" for o, _ in items):
             checks[k] = "not_run: " + next(t for o, t in items if o == "not_run")[:300]
         elif any(o == "recorded" for o, _ in items):
-            checks[k] = ("recorded (not a pass): " + "; ".join(t for o, t in items if o == "recorded"))[:320]
+            checks[k] = ("recorded (not a pass; the log is operator-reported, not verified): "
+                         + "; ".join(t for o, t in items if o == "recorded"))[:400]
         elif items and all(o == "skip" for o, _ in items):
             checks[k] = ("n/a: no compose_manager_attestation captured, and it is not required "
                          "(require_provider_tee is off)")
@@ -595,11 +628,25 @@ def _compose_manager_checks(checks: dict, evidence: Mapping, blobs: Mapping, mod
 
 
 def evidence_claims(evidence: Mapping, a: Appraisal) -> dict:
+    """The claims a verify_ok row carries. With v2 evidence (a ``blobs`` dict) each CVM's whole service map
+    and the full component list go into the blobs ({"$blob": id}), so a row stays small whatever the
+    allowlist; ``components`` keeps the condensed lines and ``components_full`` points at the full list."""
     gw = evidence.get("gateway") if isinstance(evidence.get("gateway"), Mapping) else {}
-    return {"code_fingerprint": a.code_fingerprint, "enclave_fingerprint": a.enclave_fingerprint,
-            "release_tag": None, "identity": a.identity, "tls_public_key_fp": gw.get("tls_cert_fingerprint"),
-            "hpke_public_key": None, "gateway_signer": a.gateway_signer, "model_signers": a.model_signers,
-            "components": list(a.components), "tcb_status": a.tcb_status, "cvms": [dict(c) for c in a.cvms]}
+    blobs = evidence.get("blobs") if isinstance(evidence.get("blobs"), dict) else None
+    cvms = [dict(c) for c in a.cvms]
+    claims = {"code_fingerprint": a.code_fingerprint, "enclave_fingerprint": a.enclave_fingerprint,
+              "release_tag": None, "identity": a.identity, "tls_public_key_fp": gw.get("tls_cert_fingerprint"),
+              "hpke_public_key": None, "gateway_signer": a.gateway_signer, "model_signers": a.model_signers,
+              "components": list(a.components), "tcb_status": a.tcb_status, "cvms": cvms}
+    if blobs is not None and evidence.get("schema") == EVIDENCE_SCHEMA:
+        for c in cvms:
+            if isinstance(c.get("services"), Mapping):
+                c["services"] = {BLOB_REF: put_blob(blobs, blob_text(c["services"]))}
+        claims["components"] = condensed_components(a.components)
+        claims["components_full"] = {BLOB_REF: put_blob(blobs, blob_text(list(a.components)))}
+        if isinstance(evidence, dict):
+            evidence["blob_refs"] = sorted(blobs)
+    return claims
 
 
 # ── the adapter ─────────────────────────────────────────────────────────────────────────────────

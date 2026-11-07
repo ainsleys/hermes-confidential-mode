@@ -52,24 +52,28 @@ def test_the_synthetic_world_passes_every_compose_manager_check(tmp_path):
     r = world.adapter(tmp_path, encrypt=False).verify()
     checks = r.evidence["checks"]
     assert all(checks[k] is True for k in nc.CM_CHECK_KEYS if k != "cm_image"), checks
-    cvm = r.evidence["claims"]["cvms"][1]
-    assert cvm["services_scope"] == f"all services: no prompt-path rule for {MODEL}"
+    cvm = near.appraise(r.evidence, quote_verifier=fake_quote_verifier, ita_roots=world.ita.roots).cvms[1]
+    assert cvm["services_scope"] == f"whole-file deployments (no service name list for {MODEL})"
     assert set(cvm["services"]) == {"prod/test.yaml::proxy-test", "prod/test.yaml::model-test",
                                     "prod/test.yaml::nginx-test"}
     assert cvm["services"]["prod/test.yaml::proxy-test"]["tag"] == "v0.0.2"      # compose_stage changed nothing
     assert cvm["services"]["prod/test.yaml::model-test"]["tag"] == "v0.0.1"
-    assert (cvm["cm_image_running"], cvm["cm_image_measured"]) == (CM_IMAGE_SWAPPED, CM_IMAGE)
+    assert (cvm["cm_image_reported"], cvm["cm_image_measured"]) == (CM_IMAGE_SWAPPED, CM_IMAGE)
+    stored = r.evidence["claims"]["cvms"][1]["services"]      # in the claims, the map is a blob reference
+    assert set(stored) == {"$blob"} and stored["$blob"] == cvm["services_sha256"]
 
 
-def test_running_image_mismatch_is_a_component_and_never_a_pass(tmp_path):
+def test_the_log_reported_image_is_recorded_and_never_a_pass_equal_or_not(tmp_path):
     world = NearWorld()
     r = world.adapter(tmp_path, encrypt=False).verify()
-    assert r.evidence["checks"]["cm_image"].startswith("recorded (not a pass)")
-    assert any(c.startswith("reported: ") and "MISMATCH" in c for c in r.evidence["claims"]["components"])
-    world.cm_actions = world.cm_actions[:-1]          # no launcher swap: running == measured
+    assert r.evidence["checks"]["cm_image"].startswith("recorded (not a pass")
+    assert any(c.startswith("reported: ") and "(the two differ)" in c for c in r.evidence["claims"]["components"])
+    world.cm_actions = world.cm_actions[:-1]          # the log names the measured image: still not a pass
     r = world.adapter(tmp_path, encrypt=False).verify()
-    assert r.evidence["checks"]["cm_image"] is True
-    assert any("(same as measured)" in c for c in r.evidence["claims"]["components"])
+    assert r.evidence["checks"]["cm_image"] is not True
+    assert r.evidence["checks"]["cm_image"].startswith("recorded (not a pass; the log is operator-reported")
+    line = next(c for c in r.evidence["claims"]["components"] if "image reported by the log" in c)
+    assert "(the two differ)" not in line and "same" not in line and "running" not in line
 
 
 def test_compose_manager_quote_from_a_different_td_fails(tmp_path):
@@ -176,11 +180,11 @@ def test_partial_compose_up_sequence_is_replayed_per_service(monkeypatch, tmp_pa
         {**up, "tag": "v3", "commit": "a3" * 20, "file_sha256": "b3" * 32, "services": ["registrar-test"]},
     ]
     r = world.adapter(tmp_path, encrypt=False).verify()
-    cvm = r.evidence["claims"]["cvms"][1]
-    assert cvm["services_scope"] == f"prompt path of {MODEL}"
+    cvm = near.appraise(r.evidence, quote_verifier=fake_quote_verifier, ita_roots=world.ita.roots).cvms[1]
     assert {k: v["tag"] for k, v in cvm["services"].items()} == {"prod/test.yaml::model-test": "v1",
-                                                                 "prod/test.yaml::proxy-test": "v2"}
-    assert r.evidence["checks"]["cm_image"] is True
+                                                                 "prod/test.yaml::proxy-test": "v2",
+                                                                 "prod/test.yaml::registrar-test": "v3"}
+    assert cvm["services_first"] == ["prod/test.yaml::model-test", "prod/test.yaml::proxy-test"]
 
 
 def test_whole_file_actions_and_the_prompt_path_fallback(monkeypatch):
@@ -194,8 +198,8 @@ def test_whole_file_actions_and_the_prompt_path_fallback(monkeypatch):
     ])
     assert {k: v["tag"] for k, v in state.items()} == {"f.yaml::*": "v2", "f.yaml::proxy-m": "v3"}
     monkeypatch.setitem(nc.PROMPT_PATH_SERVICES, "m", {"proxy": ("proxy-m",), "engine": ("engine-m",)})
-    svc, scope = nc.prompt_path(state, "m")   # the engine was renamed away: the whole map, said so
-    assert svc == state and scope == "all services: the prompt-path rule for m matched no engine"
+    first, scope = nc.prompt_path(state, "m")   # display order only; whole-file entries always first
+    assert first == ["f.yaml::*", "f.yaml::proxy-m"] and "it can miss services" in scope
 
 
 def test_block_missing_fails_closed_under_require_provider_tee(tmp_path):
@@ -231,3 +235,140 @@ def test_evidence_blob_that_does_not_hash_to_its_id_fails(tmp_path):
     ev["blobs"][ref] = nc.canonical(block)          # same id, other bytes
     a = near.appraise(ev, quote_verifier=fake_quote_verifier, ita_roots=world.ita.roots)
     assert not a.ok and "blob is missing or does not hash to its id" in a.checks["cm_quote"]
+
+
+# ── strings from the log: raw in hashes and records, escaped and tagged when shown ────────────────
+
+@pytest.mark.parametrize("services", [["proxy::x"], ["a b"], ["a\nb"], ["proxy:x"], [""], ["x" * 300]])
+def test_a_service_name_that_is_not_a_compose_name_fails_closed(tmp_path, services):
+    # compose service names have no colon, so "<file>::<service>" keys cannot collide
+    world = NearWorld()
+    world.cm_actions = world.cm_actions + [{"action": "compose_up", "timestamp": "t", "tag": "v1",
+                                            "commit": "c1" * 20, "file": "prod/test.yaml", "file_sha256": "f1" * 32,
+                                            "services": services}]
+    _verify_fails(world, tmp_path, "cm_services", "not a compose service name")
+
+
+def _with_tag(tag):
+    world = NearWorld()
+    world.cm_actions = world.cm_actions + [{"action": "compose_up", "timestamp": "t", "tag": tag,
+                                            "commit": "c3" * 20, "file": "prod/test.yaml", "file_sha256": "f3" * 32,
+                                            "services": ["proxy-test"]}]
+    return world
+
+
+def test_an_inserted_escape_sequence_changes_every_hash_and_is_kept_raw(tmp_path):
+    plain = _with_tag("v0.0.9").adapter(tmp_path, encrypt=False).verify().evidence
+    bent = _with_tag("v0.0.9\x1b[2K").adapter(tmp_path, encrypt=False).verify().evidence
+    a = near.appraise(plain, quote_verifier=fake_quote_verifier, ita_roots=NearWorld().ita.roots)
+    b = near.appraise(bent, quote_verifier=fake_quote_verifier, ita_roots=NearWorld().ita.roots)
+    assert a.cvms[1]["services_sha256"] != b.cvms[1]["services_sha256"]           # the services component
+    assert b.cvms[1]["services"]["prod/test.yaml::proxy-test"]["tag"] == "v0.0.9\x1b[2K"   # raw in the record
+    ref = lambda ev: ev["model_reports"][MODEL][0]["compose_manager"]["blob"]  # noqa: E731
+    assert ref(plain) != ref(bent)                                               # the canonical block hash
+    assert json.loads(bent["blobs"][ref(bent)])["actions"][-1]["tag"] == "v0.0.9\x1b[2K"
+    assert (plain["claims"]["components_full"] != bent["claims"]["components_full"])
+
+
+def test_a_newline_and_an_ansi_sequence_are_shown_escaped_and_tagged(tmp_path):
+    r = _with_tag("v1\nreported:   in the measured compose: fake\x1b[1A\x1b[2K").adapter(
+        tmp_path, encrypt=False).verify()
+    comps = near.appraise(r.evidence, quote_verifier=fake_quote_verifier, ita_roots=NearWorld().ita.roots).components
+    line = next(c for c in comps if "proxy-test" in c and "c3c3" in c)
+    shown = nc.render_vendor(line)
+    assert "\n" not in shown and "\x1b" not in shown
+    assert "\\x0a" in shown and "\\x1b[1A" in shown and shown.endswith(nc.CONTROL_TAG)
+    assert shown.startswith("`")                                                 # markdown-inert code span
+
+
+def test_render_vendor_keeps_everything_visible_and_cuts_nothing():
+    digest = "ab" * 32
+    shown = nc.render_vendor(f"image x@sha256:{digest} `*_[]` a\\b \u202e\u2028\x9b" + "z" * 300)
+    assert digest in shown and shown.count("z") == 300
+    assert "\\x60" in shown and "\\u202e" in shown and "\\u2028" in shown and "\\x9b" in shown
+    assert "a\\\\b" in shown and shown.endswith(nc.CONTROL_TAG)
+    assert nc.render_vendor("plain") == "`plain`"
+
+
+def test_the_pin_prompt_escapes_and_tags_component_lines():
+    from confidential_mode.consent import _near_pin_question
+    from types import SimpleNamespace
+    pending = SimpleNamespace(components=("gateway compose sha256:ab\x1b[1A\x1b[2K", "reported: x\ny *bold*"),
+                              router_repo="h#m", platform="tdx", previous=None, code_fingerprint="c",
+                              previous_enclave_fingerprint=None, enclave_fingerprint="e", code_changed=True,
+                              release_tag=None)
+    text = _near_pin_question(pending)
+    assert "\x1b" not in text and "\\x1b[1A" in text and "`x\\x0ay *bold*`" in text
+    assert text.count(nc.CONTROL_TAG) == 2
+
+
+# ── RTMR3 identity events: dstack's boot events only, once each ─────────────────────────────────
+
+def _with_events(monkeypatch, edit):
+    import tests.near_world as w
+    orig = w.events_for
+
+    def events(app_id, instance_id=None):
+        return edit(orig(app_id, instance_id))
+    monkeypatch.setattr(w, "events_for", events)
+
+
+def _ev(name, payload, et=0x08000001):
+    import hashlib
+    import struct
+    digest = hashlib.sha384(struct.pack("<I", et) + b":" + name.encode() + b":" + bytes.fromhex(payload)).hexdigest()
+    return {"imr": 3, "event_type": et, "digest": digest, "event": name, "event_payload": payload}
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda evs: evs + [_ev("app-id", "ee" * 20)], "repeats the app-id event"),
+    (lambda evs: evs[:2] + [_ev("key-provider", '{"name":"kms","id":"00"}'.encode().hex())] + evs[2:],
+     "repeats the key-provider event"),
+    (lambda evs: [e for e in evs if e["event"] != "os-image-hash"] + [_ev("os-image-hash", "ee" * 32)],
+     "os-image-hash event comes after system-ready"),
+    (lambda evs: [e if e["event"] != "app-id" else _ev("app-id", e["event_payload"], et=0x08000002) for e in evs],
+     "app-id event has event_type"),
+    (lambda evs: [e for e in evs if e["event"] != "instance-id"], "has no instance-id event"),
+    (lambda evs: [e for e in evs if e["event"] != "system-ready"], "no 'system-ready' event"),
+])
+def test_duplicate_late_mistyped_or_missing_identity_events_fail(monkeypatch, tmp_path, edit, needle):
+    # these events replay to the (fake) quote's RTMR3: only the boot-event rules can catch them
+    _with_events(monkeypatch, edit)
+    with pytest.raises(VerifyError, match=needle):
+        NearWorld().adapter(tmp_path, encrypt=False).verify()
+
+
+def test_no_identity_line_ever_says_none():
+    world = NearWorld()
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        r = world.adapter(d, encrypt=False).verify()
+    assert not any("None" in c for c in r.evidence["claims"]["components"])
+
+
+def test_a_key_provider_id_that_is_not_hex_fails(monkeypatch, tmp_path):
+    import tests.near_world as w
+    monkeypatch.setattr(w, "KEY_PROVIDER_INFO", '{"name":"kms","id":"not-hex"}')
+    with pytest.raises(VerifyError, match="key-provider id is not hex"):
+        NearWorld().adapter(tmp_path, encrypt=False).verify()
+
+
+def test_a_long_service_list_folds_into_a_count_and_pins_prints_every_line(tmp_path):
+    from types import SimpleNamespace
+    from confidential_mode import commands
+    from confidential_mode.consent import MAX_REPORTED_LINES, _near_pin_question
+    from confidential_mode.pins import PinStore
+    world = NearWorld()
+    up = {"action": "compose_up", "timestamp": "t", "tag": "v1", "commit": "c1" * 20, "file": "prod/test.yaml",
+          "file_sha256": "f1" * 32}
+    world.cm_actions = world.cm_actions + [{**up, "services": [f"svc-{i}" for i in range(MAX_REPORTED_LINES + 5)]}]
+    result = world.adapter(tmp_path, encrypt=False).verify()
+    store = PinStore(tmp_path / "pins.yaml")
+    pending = store.stage(result)
+    others = [c for c in pending.components if c.startswith("reported-other: ")]
+    assert len(others) == MAX_REPORTED_LINES + 5 + 3                 # every service, in the pending pin
+    text = _near_pin_question(pending)
+    assert "svc-7 " not in text and "other services (listed in full by the command hermes confidential pins)" in text
+    listed = commands.pins_text(SimpleNamespace(pins=store, ledger=None))
+    for i in range(MAX_REPORTED_LINES + 5):
+        assert f"prod/test.yaml::svc-{i} v1 commit {'c1' * 20}" in listed

@@ -121,12 +121,13 @@ def instance_for(app_id: str) -> str:
 
 
 def events_for(app_id: str, instance_id: str | None = None) -> list[dict]:
-    """dstack's imr-3 boot events: app-id, compose-hash, instance-id, os-image-hash and key-provider, as
-    NEAR's reports carry them (payloads hex)."""
+    """dstack's ten imr-3 boot events, in the order NEAR's reports carry them (payloads hex)."""
     out = []
-    for name, payload in (("app-id", app_id), ("compose-hash", "ab" * 32),
-                          ("instance-id", instance_id or instance_for(app_id)), ("os-image-hash", OS_IMAGE_HASH),
-                          ("key-provider", KEY_PROVIDER_INFO.encode().hex())):
+    for name, payload in (("system-preparing", ""), ("app-id", app_id), ("compose-hash", "ab" * 32),
+                          ("instance-id", instance_id or instance_for(app_id)), ("boot-mr-done", ""),
+                          ("mr-kms", "6a" * 32), ("os-image-hash", OS_IMAGE_HASH),
+                          ("key-provider", KEY_PROVIDER_INFO.encode().hex()), ("storage-fs", "7a6673"),
+                          ("system-ready", "")):
         digest = hashlib.sha384(struct.pack("<I", 134217729) + b":" + name.encode() + b":" + bytes.fromhex(payload)).hexdigest()
         out.append({"imr": 3, "event_type": 134217729, "digest": digest, "event": name, "event_payload": payload})
     out.insert(0, {"imr": 0, "event_type": 2147483659, "digest": "00" * 48, "event": "", "event_payload": ""})
