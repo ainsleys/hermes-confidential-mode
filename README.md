@@ -211,6 +211,27 @@ except where noted.
 - [docs/DISCLOSURE.md](docs/DISCLOSURE.md): what the plugin touches on your machine and the network.
 - [docs/INTERFACES.md](docs/INTERFACES.md): how the plugin's modules fit together.
 
+## Prior work
+
+Five contributors tried to add confidential inference to Hermes core before this plugin. The
+maintainers closed each pull request asking for the work to arrive as a plugin instead. Their
+designs and findings shaped this one, and the guide's
+[comparison chapter](docs/GUIDE.md#comparison-with-earlier-approaches) sets each against what the
+plugin does now.
+
+- [#7045](https://github.com/NousResearch/hermes-agent/pull/7045) by aljazceru, April 2026: a Tinfoil
+  provider with a fail-closed design that this plugin keeps.
+- [#4231](https://github.com/NousResearch/hermes-agent/pull/4231) by elkimek, July 2026: Venice's
+  encrypted models, with client-side request encryption.
+- [#5015](https://github.com/NousResearch/hermes-agent/pull/5015) by Alex4Xu, July 2026: RedPill as a
+  provider.
+- [#12201](https://github.com/NousResearch/hermes-agent/pull/12201) by amiller, July 2026: NEAR AI and
+  Phala with TDX attestation and end-to-end encryption, the most complete of the five and the basis
+  for this plugin's NEAR checks. The same author maintains a
+  [public registry of TEE-verified inference providers](https://github.com/amiller/awesome-private-inference).
+- [#31613](https://github.com/NousResearch/hermes-agent/pull/31613) by KellenRenshaw, July 2026: a
+  Tinfoil provider and encrypted transport.
+
 ## Status
 
 Experimental. Built for the Nous Research Hermes plugin hackathon, November 2026.
