@@ -422,9 +422,22 @@ A `gateway` signature is made inside the gateway's CVM over `<request hash>:<res
   instances with different measured configurations. On 2026-11-07 NEAR served Qwen/Qwen3.8-27B from at
   least two instances whose measured docker-compose files differ, in an instance label and in a
   compose-manager image digest.
-- **What runs after launch is not measured here.** The model CVM's docker-compose starts a
-  compose-manager, which can apply further deployment actions after launch. NEAR returns a separate
-  attestation for it, and the plugin does not check that attestation.
+- **What runs after launch is not measured here.** The model CVM's docker-compose starts a service
+  called compose-manager. Compose-manager deploys further services after launch, from docker-compose
+  files in NEAR's public repository. NEAR returns a separate attestation for compose-manager: a log of
+  its deployment actions, with an Intel TDX quote. A TD (trust domain) is Intel's name for one TDX
+  virtual machine. The plugin checks that attestation, and a pass establishes three things. A TD of this
+  instance reported this actions log for this nonce. The log's hash is bound in a hardware quote. The per-service
+  deployment map the plugin derives from the log is what the operator's own tooling reported. A pass
+  does not establish that the docker-compose files deployed after launch are measured. A pass does not
+  establish that the reported services are the ones running. Two facts stand in the way.
+  - The running compose-manager is not the measured one. The measured docker-compose names one
+    compose-manager image. A launcher service replaces that image after boot, and the log records the
+    replacement's digest. On 2026-11-07 every instance the plugin saw ran a replacement.
+  - The deployed services hold the quote socket. The model proxies that compose-manager deploys run as
+    root and privileged, with the dstack socket (`/var/run/dstack.sock`) mounted. Any program that holds
+    that socket can get a quote of this TD over report data it chooses. Such a program could produce a
+    log that passes every check.
 - **The model CVM's patch level is not checked.** The plugin checks each model quote's signature
   chain to Intel's SGX root offline. It does not fetch Intel's TCB collateral for it, so the model CVM's
   TCB status, advisories and revocation are unknown. Only the gateway's TCB status is known, from
@@ -495,13 +508,24 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
 - It pins the measured docker-compose of the gateway and of every model instance it saw. A new
   instance with a different compose is a pin prompt. With two instances behind one model, you may be
   asked again when a later verification lands on the second instance.
+- The plugin checks the compose-manager attestation of every model report it accepts. While
+  `require_provider_tee` is true, a report without one is refused. The pin prompt shows what that
+  attestation reported, under a heading that says the report is not a measurement. The prompt lists the
+  services on the model's prompt path, which are the services a request for that model passes through, and the release
+  each one was deployed from. The plugin picks those services by name, from a list per model that it
+  ships. For a model not on that list it shows every service. The prompt also shows the running and the
+  measured compose-manager images. A running image that differs from the measured one is shown as a
+  mismatch. The mismatch is never counted as a pass, and it does not refuse the verification. A change
+  in these reported lines alone does not ask for a new pin.
 - The replay's `NOT_ESTABLISHED` list names every item above.
 
 **The change that would close it.** On NEAR's side: one signature chain from the model's bytes through
 the gateway to the bytes the client received; a signing key per instance, or the instance id inside
-the signed text; TCB status and GPU evidence bound to the model CVM's own quote. In the plugin: an
-approved-set pin that accepts any measured configuration a human has approved for this identity. That
-change is listed, not built.
+the signed text; TCB status and GPU evidence bound to the model CVM's own quote; each deployment after
+launch measured into the TD (for example extended into RTMR3), and the quote socket kept away from the
+services it deploys. In the plugin: an approved-set pin that accepts any measured configuration a human
+has approved for this identity, and that also covers the reported services and compose-manager images.
+That change is listed, not built.
 
 ## Smaller gaps, disclosed
 
