@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 PLUGIN_VERSION = "0.1.0"
-PLUGIN_COMMIT = "unpackaged"
+PLUGIN_COMMIT = "0babb6b"
 
 UNSTAMPED_SUFFIX = " (unstamped checkout)"
 
