@@ -237,7 +237,7 @@ def test_demo(world, monkeypatch):
     out = model_tools.handle_function_call("web_search", {"query": "acme merger"}, task_id="t1",
                                            session_id=SID, tool_call_id="call-ws-1")
     assert w.prompts == [("<web_search> (plugin approval rule)",
-                          "web_search wants to send ~1 KB of this conversation off the machine")]
+                          "Confidential mode: web_search wants to send ~1 KB of this conversation off the machine")]
     assert w.ran == [{"query": "acme merger"}] and json.loads(out) == {"results": ["fake"]}
     assert plugin.events()[-2:] == [("tool_asked", "ask"), ("tool_allowed", "once")]
     w.human("")

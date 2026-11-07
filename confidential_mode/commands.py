@@ -35,8 +35,34 @@ from . import revoke as _revoke
 from .tiers import Tier
 
 PROFILE_NAME = _locking.PROFILE_NAME
-USAGE = ("Usage: /confidential on <on-host-only|attested>|off|status|check [tier]|pins [approve|retire <fp>]|"
-         "receipts [session]|allow <tool>|revoke <tool>|revoke --all|watch")
+USAGE = ("Usage: /confidential on <on-host-only|attested>|off|status [--verbose]|check [tier]|"
+         "pins [approve|review|retire <fp>]|receipts [session]|allow <tool>|revoke <tool>|revoke --all|watch|"
+         "replay <receipt.json>|setup")
+#: Every verb of `hermes confidential`, in chat too (ux-pass-1 item 9). Verbs that need a terminal say so.
+HELP_LINES = (
+    ("on <on-host-only|attested>", "lock this profile (the preflight runs first)"),
+    ("off", "unlock, with the lock period's counts"),
+    ("status [--verbose]", "lock state, pins, verification, installed commit; --verbose adds the tool list"),
+    ("check [tier]", "the preflight table"),
+    ("pins", "approved pins, the pending pin, tool grants"),
+    ("pins approve", "approve the pending pin (asks you)"),
+    ("pins review", "terminal only: hermes confidential pins review (fetches the review bundle)"),
+    ("pins retire <fingerprint>", "remove one approved entry"),
+    ("receipts <session> [--json]", "a session receipt"),
+    ("allow <tool>", "let an off-host tool run without asking, for this lock (asks you)"),
+    ("revoke <tool> | revoke --all", "withdraw the grants confidential mode holds"),
+    ("watch", "the latest ledger rows (live: hermes confidential watch)"),
+    ("replay <receipt.json>", "terminal only: hermes confidential replay <receipt.json>"),
+    ("setup", "terminal only: hermes confidential setup [--vendor near] --model <id>"),
+)
+HELP = USAGE + "\n" + "\n".join(f"  {verb:<30} {what}" for verb, what in HELP_LINES)
+TERMINAL_ONLY = {
+    "replay": "Replay reads a receipt file, so it runs only as a command in a terminal: "
+              "hermes confidential replay <receipt.json>.",
+    "setup": "Setup verifies the enclave and asks you to approve the first pin, so it runs only as a command in "
+             "a terminal: hermes confidential setup [--vendor near] --model <model id>.",
+}
+NO_SUCH_SESSION = "No ledger rows for session"
 RECEIPTS_PLACEHOLDER = ("Receipts are not available in this build yet (confidential_mode.receipts is missing). "
                         "The raw ledger is visible with /confidential watch or `hermes confidential watch`.")
 
@@ -191,7 +217,41 @@ def _enclave_line(rt: Any) -> str:
         (f" [{source}]" if host and source else "")
 
 
-def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = time.time) -> str:
+def pending_pin_note(rt: Any) -> str:
+    """'' unless a pin update is waiting for approval. Said by the lock reply and by status, because a lock can
+    succeed on an approved instance while NEAR runs another instance of the same model that is pending: a
+    send NEAR routes to the pending instance is then refused."""
+    pins = getattr(rt, "pins", None)
+    try:
+        batches = pins.pending_all() if callable(getattr(pins, "pending_all", None)) else \
+            [p for p in [pins.pending()] if p] if pins is not None else []
+    except Exception:  # noqa: BLE001
+        return ""
+    if not batches:
+        return ""
+    vendors = ", ".join(sorted({str(getattr(b, "vendor", "?")) for b in batches}))
+    entries = sum(len(list(getattr(b, "entries", ()) or ())) or 1 for b in batches)
+    return (f"A pin update for {vendors} is pending ({entries} {'entry' if entries == 1 else 'entries'}). This "
+            "lock uses the approved builds; a send that reaches a build in the pending update is refused until "
+            "you approve it: hermes confidential pins review, then hermes confidential pins approve.")
+
+
+def data_paths_line(rt: Any) -> str:
+    """Both plugin data directories (README, "Where the plugin keeps its files")."""
+    try:
+        from .ledger import default_ledger_path
+        ledger_dir = str(default_ledger_path().parent)
+    except Exception:  # noqa: BLE001
+        ledger_dir = "(unavailable)"
+    try:
+        state_dir = str(rt.ctx.state.data_dir)
+    except Exception:  # noqa: BLE001
+        state_dir = "(unavailable)"
+    return f"Data: ledger and evidence in {ledger_dir}; lock, pins and tool grants in {state_dir}"
+
+
+def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = time.time,
+                verbose: bool = False) -> str:
     lines: list[str] = []
     locked = tier = None
     try:
@@ -237,12 +297,31 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
                          f"{counts.get('allowed', 0)} allowed")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"Breach: unknown ({type(exc).__name__})")
+    if locked is True and tier is Tier.ATTESTED:
+        note = pending_pin_note(rt)
+        if note:
+            lines.append(f"Locked with a pin pending: {note}")
     lines.extend(_grant_lines(rt, session_key))
     for step, err in getattr(rt, "errors", [])[:5]:
         lines.append(f"Plugin registration problem: {step}: {err}")
     lines.append(plugin_identity())
-    lines.append(f"Tools: {_locking.TOOLS_TEXT}")
-    lines.append(f"Limits: {_locking.AUX_TEXT} {_locking.SAFE_WORKER_TEXT}")
+    lines.append(data_paths_line(rt))
+    if not verbose:
+        lines.append("Details: hermes confidential status --verbose, docs/LIMITATIONS.md")
+        return "\n".join(lines)
+    lines.append(("While locked: " if locked is True else "When locked: ") + _locking.LOCK_TAIL)
+    if locked is True:
+        try:
+            from .gate_tools import format_allowlist
+            lines.append("Tools:\n" + format_allowlist(rt.allowlist()))
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"Tools: could not list ({type(exc).__name__})")
+        try:
+            report = _locking.run_tier_preflight(
+                tier, config=config, predicate=_locking.structural_predicate(tier, config=config))
+            lines.append("Preflight:\n" + _pf.format_report(report))
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"Preflight: could not run ({type(exc).__name__})")
     return "\n".join(lines)
 
 
@@ -305,6 +384,11 @@ def interactive_attested_ok(rt: Any, wait_seconds: float = INTERACTIVE_VERIFY_WA
 
 
 def check_text(rt: Any, tier: Optional[str]) -> str:
+    return check_result(rt, tier)[0]
+
+
+def check_result(rt: Any, tier: Optional[str]) -> tuple[str, bool]:
+    """(the preflight table, whether it passed). `hermes confidential check` exits 1 unless it passed."""
     try:
         locked, locked_tier = rt.is_locked()
     except Exception:  # noqa: BLE001
@@ -313,11 +397,11 @@ def check_text(rt: Any, tier: Optional[str]) -> str:
     try:
         t = Tier(chosen)
     except ValueError:
-        return f"Unknown tier {chosen!r} (one of: {', '.join(x.value for x in Tier)})."
+        return f"Unknown tier {chosen!r} (one of: {', '.join(x.value for x in Tier)}).", False
     if t is Tier.ZDR:
-        return f"zero-retention: {_locking.ZDR_REASON}."
+        return f"zero-retention: {_locking.ZDR_REASON}.", False
     report = _locking.run_tier_preflight(t, config=rt.load_config(), attested_ok=interactive_attested_ok(rt))
-    return _pf.format_report(report)
+    return _pf.format_report(report), report.ok is True
 
 
 def receipts_text(rt: Any, session: str, *, fmt: str = "text") -> str:
@@ -329,6 +413,13 @@ def receipts_text(rt: Any, session: str, *, fmt: str = "text") -> str:
         return RECEIPTS_PLACEHOLDER
     if not session:
         return "Usage: /confidential receipts <session id> [--json] (no current session id here)"
+    try:
+        known = bool(rt.ledger.session(session))
+    except Exception:  # noqa: BLE001 - an unreadable ledger is reported by render itself
+        known = True
+    if not known:
+        return (f"{NO_SUCH_SESSION} {session!r}. Check the id: hermes confidential watch shows recent rows "
+                "with their session ids.")
     import inspect
     try:
         sig_params = inspect.signature(render).parameters
@@ -396,19 +487,22 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
     except ValueError:
         argv = (raw_args or "").split()
     if not argv or argv[0] in ("help", "-h", "--help"):
-        return USAGE
+        return HELP
     cmd, rest = argv[0].lower(), argv[1:]
+    if cmd in TERMINAL_ONLY:
+        return TERMINAL_ONLY[cmd]
     sid, skey, surface = session_id or "", session_key or session_id or "", platform or ""
     if cmd in ("on", "lock"):
         if len(rest) != 1:
             return "Usage: /confidential on <on-host-only|attested>"
         result = _locking.lock(rest[0], state=rt.state, ledger=rt.ledger, config=rt.load_config(),
                                allowlist_path=rt.allowlist_path, session_id=sid, surface=surface,
-                               attested_ok=interactive_attested_ok(rt))
+                               attested_ok=interactive_attested_ok(rt), progress=getattr(rt, "progress", None))
         if result.ok:
             rt.set_allowlist(result.allowlist)
-            if show_report and result.report is not None:
-                return result.message + "\n\nPreflight:\n" + _pf.format_report(result.report)
+            note = pending_pin_note(rt) if result.tier is Tier.ATTESTED else ""
+            if note:
+                return f"{result.message}\n{note}"
         return result.message
     if cmd in ("off", "unlock"):
         # Amendment 4 F6 (W4): allow grants are scoped to the lock. Second review, minor item: the file is
@@ -425,7 +519,9 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
         rt.set_allowlist(None)
         return result.message
     if cmd == "status":
-        return status_text(rt, session_key=skey)
+        if rest not in ([], ["--verbose"], ["-v"]):
+            return "Usage: /confidential status [--verbose]"
+        return status_text(rt, session_key=skey, verbose=bool(rest))
     if cmd == "check":
         return check_text(rt, rest[0] if rest else None)
     if cmd == "pins":
@@ -488,7 +584,7 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
                 "switch, then lock again.")
     if cmd == "watch":
         return watch_text(rt) + "\n(live view: `hermes confidential watch` in a terminal)"
-    return USAGE
+    return HELP
 
 
 def _approve_flags(args: list) -> dict:
@@ -551,8 +647,8 @@ def register_slash(ctx: Any, rt: Any) -> None:
 
     ctx.register_command("confidential", confidential,
                          description="Confidential mode: lock, unlock, status, pins, receipts, allow, revoke, watch",
-                         args_hint="on <tier>|off|status|check|pins [approve|retire <fp>]|receipts|allow <tool>|"
-                                   "revoke <tool>|revoke --all|watch")
+                         args_hint="help|on <tier>|off|status|check|pins [approve|review|retire <fp>]|receipts|"
+                                   "allow <tool>|revoke <tool>|revoke --all|watch|replay|setup")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────────────────────
@@ -596,14 +692,17 @@ class TerminalAsker:
 
 
 # Default Tinfoil models for the printed config block (setup never writes config).
-DEFAULT_VISION_MODEL = "gemma4-31b"          # vision-capable; the main chat models are text-only
+# Tinfoil's model list (https://docs.tinfoil.sh/models/chat.md, read 2026-11-06; the SDK carries no model
+# table) gives image input for gemma4-31b, kimi-k3-1-pro and deepseek-v4-1-flash. gemma4-31b is the default
+# vision model because it works beside any main model, including the text-only ones (llama3-3-70b).
+DEFAULT_VISION_MODEL = "gemma4-31b"
 DEFAULT_AUX_MODEL = "deepseek-v4-1-flash"    # cheaper model for short side jobs
 #: Short auxiliary jobs that do not need the main model (titles, summaries, classification, rewrites).
 CHEAP_AUX_TASKS = ("title_generation", "compression", "approval", "mcp", "memory_query_rewrite",
                    "tts_audio_tags", "group_router", "profile_describer", "monitor", "triage_specifier")
 _GROUP_COMMENTS = {
     "vision": "# vision: a vision-capable model; Hermes describes inbound images through this task even "
-              "without a tool call, and the main model is text-only",
+              "without a tool call. A main model that accepts images (kimi-k3-1-pro does) can serve vision too",
     "cheap": "# short side jobs (titles, compression, approval checks, MCP helpers, query rewrites): a cheaper "
              "attested model is enough",
     "main": "# tasks that reason over the whole conversation or act for you: the main model",
@@ -1110,15 +1209,21 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
         return 1 if status == _revoke.FAILED else 0
     else:
         raw, ok_prefix = f"allow {shlex.quote(args.tool)}", ""
-    text = handle_slash(rt, raw, session_id="", session_key="cli", platform="cli", asker=asker,
-                        show_report=(action == "on"))
+    from .progress import for_cli
+    previous = getattr(rt, "progress", None)
+    rt.progress = for_cli()        # this command runs in a terminal a person is watching
+    try:
+        text = handle_slash(rt, raw, session_id="", session_key="cli", platform="cli", asker=asker,
+                            show_report=(action == "on"))
+    finally:
+        rt.progress = previous
     out.write(text.rstrip() + "\n")
     if action == "allow":
         return 0 if text.endswith("added to the allowlist for this lock.") or text.endswith("is already allowed.") else 1
     if ok_prefix:
         # `pins approve` with nothing pending is a no-op, not a failure
         return 0 if text.startswith(ok_prefix) or text.startswith("No pin update is waiting") else 1
-    if action == "receipts" and text.startswith(("Receipts are not available", "Usage")):
+    if action == "receipts" and text.startswith(("Receipts are not available", "Usage", NO_SUCH_SESSION)):
         return 1
     return 0
 
@@ -1126,7 +1231,7 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
 def register_cli(ctx: Any, rt: Any) -> None:
     def setup_fn(parser: argparse.ArgumentParser) -> None:
         sub = parser.add_subparsers(dest="confidential_action")
-        p = sub.add_parser("setup", help="verify the Tinfoil enclave, approve the first pin, print a config block")
+        p = sub.add_parser("setup", help="verify the Tinfoil enclave (or, with --vendor near, NEAR AI Cloud), approve the first pin, print a config block")
         p.add_argument("--model", default=None, help="model id to put in the printed config block")
         p.add_argument("--vision-model", default=None,
                        help=f"vision-capable model for auxiliary.vision (default {DEFAULT_VISION_MODEL}; with "
@@ -1141,7 +1246,9 @@ def register_cli(ctx: Any, rt: Any) -> None:
         p = sub.add_parser("watch", help="stream the ledger (works unlocked)")
         from . import watch
         watch.setup_parser(p)
-        sub.add_parser("status", help="lock state, pins, verification, breaches")
+        p = sub.add_parser("status", help="lock state, pins, verification, breaches, installed commit")
+        p.add_argument("--verbose", "-v", action="store_true",
+                       help="also the full disclosure, the locked tool list and the preflight table")
         p = sub.add_parser("on", help="lock this profile (same path as /confidential on)")
         p.add_argument("tier", choices=[t.value for t in Tier])
         sub.add_parser("off", help="unlock this profile and print the lock period's counts")
@@ -1190,15 +1297,16 @@ def register_cli(ctx: Any, rt: Any) -> None:
             if action in CLI_VERBS:
                 return cli_verb(rt, action, args)
             if action == "check":
-                print(check_text(rt, getattr(args, "tier", None)))
-                return 0
+                text, ok = check_result(rt, getattr(args, "tier", None))
+                print(text)
+                return 0 if ok else 1
             if action == "watch":
                 from . import watch
                 watch.run(rt.ledger, once=getattr(args, "once", False), limit=getattr(args, "limit", 50),
                           interval=getattr(args, "interval", 1.0))
                 return 0
             if action == "status":
-                print(status_text(rt))
+                print(status_text(rt, verbose=bool(getattr(args, "verbose", False))))
                 return 0
             print("Usage: hermes confidential setup|check|watch|status|on <tier>|off|receipts <session>|"
                   "pins [approve|review|retire <fp>]|allow <tool>|revoke <tool>|revoke --all|replay <receipt.json>")

@@ -31,7 +31,7 @@ OR_CONFIG_TAIL = """\
 
 def _locked_on_host(plugin):
     out = plugin.slash("on on-host-only")
-    assert out.startswith("Locked (on-host-only)"), out
+    assert out.startswith("Locked to this machine (on-host-only)"), out
     return out
 
 

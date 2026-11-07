@@ -30,7 +30,7 @@ def _locked(plugin, near):
     assert plugin.slash("on attested").startswith("Not locked")
     _approve(plugin)
     out = plugin.slash("on attested")
-    assert out.startswith("Locked."), out
+    assert out.startswith("Locked to "), out
 
 
 def test_a_turn_during_a_background_capture_is_not_delayed_and_the_next_turn_uses_the_new_verification(

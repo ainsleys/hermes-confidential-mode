@@ -211,10 +211,13 @@ def test_unlocked_turn_is_observed_and_sent(plugin, monkeypatch):
 
 def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeypatch):
     out = plugin.slash("on on-host-only")
-    assert out.startswith("Locked (on-host-only). Model: custom/llama3 at 127.0.0.1"), out
-    assert "ask you first, each call" in out and "Memory: on-host. Fallbacks: none." in out
-    assert "safe-worker" in out and "recorded after the fact" in out
-    assert "on-host (runs without asking)" in out and "web_search" in out
+    # ux-pass-1 item 4: one line; the disclosure, the tool list and the preflight are in status --verbose.
+    assert out == ("Locked to this machine (on-host-only), custom/llama3 at 127.0.0.1. Off-host tools ask first. "
+                   "Details: hermes confidential status, docs/LIMITATIONS.md"), out
+    verbose = plugin.slash("status --verbose")
+    assert "ask you first, each call" in verbose and "Memory: on-host. Fallbacks: none." in verbose
+    assert "safe-worker" in verbose and "recorded after the fact" in verbose
+    assert "on-host (runs without asking)" in verbose and "web_search" in verbose and "Preflight:" in verbose
     rec = Rec()
     agent = build_agent(monkeypatch, rec, ON_HOST_URL)
     result = agent.run_conversation("summarise the board minutes")
@@ -406,7 +409,7 @@ def test_locked_web_search_asks_and_runs_only_on_exact_once(plugin, monkeypatch)
         call(i)
     assert ran == []
     assert len(plugin.prompts) == 4
-    assert plugin.prompts[0][1] == "web_search wants to send ~2 KB of this conversation off the machine"
+    assert plugin.prompts[0][1] == "Confidential mode: web_search wants to send ~2 KB of this conversation off the machine"
     plugin.human("once")
     out = call(9)
     assert ran == [{"query": "q" * 1500}] and json.loads(out) == {"ok": "web_search"}

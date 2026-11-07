@@ -239,18 +239,33 @@ def _default_verification(provider: str):
         return None
 
 
+#: Who runs the model on the attested tier, by profile (the one-line lock confirmation names the vendor).
+VENDOR_NAMES = {PROFILE_NAME: "Tinfoil", NEAR_PROFILE_NAME: "NEAR AI Cloud"}
+LOCK_DETAILS = "Off-host tools ask first. Details: hermes confidential status, docs/LIMITATIONS.md"
+
+
+def short_age(seconds: float | None) -> str:
+    """"4 s" under 90 seconds, else age_text ("3m", "2h")."""
+    if seconds is None:
+        return "never"
+    s = max(0, int(seconds))
+    return f"{s} s" if s < 90 else age_text(s)
+
+
 def lock_message(tier: Tier, config: Mapping, *, verification: Any = None,
                  clock: Callable[[], float] = time.time) -> str:
+    """The one-line lock confirmation (ux-pass-1 item 4). The full disclosure paragraph, LOCK_TAIL, is in
+    `hermes confidential status --verbose` and docs/LIMITATIONS.md."""
     provider, model, base_url = _main_route(config)
-    route = f"{provider or '?'}/{model or '?'}"
     if tier is Tier.ATTESTED:
         verified_at = getattr(verification, "verified_at_host_clock", None)
         host = getattr(verification, "enclave_host", "") or host_of(base_url)
-        age = age_text(clock() - verified_at) if isinstance(verified_at, (int, float)) else "never"
-        head = f"Locked. Model: {route} at {host or '(enclave unresolved)'}, verified {age} ago (host clock)."
-    else:
-        head = f"Locked ({tier.value}). Model: {route} at {host_of(base_url) or '(provider default)'} (on-host endpoint)."
-    return f"{head} {LOCK_TAIL}"
+        when = (f"verified {short_age(clock() - verified_at)} ago" if isinstance(verified_at, (int, float))
+                else "not verified yet")
+        vendor = VENDOR_NAMES.get(provider, provider or "?")
+        return f"Locked to {vendor}, {model or '?'} at {host or '(enclave unresolved)'}; {when}. {LOCK_DETAILS}"
+    return (f"Locked to this machine ({tier.value}), {provider or '?'}/{model or '?'} at "
+            f"{host_of(base_url) or '(provider default)'}. {LOCK_DETAILS}")
 
 
 # ── live main runtime (Amendment 4 F1) ───────────────────────────────────────────────────────────
@@ -318,7 +333,7 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
          verification: Callable[[str], Any] | None = None, session_id: str = "", surface: str = "",
          live_runtime: Callable[[], Optional[dict]] | None = None,
          cached_environments: Callable[[], list] | None = None,
-         clock: Callable[[], float] = time.time) -> LockResult:
+         clock: Callable[[], float] = time.time, progress: Any = None) -> LockResult:
     """Lock the profile to ``tier`` or refuse with the reason. Never raises for a refusal."""
     try:
         tier = Tier(tier)
@@ -396,7 +411,7 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
         # Built-in tools self-register on import; a `hermes confidential on` process never imported them,
         # and an allowlist built from that registry would classify nothing (every tool blocked later).
         from .gate_tools import ensure_builtin_tools
-        ensure_builtin_tools()
+        ensure_builtin_tools(progress)
     if allowlist_builder is None:
         from .gate_tools import build_allowlist as allowlist_builder
     from .gate_tools import format_allowlist
@@ -430,7 +445,7 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
         kind="lock", purpose="lock", provider=provider, model=model, host=host_of(base_url), verdict="in_tier",
         decision="locked", detail={"fingerprint": report.fingerprint, "routes": routes,
                                    "aux_tasks": len(report.aux_tasks)}, **base))
-    return LockResult(True, message + "\n\nTools:\n" + allowlist_text, tier=tier, report=report,
+    return LockResult(True, message, tier=tier, report=report,
                       allowlist=allowlist, allowlist_text=allowlist_text, fingerprint=report.fingerprint)
 
 

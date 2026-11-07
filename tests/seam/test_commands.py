@@ -151,6 +151,11 @@ def test_receipts_delegate_to_w6_render(plugin, monkeypatch):
     receipts = _sub(plugin, "receipts")
     doc = json.loads(plugin.slash("receipts sess-1 --json"))
     assert receipts.verify_chain(doc)
+    # ux-pass-1 item 8: an id with no ledger rows is an error, not an empty receipt.
+    assert plugin.slash("receipts nosuchsession").startswith("No ledger rows for session 'nosuchsession'")
+    proc = _hermes(plugin, "receipts", "nosuchsession")
+    assert proc.returncode == 1 and proc.stdout.startswith("No ledger rows for session"), proc.stdout + proc.stderr
+    plugin.rt.ledger.append({"kind": "session_start", "session_id": "sess-cur", "purpose": "session"})
     fake = types.ModuleType("receipts")
     fake.render = lambda ledger, session: f"RECEIPT {session}"          # an older two-argument render
     monkeypatch.setitem(sys.modules, f"{plugin.mod.__name__}.confidential_mode.receipts", fake)
@@ -220,14 +225,16 @@ def test_attested_lock_message_and_refusal_reason_without_network(plugin, monkey
     monkeypatch.setattr(provider, "attested_ok", lambda name: verdict["v"])
     plugin.cfg.write_text(ATTESTED_CONFIG)
     out = plugin.slash("on attested")
-    assert out.startswith("Not locked") and "no approved enclave build pinned" in out
+    assert out.startswith("Not locked") and "approve the pending pin: hermes confidential pins approve" in out
     verdict["v"] = tiers.Verdict(True, "attested enclave verified and pinned", "router.tinfoil.invalid")
     entry = provider.verification_cache.entry("attested-tinfoil")
     entry.result, entry.verified_mono = _result(plugin), time.monotonic()
+    monkeypatch.setenv("TINFOIL_API_KEY", "test-key")
     out = plugin.slash("on attested")
-    assert out.startswith("Locked. Model: attested-tinfoil/llama3-3-70b at router.tinfoil.invalid, verified 4")
-    assert "ago (host clock). Tools that send data off this machine" in out and "Fallbacks: none." in out
+    assert out == ("Locked to Tinfoil, llama3-3-70b at router.tinfoil.invalid; verified 42 s ago. Off-host tools "
+                   "ask first. Details: hermes confidential status, docs/LIMITATIONS.md"), out
     assert "LOCKED (attested)" in plugin.slash("status")
+    assert "Fallbacks: none." in plugin.slash("status --verbose")
 
 
 def test_gateway_model_switch_is_refused_while_locked(plugin):
@@ -522,7 +529,7 @@ def _setup_block(plugin, capsys, *argv):
     return out, hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Then run")])
 
 
-def test_setup_block_gives_vision_and_side_jobs_suitable_models(plugin, capsys):
+def test_setup_block_gives_vision_and_side_jobs_suitable_models(plugin, capsys, monkeypatch):
     out, cfg = _setup_block(plugin, capsys, "--model", "llama3-3-70b")
     aux = cfg["auxiliary"]
     assert cfg["model"] == {"provider": "attested-tinfoil", "default": "llama3-3-70b"}
@@ -537,7 +544,8 @@ def test_setup_block_gives_vision_and_side_jobs_suitable_models(plugin, capsys):
     assert "confidential:" not in out                          # --no-verify resolved no host
     out, cfg = _setup_block(plugin, capsys, "--model", "m", "--vision-model", "v", "--aux-model", "a")
     assert cfg["auxiliary"]["vision"]["model"] == "v" and cfg["auxiliary"]["title_generation"]["model"] == "a"
-    # The printed block passes the attested preflight structurally (no network).
+    # The printed block passes the attested preflight structurally (no network), with the key set.
+    monkeypatch.setenv("TINFOIL_API_KEY", "test-key")
     locking = _sub(plugin, "locking")
     report = locking.run_tier_preflight("attested", config=cfg,
                                         predicate=locking.structural_predicate("attested", config=cfg))
@@ -573,8 +581,9 @@ def test_cli_on_and_off_in_another_process_govern_the_running_gateway(plugin, mo
     from ._harness import Rec
     proc = _hermes(plugin, "on", "on-host-only")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.startswith("Locked (on-host-only)") and "Preflight:" in proc.stdout
-    assert "confidential preflight: tier=on-host-only PASS" in proc.stdout
+    assert proc.stdout.startswith("Locked to this machine (on-host-only)") and len(proc.stdout.splitlines()) == 1
+    verbose = _hermes(plugin, "status", "--verbose")
+    assert "confidential preflight: tier=on-host-only PASS" in verbose.stdout and "Tools:" in verbose.stdout
     tiers = _sub(plugin, "tiers")
     assert plugin.rt.state.locked() == (True, tiers.Tier.ON_HOST)
     rec = Rec()
@@ -694,7 +703,7 @@ def test_cli_verbs_parse(plugin):
     assert parser.parse_args(["off"]).confidential_action == "off"
 
 
-def test_near_setup_block_routes_vision_through_near_with_the_plaintext_note(plugin, capsys):
+def test_near_setup_block_routes_vision_through_near_with_the_plaintext_note(plugin, capsys, monkeypatch):
     """Amendment 9: image parts leave as plaintext to NEAR's gateway beside the encrypted text, so `setup
     --vendor near` routes auxiliary.vision through attested-near again, with a NEAR vision model and a note."""
     out, cfg = _setup_block(plugin, capsys, "--vendor", "near", "--model", "Qwen/Qwen3.8-27B")
@@ -707,6 +716,7 @@ def test_near_setup_block_routes_vision_through_near_with_the_plaintext_note(plu
     assert out.index("auxiliary.vision goes through attested-near") < out.index("# Add to config.yaml")
     assert "each image leaves" in out and "in plaintext to NEAR's gateway" in out
     assert "#   vision: {provider: attested-tinfoil, model: gemma4-31b}" in out
+    monkeypatch.setenv("NEAR_AI_API_KEY", "test-key")
     locking = _sub(plugin, "locking")
     report = locking.run_tier_preflight("attested", config=cfg,
                                         predicate=locking.structural_predicate("attested", config=cfg))

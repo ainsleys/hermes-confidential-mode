@@ -85,7 +85,7 @@ def test_attested_near_profile_is_registered_without_network(plugin):
 
 def test_lock_needs_a_human_approved_pin_then_a_turn_is_signed_and_ledgered(plugin, near):
     out = plugin.slash("on attested")
-    assert out.startswith("Not locked") and "no approved enclave build pinned" in out
+    assert out.startswith("Not locked") and "approve the pending pin: hermes confidential pins approve" in out
     pending = plugin.rt.pins.pending()
     assert pending.vendor == "near" and pending.router_repo == f"{HOST}#{MODEL}"
     assert pending.components and pending.components[0].startswith("gateway compose sha256:")
@@ -106,7 +106,7 @@ def test_lock_needs_a_human_approved_pin_then_a_turn_is_signed_and_ledgered(plug
     assert "  `  prod/test.yaml::proxy-test v0.0.2 commit " + "c2" * 20 in tail and "(the two differ)" in tail
     assert consent.REPORTED_NOT_PINNED in tail and "reported: " not in asked[0]
     out = plugin.slash("on attested")
-    assert out.startswith(f"Locked. Model: attested-near/{MODEL} at {HOST}"), out
+    assert out.startswith(f"Locked to NEAR AI Cloud, {MODEL} at {HOST}; verified "), out
 
     import run_agent
     agent = run_agent.AIAgent(model=MODEL, provider="attested-near", api_key="sk-near-seam", base_url=BASE,
@@ -422,7 +422,7 @@ def test_an_image_to_near_while_locked_is_disclosed_once_per_lock_and_the_reply_
     from hermes_cli.plugins import invoke_hook
     assert plugin.slash("on attested").startswith("Not locked")
     _approve(plugin)
-    assert plugin.slash("on attested").startswith("Locked.")
+    assert plugin.slash("on attested").startswith("Locked to ")
     client = providers.get_provider_profile("attested-near").create_client(api_key="sk-near-seam", base_url=BASE)
     sendctx = _sub(plugin, "sendctx")
     msg = [{"role": "user", "content": [{"type": "text", "text": "Describe this"}, IMAGE_PART]}]
@@ -451,7 +451,7 @@ def test_an_image_to_near_while_locked_is_disclosed_once_per_lock_and_the_reply_
     assert "1 image part(s) left this host in plaintext to NEAR's gateway" in text
     # A new lock notices again.
     plugin.slash("off")
-    assert plugin.slash("on attested").startswith("Locked.")
+    assert plugin.slash("on attested").startswith("Locked to ")
     with sendctx.send_context(session_id="sess-img", purpose="aux:vision", tier="attested"):
         client = providers.get_provider_profile("attested-near").create_client(api_key="sk-near-seam", base_url=BASE)
         client.chat.completions.create(model=MODEL, messages=msg)
@@ -470,7 +470,7 @@ def test_image_parts_refuse_is_in_tier_and_shown_and_refuses_images(plugin, near
     assert item.verdict == "in_tier" and item.value_redacted == "refuse"
     assert plugin.slash("on attested").startswith("Not locked")
     _approve(plugin)
-    assert plugin.slash("on attested").startswith("Locked.")
+    assert plugin.slash("on attested").startswith("Locked to ")
     client = providers.get_provider_profile("attested-near").create_client(api_key="sk-near-seam", base_url=BASE)
     with pytest.raises(Exception):
         client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": [IMAGE_PART]}])
