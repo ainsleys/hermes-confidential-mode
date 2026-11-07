@@ -507,21 +507,32 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   that carries one is refused before it is sent. With encryption
   off, the send is not refused, because the response has already arrived when the signature is
   fetched.
-- It pins the measured docker-compose of the gateway and of every model instance it saw. It also pins
-  each one's app_id, OS image and KMS key as RTMR3 records them. A new instance with a different
-  compose, app_id, OS image or KMS key is a pin prompt. With two instances behind one model, you may be
-  asked again when a later verification lands on the second instance.
+- It pins each CVM it saw as an entry of its own: the gateway, and each model instance. An entry pins
+  the CVM's measured docker-compose, its app_id, OS image and KMS key as RTMR3 records them, and its
+  firmware and kernel measurements. A model entry also pins the compose-manager image the log reports.
+  The approved entries form a set. A verification passes when every CVM it reports matches an
+  approved entry, so a new instance with another configuration is a pin prompt. Approving adds to the
+  set. An entry no verification has matched for 20 verifications is flagged, and `hermes confidential
+  pins retire` removes it. The set only grows unless you retire entries, so an instance NEAR stopped
+  running stays approved until you do.
 - The plugin checks the compose-manager attestation of every model report it accepts. While
   `require_provider_tee` is true, a report without one is refused. The pin prompt shows what that
   attestation reported, under a heading that says the report is not a measurement. The plugin records
   every service in the log, with the release each one was deployed from. The prompt lists first the
   services that a per-model name list, shipped with the plugin, names for that model. Such a list can
   miss services, so every other service follows. A long list is folded into a count, and the command
-  `hermes confidential pins` prints every line. The prompt does not say which services hold the quote
-  socket or run privileged: the log does not say, and the plugin does not fetch the deployed
-  docker-compose files. The prompt also shows the compose-manager image the log reports and the image
-  the measured docker-compose names. Both images are recorded and never scored, because the log is the
-  operator's report. A change in these reported lines alone does not ask for a new pin.
+  `hermes confidential pins` prints every line.
+- The service map is pinned only together with its socket tags. The verification itself never fetches
+  anything from GitHub. `hermes confidential pins review` fetches each deployed docker-compose file the
+  map names from NEAR's public repository at the logged commit, and keeps it only when its SHA-256
+  equals the log's `file_sha256`. From those files it tags every service that holds `dstack.sock` or
+  `docker.sock`, runs privileged or as root, or is built from `dockerfile_inline` or from an image not
+  pinned by digest. Once every file of an entry is kept, the entry pins its whole service map and the
+  prompt shows the tags. Until then the prompt says the tags are unavailable, names the command, and
+  shows the map for review only. The tags describe the files at the logged commits. They do not show
+  what runs, because what runs after launch is not measured (above).
+- The commit author and date in the review bundle come from GitHub's API and are not signed. A
+  reviewer can use them as a hint about who published a change, not as proof.
 - Vendor strings from the log are shown escaped. A control character or an escape sequence appears as a
   visible backslash escape, and its line is tagged. The ledger, the pins file and the receipt JSON keep
   the raw bytes.
@@ -536,9 +547,8 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
 the gateway to the bytes the client received; a signing key per instance, or the instance id inside
 the signed text; TCB status and GPU evidence bound to the model CVM's own quote; each deployment after
 launch measured into the TD (for example extended into RTMR3), and the quote socket kept away from the
-services it deploys. In the plugin: an approved-set pin that accepts any measured configuration a human
-has approved for this identity, and that also covers the reported services and compose-manager images.
-That change is listed, not built.
+services it deploys. In the plugin: the approved-set pin is built (section 15 covers who may approve
+it). The model key is still not part of a pin.
 
 ## 15. An agent with a terminal can reach the approval prompt
 

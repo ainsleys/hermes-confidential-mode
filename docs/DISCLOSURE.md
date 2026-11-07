@@ -85,6 +85,14 @@ When you use the `attested-near` provider (NEAR AI Cloud), the plugin itself con
 | `cloud-api.near.ai` (or `confidential.near.base_url`) | The plugin's NEAR adapter. | `/v1/attestation/report` and `/v1/attestation/ita-token` with a fresh nonce, without an API key (NEAR documents them as public). Then your inference requests, and `/v1/signature/<id>` for each response, both with `NEAR_AI_API_KEY`, over connections pinned to the TLS key the gateway's quote binds. TLS ends inside NEAR's gateway CVM. With `confidential.near.encrypt` on (the default), chat message text, tool definitions and tool calls reach the gateway encrypted to the attested model key (PyNaCl, `pynacl==1.6.*`); the gateway still reads the model id, the plaintext parameters, the request headers, sizes and timing, and can read a reply by swapping the client key header, which the plugin detects afterwards and records as unverified. With encryption off it reads every request it routes. |
 | `portal.trustauthority.intel.com` (`/certs`) | The plugin's NEAR adapter. | Intel Trust Authority's token-signing keys. The adapter never fetches keys from a URL the vendor names; the key chain must end at a pinned Intel root. |
 
+Only when you run `hermes confidential pins review` (never during a verification or a send), the plugin
+also contacts the hosts below. It sends no key, no prompt and nothing from the ledger.
+
+| Host | Who calls it | What for |
+|---|---|---|
+| `raw.githubusercontent.com` | `pins review`. | Each docker-compose file a NEAR model CVM's deployment log names, at `nearai/cvm-compose-files/<commit>/<file>`. Only a 40-digit commit and a plain repository path are ever put in the URL. The text is kept only when its SHA-256 equals the log's. |
+| `api.github.com` | `pins review`. | The author, date and message of each of those commits, as unsigned metadata for the reviewer. |
+
 ### When it verifies again
 
 The plugin verifies the router again in three situations:
@@ -97,6 +105,10 @@ The plugin verifies the router again in three situations:
 ### What it does not contact
 
 The plugin itself calls no other host. It sends no telemetry and no usage data anywhere.
+
+The plugin sets one environment variable in the Hermes process, `CONFIDENTIAL_MODE_TOOL_PROCESS=1`,
+before the first tool runs, so that every tool subprocess inherits it. The terminal approval prompt
+refuses to ask in a process that has it (docs/LIMITATIONS.md, section 15).
 
 ### What those hosts can see even when everything works
 
@@ -137,7 +149,8 @@ Everything the plugin writes is under your Hermes home, scoped to the profile.
 |---|---|
 | `plugin-data/confidential-mode/ledger.sqlite` | The ledger. It holds one row per observed send, refusal, question, answer, lock, unlock, session start and session end, verification (with the captured attestation evidence), pin event, breach and compaction. Rows hold hosts, byte counts, verdicts and decisions only. That is still a metadata trail, and a shared receipt shares it. Rows hold no prompt or response text. `Ledger.append` rejects any row whose details carry one of these keys at any depth: `messages`, `prompt`, `prompts`, `request`, `input`, `instructions`, `system`, `content` or `contents`. |
 | `plugin-data/agent-plugin-confidential-mode-<digest>/state.json` | `ctx.state`, Hermes' per-plugin key-value store. It holds the locked flag, the tier, the time of locking, the routing-config fingerprint and the list of breached sessions. |
-| The same directory, `pins.yaml` | The approved enclave pins and at most one pending pin. The plugin writes a pending pin when a verification finds a build that does not match your pin. It turns a pending pin into an approved pin only on an explicit Approve from you. The one exception is the platform-only policy, `confidential.pins.auto_approve_platform_only`, which is off by default. |
+| The same directory, `pins.yaml` | Version 3 of the pins file: for each vendor and identity, the approved entries and the pending entries. The plugin writes a pending entry when a verification finds a CVM or build that no approved entry covers. It turns pending entries into approved entries only on an explicit Approve from you. The one exception is the platform-only policy, `confidential.pins.auto_approve_platform_only`, which is off by default and applies to Tinfoil only. Beside it: `pins.yaml.lock` (empty; it serialises writes between processes) and, after an upgrade, `pins.yaml.v2.bak` (the version-2 file as it was before the first version-3 write). |
+| The same directory, `pins/composes/` | Written only by `hermes confidential pins review`: the docker-compose files it fetched, each named `<sha256>.yaml` by its content hash, and `commit-<sha>.json` with each commit's GitHub metadata. |
 | The same directory, `allowlist.yaml` | This lock's tool identities: each tool's name, toolset, handler module and handler name. It also holds the tools you allowed with `/confidential allow`, tagged with the lock's identity. After a restart, the plugin rebuilds the allowlist from this file. `/confidential off` deletes it, so additions never outlive the lock. |
 | The same directory, `tinfoil_user_cache_secret` | A random 32-byte secret, stored as hex with file mode 0600. The SDK sends it as `user_cache_secret`, which keeps Tinfoil's prompt cache separate for you. The SDK's own default location is `~/.tinfoil/user_cache_secret`. The plugin never uses that path. |
 | The same directory, `trust-roots/<sha256>.json` | The Sigstore trust root used at verification. Each distinct trust root is stored once, named by the hash of its content. The evidence in the ledger also carries the trust root's bytes, so a receipt replays offline on any machine. The evidence records no local path. |

@@ -514,13 +514,65 @@ NEAR signs the id it received and refuses aliases from this plugin.
 ### Pins for NEAR
 
 A pin for NEAR is keyed by the gateway host and the list of allowed models, for example
-`cloud-api.near.ai#Qwen/Qwen3.8-27B`. The code fingerprint covers the docker-compose file of the
-gateway and of every model server the report showed. The enclave fingerprint covers the firmware and
-kernel measurements of the same CVMs.
+`cloud-api.near.ai#Qwen/Qwen3.8-27B`. That key is the **identity**. A NEAR pin is a set of approved
+**entries**, one for each CVM configuration you approved. An entry belongs to one CVM: the gateway, or
+one instance of a model.
 
-A change to either fingerprint is refused until you approve it with `/confidential pins approve`, as
-for Tinfoil. NEAR may run one model on several CVMs with different docker-compose files. You may
-therefore be asked again when a later check reaches another CVM.
+An entry pins named **components** of its CVM. For the gateway these are the docker-compose file, the
+app_id, the OS image and the KMS key. For a model they are the same four, plus the compose-manager image
+that the CVM's deployment log reports. Each entry also pins the CVM's firmware and kernel measurements.
+A model entry pins the CVM's whole **service map** (the services the log says were deployed after
+launch) only when the plugin can show which of those services hold the quote socket. Showing that needs
+the deployed docker-compose files, which `hermes confidential pins review` fetches (see below). Until then,
+the map is shown for review only.
+
+A verification passes when every CVM it reports matches an approved entry. A CVM that matches none
+becomes a pending entry, and the attested tier refuses until you approve it with `/confidential pins
+approve`. One prompt lists every pending entry, and the whole approved set. Approving adds the pending
+entries to the set; approving never removes an entry. NEAR runs one model on several CVMs with different
+configurations, so the set grows as you meet them. An entry that no verification has matched for 20
+verifications is flagged in the prompt. To remove such an entry, run `hermes confidential pins retire
+<fingerprint>` with 8 or more hex digits of its code or enclave fingerprint.
+
+The first verification after upgrading to this version asks for NEAR again, once. Version 3 of the pins
+file names each CVM's components, so the earlier NEAR pin no longer describes the same thing. A Tinfoil
+pin keeps working unchanged.
+
+### Reviewing a pending pin
+
+```
+hermes confidential pins review          # numbered text lines
+hermes confidential pins review --json   # the same bundle as JSON
+hermes confidential pins approve --reviewed-by <name> --note "<verdict>"
+```
+
+`pins review` builds a **review bundle**: everything a reviewer needs to judge each pending entry. You
+run the command yourself, in a terminal you opened. You can hand the bundle to another agent, in a fresh session
+that has no access to the locked profile. For each NEAR entry the bundle holds:
+
+- the old and the new value of every component, and the verified signing address old and new;
+- the measured docker-compose fields beyond images (`allowed_envs`, `pre_launch_script`, the manifest
+  flags, `GITHUB_REPO`, `CM_MIN_TAG_AGE_HOURS`), with a unified diff;
+- the compose-manager image the log reports beside the measured one;
+- the service map old and new;
+- each deployed docker-compose file named in the map. The command fetches each file from
+  `github.com/nearai/cvm-compose-files` at the logged commit, checks its SHA-256 against the log, and
+  keeps the file under `pins/composes/` in the plugin's data directory. A file the command cannot fetch is marked "text
+  not fetched", with its link;
+- for every service, tags: holds `dstack.sock` or `docker.sock`, privileged, runs as root, built from
+  `dockerfile_inline`, image not pinned by digest;
+- the commit author and date from GitHub (unsigned metadata);
+- a brief: fixed rules, fixed questions, and a required answer format of one verdict per question with
+  cited line numbers.
+
+A Tinfoil entry keeps its release and compare links. Every vendor string is shown escaped.
+
+Once every deployed docker-compose file of an entry is fetched, the entry pins its service map too. The
+pending entry then changes, so approve after the review, not before. `--reviewed-by` and `--note` are
+recorded on the approved entries. An approval from a chat surface records no reviewer.
+
+The reviewer must never run a `confidential` command. While you are locked, the plugin enforces part
+of that rule. [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 15, says how and what remains.
 
 ### Setup
 
@@ -838,6 +890,8 @@ separately.
 
 A pin with no matching `pin_applied` row in the ledger is refused, with the message "pin has no
 consent record". This means that a pin some other code wrote straight into `pins.yaml` does not count.
+Each approved entry needs a row of its own. After `pins retire`, the ledger holds a `pin_retired` row
+for the entry, and a later copy of that entry written back by hand does not count either.
 
 This raises the bar. It is not a wall. Other code in the same process could forge the ledger row as
 well.
@@ -1334,6 +1388,12 @@ After installing, do the following.
    see the attested provider, and the preflight refuses to lock.
 
 ### Upgrading
+
+This version writes the pins file as version 3. Before the first write over a version-2 file it saves
+the old file as `pins.yaml.v2.bak` beside it. Your Tinfoil pin and any pending Tinfoil pin carry over
+unchanged; NEAR asks once (see "Pins for NEAR"). To go back to the previous plugin version, stop Hermes
+and copy `pins.yaml.v2.bak` over `pins.yaml`. The previous version cannot read a version-3 file, and
+this version never writes version 2.
 
 Restart every Hermes process that loads the plugin after you upgrade it: the gateway, and any CLI or
 TUI session. Do this before you lock or unlock from any of them. The lock records a fingerprint of
