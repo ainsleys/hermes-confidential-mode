@@ -214,7 +214,7 @@ Signed responses: every POST to `/chat/completions` or `/responses` through the 
 
 ## Amendment 5.1 (2026-11-07): NEAR request encryption, the per-send TLS pin, the model-key binding
 
-Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only. Amendment 6 holds the codebase-review fixes; W12 takes 7.
+Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only. Amendment 6 holds the codebase-review fixes; W12 takes 7. This amendment closes Amendment 6's open findings 1 (per-send TLS pin), 7 (one key across candidates) and 11 (non-chat POSTs); finding 19 (the adapter lock held across a capture) stays open.
 
 - New file `verify/near_e2ee.py`: NEAR E2EE version 2 (docs.near.ai/cloud/guides/e2ee-chat-completions,
   read 2026-11-07), `seal`, `open`, `encrypt_request`, `decrypt_response`, `available`, `ClientKey`.
@@ -263,13 +263,14 @@ Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only.
   signing_address`, 32 bytes of lower-case hex. `appraise` refuses a model whose verified candidates name
   different keys; equal keys are one signer (`model_signers` lists unique keys). `Appraisal.cvms` and
   `claims.cvms` record role, app_id, instance_id, compose_hash and signer per CVM.
-- `send_signed` detail gains `encrypted`, `encrypted_fields` (paths with `[]` for indices),
-  `encrypted_field_count`, `dropped_fields`, `plaintext_keys` (top-level keys that left in plaintext,
-  by name), `encryption_version`, `client_pub`, `model_pub`, `reply_released`, `withheld_reason`.
-- Receipts: `near_sends[]` gains `encrypted`, `encrypted_fields`, `encryption_version`, `model_pub`; a
+- `send_signed` detail gains `near_e2ee` (NEAR's request encryption was applied; distinct from the
+  Tinfoil EHBP flag `encrypted` on `send_observed`, Amendment 6), `e2ee_fields` (paths with `[]` for
+  indices), `e2ee_field_count`, `dropped_fields`, `plaintext_keys` (top-level keys that left in plaintext,
+  by name), `e2ee_version`, `client_pub`, `model_pub`, `reply_released`, `withheld_reason`.
+- Receipts: `near_sends[]` gains `near_e2ee`, `e2ee_fields`, `e2ee_version`, `model_pub`; a
   receipt with an encrypted send must carry `near_encryption_note` (a constant; `verify_chain` fails a
   receipt that holds an encrypted send without it). `near_sends[]` also gains `plaintext_keys`,
-  `reply_released` and `withheld_reason`. `replay_receipt` sends gain `encrypted`. `replay_near.NOT_ESTABLISHED` gains two items.
+  `reply_released` and `withheld_reason`. `replay_receipt` sends gain `near_e2ee`. `replay_near.NOT_ESTABLISHED` gains two items.
 - Preflight (attested tier, any attested-near route, auxiliary fallback chains included): `<route>.api_mode`
   must be chat completions; `confidential.near.encrypt` and `confidential.near.require_tls_binding` must
   be absent or exactly true, and on in the running adapter; `confidential.near.encryption_library` is

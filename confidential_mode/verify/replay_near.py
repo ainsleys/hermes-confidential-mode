@@ -190,6 +190,6 @@ def replay_receipt(doc: Mapping, *, quote_verifier=None, ita_roots=None) -> dict
         tee = bool(res["verdict"] == "pass" and (res.get("signature") or {}).get("provider_tee_verified"))
         sends.append({"row": row.get("id"), "chat_id": d.get("chat_id"), "kind": res["kind"],
                       "verdict": res["verdict"], "reason": res["reason"], "provider_tee": tee,
-                      "encrypted": d.get("encrypted") is True})
+                      "near_e2ee": d.get("near_e2ee") is True})
     return {"sends": sends, "all_pass": all(s["verdict"] == "pass" for s in sends),
             "fully_attested": bool(sends) and all(s["provider_tee"] for s in sends)}

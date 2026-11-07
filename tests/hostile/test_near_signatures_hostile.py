@@ -75,7 +75,7 @@ def test_encrypted_response_is_withheld_unless_provider_tee_verifies(tmp_path, m
         client.chat.completions.create(model=MODEL, messages=MSG)
     assert isinstance(ei.value, openai.OpenAIError) and "withheld" in str(ei.value)
     (row,) = rows
-    assert row["verdict"] == "unverified" and row["detail"]["encrypted"] is True
+    assert row["verdict"] == "unverified" and row["detail"]["near_e2ee"] is True
     assert row["detail"]["fully_attested"] is False
 
 

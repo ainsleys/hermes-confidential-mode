@@ -1366,10 +1366,12 @@ The plugin's own keys live under a top-level `confidential:` section of `config.
 | `confidential.near.base_url` | `https://cloud-api.near.ai/v1` | NEAR AI Cloud's gateway. Attestation, inference and signature requests all go here. |
 | `confidential.near.models` | `[]` | Every NEAR model id Hermes may send. The plugin adds the ids that `model.default` and `auxiliary.<task>.model` name for `attested-near`. The pin covers exactly this list. |
 | `confidential.near.require_provider_tee` | `true` | A NEAR send counts as verified only with a signature made by an attested model server's key. Only the exact value `false` turns it off. |
-| `confidential.near.require_tls_binding` | `true` | The TLS certificate of the attestation connection must be the certificate the gateway's report binds. |
+| `confidential.near.require_tls_binding` | `true` | The TLS certificate of the attestation connection must be the certificate the gateway's report binds. Every inference and signature connection is checked against it right after the handshake, before any request byte is sent. The attested-tier lock is refused unless it is absent or exactly `true`. |
+| `confidential.near.encrypt` | `true` | Encrypt every chat request to the attested model's key (NEAR's encryption, version 2, all fields). A reply is decrypted only after a verified `provider_tee` signature. Needs `pynacl`. The attested-tier lock is refused unless it is absent or exactly `true`. |
+| `confidential.near.reverify_backoff_seconds` | 30 | At most one re-attestation per this many seconds after an HTTP 421 or a TLS pin mismatch on a send. |
 | `confidential.near.accepted_tcb_statuses` | `[UpToDate]` | The Intel TCB status values accepted for the gateway, from Intel Trust Authority's token. |
 | `confidential.near.signature_wait_seconds` | 5 | How many seconds the plugin keeps asking for a response's signature after the response ended. |
-| `confidential.near.streaming` | `false` | Whether Hermes may stream main calls to NEAR. NEAR's gateway re-signs streamed responses with its own key. |
+| `confidential.near.streaming` | `false` | Whether Hermes may stream main calls to NEAR. NEAR's gateway re-signs streamed responses with its own key. No effect while `encrypt` is on: streaming is then refused. |
 | `confidential.near.context_length` | 65536 | The context window reported to Hermes for `attested-near`. |
 
 ## Tests

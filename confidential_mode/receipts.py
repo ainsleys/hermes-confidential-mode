@@ -405,9 +405,9 @@ def _near_sends(rows: list[dict], evidence: list[dict]) -> tuple[list[dict], dic
                     "replay_verdict": rep.get("verdict"), "replay_reason": rep.get("reason"),
                     "fully_attested": bool(live_tee and rep.get("verdict") == "pass" and rep.get("provider_tee")),
                     "require_provider_tee": d.get("require_provider_tee") is not False,
-                    "encrypted": d.get("encrypted") is True,
-                    "encrypted_fields": list(d.get("encrypted_fields") or []),
-                    "encryption_version": d.get("encryption_version"), "model_pub": d.get("model_pub"),
+                    "near_e2ee": d.get("near_e2ee") is True,
+                    "e2ee_fields": list(d.get("e2ee_fields") or []),
+                    "e2ee_version": d.get("e2ee_version"), "model_pub": d.get("model_pub"),
                     "plaintext_keys": list(d.get("plaintext_keys") or []),
                     "reply_released": d.get("reply_released"), "withheld_reason": d.get("withheld_reason")})
     summary = {"sends": len(out), "fully_attested": all(s["fully_attested"] for s in out),
@@ -634,7 +634,7 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, on_host_extra_ho
         doc["sections"]["near_sends"] = near_sends
         doc["header"]["near"] = near_summary
         doc["near_closing"] = NEAR_CLOSING
-        if any(c.get("encrypted") for c in near_sends):
+        if any(c.get("near_e2ee") for c in near_sends):
             doc["near_encryption_note"] = NEAR_ENCRYPTION_NOTE
     leaks = forbidden_keys_in(doc)
     if leaks:  # unreachable after _redact; kept as the last line of defence
@@ -674,7 +674,7 @@ def verify_chain(receipt_json: str | Mapping) -> bool:
         if "near_encryption_note" in doc and doc.get("near_encryption_note") != NEAR_ENCRYPTION_NOTE:
             return False
         encrypted_send = any(r.get("kind") == "send_signed" and isinstance(r.get("detail"), dict)
-                             and r["detail"].get("encrypted") is True for r in rows)
+                             and r["detail"].get("near_e2ee") is True for r in rows)
         if encrypted_send and doc.get("near_encryption_note") != NEAR_ENCRYPTION_NOTE:
             return False   # the caveat cannot be stripped from a receipt that holds an encrypted send
         return doc.get("closing") == CLOSING_PARAGRAPH
@@ -922,8 +922,8 @@ def render_text(doc: Mapping) -> str:
             add(f"      response sha256 {_p(c['response_sha256']) or '(none: body incomplete)'}")
             if c["live_reason"] or c["replay_reason"]:
                 add(f"      {_p(c['replay_reason'] or c['live_reason'])}")
-            if c.get("encrypted"):
-                add(f"      request body sent as ciphertext for fields {_p(', '.join(c['encrypted_fields'])) or '(none)'} "
+            if c.get("near_e2ee"):
+                add(f"      request body sent as ciphertext for fields {_p(', '.join(c['e2ee_fields'])) or '(none)'} "
                     f"(plugin self-report); encrypted to model key {_p(c.get('model_pub')) or '?'} (plugin self-report)")
                 if c.get("plaintext_keys"):
                     add(f"      left in plaintext besides the model id: {_p(', '.join(c['plaintext_keys']))}")

@@ -204,13 +204,13 @@ def test_a_locked_turn_leaves_encrypted_and_the_receipt_separates_self_report_fr
     assert near.chat_bodies and all(b"SEAM-SECRET-PROMPT" not in b for b in near.chat_bodies)
     assert any("SEAM-SECRET-PROMPT" in json.dumps(r) for r in near.decrypted_requests)
     row = [e for e in plugin.rt.ledger.tail(0) if e.kind == "send_signed"][-1]
-    assert row.detail["encrypted"] is True and "messages[].content" in row.detail["encrypted_fields"]
+    assert row.detail["near_e2ee"] is True and "messages[].content" in row.detail["e2ee_fields"]
     text = plugin.slash(f"receipts {agent.session_id}")
     assert "request body sent as ciphertext for fields messages[].content" in text
     assert "(plugin self-report)" in text and "signature verified over the ciphertext digests (third-party checkable)" in text
     doc = json.loads(plugin.slash(f"receipts {agent.session_id} --json"))
     send = doc["sections"]["near_sends"][-1]
-    assert send["encrypted"] is True and send["model_pub"] == plugin.rt.near_adapter.model_public_key(MODEL)
+    assert send["near_e2ee"] is True and send["model_pub"] == plugin.rt.near_adapter.model_public_key(MODEL)
 
 
 @pytest.mark.parametrize("extra,key", [

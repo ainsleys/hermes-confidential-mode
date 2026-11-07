@@ -81,7 +81,7 @@ def test_live_encrypted_unstreamed_send_is_provider_tee_verified_over_ciphertext
                                               max_tokens=200)
     assert out.choices[0].message.content is not None or getattr(out.choices[0].message, "reasoning_content", None)
     d = rows[-1]["detail"]
-    assert d["encrypted"] is True and d["encrypted_fields"] == ["messages[].content"] and d["encryption_version"] == 2
+    assert d["near_e2ee"] is True and d["e2ee_fields"] == ["messages[].content"] and d["e2ee_version"] == 2
     assert rows[-1]["decision"] == "provider_tee" and rows[-1]["verdict"] == "verified", d["check"]
     assert d["fully_attested"] is True and d["tls_matches_attested"] is True
     assert d["model_pub"] == ad.model_public_key(MODEL)
@@ -104,8 +104,8 @@ def test_live_tool_call_round_trip(adapter):
              {"role": "tool", "tool_call_id": call.id, "content": '{"temp_c": 18, "sky": "clear"}'}]
     second = c.chat.completions.create(model=MODEL, messages=msgs, tools=tools, max_tokens=400)
     assert second.choices[0].finish_reason in ("stop", "length")
-    assert all(r["verdict"] == "verified" and r["detail"]["encrypted"] for r in rows[-2:])
-    assert "messages[].tool_calls[].function.arguments" in rows[-1]["detail"]["encrypted_fields"]
+    assert all(r["verdict"] == "verified" and r["detail"]["near_e2ee"] for r in rows[-2:])
+    assert "messages[].tool_calls[].function.arguments" in rows[-1]["detail"]["e2ee_fields"]
 
 
 def test_live_image_part_is_refused_before_sending(adapter):

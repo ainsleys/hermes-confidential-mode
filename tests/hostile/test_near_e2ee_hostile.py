@@ -59,9 +59,9 @@ def test_encrypted_round_trip_no_plaintext_on_the_wire_and_provider_tee_over_cip
     assert int(hdr["content-length"]) == len(wire)                   # no stale Content-Length
     (row,) = rows
     d = row["detail"]
-    assert row["verdict"] == "verified" and d["fully_attested"] is True and d["encrypted"] is True
+    assert row["verdict"] == "verified" and d["fully_attested"] is True and d["near_e2ee"] is True
     assert d["request_sha256"] == __import__("hashlib").sha256(wire).hexdigest()   # digest of the ciphertext
-    assert d["encrypted_fields"] == ["messages[].content"] and d["encryption_version"] == 2
+    assert d["e2ee_fields"] == ["messages[].content"] and d["e2ee_version"] == 2
     assert d["client_pub"] == hdr["x-client-pub-key"] and d["model_pub"] == ad.model_public_key(MODEL)
     json.dumps(row)                                                     # ledger-shaped, no key material
     assert "secret" not in json.dumps(d).lower()
@@ -90,7 +90,7 @@ def test_tool_call_round_trip(tmp_path):
     for b in world.chat_bodies:
         assert b"get_weather" not in b and b"TOOL-RESULT" not in b and b"Paris" not in b
     assert all(r["verdict"] == "verified" for r in rows)
-    assert "messages[].tool_calls[].function.arguments" in rows[1]["detail"]["encrypted_fields"]
+    assert "messages[].tool_calls[].function.arguments" in rows[1]["detail"]["e2ee_fields"]
 
 
 def test_async_view_round_trip(tmp_path):
@@ -101,7 +101,7 @@ def test_async_view_round_trip(tmp_path):
         c = openai.AsyncOpenAI(api_key="sk-x", base_url=BASE, http_client=ad.async_http_for_loop(), max_retries=0)
         return await c.chat.completions.create(model=MODEL, messages=MSG)
     assert asyncio.run(go()).choices[0].message.content == "NEAR-FAKE-REPLY"
-    assert rows[0]["detail"]["encrypted"] is True and rows[0]["verdict"] == "verified"
+    assert rows[0]["detail"]["near_e2ee"] is True and rows[0]["verdict"] == "verified"
     assert b"PLAINTEXT-SECRET-PROMPT" not in world.chat_bodies[0]
 
 
@@ -363,7 +363,7 @@ def test_transport_error_after_send_gets_a_row(tmp_path):
     with pytest.raises(openai.APITimeoutError):
         client.chat.completions.create(model=MODEL, messages=MSG)
     (row,) = rows
-    assert row["detail"]["encrypted"] is True and row["detail"]["reply_released"] is False
+    assert row["detail"]["near_e2ee"] is True and row["detail"]["reply_released"] is False
     assert "transport error (ReadTimeout)" in row["detail"]["signature"]["reason"]
     assert row["detail"]["response_sha256"] is None
 

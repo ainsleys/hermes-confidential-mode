@@ -902,7 +902,7 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
             mark = "OK" if snd["verdict"] == "pass" else snd["verdict"].upper()
             tee = "provider_tee" if snd["provider_tee"] else (snd["kind"] or "no signature")
             enc = ("  signature verified over the ciphertext digests (third-party checkable); request "
-                   "encrypted (plugin self-report)") if snd.get("encrypted") and snd["verdict"] == "pass" else ""
+                   "encrypted (plugin self-report)") if snd.get("near_e2ee") and snd["verdict"] == "pass" else ""
             out.write(f"  Row #{snd['row']}: {mark}  {tee}  id {snd['chat_id'] or '(none)'}"
                       f"{'' if snd['verdict'] == 'pass' else '  ' + str(snd['reason'] or '')}{enc}\n")
             signed_failed += 0 if snd["verdict"] == "pass" else 1

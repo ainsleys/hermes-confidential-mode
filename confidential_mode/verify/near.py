@@ -992,13 +992,13 @@ class NearAdapter:
             "verify_code_fingerprint": ex.code_fingerprint, "tls_spki_sha256": ex.tls_spki_sha256,
             "tls_matches_attested": ex.tls_matches,
             # Request encryption (plugin self-report): which fields left as ciphertext, to which model key.
-            "encrypted": ex.encrypted,
-            "encrypted_fields": list((ex.e2ee_report or {}).get("encrypted_fields") or []),
-            "encrypted_field_count": (ex.e2ee_report or {}).get("encrypted_count", 0),
+            "near_e2ee": ex.encrypted,
+            "e2ee_fields": list((ex.e2ee_report or {}).get("encrypted_fields") or []),
+            "e2ee_field_count": (ex.e2ee_report or {}).get("encrypted_count", 0),
             "dropped_fields": list((ex.e2ee_report or {}).get("dropped_fields") or []),
             # Top-level keys that left in plaintext (names only), besides model and messages' roles and ids.
             "plaintext_keys": list((ex.e2ee_report or {}).get("plaintext_keys") or []),
-            "encryption_version": (ex.e2ee_report or {}).get("encryption_version") if ex.encrypted else None,
+            "e2ee_version": (ex.e2ee_report or {}).get("encryption_version") if ex.encrypted else None,
             "client_pub": ex.client_key.public_hex if ex.client_key is not None else None,
             "model_pub": ex.model_pub,
             "hashing": "sha256 of the exact request body; sha256 of the response body as received after content "
