@@ -38,6 +38,8 @@ KINDS = frozenset({
     # Amendment 9: something the user is told about, without a refusal (decision names it; today
     # "image_plaintext": the first image part of a lock left as plaintext to NEAR's gateway).
     "notice",
+    # Amendment 10: `revoke <tool>` / `revoke --all` removed tool grants confidential mode wrote.
+    "grant_revoked",
 })
 
 # Keys that carry conversation content in the provider request shapes Hermes sends

@@ -84,6 +84,9 @@ def fill_every_kind(led: Ledger, sid: str = SID) -> None:
                    detail={"vendor": "tinfoil", "code_fingerprint": "c2" * 32, "raw_pick": "approve"}))
     led.append(_ev("pin_retired", provider="tinfoil", decision="retire", surface="cli",
                    detail={"vendor": "tinfoil", "code_fingerprint": "c0" * 32, "enclave_fingerprint": "e0" * 32}))
+    led.append(_ev("grant_revoked", purpose="tool:web_search", decision="revoke", surface="cli",
+                   detail={"tool": "web_search", "lock_id": "100.0|fp", "surface": "cli",
+                           "removed": {"allowlist": [], "command_allowlist": ["web_search"], "session": []}}))
     led.append(_ev("breach", purpose="aux:compression", provider="openrouter", host="openrouter.ai", bytes=900,
                    detail={"reason": "compression summary sent off-tier"}))
     led.append(_ev("compaction", purpose="compaction", provider="attested-tinfoil", host="r1.tinfoil.invalid",

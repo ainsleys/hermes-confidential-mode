@@ -51,7 +51,7 @@ CLOCK_LABEL = "(host clock)"
 
 # Kinds that describe the profile, not one session: included in every session receipt they overlap.
 PROFILE_KINDS = frozenset({"lock", "unlock", "verify_ok", "verify_fail", "pin_staged", "pin_applied",
-                           "pin_denied", "pin_retired", "preflight_fail"})
+                           "pin_denied", "pin_retired", "preflight_fail", "grant_revoked"})
 VERIFICATION_KINDS = ("verify_ok", "verify_fail", "pin_staged", "pin_applied", "pin_denied", "pin_retired")
 REFUSAL_KINDS = ("send_refused", "tool_refused", "preflight_fail")
 ANSWER_KINDS = ("tool_allowed", "tool_refused")

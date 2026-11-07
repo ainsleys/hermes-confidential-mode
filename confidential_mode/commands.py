@@ -31,11 +31,12 @@ from typing import Any, Callable, Optional
 
 from . import preflight as _pf
 from . import locking as _locking
+from . import revoke as _revoke
 from .tiers import Tier
 
 PROFILE_NAME = _locking.PROFILE_NAME
 USAGE = ("Usage: /confidential on <on-host-only|attested>|off|status|check [tier]|pins [approve|retire <fp>]|"
-         "receipts [session]|allow <tool>|watch")
+         "receipts [session]|allow <tool>|revoke <tool>|revoke --all|watch")
 RECEIPTS_PLACEHOLDER = ("Receipts are not available in this build yet (confidential_mode.receipts is missing). "
                         "The raw ledger is visible with /confidential watch or `hermes confidential watch`.")
 
@@ -469,6 +470,13 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
                               platform=surface)
         except ConsentContextError as exc:
             return f"Not asked: {exc}"
+    if cmd == "revoke":
+        # Amendment 9 (U06): narrows only, so no consent prompt and no self-approval refusal.
+        if rest == ["--all"]:
+            return _revoke.revoke(rt, None, revoke_all=True, session_id=sid, surface=surface)[1]
+        if len(rest) != 1 or rest[0].startswith("-"):
+            return "Usage: /confidential revoke <tool>|--all"
+        return _revoke.revoke(rt, rest[0], session_id=sid, surface=surface)[1]
     if cmd == "blocked":       # pre_gateway_dispatch rewrites a locked /model (or /moa) to this
         what = rest[0] if rest else "that command"
         if rest[1:2] == ["unresolved"]:
@@ -542,8 +550,9 @@ def register_slash(ctx: Any, rt: Any) -> None:
             return f"confidential: error ({type(exc).__name__}: {exc})"
 
     ctx.register_command("confidential", confidential,
-                         description="Confidential mode: lock, unlock, status, pins, receipts, allow, watch",
-                         args_hint="on <tier>|off|status|check|pins [approve|retire <fp>]|receipts|allow <tool>|watch")
+                         description="Confidential mode: lock, unlock, status, pins, receipts, allow, revoke, watch",
+                         args_hint="on <tier>|off|status|check|pins [approve|retire <fp>]|receipts|allow <tool>|"
+                                   "revoke <tool>|watch")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────────────────────
@@ -1053,11 +1062,11 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
     return 1 if (failed or signed_failed or not chain_ok) else 0
 
 
-CLI_VERBS = ("on", "off", "receipts", "pins", "allow")
+CLI_VERBS = ("on", "off", "receipts", "pins", "allow", "revoke")
 
 
 def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> int:
-    """`hermes confidential on|off|receipts|pins|allow`: the slash verbs on the same ctx.state, ledger,
+    """`hermes confidential on|off|receipts|pins|allow|revoke`: the slash verbs on the same ctx.state, ledger,
     pins and allowlist files as a running gateway (state is re-read from disk on every gate call, so a lock
     or unlock here takes effect on the gateway's next turn). Consent uses the exact-match TerminalAsker."""
     out = out or sys.stdout
@@ -1090,6 +1099,15 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
                 if getattr(args, attr, None):
                     raw += f" {flag} {shlex.quote(str(getattr(args, attr)))}"
         ok_prefix = "Pinned" if pa == "approve" else ""
+    elif action == "revoke":
+        tool, every = getattr(args, "tool", None), bool(getattr(args, "all", False))
+        if every == bool(tool):
+            out.write("Usage: hermes confidential revoke <tool> | --all\n")
+            return 2
+        changed, text = (_revoke.revoke(rt, None, revoke_all=True, surface="cli") if every
+                         else _revoke.revoke(rt, tool, surface="cli"))
+        out.write(text.rstrip() + "\n")
+        return 0 if changed or text.startswith("Nothing to revoke") else 1
     else:
         raw, ok_prefix = f"allow {shlex.quote(args.tool)}", ""
     text = handle_slash(rt, raw, session_id="", session_key="cli", platform="cli", asker=asker,
@@ -1142,6 +1160,9 @@ def register_cli(ctx: Any, rt: Any) -> None:
                        help="for retire: the identity (host#models) when one entry is approved under several")
         p = sub.add_parser("allow", help="allow an off-host tool for this lock (asks on this terminal)")
         p.add_argument("tool")
+        p = sub.add_parser("revoke", help="withdraw the allow or 'always' grant confidential mode holds for a tool")
+        p.add_argument("tool", nargs="?", default=None)
+        p.add_argument("--all", action="store_true", help="withdraw every grant confidential mode holds")
         p = sub.add_parser("replay", help="replay a receipt's attestation evidence offline")
         p.add_argument("receipt", help="receipt JSON (/confidential receipts <session> --json)")
         p.add_argument("--expected-repo", default=DEFAULT_EXPECTED_REPO,
@@ -1180,7 +1201,7 @@ def register_cli(ctx: Any, rt: Any) -> None:
                 print(status_text(rt))
                 return 0
             print("Usage: hermes confidential setup|check|watch|status|on <tier>|off|receipts <session>|"
-                  "pins [approve|review|retire <fp>]|allow <tool>|replay <receipt.json>")
+                  "pins [approve|review|retire <fp>]|allow <tool>|revoke <tool>|revoke --all|replay <receipt.json>")
             return 2
         except Exception as exc:  # noqa: BLE001
             print(f"confidential: error ({type(exc).__name__}: {exc})", file=sys.stderr)

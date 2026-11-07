@@ -69,6 +69,7 @@ class Runtime:
         self.errors: list[tuple[str, str]] = []
         self._allowlist: Any = None
         self._allowlist_stamp: Any = None
+        self.revocations: Any = None             # revoke.RevocationWatcher (Amendment 9)
         self._lock = threading.Lock()
         self._aux_seen: deque = deque(maxlen=512)
         self.last_live: Optional[dict] = None      # last live main runtime seen by pre_llm_call (status)
@@ -111,6 +112,8 @@ class Runtime:
         another process approved (allowlist.yaml changed, same lock) are merged in. After a restart, or a
         lock made by another process, it is rebuilt from the identities persisted at that lock and ledgered."""
         gt = _cm("gate_tools")
+        if self.revocations is not None:   # a revoke made in another process, before any grant is read
+            self.revocations.apply()
         try:
             locked, tier = self.is_locked()
         except Exception:  # noqa: BLE001
@@ -172,8 +175,9 @@ class Runtime:
 
 
 def _merge_added(allowlist: Any, path: Any, lock_id: str) -> None:
-    """Pull human-approved additions another process persisted for the SAME lock into ``allowlist``.
-    Only names still on the ask route count; a file for another lock adds nothing."""
+    """Take the human-approved additions persisted for the SAME lock as ``allowlist.added``: additions
+    another process approved are added, and names another process revoked (Amendment 9) are dropped.
+    Only names still on the ask route count; a file for another lock changes nothing."""
     import json
     try:
         data = json.loads(open(path, encoding="utf-8").read())
@@ -185,7 +189,7 @@ def _merge_added(allowlist: Any, path: Any, lock_id: str) -> None:
     names = {n for n in data["allowed"] if isinstance(n, str)
              and getattr(allowlist.tools.get(n), "route", None) is route_ask}
     with allowlist._lock:
-        allowlist.added |= names
+        allowlist.added = names
 
 
 class _ChangedConfigPredicate:
@@ -263,6 +267,18 @@ def _register(rt: Runtime) -> None:
     def data_paths():
         rt.allowlist_path = ctx.state.data_dir / "allowlist.yaml"
     _step(rt, "data_paths", data_paths)
+
+    def revocations():
+        rv = _cm("revoke")
+
+        def drop_added(tools):
+            al = rt._allowlist
+            if al is not None:
+                with al._lock:
+                    al.added -= {n for n in al.added if tools is None or n in tools}
+        rt.revocations = rv.RevocationWatcher(rv.revocations_path(rt.allowlist_path), drop_added=drop_added)
+        rt.revocations.baseline()
+    _step(rt, "revocations", revocations)
 
     def provider_profile():
         provider = _cm("provider")
