@@ -1013,7 +1013,10 @@ is `True` or `n/a`.
 - `tls_cert_binding` checks that the TLS certificate captured on the EHBP connection carries the
   TLS public key the report commits to, and that its subject alternative names bind the HPKE key and
   the attestation hash. A pass means the TLS connection ended inside the attested router. A row
-  captured before the plugin recorded certificates reads n/a.
+  captured before the plugin recorded certificates reads n/a. A certificate whose key is not the
+  report's TLS key also reads n/a, not fail. The check is a record: EHBP seals each request body to
+  the attested HPKE key whoever ends the TLS connection, and the SDK's transport is what enforces the
+  TLS key on every connection.
 - `policy_check` re-runs the plugin's own restated Sigstore policy check, the standalone file named
   above, over the captured bundle. It is independent of the vendor SDK.
 - `sev_check` re-verifies an AMD SEV-SNP report with the plugin's own standalone checker: the
