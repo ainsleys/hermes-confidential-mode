@@ -1,6 +1,6 @@
 # Hermes Confidential Mode guide
 
-This guide is the long form of the [README](../README.md). It covers how the plugin works, what each
+This guide is the long form of the [README](../README.md). The guide covers how the plugin works, what each
 tier accepts, how pins, receipts and replay work, and every command and config key. Each chapter ends
 with a short "Limits" note; [LIMITATIONS.md](LIMITATIONS.md) is the complete list of limits, and
 [DISCLOSURE.md](DISCLOSURE.md) lists what the plugin touches on your machine and on the network.
@@ -38,7 +38,7 @@ provider for the main chat covers the first road and nothing else.
    helpers, memory query rewriting, background review, the curator, the monitor, the goal judge, the
    group router, the kanban decomposer, TTS audio tags, voice chat and more. Each job is a separate
    request carrying some of your text, routed under `auxiliary.<task>`. The default route, `auto`,
-   follows your main provider. Vision's `auto` route tries OpenRouter, then Nous, then DeepInfra
+   sends the task to your main provider first, then to your fallbacks. Vision's `auto` route tries OpenRouter, then Nous, then DeepInfra
    when the main model can't take images, and Hermes describes an image that arrives through the
    gateway with the vision task even when no tool is called.
 4. **Tools.** Web search and fetch, the browser, messaging, media tools, other plugins' tools and
@@ -106,7 +106,7 @@ requests are Hermes #4231 (Venice), #5015 (RedPill), #7045 (Tinfoil), #12201 (NE
 | Build pins with a human's consent | No | No | No | Partial | No | Yes: one entry per NEAR virtual machine configuration |
 | Review bundle for a second reviewer | No | No | No | No | No | Yes |
 | Model signing key bound to the report | Yes | No | No | Yes | No | Yes, not pinned |
-| TLS bound to the attested key on every send | No | No | Yes | Partial | Partial | Yes |
+| TLS bound to the attested key on every send | No | No | Yes | Partial | Partial | Partial: pinned per send on NEAR; recorded, not pinned, on Tinfoil |
 | Check of what NEAR deploys after launch | No | No | No | Yes | No | Yes: the operator's reported log, bound in a hardware quote, not a measurement |
 | NVIDIA GPU evidence | No | No | No | Yes | No | No |
 | Request body encryption | Partial | No | No | Partial | Yes | Yes: whole body on Tinfoil; all fields NEAR covers |
@@ -134,7 +134,7 @@ hermes confidential status | grep '^Plugin:'
    `hermes confidential` command fails with "'confidential' is not a hermes command". Hermes, not the
    plugin, runs this step: it installs the dependencies in the plugin's `pyproject.toml` (`tinfoil`
    0.14.2, `pynacl` 1.6, `sigstore` 4.5, and what they need, such as `cryptography`, `pyopenssl`,
-   `requests` and `urllib3`) into Hermes' environment. It can take a few minutes, and Hermes prints
+   `requests` and `urllib3`) into Hermes' environment. The step can take a few minutes, and Hermes prints
    only "Resolving Python dependencies" and "Installing Python dependencies" meanwhile. Set
    `HERMES_VERBOSE=1` to watch the installer.
 3. **First start.** The first Hermes command after enabling loads the plugin. On a terminal, the first
@@ -153,7 +153,7 @@ hermes confidential status | grep '^Plugin:'
    `<hermes home>/.env`, or given through `model.api_key` or `hermes auth`. Observe mode and the
    `on-host-only` tier need no key. Verification and pin approval work without a key, because the
    attestation endpoints are public, so the lock and `check` test the key of each vendor a route uses
-   and refuse while one is missing. They show "set", "not set" or "not readable in this scope" (a
+   and refuse while one is missing. The test runs when you lock and in `check`, not on every turn. The lock and `check` show "set", "not set" or "not readable in this scope" (a
    multiplexed gateway with no profile scope), never the key. If a later turn's process can't read
    the key, the plugin refuses that call with "vendor key unreadable" and records a refusal, not a
    breach.
@@ -179,7 +179,7 @@ interface it uses. `hermes confidential status` prints both paths.
 
 Files are created with mode 0600. The plugin sets that mode again on existing files once per
 installed commit, and whenever the ledger, `pins.yaml` or `allowlist.yaml` has another mode.
-[DISCLOSURE.md](DISCLOSURE.md#files) lists every file.
+[DISCLOSURE.md](DISCLOSURE.md#files) lists the files and what each holds.
 
 ### Upgrading
 
@@ -240,7 +240,7 @@ calls and gates off-host tools. The time from a lock to the next unlock is a loc
 **Safe-worker mode.** A mode for managed Hermes worker processes in which Hermes loads no plugins.
 Nothing in this plugin runs there.
 
-**Preflight.** The check the plugin runs over your config before it locks. It gives every route that
+**Preflight.** The check the plugin runs over your config before it locks. The preflight gives every route that
 can carry conversation text a verdict, and names the key to change for each failure.
 
 **Hook and middleware.** A hook is a callback Hermes calls at a named moment, such as
@@ -277,6 +277,9 @@ enclave fingerprint, from the hardware report.
 AMD, the main piece is the VCEK, the certificate for the signing key of the CPU that made the report.
 For Intel, collateral includes signed security-version information and revocation lists.
 
+**ACP command.** A delegation route that launches an external agent through the Agent Client
+Protocol.
+
 **TLS.** The encryption HTTPS uses. Whoever holds the server end of a TLS connection sees the headers,
 sizes and timing, and, without EHBP, the body.
 
@@ -307,7 +310,7 @@ that verification later, offline, from the evidence alone.
 
 > **Read this first.** If Hermes runs on someone else's machine, such as a cloud agent service or a
 > rented VPS, that machine's operator can read every prompt before anything in this plugin applies.
-> The plugin controls the road out of the Hermes process. It doesn't protect the process itself.
+> The plugin controls the road out of the Hermes process. The plugin doesn't protect the process itself.
 >
 > **What it defends against**
 >
@@ -330,9 +333,12 @@ that verification later, offline, from the evidence alone.
 > - **Tinfoil's own infrastructure.** The vendor's control plane and the model backends behind the
 >   router; the attestation covers the router only.
 > - **Connection metadata.** Tinfoil's network and hosting see request and response sizes, timing and
->   your IP address. TLS ends inside the attested router: the tinfoil SDK's transport pins the TLS key
->   from the attestation report on every connection, and the plugin's own TLS probe only records the
->   certificate it saw.
+>   your IP address. The tinfoil SDK's `ehbp` transport, which the plugin uses, encrypts each request
+>   body to the enclave's HPKE key but doesn't pin the TLS certificate, and the plugin doesn't pin TLS
+>   per send on Tinfoil yet. A TLS intermediary can therefore read the request headers, your API key
+>   included, though not the body. The plugin's TLS probe records after each verification whether the
+>   router's certificate carried the attested TLS key; on 2026-11-06 (`router-0.tinfoil.sh`, release
+>   v0.0.170) it did. On NEAR the plugin pins TLS on every connection.
 > - **NEAR's gateway.** With request encryption on, the gateway still reads the model id, plaintext
 >   parameters, headers, sizes, timing and images, and a gateway that swaps the client key header can
 >   read a reply; the plugin detects that only afterwards.
@@ -463,8 +469,8 @@ plugins.isolation                        (default in_process)                   
 
 `check --tier attested` does change something: it verifies the enclave over the network, writes
 `verify_ok` and `pin_staged` rows, and may stage a pending pin in `pins.yaml`; for a staged NEAR model
-entry it then fetches the entry's docker-compose files from GitHub in the background. It never
-applies a pin and never changes your config.
+entry the plugin then fetches the entry's docker-compose files from GitHub in the background. `check`
+never applies a pin and never changes your config.
 
 ### `hermes confidential watch`
 
@@ -512,7 +518,7 @@ In a terminal, refusals and breaches print in red and off-tier verdicts in yello
    allowlist into tools that run on this host, tools that ask, and tools that are blocked.
 
 The preflight fails if `plugins.hook_callback_timeout` is more than 0 and less than 5 seconds, because
-a timeout that short lets Hermes skip the plugin's per-turn check. It also refuses `openai-codex` and
+a timeout that short lets Hermes skip the plugin's per-turn check. The preflight also refuses `openai-codex` and
 `moa` as the main provider, an unset or `auto` main provider, and `auto` vision.
 
 The lock survives a restart: the plugin rebuilds the allowlist from the copy it saved at lock time,
@@ -566,8 +572,9 @@ machine.
   so the lock is also refused while Hermes holds an environment on a non-local backend; restart
   Hermes or wait for `terminal.lifetime_seconds`.
 - Each call to one of the seven tools is blocked unless the resolved backend and the environment
-  cached for the task are both `local`. `docker` is refused too: a container can have its own network,
-  and a Docker host can be remote.
+  cached for the task are both `local`. The refusal has the decision `terminal_backend` and says "Set
+  terminal.backend: local (and unset TERMINAL_ENV), then run /confidential off and lock again."
+  `docker` is refused too: a container can have its own network, and a Docker host can be remote.
 
 **Every other tool asks you first,** on Hermes' approval prompt:
 
@@ -603,7 +610,7 @@ asking, so the plugin blocks the tool instead. A tool you added with `/confident
   `ledger.sqlite`, `allowlist.yaml` or its `state.json`) or the plugin's data directory, and a
   `write_file` or `patch` aimed there. The exact forms are in
   [LIMITATIONS 15](LIMITATIONS.md#15-an-agent-with-a-terminal-can-reach-the-approval-prompt). Calls
-  that only mention them run, such as `grep "confidential off" docs/README.md`,
+  that only mention them run, such as `grep "confidential off" README.md`,
   `make confidential status`, `cat` of the pins file, or an edit to the plugin's own source. Each
   refusal is a `tool_refused` row with the decision `self_approval`.
 
@@ -612,7 +619,8 @@ asking, so the plugin blocks the tool instead. A tool you added with `/confident
 `/confidential allow <tool>` lets a tool that would ask run without asking for the rest of this lock.
 The plugin confirms through `ctx.ask_choice`, a Hermes prompt that never answers itself under any
 bypass setting; no answer counts as no. On Allow, the plugin adds the tool and writes a
-`tool_allowed` row. Always-blocked tools can't be added.
+`tool_allowed` row. Always-blocked tools can't be added, and stay blocked whatever `allowlist.yaml`
+says.
 
 Additions live in `allowlist.yaml` (mode 0600), tagged with the lock's identity. `/confidential off`
 deletes the file, and the next lock starts with none. Anyone who can edit the file can add a tool for
@@ -668,11 +676,12 @@ consent rule for both vendors; NEAR's entry sets are under [Pins for NEAR](#pins
 The plugin uses the tinfoil SDK's default verification path:
 
 1. The SDK fetches the router's hardware-signed attestation report.
-2. It checks that genuine AMD or Intel hardware signed the report, with the CPU vendor's certificates.
-3. It fetches the latest router release from GitHub, with its Sigstore signature.
-4. It checks that signature: it must come from the router repository's GitHub Actions workflow,
+2. The SDK checks that genuine AMD or Intel hardware signed the report, with the CPU vendor's
+   certificates.
+3. The SDK fetches the latest router release from GitHub, with its Sigstore signature.
+4. The SDK checks that signature: the signature must come from the router repository's GitHub Actions workflow,
    running at that release's tag.
-5. It compares the code measurement in the signed release with the measurement in the report.
+5. The SDK compares the code measurement in the signed release with the measurement in the report.
 
 The result is a code fingerprint and an enclave fingerprint. You approve that pair once; every later
 verification has to produce the same pair.
@@ -685,7 +694,7 @@ hermes confidential setup --model <tinfoil model id>
 
 Setup reports whether `TINFOIL_API_KEY` is set, verifies the router, shows the two fingerprints and the
 release tag, and asks you on the terminal to Approve or Deny. Only an exact choice, or its number,
-counts; on a non-interactive terminal there's no answer and no pin. It then prints a config block for
+counts; on a non-interactive terminal there's no answer and no pin. Setup then prints a config block for
 `config.yaml`. Setup never writes your config. `--vision-model` and `--aux-model` choose the vision and
 short-job models in the block, and `--no-verify` only prints the block.
 
@@ -822,7 +831,7 @@ checks that:
 
 A compose-manager pass establishes that a TD of this instance reported this log for this nonce, that
 the log's hash is bound in a hardware quote, and that the service map is what the operator's tooling
-reported. It doesn't establish that the services deployed after launch are measured, or that they are
+reported. A pass doesn't establish that the services deployed after launch are measured, or that they are
 the ones running.
 
 ### Signed responses
@@ -833,7 +842,8 @@ of the exact response bytes, then fetches NEAR's signature for that completion, 
 of two keys:
 
 - **`provider_tee`:** the model server's CVM signs `<model id>:<request digest>:<response digest>`,
-  proving an attested model server signed exactly these bytes for this model.
+  showing that a holder of the signing key a verified model CVM's quote binds signed these bytes for
+  this model; every instance of the model shares that key, approved or not.
 - **`gateway`:** the gateway's CVM signs `<request digest>:<response digest>`, proving the gateway
   sent these bytes and nothing about which model produced them.
 
@@ -997,7 +1007,7 @@ states each item.
 
 ```
 /confidential receipts [session] [--json]
-hermes confidential receipts <session id> [--json]
+hermes confidential receipts [session id] [--json]
 ```
 
 A receipt renders the ledger for one session; without a session id, `/confidential receipts` uses the
@@ -1031,8 +1041,9 @@ genuine.
 
 ### The closing paragraphs
 
-Every receipt ends with the same fixed paragraph, never filled in from data, which splits the receipt's
-claims in two.
+Every receipt ends with the same fixed paragraph (`CLOSING_PARAGRAPH` in
+`confidential_mode/receipts.py`), never filled in from data, which splits the receipt's claims in two.
+NEAR receipts add up to two more fixed paragraphs, described at the end of this section.
 
 **What the evidence shows.** Evidence that replays offline shows that an enclave whose hardware report
 commits to TLS key fingerprint T and HPKE public key H ran code with measurement M, signed by
@@ -1045,8 +1056,7 @@ capture time inside the evidence are asserted by whoever captured it.
 
 **What is recorded only, not proven:** that the plugin checked the evidence during this session; that
 this session's requests went to that enclave; that request bodies were encrypted to that key; which
-HPKE key each send recorded and whether its response decrypted (a streamed response the client closed
-early is recorded as not known); that the build was the vendor's latest release; whether the build or
+HPKE key each send recorded and whether its response decrypted (the plugin's own observations); that the build was the vendor's latest release; whether the build or
 its key was revoked after capture; what shell, terminal and code-execution tools sent off the machine;
 which model backends sit behind the router; other access the vendor's operators have; and Hermes'
 auxiliary calls, which can leave the tier while locked and are recorded after the fact. The paragraph
@@ -1100,12 +1110,14 @@ machine, and needs `--trusted-root` elsewhere. Certificates are checked as of th
 evidence, also asserted by the capturer; `--as-of <ISO time>` chooses the time.
 `--expected-repo-id` and `--expected-owner-id` bind the numeric GitHub repository and owner IDs in the
 Sigstore signing certificate, which survive a rename or re-creation; the `repo_identity` check then
-reports `name+id` instead of `name`. For Tinfoil's router repository these are 1077094187
+reports `name+id` instead of `name only (ids not supplied)`. For Tinfoil's router repository these are 1077094187
 (repository) and 168487856 (owner).
 
 #### From Python
 
-The same check is `confidential_mode.verify.replay.replay(evidence)`. Run it in Hermes' environment:
+For Tinfoil rows the same check is `confidential_mode.verify.replay.replay(evidence)`; NEAR rows go
+through `confidential_mode.verify.replay_near.replay` after `replay_near.with_blobs`, which the command
+does for you. The example below replays Tinfoil rows only. Run the example in Hermes' environment:
 
 ```
 cd ~/hermes-agent && PYTHONPATH=<plugin dir> uv run --no-sync python - receipt.json <<'EOF'
@@ -1113,6 +1125,8 @@ import json, sys
 from confidential_mode.verify.replay import replay
 doc = json.load(open(sys.argv[1]))
 for item in doc["evidence"]:
+    if str(item["evidence"].get("schema", "")).startswith("confidential-mode/near"):
+        continue   # a NEAR row: use hermes confidential replay
     r = replay(item["evidence"])   # the evidence carries its trust root
     print(item["row_id"], "ok" if r.ok else "FAIL", r.checks)
     print("not established:", *r.not_established, sep="\n  ")
@@ -1132,8 +1146,9 @@ Each check's value is `True` (passed) or a string starting `fail:`, `n/a:` or `n
 only when every check is `True` or `n/a`.
 
 - `repo_match`: the evidence names the expected repository.
-- `repo_identity`: `name+id` when the numeric IDs you gave matched the signing certificate, `name`
-  otherwise.
+- `repo_identity`: `name+id` when the numeric IDs you gave matched the signing certificate, and
+  `name only (ids not supplied)` when you gave none. Both are passing values, and the only exception to
+  the prefix rule above.
 - `trust_root_source`: informational; whether you supplied the trust root or it came from the evidence.
 - `hardware_signature`: the report is signed by the CPU vendor's key.
 - `cert_chain`: the signing certificate chains to AMD's or Intel's root, and the collateral signatures
@@ -1151,9 +1166,10 @@ only when every check is `True` or `n/a`.
 - `report_data_keys`: the keys in the report equal the keys the client used.
 - `tls_cert_binding`: the TLS certificate captured on the EHBP connection carries the TLS key the
   report commits to, and its subject alternative names bind the HPKE key and the attestation hash. A
-  pass means TLS ended inside the attested router. A row captured before certificates were recorded,
-  or a certificate with another key, reads n/a: the check is a record, since EHBP encrypts each body to
-  the attested HPKE key whoever ends TLS, and the SDK's transport enforces the TLS key.
+  pass means TLS ended inside the attested router on the connection the probe used. A row captured
+  before certificates were recorded, or a certificate with another key, reads n/a: the check is a
+  record, not an enforcement. EHBP encrypts each body to the attested HPKE key whoever ends TLS, and
+  on the `ehbp` transport nothing pins the TLS certificate per send.
 - `policy_check`: the plugin's own restated Sigstore policy check over the captured bundle,
   independent of the SDK.
 - `sev_check`: an AMD SEV-SNP report re-verified by the plugin's own standalone checker (signature,
@@ -1209,10 +1225,10 @@ under `confidential:` in `config.yaml`:
 |---|---|---|
 | `confidential.tinfoil.enclave` | Unset (router discovery) | One router host to verify and use; stops the AMD/Intel switching after a restart. |
 | `confidential.tinfoil.context_length` | 65536 | The context window reported to Hermes, so Hermes never sends its own probe outside the attested transport. |
-| `confidential.tinfoil.tls_probe` | `true` | After each verification, send one bodiless request over the verified connection and record the TLS certificate seen. An observation that never fails a verification; only the exact value `false` turns it off. |
+| `confidential.tinfoil.tls_probe` | `true` | After each verification, send one bodiless request over the verified connection and record the TLS certificate seen and whether its key is the attested TLS key. An observation that never fails a verification and pins nothing per send; only the exact value `false` turns it off. |
 | `confidential.verify_ttl_seconds` | 300 | How long one verification vouches for the enclave, on a monotonic clock. |
 | `confidential.verify_wait_seconds` | 20 | How long a turn waits for a verification before it is refused. |
-| `confidential.verify_refresh_lead_seconds` | 60 | While locked, a background thread verifies again this long before the current verification ends, when a call checked it in the last two minutes. A new verification is used only after the pin check accepts it; a failed one changes nothing, and the next send then verifies inline. 0 turns the thread off. |
+| `confidential.verify_refresh_lead_seconds` | 60 | While locked, a background thread verifies again this long before the current verification ends, when a call used it within two lead periods of its end (two minutes at the default). A new verification is used only after the pin check accepts it; a failed one changes nothing, and the next send then verifies inline. 0 turns the thread off. |
 | `confidential.pins.auto_approve_platform_only` | `false` | Apply a new Tinfoil pin without asking when only the platform changed and the SDK's signed hardware check passed (TDX only). |
 | `confidential.on_host.extra_hosts` | `[]` | Exact hosts (one name or IP address each, no ranges) the `on-host-only` tier counts as on-host. |
 | `confidential.model` | Unset | The model id `hermes confidential setup` writes into the block it prints. |
@@ -1236,6 +1252,8 @@ GitHub compose fetches).
 
 - [INTERFACES.md](INTERFACES.md) is the developer contract: package layout, shared types, each
   module's contract with Hermes, and the change record.
+- [dev/C0-spikes.md](dev/C0-spikes.md) records the Hermes behaviour the `tests/spikes/` checks
+  established before the plugin was built.
 - [RUNNING_TESTS.md](RUNNING_TESTS.md) gives the test command, the PyNaCl setup, the live NEAR tests and
   the real captures.
 - `tests/` is laid out by kind: `unit/` (pure logic, no Hermes import), `seam/` (real Hermes modules
