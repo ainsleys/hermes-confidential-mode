@@ -156,15 +156,41 @@ def request_bytes(request: Any) -> int | None:
         return None
 
 
+#: Nesting limit for measuring a response built of SimpleNamespace objects; deeper gives "unknown".
+_RESPONSE_DEPTH = 32
+
+
+def _plain(value: Any, depth: int = 0) -> Any:
+    """A JSON-ready copy of a response built of SimpleNamespace objects, dicts, lists and pydantic models.
+    Attributes whose names start with "_" are Hermes' own markers on the object (a partial-stream stub's
+    ``_clean_eof``), not part of the provider's response, and are left out."""
+    if depth > _RESPONSE_DEPTH:
+        raise ValueError("response nested too deeply to measure")
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(k): _plain(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v, depth + 1) for v in value]
+    if isinstance(value, SimpleNamespace):
+        return {k: _plain(v, depth + 1) for k, v in vars(value).items() if not k.startswith("_")}
+    dump = getattr(type(value), "model_dump", None)
+    if callable(dump):
+        return _plain(value.model_dump(mode="json"), depth + 1)
+    return str(value)
+
+
 def response_bytes(response: Any) -> int | None:
-    """Byte size of a provider response object as JSON, when it can be measured without consuming it (a
-    pydantic model or a plain dict); None otherwise (a stream, an unknown object). Counted, never stored."""
+    """Byte size of a provider response object as JSON, when it can be measured without consuming it: a
+    pydantic model (Hermes' non-streaming call), a plain dict, or the SimpleNamespace Hermes builds from a
+    stream (agent/chat_completion_helpers.py, the CLI's default path). None otherwise (a live stream, an
+    unknown object). Counted, never stored."""
     try:
-        dump = getattr(response, "model_dump_json", None)
+        dump = getattr(type(response), "model_dump_json", None)
         if callable(dump):
-            return len(dump().encode("utf-8"))
-        if isinstance(response, (dict, list)):
-            return len(json.dumps(response, default=str, ensure_ascii=False).encode("utf-8"))
+            return len(response.model_dump_json().encode("utf-8"))
+        if isinstance(response, (dict, list, SimpleNamespace)):
+            return len(json.dumps(_plain(response), default=str, ensure_ascii=False).encode("utf-8"))
     except Exception:  # noqa: BLE001
         return None
     return None
