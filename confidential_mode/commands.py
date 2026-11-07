@@ -1079,7 +1079,8 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
     if action == "allow":
         return 0 if text.endswith("added to the allowlist for this lock.") or text.endswith("is already allowed.") else 1
     if ok_prefix:
-        return 0 if text.startswith(ok_prefix) else 1
+        # `pins approve` with nothing pending is a no-op, not a failure
+        return 0 if text.startswith(ok_prefix) or text.startswith("No pin update is waiting") else 1
     if action == "receipts" and text.startswith(("Receipts are not available", "Usage")):
         return 1
     return 0

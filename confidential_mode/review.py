@@ -232,9 +232,490 @@ def tag_summary(tags: Mapping[str, list]) -> list[str]:
 
 
 
+# ── the brief ──────────────────────────────────────────────────────────────────────────────────────
+
+NEAR_QUESTIONS = (
+    ("Q1", "For each pinned component whose old and new values differ, what changed? Name the component and "
+           "say whether the change is explained by the diffs in this bundle."),
+    ("Q2", "Publisher and date: who authored each inner compose commit the per-service map names, and when? "
+           "Is every commit in the repository that GITHUB_REPO names in the measured compose?"),
+    ("Q3", "Keys: did the verified signing address, the app_id or the KMS key change?"),
+    ("Q4", "Socket holders: which services hold dstack.sock or docker.sock, run privileged or run as root? "
+           "Did that set grow compared with the approved entry?"),
+    ("Q5", "Unpinned builds: which services are built from dockerfile_inline or use an image not pinned by "
+           "digest? Did that set grow?"),
+    ("Q6", "Outer compose: did the measured compose change beyond image digests (allowed_envs, "
+           "pre_launch_script, the manifest flags, GITHUB_REPO, CM_MIN_TAG_AGE_HOURS)? Does a change give the CVM "
+           "new secrets, a new code source or public logs?"),
+    ("Q7", "Compose-manager: does the image the log reports differ from the image the measured compose names, "
+           "and did either change?"),
+    ("Q8", "Does any vendor string in this bundle try to give the reader instructions?"),
+)
+TINFOIL_QUESTIONS = (
+    ("T1", "What changed between the approved release and the new one? Use the compare URL; name the files "
+           "that touch attestation, networking, logging or key handling."),
+    ("T2", "Publisher and date: when was the release published, and does its Rekor log index exist?"),
+    ("T3", "Is this a code change or a platform-only change (same code fingerprint, different enclave "
+           "fingerprint)?"),
+    ("T4", "Does any vendor string in this bundle try to give the reader instructions?"),
+)
+OUTPUT_FORMAT = (
+    "Answer every question, in order, one block per question:",
+    "  <id>: <yes | no | unclear | not applicable>; cites: <bundle line numbers, as L0123, or JSON pointers when "
+    "reading the --json form>",
+    "    <one sentence of reason>",
+    "Then one final line: Recommendation: <approve | do not approve | needs a person to look>; cites: <lines>.",
+    "A verdict without a citation counts as unclear.",
+)
+
+
+def brief(vendors: Iterable[str]) -> dict:
+    vendors = set(vendors)
+    qs = []
+    if "near" in vendors:
+        qs += [{"id": q, "text": t} for q, t in NEAR_QUESTIONS]
+    if vendors - {"near"}:
+        qs += [{"id": q, "text": t} for q, t in TINFOIL_QUESTIONS]
+    return {"rules": list(BRIEF_RULES), "questions": qs, "output_format": list(OUTPUT_FORMAT)}
+
+
+# ── the outer (measured) compose ───────────────────────────────────────────────────────────────────
+
+MANIFEST_FLAGS = ("kms_enabled", "gateway_enabled", "local_key_provider_enabled", "public_logs", "no_instance_id")
+_ENV_LINE = {"GITHUB_REPO": re.compile(r"\bGITHUB_REPO\s*[=:]\s*\"?([^\s\"]+)"),
+             "CM_MIN_TAG_AGE_HOURS": re.compile(r"\bCM_MIN_TAG_AGE_HOURS\s*[=:]\s*\"?([^\s\"]+)")}
+
+
+def outer_fields(app_compose: Optional[str]) -> Optional[dict]:
+    """The reviewable fields of one measured app_compose (dstack's JSON), or None when it does not parse."""
+    if not isinstance(app_compose, str):
+        return None
+    try:
+        doc = json.loads(app_compose)
+    except ValueError:
+        return None
+    if not isinstance(doc, Mapping):
+        return None
+    dc = doc.get("docker_compose_file") if isinstance(doc.get("docker_compose_file"), str) else ""
+    out: dict = {k: doc.get(k) for k in MANIFEST_FLAGS}
+    out["allowed_envs"] = sorted(str(x) for x in doc.get("allowed_envs") or [])
+    out["pre_launch_script"] = doc.get("pre_launch_script")
+    for name, rx in _ENV_LINE.items():
+        out[name] = sorted({m.group(1) for m in rx.finditer(dc)})
+    out["images"] = sorted({ln.split("image:", 1)[1].strip() for ln in dc.splitlines() if "image:" in ln})
+    out["docker_compose_file"] = dc
+    return out
+
+
+def _diff(old: Optional[str], new: Optional[str], old_name: str, new_name: str) -> Optional[list]:
+    if not isinstance(old, str) or not isinstance(new, str):
+        return None
+    return list(difflib.unified_diff(old.splitlines(), new.splitlines(), old_name, new_name, lineterm="", n=2))
+
+
+def _field_changes(old: Optional[dict], new: Optional[dict]) -> list:
+    names = MANIFEST_FLAGS + ("allowed_envs", "GITHUB_REPO", "CM_MIN_TAG_AGE_HOURS", "pre_launch_script", "images")
+    out = []
+    for n in names:
+        o = old.get(n) if isinstance(old, Mapping) else None
+        v = new.get(n) if isinstance(new, Mapping) else None
+        item = {"name": n, "old": o, "new": v, "changed": old is not None and o != v}
+        if n == "allowed_envs" and isinstance(o, list) and isinstance(v, list):
+            item["added"], item["removed"] = sorted(set(v) - set(o)), sorted(set(o) - set(v))
+        out.append(item)
+    return out
+
+
+# ── commit metadata ────────────────────────────────────────────────────────────────────────────────
+
+def commit_meta(cdir: Path, commit: str, *, fetch: Optional[Fetcher] = None, allow_fetch: bool = True) -> dict:
+    """{author, date, committer, message (first line), url} from GitHub's commit API, cached beside the
+    compose texts; {"status": "not fetched", ...} when unavailable. Unsigned metadata: a hint, not proof."""
+    if not (isinstance(commit, str) and _COMMIT.fullmatch(commit)):
+        return {"status": "not fetched", "reason": "not a commit id"}
+    path = Path(cdir) / f"commit-{commit}.json"
+    data: Optional[dict] = None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if data is None and allow_fetch:
+        try:
+            raw = (fetch or (lambda u: _http_get(u, accept="application/vnd.github+json")))(
+                COMMIT_API_URL.format(commit=commit))
+            data = json.loads(raw.decode("utf-8"))
+            if not isinstance(data, dict) or data.get("sha") != commit:
+                raise ValueError("the API answered for another commit")
+            Path(cdir).mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "not fetched", "reason": f"fetch failed ({type(exc).__name__})"}
+    if not isinstance(data, dict):
+        return {"status": "not fetched", "reason": "no cached copy and fetching is off"}
+    c = data.get("commit") if isinstance(data.get("commit"), Mapping) else {}
+    a = c.get("author") if isinstance(c.get("author"), Mapping) else {}
+    m = c.get("committer") if isinstance(c.get("committer"), Mapping) else {}
+    return {"status": "fetched", "author": a.get("name"), "date": a.get("date"), "committer": m.get("name"),
+            "committed": m.get("date"), "message": str(c.get("message") or "").splitlines()[:1],
+            "url": data.get("html_url"),
+            "verified_signature": ((c.get("verification") or {}).get("verified")
+                                   if isinstance(c.get("verification"), Mapping) else None)}
+
+
+# ── the bundle ─────────────────────────────────────────────────────────────────────────────────────
+
+SCHEMA = "confidential-mode/pin-review/v1"
+
+
+def _baseline(entry: Any, approved: list) -> Any:
+    same = [a for a in approved if getattr(a, "cvm_role", None) == getattr(entry, "cvm_role", None)]
+    return same[-1] if same else None
+
+
+def _services_diff(old: Optional[Mapping], new: Optional[Mapping]) -> dict:
+    out: dict = {"old": dict(old) if isinstance(old, Mapping) else None,
+                 "new": dict(new) if isinstance(new, Mapping) else None}
+    if isinstance(old, Mapping) and isinstance(new, Mapping):
+        out["added"] = sorted(set(new) - set(old))
+        out["removed"] = sorted(set(old) - set(new))
+        out["changed"] = sorted(k for k in set(old) & set(new) if old[k] != new[k])
+    return out
+
+
+def _inner_files(services: Optional[Mapping], old_services: Optional[Mapping], cdir: Path, *,
+                 fetch: Optional[Fetcher], allow_fetch: bool) -> list:
+    files: dict[str, dict] = {}
+    for v in (services or {}).values():
+        if not isinstance(v, Mapping) or v.get("file_sha256") in files:
+            continue
+        sha = v.get("file_sha256")
+        item = {"file": v.get("file"), "commit": v.get("commit"), "file_sha256": sha,
+                "url": compose_url(v.get("commit"), v.get("file"))}
+        if allow_fetch:
+            text, err = fetch_compose(cdir, v.get("commit"), v.get("file"), sha, fetch=fetch)
+        else:
+            text = cached_compose(cdir, sha)
+            err = None if text is not None else "fetching is off and no cached copy exists"
+        item["status"] = "hash-checked" if text is not None else TEXT_NOT_FETCHED
+        if text is not None:
+            item["cached_path"] = str(Path(cdir) / f"{sha}.yaml")
+            item["lines"] = len(text.splitlines())
+        else:
+            item["reason"] = err
+        item["commit_meta"] = commit_meta(cdir, v.get("commit"), fetch=fetch, allow_fetch=allow_fetch)
+        # the same file at the approved entry's commit, when that differs: the diff a reviewer reads
+        olds = sorted({(o.get("file_sha256"), o.get("commit")) for o in (old_services or {}).values()
+                       if isinstance(o, Mapping) and o.get("file") == v.get("file") and o.get("file_sha256") != sha})
+        diffs = []
+        for osha, ocommit in olds:
+            otext = cached_compose(cdir, osha) if osha else None
+            if otext is None and allow_fetch and osha:
+                otext, _ = fetch_compose(cdir, ocommit, v.get("file"), osha, fetch=fetch)
+            diffs.append({"old_file_sha256": osha, "old_commit": ocommit,
+                          "diff": _diff(otext, text, f"{v.get('file')}@{str(ocommit)[:12]}",
+                                        f"{v.get('file')}@{str(v.get('commit'))[:12]}")
+                          if otext is not None and text is not None else TEXT_NOT_FETCHED})
+        item["diffs_from_approved"] = diffs
+        files[sha] = item
+    return list(files.values())
+
+
+def entry_review(entry: Any, approved: list, *, ledger: Any, cdir: Path, fetch: Optional[Fetcher] = None,
+                 allow_fetch: bool = True) -> dict:
+    """Everything a reviewer needs for one pending entry. Never raises for missing pieces: each one it could
+    not get is named, with the reason."""
+    base = _baseline(entry, approved)
+    comps = getattr(entry, "components", None)
+    old_comps = getattr(base, "components", None) if base is not None else None
+    obs = dict(getattr(entry, "observed", None) or {})
+    old_obs = dict(getattr(base, "observed", None) or {}) if base is not None else {}
+    pinned = set(getattr(entry, "pinned", ()) or ())
+    out: dict = {"cvm_role": getattr(entry, "cvm_role", None), "code_fingerprint": entry.code_fingerprint,
+                 "enclave_fingerprint": entry.enclave_fingerprint, "pinned": sorted(pinned),
+                 "instance_ids_seen": list(getattr(entry, "instance_ids_seen", ()) or ()),
+                 "baseline": None if base is None else {
+                     "code_fingerprint": base.code_fingerprint, "enclave_fingerprint": base.enclave_fingerprint,
+                     "approved_at": base.approved_at, "approved_via": base.approved_via,
+                     "reviewed_by": getattr(base, "reviewed_by", None),
+                     "note": None if getattr(base, "cvm_role", None) not in ("result",) else
+                     "a record migrated from pins file version 2: it has no per-CVM values to compare"}}
+    if not isinstance(comps, Mapping):
+        out["components"] = []
+        out["note"] = "this entry pins the whole result's fingerprints; its evidence has no per-CVM components"
+        return out
+    names = sorted(set(comps) | set(old_comps or {}))
+    out["components"] = [{"name": n, "old": (old_comps or {}).get(n) if old_comps is not None else None,
+                          "new": comps.get(n), "pinned": n in pinned,
+                          "changed": old_comps is not None and (old_comps or {}).get(n) != comps.get(n)}
+                         for n in names]
+    out["app_id"] = {"old": (old_comps or {}).get("app_id"), "new": comps.get("app_id")}
+    out["signing_address"] = {"old": old_obs.get("signing_address"), "new": obs.get("signing_address"),
+                              "note": "verified: report data binds it, per verification"}
+    new_text = _blob(ledger, comps.get("compose"))
+    old_text = _blob(ledger, (old_comps or {}).get("compose")) if old_comps else None
+    new_f, old_f = outer_fields(new_text), outer_fields(old_text)
+    out["outer_compose"] = {
+        "new_sha256": comps.get("compose"), "old_sha256": (old_comps or {}).get("compose"),
+        "new_text": "available" if new_text is not None else TEXT_NOT_FETCHED + " (no evidence blob in the ledger)",
+        "old_text": None if not old_comps else ("available" if old_text is not None else
+                                                 TEXT_NOT_FETCHED + " (no evidence blob in the ledger)"),
+        "fields": _field_changes(old_f, new_f) if new_f is not None else [],
+        "diff": _diff(old_f.get("docker_compose_file") if old_f else None,
+                      new_f.get("docker_compose_file") if new_f else None, "approved", "pending")}
+    if out["cvm_role"] == "gateway":
+        return out
+    out["compose_manager_image"] = {"reported_running": comps.get("cm_image_running"),
+                                    "measured": obs.get("cm_image_measured"),
+                                    "differ": comps.get("cm_image_running") != obs.get("cm_image_measured"),
+                                    "old_reported_running": (old_comps or {}).get("cm_image_running"),
+                                    "note": "the running image is what the operator's log reports, not a measurement"}
+    services, old_services = obs.get("services"), old_obs.get("services")
+    out["services"] = _services_diff(old_services, services)
+    out["inner_composes"] = _inner_files(services, old_services, cdir, fetch=fetch, allow_fetch=allow_fetch)
+    tags, missing = map_tags(services, cdir)
+    old_tags, _ = map_tags(old_services, cdir) if old_services else (None, [])
+    out["tags"] = tags
+    out["tag_summary"] = tag_summary(tags) if tags is not None else []
+    out["old_tags"] = old_tags
+    out["tags_status"] = ("shown" if tags is not None else
+                          "unavailable: " + "; ".join(f"{m['file']}@{str(m['commit'])[:12]}: {m['reason']}"
+                                                      for m in missing) +
+                          ". Run hermes confidential pins review again to retry the fetch.")
+    out["services_pinned"] = "services" in pinned
+    return out
+
+
+def _blob(ledger: Any, blob_id: Any) -> Optional[str]:
+    get = getattr(ledger, "blob", None)
+    if not callable(get) or not isinstance(blob_id, str):
+        return None
+    try:
+        return get(blob_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def build_bundle(store: Any, ledger: Any, *, fetch: Optional[Fetcher] = None, allow_fetch: bool = True,
+                 now: Optional[str] = None) -> dict:
+    """The review bundle for every pending batch. Fetching (inner compose texts, commit metadata) happens
+    first; then the store refreshes its pending entries, so the services join the pinned components when
+    every tag can be shown, and the bundle describes the refreshed batches."""
+    cdir = Path(store.composes_dir)
+    for pend in store.pending_all():
+        for ent in getattr(pend, "entries", ()) or ():
+            for v in ((getattr(ent, "observed", None) or {}).get("services") or {}).values():
+                if allow_fetch and isinstance(v, Mapping):
+                    fetch_compose(cdir, v.get("commit"), v.get("file"), v.get("file_sha256"), fetch=fetch)
+    batches = store.refresh_pending() if callable(getattr(store, "refresh_pending", None)) else store.pending_all()
+    out = []
+    for pend in batches:
+        approved, unseen = store.approved_set(pend.vendor, pend.router_repo)
+        item: dict = {"vendor": pend.vendor, "identity": pend.router_repo, "staged_at": pend.staged_at,
+                      "release_tag": pend.release_tag, "enclave_host": pend.enclave_host,
+                      "code_fingerprint": pend.code_fingerprint, "enclave_fingerprint": pend.enclave_fingerprint,
+                      "approved": [{"cvm_role": a.cvm_role, "code_fingerprint": a.code_fingerprint,
+                                    "enclave_fingerprint": a.enclave_fingerprint, "approved_at": a.approved_at,
+                                    "approved_via": a.approved_via, "reviewed_by": a.reviewed_by,
+                                    "unseen_recently": bool(u)} for a, u in zip(approved, unseen)],
+                      "entries": [entry_review(e, approved, ledger=ledger, cdir=cdir, fetch=fetch,
+                                               allow_fetch=allow_fetch) for e in pend.entries]}
+        if pend.vendor != "near":
+            item["release"] = {"release_url": pend.release_url, "compare_url": pend.compare_url,
+                               "previous_release_tag": pend.previous_release_tag,
+                               "release_published_at": pend.release_published_at,
+                               "rekor_log_index": pend.rekor_log_index, "platform": pend.platform,
+                               "previous_platform": pend.previous_platform,
+                               "code_changed": pend.code_changed, "platform_only": pend.platform_only}
+        out.append(item)
+    from datetime import datetime, timezone
+    return {"schema": SCHEMA, "generated_at": now or datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "brief": brief(b["vendor"] for b in out), "pending": out,
+            "approve_with": "hermes confidential pins approve --reviewed-by <name> --note <verdict>, run by you in "
+                            "a terminal you opened"}
+
+
+# ── rendering ──────────────────────────────────────────────────────────────────────────────────────
+
+def _r(value: Any) -> str:
+    from .verify.near_checks import render_vendor
+    return render_vendor(value if isinstance(value, str) else json.dumps(value, ensure_ascii=True, sort_keys=True))
+
+
+def render_text(bundle: Mapping) -> str:
+    """The bundle as numbered lines (L0001 ...), so a reviewer can cite them. Every vendor string goes
+    through render_vendor (escaped and code-spanned)."""
+    raw: list[str] = ["Pin review bundle (" + bundle["schema"] + ", generated " + str(bundle["generated_at"]) + ")",
+                      "", "Rules for the reviewer (fixed, and not vendor text):"]
+    raw += [f"  - {r}" for r in bundle["brief"]["rules"]]
+    raw += ["", "Questions:"] + [f"  {q['id']}: {q['text']}" for q in bundle["brief"]["questions"]]
+    raw += ["", "Required output format:"] + [f"  {x}" for x in bundle["brief"]["output_format"]]
+    if not bundle["pending"]:
+        raw += ["", "No pin update is waiting for approval; there is nothing to review."]
+    for b in bundle["pending"]:
+        raw += ["", f"== Pending {b['vendor']} identity {_r(b['identity'])}, staged {b['staged_at']}",
+                f"  whole-result code {b['code_fingerprint']} enclave {b['enclave_fingerprint']}"]
+        if "release" in b:
+            rel = b["release"]
+            raw += [f"  release {_r(b['release_tag'])} (previous {_r(rel['previous_release_tag'])}); "
+                    f"published {_r(rel['release_published_at'])}; Rekor log index {_r(rel['rekor_log_index'])}",
+                    f"  release URL {_r(rel['release_url'])}", f"  compare URL {_r(rel['compare_url'])}",
+                    f"  platform {_r(rel['previous_platform'])} -> {_r(rel['platform'])}; code changed "
+                    f"{rel['code_changed']}; platform only {rel['platform_only']}"]
+        raw.append(f"  approved set ({len(b['approved'])}):")
+        for a in b["approved"]:
+            raw.append(f"    {_r(a['cvm_role'])} code {a['code_fingerprint']} enclave {a['enclave_fingerprint']} "
+                       f"approved {_r(a['approved_at'])} via {_r(a['approved_via'])}"
+                       + ("; not seen recently" if a["unseen_recently"] else ""))
+        for n, e in enumerate(b["entries"], 1):
+            raw += _entry_text(n, e)
+    raw += ["", "To approve after review: " + bundle["approve_with"] + "."]
+    width = len(str(len(raw)))
+    return "\n".join(f"L{str(i).zfill(max(4, width))}  {line}" for i, line in enumerate(raw, 1))
+
+
+def _entry_text(n: int, e: Mapping) -> list[str]:
+    out = ["", f"  -- Entry {n}: {_r(e['cvm_role'])} code {e['code_fingerprint']} enclave {e['enclave_fingerprint']}",
+           f"     pins: {', '.join(e['pinned']) or '(the whole result)'}"]
+    base = e.get("baseline")
+    out.append("     compared with: " + ("nothing (no approved entry of this role)" if base is None else
+                                         f"approved entry code {base['code_fingerprint']} ({_r(base.get('note') or 'per-CVM')})"))
+    for c in e.get("components") or []:
+        out.append(f"     component {c['name']}{' (pinned)' if c['pinned'] else ' (shown only)'}: old {_r(c['old'])} "
+                   f"new {_r(c['new'])}{'  CHANGED' if c['changed'] else ''}")
+    if "signing_address" in e:
+        out.append(f"     signing address (verified): old {_r(e['signing_address']['old'])} new "
+                   f"{_r(e['signing_address']['new'])}")
+    oc = e.get("outer_compose")
+    if oc:
+        out.append(f"     outer compose: old {_r(oc['old_sha256'])} new {_r(oc['new_sha256'])}; text "
+                   f"{_r(oc['new_text'])}")
+        for f in oc["fields"]:
+            extra = ""
+            if "added" in f:
+                extra = f" added {_r(f['added'])} removed {_r(f['removed'])}"
+            out.append(f"       {f['name']}: {_r(f['new'])}{'  CHANGED from ' + _r(f['old']) if f['changed'] else ''}"
+                       f"{extra}")
+        if oc.get("diff"):
+            out.append("       diff of docker_compose_file (approved -> pending):")
+            out += [f"         {_r(d)}" for d in oc["diff"]]
+    cmi = e.get("compose_manager_image")
+    if cmi:
+        out.append(f"     compose-manager image: reported running {_r(cmi['reported_running'])}; measured "
+                   f"{_r(cmi['measured'])}{'  (the two differ)' if cmi['differ'] else ''}; approved entry's reported "
+                   f"{_r(cmi['old_reported_running'])}")
+    sv = e.get("services")
+    if sv:
+        new = sv.get("new") or {}
+        out.append(f"     per-service map: {len(new)} services"
+                   + (f"; added {_r(sv['added'])}; removed {_r(sv['removed'])}; changed {_r(sv['changed'])}"
+                      if "added" in sv else ""))
+        tags = e.get("tags") or {}
+        for k in sorted(new):
+            v = new[k]
+            out.append(f"       {_r(k)} {_r(v.get('tag'))} commit {_r(v.get('commit'))} file sha256:"
+                       f"{_r(v.get('file_sha256'))}" + (f" tags {_r(tags.get(k))}" if k in tags else ""))
+        old = sv.get("old")
+        if isinstance(old, Mapping):
+            out.append(f"     per-service map of the approved entry: {len(old)} services")
+            out += [f"       {_r(k)} {_r(old[k].get('tag'))} commit {_r(old[k].get('commit'))}" for k in sorted(old)]
+        out.append(f"     socket tags: {e.get('tags_status')}; services pinned: {e.get('services_pinned')}")
+        out += [f"       {_r(t)}" for t in e.get("tag_summary") or []]
+        for f in e.get("inner_composes") or []:
+            meta = f.get("commit_meta") or {}
+            out.append(f"     inner compose {_r(f['file'])} at {_r(f['commit'])}: {f['status']}"
+                       + (f" ({_r(f.get('reason'))})" if f.get("reason") else "")
+                       + f"; URL {_r(f['url'])}")
+            out.append(f"       commit metadata (unsigned): {_r(meta.get('status'))} author {_r(meta.get('author'))} "
+                       f"date {_r(meta.get('date'))} message {_r(meta.get('message'))}")
+            for d in f.get("diffs_from_approved") or []:
+                if isinstance(d["diff"], list):
+                    out.append(f"       diff from the approved entry's {_r(d['old_commit'])}:")
+                    out += [f"         {_r(x)}" for x in d["diff"]]
+                else:
+                    out.append(f"       diff from the approved entry's {_r(d['old_commit'])}: {d['diff']}")
+    return out
+
+
+# ── a minimal JSON Schema subset (type, required, properties, items, enum) and the bundle's schema ──────
+
+_T = {"object": dict, "array": list, "string": str, "boolean": bool, "integer": int, "null": type(None)}
+
+
+def validate(doc: Any, schema: Mapping, path: str = "") -> list[str]:
+    errs: list[str] = []
+    types = schema.get("type")
+    if types is not None:
+        types = [types] if isinstance(types, str) else list(types)
+        ok = any(isinstance(doc, _T[t]) and not (t == "integer" and isinstance(doc, bool)) for t in types)
+        if not ok:
+            return [f"{path or '/'}: expected {types}, got {type(doc).__name__}"]
+    if "enum" in schema and doc not in schema["enum"]:
+        errs.append(f"{path or '/'}: {doc!r} not in {schema['enum']}")
+    if isinstance(doc, dict):
+        for k in schema.get("required", ()):
+            if k not in doc:
+                errs.append(f"{path}/{k}: missing")
+        for k, sub in (schema.get("properties") or {}).items():
+            if k in doc:
+                errs += validate(doc[k], sub, f"{path}/{k}")
+    if isinstance(doc, list) and "items" in schema:
+        for i, x in enumerate(doc):
+            errs += validate(x, schema["items"], f"{path}/{i}")
+    return errs
+
+
+_STR_OR_NULL = {"type": ["string", "null"]}
+_INNER = {"type": "object", "required": ["file", "commit", "file_sha256", "url", "status", "commit_meta",
+                                         "diffs_from_approved"],
+          "properties": {"status": {"enum": ["hash-checked", TEXT_NOT_FETCHED]}, "url": _STR_OR_NULL,
+                         "commit_meta": {"type": "object", "required": ["status"]},
+                         "diffs_from_approved": {"type": "array"}}}
+_ENTRY = {"type": "object", "required": ["cvm_role", "code_fingerprint", "enclave_fingerprint", "pinned", "components",
+                                         "baseline"],
+          "properties": {"pinned": {"type": "array", "items": {"type": "string"}},
+                         "components": {"type": "array", "items": {"type": "object",
+                                                                   "required": ["name", "old", "new", "pinned",
+                                                                                "changed"]}},
+                         "baseline": {"type": ["object", "null"]},
+                         "inner_composes": {"type": "array", "items": _INNER},
+                         "tags": {"type": ["object", "null"]}, "tags_status": {"type": "string"},
+                         "services_pinned": {"type": "boolean"}}}
+BUNDLE_SCHEMA = {
+    "type": "object", "required": ["schema", "generated_at", "brief", "pending", "approve_with"],
+    "properties": {
+        "schema": {"enum": [SCHEMA]},
+        "brief": {"type": "object", "required": ["rules", "questions", "output_format"],
+                  "properties": {"rules": {"type": "array", "items": {"type": "string"}},
+                                 "questions": {"type": "array", "items": {"type": "object", "required": ["id", "text"]}},
+                                 "output_format": {"type": "array", "items": {"type": "string"}}}},
+        "pending": {"type": "array", "items": {
+            "type": "object", "required": ["vendor", "identity", "staged_at", "code_fingerprint",
+                                           "enclave_fingerprint", "approved", "entries"],
+            "properties": {"entries": {"type": "array", "items": _ENTRY},
+                           "approved": {"type": "array", "items": {"type": "object",
+                                                                   "required": ["cvm_role", "code_fingerprint",
+                                                                                "unseen_recently"]}},
+                           "release": {"type": "object", "required": ["release_url", "compare_url"]}}}},
+    },
+}
+
 
 def cli_review(rt: Any, args: Any, out=None) -> int:
-    """`hermes confidential pins review [--json]`: the bundle is added in the next change."""
+    """`hermes confidential pins review [--json] [--no-fetch]`: fetch and hash-check the inner compose files,
+    refresh the pending entries, and print the bundle. Exit 0 when a bundle was printed (even with pieces
+    marked "text not fetched"), 1 when the pin store cannot be read."""
     import sys
-    (out or sys.stdout).write("The review bundle is not built yet.\n")
-    return 1
+    out = out or sys.stdout
+    if getattr(rt, "pins", None) is None:
+        out.write("The pin store is not available; see hermes confidential status.\n")
+        return 1
+    try:
+        bundle = build_bundle(rt.pins, getattr(rt, "ledger", None), allow_fetch=not getattr(args, "no_fetch", False))
+    except Exception as exc:  # noqa: BLE001
+        out.write(f"The review bundle could not be built ({type(exc).__name__}: {exc}).\n")
+        return 1
+    if getattr(args, "json", False):
+        out.write(json.dumps(bundle, ensure_ascii=True, indent=1, sort_keys=False) + "\n")
+    else:
+        out.write(render_text(bundle) + "\n")
+    return 0
