@@ -112,7 +112,9 @@ The plugin sets one environment variable in the Hermes process, `XDG_CONFIDENTIA
 that process's id, before the first tool runs. Terminal, process_manage and execute_code children inherit
 it. Every approval prompt refuses in a process whose variable names another process. An agent that removes
 the variable, builds the command at run time, or attaches a client through the gateway socket can still
-approve a pin; the ledger records every approval with its surface (docs/LIMITATIONS.md, section 15).
+approve a pin; the ledger records every approval with its surface. So can an agent in another profile
+that does not load this plugin, since nothing marks its processes, and any process running as your user
+can write the pins file and a matching ledger row (docs/LIMITATIONS.md, section 15).
 
 ### What those hosts can see even when everything works
 

@@ -349,3 +349,22 @@ def test_no_baseline_shows_the_full_texts(tmp_path):
     assert "baseline: none" in text and "full text (no baseline)" in text
     gw = next(e for e in bundle["pending"][0]["entries"] if e["cvm_role"] == "gateway")
     assert gw["outer_compose"].get("full_text"), "the measured app_compose too"
+
+
+def test_a_measured_compose_without_github_repo_fetches_nothing_and_cannot_be_approved(tmp_path, monkeypatch):
+    import tests.near_world as w
+    from confidential_mode.pins import PinStoreError
+    monkeypatch.setattr(w, "MODEL_COMPOSE", w.MODEL_COMPOSE.replace(
+        "      - GITHUB_REPO=https://github.com/nearai/cvm-compose-files\\n", ""))
+    world = NearWorld()
+    res = world.adapter(tmp_path, encrypt=False).verify()
+    store = PinStore(tmp_path / "pins.yaml")
+    store.stage(res)
+    calls = []
+    store.prefetch_composes(fetch=lambda url: calls.append(url) or b"")
+    assert calls == [], "no repository named: nothing is fetched"
+    pend = store.pending()
+    model = next(e for e in pend.entries if e.cvm_role != "gateway")
+    assert model.observed["github_repo"] is None and "services" not in model.pinned
+    with pytest.raises(PinStoreError, match="service map"):
+        store.apply(pend, approved_via="cli")

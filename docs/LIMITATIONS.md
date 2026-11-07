@@ -602,6 +602,11 @@ The details:
 - In Hermes 84a0301 a chat client attached to the gateway has its slash commands run by the gateway
   process itself, which carries its own marker. So a nested chat that a tool started can answer
   through the gateway.
+- An agent in another profile that does not load this plugin has no marker, and this profile's tool
+  gate does not see its calls. It can run the approve command for this profile under a
+  pseudo-terminal and answer it.
+- Any process running as your user can write `pins.yaml` and a matching `pin_applied` row into the
+  ledger file, so a forged approval passes the consent check (see "Pins need a consent record").
 
 **The change that would close it.** A consent surface that an agent cannot drive, for example an
 approval that Hermes core asks on a channel it never exposes to tools, plus a marker Hermes sets on
@@ -668,8 +673,8 @@ Each item below is a smaller gap. Each one is stated in full.
   Hermes creates a new file at the next start.
 
 - **Pins need a consent record.** The attested check refuses a pin that has no matching `pin_applied`
-  row in the ledger, with the message "pin has no consent record". Code in the same process can still
-  write such a row.
+  row in the ledger, with the message "pin has no consent record". Any process running as your user,
+  not only code in the same process, can write such a row into the ledger file.
 
 - **The offline replay's identity checks have limits.** `hermes confidential replay` requires the
   repository `tinfoilsh/confidential-model-router` by default. It takes the expected fingerprints from

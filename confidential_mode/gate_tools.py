@@ -61,7 +61,9 @@ SELF_APPROVAL_TOOLS: frozenset[str] = frozenset({"terminal", "process_manage", "
 # File-writing on-host tools: while locked, a call that names one of the plugin's state files is refused.
 STATE_FILE_TOOLS: frozenset[str] = frozenset({"write_file", "patch"})
 # Set in this process's environment by the tool hooks before any tool runs (selfapproval.py): the id of the
-# process that ran the tool, inherited by every tool subprocess. Every asker refuses under it.
+# process that ran the tool. It reaches terminal, process_manage and execute_code children; every asker
+# refuses when it names another process. An agent that unsets it, assembles the command at run time, or
+# attaches through the gateway socket can still approve.
 from .selfapproval import TOOL_PROCESS_ENV, mark_tool_process  # noqa: E402,F401
 
 _QUOTES = str.maketrans("", "", "'\"\\`")

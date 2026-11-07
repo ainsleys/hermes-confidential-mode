@@ -62,7 +62,9 @@ def _self_approval(error: Optional[str]) -> bool:
 
 def _guard(asker: Any) -> Optional[str]:
     """selfapproval.self_approval_reason() for this asker: every asker path checks it before asking (the chat
-    surface's ctx included), so no tool-driven prompt is ever answered. An asker may carry its own
+    surface's ctx included) and refuses when the marker names another process. An agent that unsets the
+    marker, assembles the command at run time, or attaches through the gateway socket can still approve
+    (docs/LIMITATIONS.md section 15). An asker may carry its own
     ``environ`` (TerminalAsker in tests); otherwise this process's environment is read."""
     from .selfapproval import self_approval_reason
     env = getattr(asker, "environ", None)
