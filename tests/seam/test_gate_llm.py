@@ -316,7 +316,8 @@ def check_predicate_raising_refused(monkeypatch, manager, tmp_path, api_mode, ga
     assert_clean_refusal(result, rec, agent, TEXT_INTERNAL_ERROR)
     rows = env.ledger.tail(0)
     assert [r.kind for r in rows] == ["send_refused"]
-    assert rows[0].detail == {"reason_code": "internal_error", "error_type": "RuntimeError"}
+    detail = {k: v for k, v in rows[0].detail.items() if k != "api_request_id"}   # pairs rows (ux-pass-1)
+    assert detail == {"reason_code": "internal_error", "error_type": "RuntimeError"}
 
 
 @pytest.mark.parametrize("api_mode", MODES)

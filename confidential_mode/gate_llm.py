@@ -156,6 +156,20 @@ def request_bytes(request: Any) -> int | None:
         return None
 
 
+def response_bytes(response: Any) -> int | None:
+    """Byte size of a provider response object as JSON, when it can be measured without consuming it (a
+    pydantic model or a plain dict); None otherwise (a stream, an unknown object). Counted, never stored."""
+    try:
+        dump = getattr(response, "model_dump_json", None)
+        if callable(dump):
+            return len(dump().encode("utf-8"))
+        if isinstance(response, (dict, list)):
+            return len(json.dumps(response, default=str, ensure_ascii=False).encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def purpose_from_context(context: Mapping[str, Any]) -> str:
     """Hermes 84a0301 does not pass a fallback indicator to llm_execution middleware
     (agent/turn_api_call.py:139-145); honour one if a later Hermes adds it."""
@@ -343,10 +357,12 @@ class LlmGate:
         except Exception:  # noqa: BLE001 - a ledger without the query: receipts fall back to the row's own id
             pass
 
-        def observed() -> None:
+        def observed(response: Any = None) -> None:
+            rb = response_bytes(response) if response is not None else None
             self.record("send_observed", dest, context, host=verdict.host or _host(dest.base_url),
                         nbytes=nbytes, tier=tier.value, verdict="in_tier", decision="allowed",
-                        detail={**send_record_detail(records), **started})
+                        detail={**send_record_detail(records), **started,
+                                **({"response_bytes": rb} if rb is not None else {})})
         try:
             with self.send_context(dest, context, tier, records_refusals=True), self.capture_records(records):
                 response = next_call(request)
@@ -364,7 +380,7 @@ class LlmGate:
             return self.refuse(dest, context, tier, verdict, TEXT_PROVIDER_ERROR,
                                reason_code="provider_error", nbytes=nbytes, verdict_label="in_tier",
                                detail=detail)
-        observed()
+        observed(response)
         return response
 
     # -- outcomes ------------------------------------------------------------
@@ -409,6 +425,9 @@ class LlmGate:
         """Best effort: a ledger failure never changes the gate's decision."""
         try:
             d = dict(detail or {})
+            request_id = context.get("api_request_id") if isinstance(context, Mapping) else None
+            if request_id:
+                d.setdefault("api_request_id", str(request_id))   # pairs the row with pre_api_request's attempt
             if dest.api_mode not in KNOWN_API_MODES:
                 d.setdefault("note", "unknown_api_mode")
             self.ledger.append(LedgerEvent(

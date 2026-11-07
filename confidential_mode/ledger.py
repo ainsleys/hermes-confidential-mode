@@ -152,7 +152,8 @@ class BlobStore:
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{blob_id}.{os.getpid()}.{threading.get_ident()}.tmp")
         try:
-            with open(tmp, "wb") as fh:
+            # Mode 0600 from creation, like every plugin data file (ux-pass-1 item 8).
+            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as fh:
                 fh.write(data)
                 fh.flush()
                 os.fsync(fh.fileno())
@@ -262,6 +263,48 @@ def coerce_event(event: Any) -> LedgerEvent:
     return LedgerEvent(**fields)
 
 
+#: Mode of every file the plugin keeps (the ledger, its WAL and shared-memory files, evidence blobs, the
+#: state, pins and grants files). Readable and writable by the user only.
+DATA_FILE_MODE = 0o600
+_SQLITE_SIDE_FILES = ("", "-wal", "-shm", "-journal")
+
+
+def secure_file(path: str | Path) -> None:
+    """chmod 0600 a regular file the plugin owns (not a symlink). Never raises."""
+    try:
+        p = Path(path)
+        if p.is_file() and not p.is_symlink() and (p.stat().st_mode & 0o777) != DATA_FILE_MODE:
+            os.chmod(p, DATA_FILE_MODE)
+    except OSError:
+        pass
+
+
+def secure_data_files(roots: Iterable[str | Path], *, max_files: int = 10000) -> int:
+    """chmod 0600 every regular file under the plugin's data directories (existing installs created some
+    files 0644). Symlinks are not followed. Returns how many files were looked at. Never raises."""
+    seen = 0
+    for root in roots:
+        try:
+            for dirpath, _dirs, files in os.walk(str(root), followlinks=False):
+                for name in files:
+                    secure_file(Path(dirpath) / name)
+                    seen += 1
+                    if seen >= max_files:
+                        return seen
+        except Exception:
+            continue
+    return seen
+
+
+def _create_private(path: Path) -> None:
+    """Create an empty ``path`` with mode 0600 when absent, so SQLite never creates it 0644. Never raises."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT, DATA_FILE_MODE))
+    except OSError:
+        pass
+
+
 def _default_connect() -> sqlite3.Connection:
     from plugins.plugin_storage import plugin_db
     return plugin_db(PLUGIN_STORAGE_NAME, LEDGER_FILENAME)
@@ -280,9 +323,11 @@ class Ledger:
                  clock: Callable[[], float] = time.time, blob_dir: str | Path | None = None):
         if path is not None and connect is not None:
             raise ValueError("pass path or connect, not both")
+        self._file: Path | None = None   # the SQLite file (default ledger: resolved on first use)
         if path is not None:
             p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
+            self._file = p
             connect = lambda: sqlite3.connect(p, check_same_thread=False, timeout=5.0)  # noqa: E731
             if blob_dir is None:
                 blob_dir = p.parent.joinpath(*BLOB_SUBDIR)
@@ -312,11 +357,22 @@ class Ledger:
 
     def _db(self) -> sqlite3.Connection:
         if self._conn is None:
+            target = self._file
+            if target is None and self._blob_default:
+                try:
+                    target = default_ledger_path()
+                except Exception:  # noqa: BLE001
+                    target = None
+            if target is not None:
+                _create_private(target)
             conn = self._connect()
             conn.row_factory = None
             conn.executescript(_SCHEMA)
             conn.commit()
             self._conn = conn
+            if target is not None:   # an existing ledger made 0644 by an earlier build, and SQLite's side files
+                for suffix in _SQLITE_SIDE_FILES:
+                    secure_file(Path(str(target) + suffix))
         return self._conn
 
     def append(self, event: LedgerEvent | Mapping[str, Any]) -> int:

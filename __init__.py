@@ -78,6 +78,7 @@ class Runtime:
         self.image_notice_lock: Any = _NO_LOCK
         self.reply_notices: dict = {}
         self._notice_lock = threading.Lock()
+        self.progress: Any = None   # progress.Progress while a terminal command runs (cli_verb); else quiet
 
     # ── shared collaborators ──────────────────────────────────────────────────────────────────
     def module(self, name: str):
@@ -140,7 +141,7 @@ class Runtime:
         from tools.registry import registry
         # A CLI process (`hermes confidential allow`) has not imported the built-in tools; without them the
         # rebuild below would keep no built-in tool, and every allow would be refused as unregistered.
-        gt.ensure_builtin_tools()
+        gt.ensure_builtin_tools(self.progress)
         predicate = _cm("locking").predicate_for(tier, config=self.load_config())
         # Amendment 4 F5 (W4): rebuild from the identities persisted at THIS lock; anything registered
         # after the lock, changed, or a missing/other-lock file is unclassified until a relock.
@@ -252,8 +253,37 @@ def register(ctx) -> None:
     return None
 
 
+def _start_progress(rt: Runtime):
+    """(Progress, data dir, commit) for the start-up lines (progress.py). Never raises: quiet on any error."""
+    try:
+        pr = _cm("progress")
+        commit = _cm("_version").PLUGIN_COMMIT
+        data_dir = rt.ctx.state.data_dir
+        return pr.Progress(pr.wanted(data_dir, commit)), data_dir, commit
+    except Exception:  # noqa: BLE001
+        try:
+            return _cm("progress").QUIET, None, ""
+        except Exception:  # noqa: BLE001
+            return None, None, ""
+
+
+class _NoProgress:
+    enabled = False
+
+    def start(self, name): pass
+
+    def done(self, result="ok"): pass
+
+    def line(self, text): pass
+
+
 def _register(rt: Runtime) -> None:
     ctx = rt.ctx
+    prog, prog_dir, prog_commit = _start_progress(rt)
+    prog = prog or _NoProgress()
+    if prog.enabled:
+        prog.line(f"first start of commit {prog_commit}; loading the plugin")
+    prog.start("preparing the data directory")
 
     def core():
         rt.ledger = _cm("ledger").Ledger()          # opens plugin_db lazily, on first append
@@ -270,6 +300,12 @@ def _register(rt: Runtime) -> None:
     def data_paths():
         rt.allowlist_path = ctx.state.data_dir / "allowlist.yaml"
     _step(rt, "data_paths", data_paths)
+
+    def data_modes():
+        # Every plugin data file is 0600; files an earlier build created 0644 (the ledger) are fixed here.
+        ledger = _cm("ledger")
+        ledger.secure_data_files([ctx.state.data_dir, ledger.default_ledger_path().parent])
+    _step(rt, "data_modes", data_modes)
 
     def revocations():
         rv = _cm("revoke")
@@ -288,6 +324,9 @@ def _register(rt: Runtime) -> None:
         rt.revocations.baseline()
     _step(rt, "revocations", revocations)
 
+    prog.done()
+    prog.start("registering the Tinfoil provider")
+
     def provider_profile():
         provider = _cm("provider")
         # ledger= : the verification cache ledgers verify_ok/verify_fail/pin_staged (Amendment 4 F4).
@@ -297,6 +336,9 @@ def _register(rt: Runtime) -> None:
         rt.adapter = getattr(profile, "_confidential_adapter", None)
         rt.registered["providers"].append(profile.name)
     _step(rt, "provider", provider_profile)
+
+    prog.done("ok" if "provider" not in [e[0] for e in rt.errors] else "failed (see hermes confidential status)")
+    prog.start("registering the NEAR provider (loads the OpenAI SDK)")
 
     def near_profile():
         # Amendment 5: NEAR AI Cloud, same verification cache, pins file and ledger as Tinfoil's.
@@ -308,6 +350,9 @@ def _register(rt: Runtime) -> None:
             rt.near_adapter.on_plaintext_parts = _image_notice(rt)   # Amendment 9
         rt.registered["providers"].append(profile.name)
     _step(rt, "provider_near", near_profile)
+
+    prog.done("ok" if "provider_near" not in [e[0] for e in rt.errors] else "failed (see hermes confidential status)")
+    prog.start("registering the gates, hooks and commands")
 
     def background_gate():
         # Amendment 9: the background re-verification runs only while this profile is locked on the attested
@@ -364,6 +409,12 @@ def _register(rt: Runtime) -> None:
         _cm("commands").register_cli(ctx, rt)
         rt.registered["cli_commands"].append("confidential")
     _step(rt, "cli_command", cli)
+    prog.done("ok" if not rt.errors else f"{len(rt.errors)} step(s) failed (see hermes confidential status)")
+    if prog.enabled:
+        try:
+            _cm("progress").remember(prog_dir, prog_commit)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ── hooks ────────────────────────────────────────────────────────────────────────────────────────
@@ -558,7 +609,7 @@ def _bytes_of(request: Any, chars: Any) -> Optional[int]:
 
 def _observe(rt: Runtime, *, purpose: str, provider: Any, base_url: Any, model: Any, api_mode: Any,
              session_id: Any, request: Any, chars: Any, platform: Any, decision: str, source: str,
-             breach_on_off_tier: bool) -> None:
+             breach_on_off_tier: bool, api_request_id: Any = "") -> None:
     tiers, locking = _cm("tiers"), _cm("locking")
     dest = tiers.Destination(provider=str(provider or ""), base_url=str(base_url or ""), model=str(model or ""),
                              api_mode=str(api_mode or ""), purpose=purpose)
@@ -584,7 +635,8 @@ def _observe(rt: Runtime, *, purpose: str, provider: Any, base_url: Any, model: 
     rt.append({"kind": "send_observed", "session_id": sid, "purpose": purpose, "provider": dest.provider,
                "host": host, "model": dest.model, "bytes": nbytes, "tier": tier_value,
                "verdict": verdict_label, "decision": decision, "surface": str(platform or "") or None,
-               "detail": {"source": source, **({"reason": reason} if reason else {})}})
+               "detail": {"source": source, **({"reason": reason} if reason else {}),
+                          **({"api_request_id": str(api_request_id)} if api_request_id else {})}})
     if breach_on_off_tier and locked is not False and off:
         try:
             rt.state.mark_breached(sid or NO_SESSION)
@@ -599,12 +651,14 @@ def _observe(rt: Runtime, *, purpose: str, provider: Any, base_url: Any, model: 
 def _pre_api_request(rt: Runtime):
     def pre_api_request(provider: str = "", base_url: str = "", model: str = "", api_mode: str = "",
                         session_id: str = "", request: Any = None, request_char_count: Any = None,
-                        platform: str = "", **_kw: Any) -> None:
-        # The main call's outcome is ledgered by the llm gate (allowed/refused); this row is the attempt.
+                        platform: str = "", api_request_id: Any = "", **_kw: Any) -> None:
+        # The main call's outcome is ledgered by the llm gate (allowed/refused); this row is the attempt. Both
+        # rows carry Hermes' api_request_id, so a receipt shows the send once (ux-pass-1 item 5).
         try:
             _observe(rt, purpose="main", provider=provider, base_url=base_url, model=model, api_mode=api_mode,
                      session_id=session_id, request=request, chars=request_char_count, platform=platform,
-                     decision="attempt", source="pre_api_request", breach_on_off_tier=False)
+                     decision="attempt", source="pre_api_request", breach_on_off_tier=False,
+                     api_request_id=api_request_id)
         except Exception:  # noqa: BLE001
             pass
         return None

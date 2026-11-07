@@ -18,7 +18,6 @@ import sys
 from typing import Any, Callable
 
 import httpx
-import openai
 
 # Keyword arguments Hermes may pass to create_client() that are safe to forward to openai.OpenAI.
 # api_key/base_url are handled explicitly; http_client is never forwarded (the secure view replaces it).
@@ -79,6 +78,7 @@ class ConfidentialClient:
         self._kw = dict(openai_kwargs or {})
         self._kw.setdefault("max_retries", 0)
         self._view = adapter.sync_http_view()
+        import openai   # imported on first client, not at plugin load (ux-pass-1: start-up time)
         self._sync = openai.OpenAI(api_key=api_key or "tinfoil", base_url=base_url, http_client=self._view,
                                    **self._kw)
         self._async_by_loop: dict[int, tuple[asyncio.AbstractEventLoop, openai.AsyncOpenAI]] = {}
@@ -101,6 +101,7 @@ class ConfidentialClient:
         entry = self._async_by_loop.get(id(loop))
         if entry is None or entry[0] is not loop:
             http = self._adapter.async_http_for_loop()
+            import openai
             entry = (loop, openai.AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http,
                                               **self._kw))
             self._async_by_loop[id(loop)] = entry

@@ -151,7 +151,7 @@ def test_every_kind_is_rendered_in_order(ledger, tmp_path):
 
     text = render(ledger, SID, pins=_pins(tmp_path))
     titles = ["Confidential mode receipt for session", "Trust roots in force", "Verification events",
-              "Sends (purpose, host, bytes; never text)", "Refusals", "Asks and answers", "Breaches",
+              "Sends (purpose, host, request and response bytes; never text)", "Refusals", "Asks and answers", "Breaches",
               "Compactions", "Notices", CLOSING_PARAGRAPH]
     positions = [text.index(t) for t in titles]
     assert positions == sorted(positions)
@@ -164,7 +164,7 @@ def test_every_kind_is_rendered_in_order(ledger, tmp_path):
     assert "evidence attached (" in text and "reason: code fingerprint does not match pin" in text
     assert "pin_staged" in text and "pin_applied" in text and "decision=no_answer" in text
     # sends by purpose / host / bytes
-    assert "main  host=r1.tinfoil.invalid  1234 bytes" in text
+    assert "main  host=r1.tinfoil.invalid  request 1234 bytes" in text
     # refusals with reason
     assert "reason: provider_error; HTTP 500; InternalServerError" in text
     assert "reason: fallback_providers[0].provider off_tier" in text

@@ -421,6 +421,7 @@ def commit_meta(cdir: Path, commit: str, *, repo: Optional[str] = None, fetch: O
                 raise ValueError("the API answered for another commit")
             Path(cdir).mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data), encoding="utf-8")
+            os.chmod(path, 0o600)
         except Exception as exc:  # noqa: BLE001
             return {"status": "not fetched", "reason": f"fetch failed ({type(exc).__name__})"}
     if not isinstance(data, dict):

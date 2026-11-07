@@ -337,6 +337,26 @@ def is_unverified_entry(row: Mapping) -> bool:
     return not (isinstance(evidence, Mapping) and evidence and evidence.get("capture_complete") is True)
 
 
+def send_pairs(rows: list[dict]) -> dict:
+    """{attempt row id: result row id} for each main send that has both rows (ux-pass-1 item 5): the
+    ``pre_api_request`` attempt row and the llm gate's row written for the same call (``send_observed`` allowed
+    or observed, or ``send_refused``), matched by Hermes' ``api_request_id`` within one session. The ledger
+    keeps both rows; the text form shows the send once."""
+    pairs: dict = {}
+    open_attempts: dict = {}
+    for r in rows:
+        d = r["detail"] if isinstance(r.get("detail"), Mapping) else {}
+        rid = d.get("api_request_id")
+        if not isinstance(rid, str) or not rid:
+            continue
+        key = (r["session_id"], rid)
+        if r["kind"] == "send_observed" and r.get("decision") == "attempt" and d.get("source") == "pre_api_request":
+            open_attempts[key] = r["id"]
+        elif r["kind"] in ("send_observed", "send_refused") and key in open_attempts:
+            pairs[open_attempts.pop(key)] = r["id"]
+    return pairs
+
+
 def _sections(rows: list[dict]) -> dict:
     by_kind = lambda kinds: [r["id"] for r in rows if r["kind"] in kinds]  # noqa: E731
     asks = []
@@ -368,6 +388,7 @@ def _sections(rows: list[dict]) -> dict:
         "notices": by_kind(("notice",)),
         "signed_sends": by_kind(("send_signed",)),
         "grants_revoked": by_kind(("grant_revoked",)),   # Amendment 10
+        "send_pairs": [[a, b] for a, b in send_pairs(rows).items()],   # [attempt row, result row]
     }
 
 # Added only when a receipt holds an encrypted NEAR send (W11, Amendment 5.1); checked by verify_chain then.
@@ -767,10 +788,18 @@ def _line(row: Mapping, session_id: str, body: str) -> str:
     return f"  #{row['id']} {ts_text(row['ts'])}{scope}  {body}"
 
 
-def _send_body(r: Mapping) -> str:
-    nbytes = f"{r['bytes']} bytes" if r.get("bytes") is not None else "size unknown"
-    return (f"{_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  {nbytes}  "
-            f"{_p(r['provider']) or '?'}/{_p(r['model']) or '?'}  {_p(r['decision']) or ''}").rstrip()
+def _send_body(r: Mapping, attempt: Mapping | None = None) -> str:
+    """One send. ``attempt``: the pre_api_request row of the same call, folded into this line."""
+    req = f"request {r['bytes']} bytes" if r.get("bytes") is not None else "request size unknown"
+    d = r["detail"] if isinstance(r.get("detail"), Mapping) else {}
+    rb = d.get("response_bytes")
+    if isinstance(rb, int) and not isinstance(rb, bool):
+        req += f", response {rb} bytes"
+    elif attempt is not None or r.get("decision") == "allowed":
+        req += ", response size unknown"
+    rows = f"  (rows #{attempt['id']} attempt, #{r['id']} result)" if attempt is not None else ""
+    return (f"{_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  {req}  "
+            f"{_p(r['provider']) or '?'}/{_p(r['model']) or '?'}  {_p(r['decision']) or ''}").rstrip() + rows
 
 
 def _verify_body(r: Mapping, status: Mapping | None = None) -> str:
@@ -918,8 +947,12 @@ def render_text(doc: Mapping) -> str:
     section("Verification events", sec["verification"], lambda r: _verify_body(r, statuses.get(r["id"])))
     coverage = {c["send"]: c for c in sec.get("send_coverage", [])}
 
+    pairs = {a: b for a, b in sec.get("send_pairs", [])}
+    attempt_of = {b: a for a, b in pairs.items()}
+
     def send_line(r: Mapping) -> str:
-        body = _send_body(r)
+        a = attempt_of.get(r["id"])
+        body = _send_body(r, rows[a] if a is not None else None)
         c = coverage.get(r["id"])
         if c is None:
             return body
@@ -932,10 +965,14 @@ def render_text(doc: Mapping) -> str:
                 f"window {ts_text(c['window_start'])} to {ts_text(c['window_end'])}")
         return line + _hpke_text(c)
 
-    section("Sends (purpose, host, bytes; never text)", sec["sends"], send_line)
+    # A send whose attempt and result rows pair up is shown once, on the result row; an attempt whose result
+    # is a refusal is shown under Refusals only.
+    section("Sends (purpose, host, request and response bytes; never text)",
+            [i for i in sec["sends"] if i not in pairs], send_line)
     section("Refusals", sec["refusals"],
             lambda r: f"{r['kind']}  {_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  "
-                      f"reason: {_reason(r)}")
+                      f"reason: {_reason(r)}"
+                      + (f"  (attempt row #{attempt_of[r['id']]})" if r["id"] in attempt_of else ""))
 
     add("")
     add("Asks and answers")
