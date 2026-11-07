@@ -69,6 +69,13 @@ A private-range address is not the same thing as a machine you control. A neighb
 provider's private network has a private-range address too, and so does a carrier-grade NAT
 address. The plugin cannot tell those apart from your own machine.
 
+## What the lock costs you
+
+Locking changes which models you can use, removes fallbacks, prompts on tools that leave the machine, and
+on NEAR turns streaming off. [docs/COSTS.md](docs/COSTS.md) states the expected effect on latency,
+response quality and task success for each mode, compared with running Hermes without the plugin, and
+says which of those figures the ledger can measure.
+
 ## Why "lock" and not "seal"
 
 The plugin says "lock" because sealing already means something else in confidential computing:
