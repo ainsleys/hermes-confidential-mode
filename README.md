@@ -15,8 +15,9 @@ some of your text, and each goes to whatever provider that task is configured fo
 provider takes over quietly when the main request fails. Tools such as web fetch and messaging send
 text to whatever site the agent decides to call. Shell and code execution run on this host and can
 reach the network, as long as Hermes' terminal backend is `local`. On another backend, such as `ssh`
-or `modal`, shell, code execution and the file tools run on that other machine. Memory is written to whatever store is configured. Choosing a verified provider
-for the main chat covers the main chat only.
+or `modal`, shell, code execution and the file tools run on that other machine. Memory is written to
+whatever store is configured. Choosing a verified provider for the main chat covers the main chat
+only.
 
 ![Figure 1. With a verified provider alone, the main chat is verified and five other routes carry
 text to hosts nobody checks.](docs/images/routes-figure-1-verified-provider-alone.svg)
@@ -31,27 +32,29 @@ The plugin does four things for a Hermes profile.
 
 2. **It locks the profile to one tier.** A tier is a rule for which destinations are acceptable.
    The `on-host-only` tier accepts a host whose network address is loopback or in a private range.
-   The `attested` tier accepts a Tinfoil enclave whose build you have approved. Before locking, the
-   plugin checks every configured route: the main model, every side call, delegation, text to
-   speech, MCP servers, fallbacks and the terminal backend. If any route leads off-tier, the lock
-   is refused and the plugin prints which key to change.
+   The `attested` tier accepts a Tinfoil enclave, or NEAR AI Cloud's gateway and models, whose build
+   you have approved. Before locking, the plugin checks every configured route: the main model,
+   every side call, delegation, text to speech, MCP servers, fallbacks and the terminal backend. If
+   any route leads off-tier, the lock is refused and the plugin prints which key to change.
 
 3. **While locked, it guards or refuses four of the five other routes.** The five other routes are
    side calls, fallbacks, tools, shell and code execution, and memory. Shell and code execution
-   stay open, as the next section explains. Side calls must
-   resolve to the same tier as the main chat and are rechecked every turn. No fallback provider may
-   be configured, and a failed request ends the turn instead of being rerouted. Off-host tools ask
-   you before each call; an answer of `session` or `always` stops the asking, and an `always` answer
-   is written to Hermes' own allowlist and outlives the lock. Memory must be the built-in store.
+   stay open, as the next section explains. Side calls must resolve to the same tier as the main
+   chat and are rechecked every turn. No fallback provider may be configured, and a failed request
+   ends the turn instead of being rerouted. Off-host tools ask you before each call; an answer of
+   `session` or `always` stops the asking, and an `always` answer is written to Hermes' own
+   allowlist and outlives the lock. Memory must be the built-in store.
 
 4. **It writes a receipt for each session.** The receipt lists where the text went, attaches the
-   enclave evidence captured at each verification, and ends with a fixed paragraph naming what the
+   enclave evidence captured at each verification, and ends with fixed paragraphs naming what the
    receipt cannot prove. Anyone holding the receipt can replay the enclave evidence offline, without
-   contacting Tinfoil. The rest of the receipt is the plugin's own record.
+   contacting the vendor. For NEAR, the replay also re-checks each response signature. Everything
+   else in the receipt is the plugin's own record.
 
-![Figure 2. With the plugin, preflight checks every configured route, side calls go to the verified
-enclave, fallback is refused, tools ask, memory stays on the host, shell and code stay open, and a
-ledger records model sends and tool answers.](docs/images/routes-figure-2-with-the-plugin.svg)
+![Figure 2. With the plugin, shown for Tinfoil: preflight checks every configured route, side calls
+go to the verified enclave, fallback is refused, tools ask, memory stays on the host, shell and code
+stay open on this host, and a ledger records model sends and tool
+answers.](docs/images/routes-figure-2-with-the-plugin.svg)
 
 ## What the plugin cannot do
 
@@ -63,18 +66,29 @@ routes as unproven.
 A side call that goes off-tier in the middle of a turn, for example after a runtime model switch,
 is recorded as a breach. The plugin cannot stop that call, because Hermes' auxiliary calls do not
 pass through the middleware a plugin can block. The limitations section at the end of this README
-lists every gap of this kind, with the Hermes change that would close each.
+lists every gap of this kind. [docs/LIMITATIONS.md](docs/LIMITATIONS.md) gives the Hermes change that
+would close each.
 
 A private-range address is not the same thing as a machine you control. A neighbour in a cloud
 provider's private network has a private-range address too, and so does a carrier-grade NAT
 address. The plugin cannot tell those apart from your own machine.
 
+On NEAR AI Cloud, the gateway still reads each request's model id, plaintext parameters, headers,
+sizes and timing. Every instance of a model shares the key a request is encrypted to, so the
+encryption does not limit who can read the request to the instances you approved.
+[The attested tier with NEAR AI](#the-attested-tier-with-near-ai) states what the NEAR checks
+establish.
+
+An agent with a terminal on this host can still reach a pin approval prompt by some routes, such as
+a nested chat it starts. [Reviewing a pending pin](#reviewing-a-pending-pin) says what the plugin
+refuses and what it cannot.
+
 ## What the lock costs you
 
-Locking changes which models you can use, removes fallbacks, prompts on tools that leave the machine, and
-on NEAR turns streaming off. [docs/COSTS.md](docs/COSTS.md) states the expected effect on latency,
-response quality and task success for each mode, compared with running Hermes without the plugin, and
-says which of those figures the ledger can measure.
+Locking changes which models you can use, removes fallbacks and prompts on tools that leave the
+machine. On NEAR it also turns streaming off and refuses images. [docs/COSTS.md](docs/COSTS.md)
+states the expected effect on latency, response quality and task success for each mode, compared
+with running Hermes without the plugin, and says which of those figures the ledger can measure.
 
 ## Why "lock" and not "seal"
 
@@ -95,8 +109,30 @@ plugin. This plugin ships that verified provider as asked, and adds the routing 
 gate, the ledger and the receipt that make the privacy claim about the whole session rather than
 about one endpoint.
 
+The table compares the five closed pull requests with this plugin. "Yes" means present and enforced.
+"Partial" means present with a gap. "No" means absent. The pull requests are Hermes #4231 (Venice),
+#5015 (RedPill), #7045 (Tinfoil), #12201 (NEAR AI and Phala) and #31613 (Tinfoil).
+
+| Capability | #4231 | #5015 | #7045 | #12201 | #31613 | This plugin |
+|---|---|---|---|---|---|---|
+| Verified main-chat provider | Partial | No | Yes | Partial | Partial | Yes: Tinfoil and NEAR |
+| Offline replay of the evidence | No | No | No | No | No | Yes |
+| Build pins with a human's consent | No | No | No | Partial | No | Yes: one entry per NEAR virtual machine configuration |
+| Review bundle for a second reviewer | No | No | No | No | No | Yes |
+| Model signing key bound to the report | Yes | No | No | Yes | No | Yes, not pinned |
+| TLS bound to the attested key on every send | No | No | Yes | Partial | Partial | Yes |
+| Check of what NEAR deploys after launch | No | No | No | Yes | No | Yes: the operator's reported log, bound in a hardware quote, not a measurement |
+| NVIDIA GPU evidence | No | No | No | Yes | No | No |
+| Request body encryption | Partial | No | No | Partial | Yes | Yes: whole body on Tinfoil; all fields NEAR covers |
+| Signed responses checked | No | No | No | No | No | Yes on NEAR |
+| Side-call routing check | No | No | Partial | No | No | Partial: a stray call is recorded, not stopped |
+| Fallback refusal | No | No | Yes | No | No | Yes |
+| Off-host tool gate | No | No | No | No | No | Partial: shell and code stay open |
+| Memory check | No | No | No | No | No | Yes |
+| Per-send ledger and receipt | No | No | No | No | No | Yes |
+
 The plugin was built and tested against Hermes commit 84a0301 and version 0.14.2 of the tinfoil
-Python SDK. It is an entry for the Nous Research Hermes Agent Plugin Hackathon.
+Python SDK. The plugin is an entry for the Nous Research Hermes Agent Plugin Hackathon.
 
 ## Terms this README uses
 
@@ -211,9 +247,10 @@ the request body too.
 on GitHub as `tinfoilsh/confidential-model-router`. The router forwards each request to a model
 backend that Tinfoil runs behind it.
 
-**Pin.** A pin is your recorded approval of one router build. It holds that build's code fingerprint
-and enclave fingerprint. While a pin is in force, the plugin sends nothing to a router whose
-fingerprints differ from the pin.
+**Pin.** A pin is your recorded approval of an enclave build. A Tinfoil pin holds one router build's
+code fingerprint and enclave fingerprint. A NEAR pin is a set of approved entries, one for each
+confidential virtual machine configuration you approved ([Pins for NEAR](#pins-for-near)). While a
+pin is in force, the plugin sends nothing to an enclave that no approved pin matches.
 
 **Sigstore and Rekor.** Sigstore is a public service for signing software. When Tinfoil's GitHub
 Actions workflow builds a router release, it signs a statement about that build through Sigstore.
@@ -229,9 +266,12 @@ someone's public key. EHBP (the encrypted HTTP body protocol) is Tinfoil's trans
 encrypt the body of each HTTP request to a key that the attested enclave holds. EHBP does not encrypt
 the headers, and it does not hide the size or timing of a request.
 
-**Evidence.** Evidence is the set of raw bytes the plugin captures during one verification. It
-includes the hardware report, the CPU vendor's certificates, the Sigstore bundle, the trust root and
-the release metadata. The plugin stores evidence in the ledger.
+**Evidence.** Evidence is the set of raw bytes the plugin captures during one verification. For
+Tinfoil it includes the hardware report, the CPU vendor's certificates, the Sigstore bundle, the
+trust root and the release metadata. For NEAR it includes the attestation reports, Intel Trust
+Authority's tokens and key set, and each model's compose-manager attestation. The plugin stores
+evidence in the ledger. Large pieces of NEAR evidence are kept as files beside the ledger, named by
+their SHA-256, and a receipt embeds them again.
 
 **Replay.** A replay re-runs a stored verification later, from the evidence alone, with network
 access blocked. It shows whether the stored bytes still check out.
@@ -251,9 +291,9 @@ access blocked. It shows whether the stored bytes still check out.
 >   Auxiliary side jobs are handled differently. Hermes gives plugins no way to stop an auxiliary
 >   call at the moment it is sent. The plugin therefore refuses to lock while any side job is
 >   configured to go off-tier. If a side job goes off-tier anyway, the plugin records a breach.
-> - **The vendor shipping a new enclave build without your consent.** Suppose Tinfoil's router
->   presents fingerprints that differ from your pin. Then the plugin refuses the turn. It keeps
->   refusing until you approve the new fingerprints.
+> - **The vendor shipping a new enclave build without your consent.** Suppose Tinfoil's router, or a
+>   NEAR confidential virtual machine, presents fingerprints that no approved pin matches. Then the
+>   plugin refuses the turn. The plugin keeps refusing until you approve the new fingerprints.
 >
 > **What it does not defend against**
 >
@@ -276,6 +316,14 @@ access blocked. It shows whether the stored bytes still check out.
 >   enforces where TLS ends: its transport pins the TLS key from the attestation report on every
 >   connection. The plugin's own TLS probe only corroborates the SDK's pinning. The probe records the certificate it saw and
 >   never fails a verification.
+> - **NEAR's gateway.** TLS ends inside NEAR's attested gateway. With request encryption on, the
+>   gateway still reads the model id, the plaintext parameters, the request headers, the sizes and
+>   the timing of every request. A gateway that swaps the client key header can read a reply. The
+>   plugin detects the swap only afterwards. [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 14,
+>   lists everything the NEAR checks leave open.
+> - **An agent with a terminal approving a pin.** Some routes to the approval prompt stay open to an
+>   agent with terminal access on this host. [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 15,
+>   lists them.
 > - **The vendor's collateral proxies.** These are `github-proxy.tinfoil.sh`, `kds-proxy.tinfoil.sh`
 >   and `tdx-proxy.tinfoil.sh`. The SDK fetches verification material through them. They therefore
 >   see that you verify, and when.
@@ -363,21 +411,23 @@ therefore cannot tell where they point. You have to set `model.base_url` and eac
 
 **Where the model may run.** The model must be reached through Tinfoil's confidential model router,
 or through NEAR AI Cloud's attested gateway (see [The attested tier with NEAR AI](#the-attested-tier-with-near-ai)).
-The router runs in an AMD SEV-SNP or Intel TDX enclave. The plugin verifies the router before first
-use. It verifies the router again whenever the last successful verification is older than 300
-seconds.
+Tinfoil's router runs in an AMD SEV-SNP or Intel TDX enclave. NEAR's gateway and models run in Intel
+TDX virtual machines. The plugin verifies the vendor before first use. The plugin verifies again whenever the
+last successful verification is older than 300 seconds.
 
 **What it costs you.** This tier has four costs.
 
-- You can use only the open-weight models Tinfoil serves. At the time of writing these are Kimi
-  K3.1 Pro, GLM-5.3, DeepSeek V4.1 Flash, Gemma 4 31B, gpt-oss-120b and Llama 3.3 70B.
-- You need a Tinfoil API key.
+- You can use only the open-weight models the vendor serves inside enclaves. On Tinfoil, at the time
+  of writing, these are Kimi K3.1 Pro, GLM-5.3, DeepSeek V4.1 Flash, Gemma 4 31B, gpt-oss-120b and
+  Llama 3.3 70B. On NEAR, use a model NEAR runs and attests itself (see [Models](#models)).
+- You need the vendor's API key: `TINFOIL_API_KEY`, or `NEAR_AI_API_KEY` for NEAR.
 - A failure ends the turn instead of falling back. If the enclave cannot be verified within 20
   seconds, the turn ends with a refusal, and you resend your message. If the enclave answers with an
-  error, the same thing happens. The plugin does not retry. It does not fall back to another
-  provider.
-- You will see a pin prompt every time Tinfoil ships a new router build. You may also see one after
-  a restart, for the reason explained under [Pins](#pins).
+  error, the same thing happens. While locked, the plugin does not retry a main call. The plugin does
+  not fall back to another provider.
+- You will see a pin prompt every time Tinfoil ships a new router build, and every time NEAR serves
+  from a configuration you have not approved. You may also see one after a restart, for the reason
+  explained under [Pins](#pins).
 
 ### `zero-retention`
 
@@ -402,23 +452,43 @@ confidential virtual machine. Intel TDX is Intel's TEE technology.
 ### What the plugin checks before the first send
 
 The plugin asks NEAR for an **attestation report** for the gateway and for each model you allow. An
-attestation report is a document signed by the CPU that says what the CVM runs. Each report includes a
-fresh random value from the plugin, called a **nonce**. The nonce proves the report was made for this
-request and was not copied from an earlier one.
+attestation report is a document signed by the CPU that says what the CVM runs. NEAR can return
+several reports for one model, one for each CVM that serves it. Each such CVM is an **instance**.
+Each report includes a fresh random value from the plugin, called a **nonce**. The nonce proves the
+report was made for this request and was not copied from an earlier one.
 
-The plugin checks six things.
+The plugin checks the following.
 
 - The CPU signature on each report traces back to Intel's root certificate.
-- Each report names the CVM's **signing key**, the key the CVM signs responses with.
 - Each report names the nonce the plugin sent.
+- Each report names the CVM's **signing key**, the key the CVM signs responses with. For a model,
+  the public key the report lists must be that same signing key. Every report for one model must
+  name the same key. The plugin encrypts requests to that key (see [Request encryption](#request-encryption)).
 - Each report's measured configuration matches the **docker-compose file** the report carries. The
   docker-compose file lists the container images the CVM runs.
-- The gateway's report names the TLS certificate this connection used. TLS is the encryption that
-  HTTPS uses. So the plugin knows the encrypted connection ends inside the gateway's CVM. The plugin
-  checks every later connection, for inference and for signatures, against that certificate. It does
-  so right after the TLS handshake, before it sends any byte of the request.
+- Each CVM's boot events, which its measurements record, name its app_id, its OS image and its KMS
+  key. The app_id is the CVM's application id. The KMS key identifies the key service the CVM gets
+  its keys from. The plugin reads these three values from the boot events. A report that states other
+  values is refused.
+- The gateway's report names the TLS certificate this connection used. So the plugin knows the
+  encrypted connection ends inside the gateway's CVM. The plugin checks every later connection, for
+  inference and for signatures, against that certificate. The check runs right after the TLS
+  handshake, before the plugin sends any byte of the request.
 - Intel Trust Authority, a service Intel runs, has signed a token that says the gateway's hardware is
   up to date. The plugin checks Intel's signature against Intel's published keys.
+- Each model report carries a second attestation, from a service called **compose-manager**.
+  Compose-manager deploys further services into the model's CVM after launch. Its attestation is a
+  log of those deployment actions, with an Intel quote of its own. A TD (trust domain) is Intel's
+  name for one TDX virtual machine. The plugin checks that the quote comes from the same TD as the
+  model's report, that it binds the log's hash and the plugin's nonce, and that the log hashes to
+  that value. From the log the plugin derives the **service map**: every service the log says was
+  deployed, with the release it was deployed from. While `confidential.near.require_provider_tee` is
+  true, a model report without this attestation is refused.
+
+The compose-manager check establishes three things. A TD of this instance reported this actions log
+for this nonce. The log's hash is bound in a hardware quote. The service map is what the operator's
+own tooling reported. The check does not establish that the services deployed after launch are
+measured. The check does not establish that the reported services are the ones running.
 
 No API key is sent with these requests. NEAR documents its attestation endpoints as public.
 
@@ -431,24 +501,27 @@ key to the CVM.
 For every send through `attested-near`, the plugin records two **digests**. A digest is a SHA-256
 hash. The first digest is of the exact bytes of the request. The second digest is of the exact bytes
 of the response. After the response arrives, the plugin fetches NEAR's signature for that completion.
-It waits at most 5 seconds for it. It checks the signature and writes one row to the ledger.
+The plugin waits at most 5 seconds for the signature. The plugin then checks the signature and
+writes one row to the ledger.
 
 NEAR signs with one of two kinds of key.
 
 - **`provider_tee`.** The model server's CVM signs `<model id>:<request digest>:<response digest>`.
   This proves that an attested model server signed exactly these bytes for exactly this model.
 - **`gateway`.** The gateway's CVM signs `<request digest>:<response digest>`. This proves the attested
-  gateway sent these bytes. It says nothing about which model produced them.
+  gateway sent these bytes. The signature says nothing about which model produced them.
 
 The gateway signs with its own key whenever it changes the bytes. That happens on every streamed
-response. The plugin therefore sends main calls to NEAR without streaming. A stream that stops before
-its end gets no signature at all. The ledger row then says so.
+response. So the plugin sends main calls to NEAR unstreamed by default (`confidential.near.streaming`).
+With request encryption on, a streamed request is refused before it is sent, whatever that setting
+says. With encryption off, a stream that stops before its end gets no signature, and the ledger row
+says so.
 
 `confidential.near.require_provider_tee` is true by default. A send whose signature is of the
 `gateway` kind, or is missing, is then recorded as unverified. The receipt then says the session is
 not fully attested. With request encryption on, the reply of such a send never reaches the agent.
 With encryption off, the send is not refused, because the response has already arrived when the
-signature is checked.
+signature is checked. The attested-tier lock requires encryption on.
 
 ### Request encryption
 
@@ -463,10 +536,15 @@ request. That key travels in a request header, `X-Client-Pub-Key`, which NEAR's 
 cover.
 
 The plugin decrypts a reply only after NEAR's `provider_tee` signature over the encrypted bytes has
-verified. Only an HTTP 200 reply that verifies and decrypts reaches Hermes. Any other reply is refused.
-Hermes resends a request only after a rate limit, a server error or a context-length error, as it does
-for any provider. Each resend is a new encrypted request. A reply that fails its checks is never resent. Anyone can encrypt a reply to the plugin's key, because that key is sent with the request,
-so decryption alone proves nothing.
+verified. Anyone can encrypt a reply to the plugin's key, because that key is sent with the request.
+So decryption alone proves nothing. Only an HTTP 200 reply that verifies and decrypts reaches Hermes.
+Any other reply is refused.
+
+While the profile is locked, a refused reply ends the turn, as any provider error does (see
+[What happens while locked](#what-happens-while-locked)). While the profile is unlocked, Hermes
+handles a NEAR error as Hermes would for any provider. Hermes backs off after a rate limit, retries
+after a server error, and compresses the context after a context-length error. Each resend is a new
+encrypted request. A reply that fails its checks is never resent.
 
 What this establishes, and what it does not:
 
@@ -475,17 +553,30 @@ What this establishes, and what it does not:
   The gateway cannot read those request fields.
 - The gateway still reads the model id, the plaintext parameters (for example `stop`,
   `response_format`, `metadata` and `user`), the request headers, the sizes and the timing.
-- The reply is sealed to the key named in `X-Client-Pub-Key`. A gateway that swaps that header for
+- The reply is encrypted to the key named in `X-Client-Pub-Key`. A gateway that swaps that header for
   its own key can read the reply. The plugin detects the swap only afterwards: the reply then either
   fails to decrypt or fails its signature. The plugin withholds that reply and marks the send
   unverified, but the gateway has already read it.
 - That a request was encrypted is the plugin's own report. The receipt says "plugin self-report" for
   it. The signature check is different: anyone can re-check it from the receipt.
 
-The plugin refuses some requests before they are sent. It refuses images and other non-text parts in
-a message, because NEAR's encryption covers only text. It refuses streaming, because NEAR signs
-streamed replies with the gateway's key only. It refuses every NEAR API other than chat completions. So an image task, such as `auxiliary.vision`,
-cannot use `attested-near` while encryption is on.
+The plugin refuses some requests before they are sent.
+
+- The plugin refuses images and other non-text parts in a message, because NEAR's encryption covers
+  only text.
+- The plugin refuses streaming, because NEAR signs streamed replies with the gateway's key only.
+- The plugin refuses every NEAR API other than chat completions.
+- The plugin refuses a setting whose value is a mapping, such as a reasoning effort under
+  `extra_body`, unless the plugin knows the key. Such a mapping would leave this host in plaintext.
+
+So an image task, such as `auxiliary.vision`, cannot use `attested-near` while encryption is on.
+
+An HTTP 421 from the gateway means the model key it accepts has changed. A send over a TLS
+certificate other than the attested one is treated the same way. The plugin then verifies again, at
+most once every `confidential.near.reverify_backoff_seconds` (30 by default), and refuses sends until
+that verification passes. A verification that reports a different model key is refused. So when NEAR
+rotates a model key, NEAR requests are refused until Hermes restarts. The restart accepts the new key
+without a prompt, because pins do not cover the key.
 
 Encryption needs the `pynacl` package in the environment that runs Hermes. See
 [docs/RUNNING_TESTS.md](docs/RUNNING_TESTS.md). Without it, the lock is refused, and no request is
@@ -493,9 +584,13 @@ sent unencrypted instead.
 
 ### What a receipt shows
 
-The receipt lists every NEAR send with its two digests, the signature kind, the plugin's verdict at
-the time, and a **replay verdict**. A replay re-checks everything offline, from the receipt alone.
-`hermes confidential replay <receipt.json>` re-checks each attestation report and each signature.
+The receipt lists every NEAR send with its two digests, the signature kind and the plugin's verdict
+at the time. The receipt also shows whether the request was encrypted and to which model key, which
+top-level keys left in plaintext, and whether the reply was released. That a request was encrypted
+is marked "plugin self-report". `hermes confidential replay <receipt.json>` re-checks each attestation report,
+each compose-manager attestation and each signature offline, from the receipt alone, and prints a
+replay verdict per send. A NEAR receipt ends with two more fixed paragraphs, one on signed responses
+and one on request encryption (see [The closing paragraph](#the-closing-paragraph)).
 
 A receipt holds digests, not your text. A third party can tie a signature to a conversation only if
 they hold the exact request and response bytes and hash them.
@@ -503,9 +598,10 @@ they hold the exact request and response bytes and hash them.
 ### Models
 
 You must list every NEAR model Hermes may use in `confidential.near.models`. The plugin also adds the
-models that `model.default` and the `auxiliary.<task>.model` keys name for `attested-near`. The plugin
-refuses a request for any other model before it is sent. The refusal matters because NEAR also serves
-hosted models, such as Anthropic's and OpenAI's, through the same gateway. NEAR calls those models
+models that `model.default` and the `auxiliary.<task>.model` keys name for `attested-near`. While
+`confidential.near.require_provider_tee` is true (the default), the plugin refuses a request for any
+other model before it is sent. The refusal matters because NEAR also serves hosted models, such as
+Anthropic's and OpenAI's, through the same gateway. NEAR calls those models
 **Incognito** models. For them only the gateway is attested.
 
 Use a model that NEAR runs itself and attests, such as `Qwen/Qwen3.8-27B`. Use its full id, because
@@ -523,9 +619,10 @@ app_id, the OS image and the KMS key. For a model they are the same four, the co
 that the CVM's deployment log reports, and the CVM's whole **service map** (the services the log says
 were deployed after launch). Each entry also pins the CVM's firmware and kernel measurements. So a
 change in any component, the service map and the reported compose-manager image included, asks again.
+The verified signing key is shown for review and is not pinned.
 
 A model entry can be approved only when the plugin can show, for every service in its map, whether the
-service can reach more than its own container (the socket tags). Showing that needs the deployed
+service can reach more than its own container (the privilege tags). Showing that needs the deployed
 docker-compose files. The plugin fetches them from GitHub in the background when it stages the entry,
 and the approve command fetches again before it asks. Until every file is fetched and hash-checked, the
 approve command does not ask and names `hermes confidential pins review`, which fetches them too.
@@ -563,9 +660,9 @@ session that has no access to the locked profile. For each NEAR entry the bundle
 - the compose-manager image the log reports beside the measured one;
 - the service map old and new;
 - each deployed docker-compose file named in the map. The command fetches each file from the GitHub
-  repository that the measured compose names in `GITHUB_REPO` (today `nearai/cvm-compose-files`), at the
-  logged commit, checks its SHA-256 against the log, and
-  keeps the file under `pins/composes/` in the plugin's data directory. GitHub serves a fork's commit
+  repository that the measured compose names in `GITHUB_REPO` (today `nearai/cvm-compose-files`), at
+  the logged commit, checks its SHA-256 against the log, and keeps the file under `pins/composes/` in
+  the plugin's data directory. GitHub serves a fork's commit
   under the parent repository's URL too, so the fetch does not prove that the commit belongs to that
   repository. A file the command cannot fetch is marked "text not fetched", with its link;
 - when no approved entry of the same role exists (the first review, and the first after the upgrade),
@@ -603,7 +700,21 @@ hermes confidential setup --vendor near --model Qwen/Qwen3.8-27B
 ```
 
 This command checks the gateway and the model, asks you to approve the first pin, and prints a config
-block. It never writes your config. Set `NEAR_AI_API_KEY` for inference. The script
+block. The command never writes your config. Approving a model entry needs the deployed
+docker-compose files from GitHub, as [Pins for NEAR](#pins-for-near) explains.
+
+The block routes the main model and every auxiliary task except vision through `attested-near`. The
+block leaves `auxiliary.vision` unset, because NEAR refuses images while encryption is on. The preflight
+refuses the attested lock until `auxiliary.vision` names an in-tier route. A note in the block names
+the two in-tier choices:
+
+- a vision model on `attested-tinfoil`, which needs `TINFOIL_API_KEY` and a Tinfoil pin;
+- `attested-near`, which passes the preflight but refuses every image before it is sent, so images
+  go undescribed.
+
+An on-host vision route is off-tier on the attested tier.
+
+Set `NEAR_AI_API_KEY` for inference, and install `pynacl` as described above. The script
 `scripts/near_first_contact.py` runs the same checks and one signed send, and prints no secrets.
 
 [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 14, lists what the NEAR checks leave open.
@@ -613,7 +724,9 @@ block. It never writes your config. Set `NEAR_AI_API_KEY` for inference. The scr
 Two commands let you see where your conversation goes without locking anything. Both work on an
 install that has never been locked. `check --tier attested` does change something: it
 verifies the enclave over the network, writes `verify_ok` and `pin_staged` rows to the ledger, and may
-stage a pending pin in `pins.yaml`. It never applies a pin and never changes your config.
+stage a pending pin in `pins.yaml`. For a staged NEAR model entry, the plugin then fetches its
+docker-compose files from GitHub in the background. The command never applies a pin and never
+changes your config.
 
 ### `hermes confidential check`
 
@@ -710,6 +823,13 @@ reply. The request is never sent.
 then ends the turn with the message "attested endpoint unavailable; this turn ended; resend". It does
 this so that Hermes never reaches the point where it would switch to a fallback.
 
+**A verification the ledger cannot record is refused.** On the attested tier, every successful
+verification writes a `verify_ok` row with its evidence. If that row cannot be written, for example
+because the disk is full or the row is over the ledger's size cap, the plugin refuses the
+verification. The plugin writes a `verify_fail` row instead, and sends wait for the next verification, at
+least 10 seconds later. A transient "database is locked" error is retried once first. So the plugin
+never sends on a verification it could not record.
+
 **A changed config blocks every turn.** If your routing config changes after you lock, its
 fingerprint no longer matches the one recorded at lock time. Every turn is then blocked until you
 unlock and lock again.
@@ -730,7 +850,9 @@ to the new runtime. The plugin can only record those calls. It cannot stop them.
 
 **On-host tools run without asking.** These tools run without a prompt: `terminal`,
 `process_manage`, `execute_code`, `read_file`, `write_file`, `patch`, `search_files`, `skills_list`,
-`skill_view`, `skill_manage`, `todo_list`, `memory`, `clarify` and `session_search`.
+`skill_view`, `skill_manage`, `todo_list`, `memory`, `clarify` and `session_search`. Two exceptions
+follow below: the terminal backend must be `local`, and a call that names the plugin's own commands
+or state files is refused.
 
 <a id="the-terminal-backend"></a>**The terminal backend.** Hermes runs `terminal`, `process_manage`,
 `execute_code`, `read_file`, `write_file`, `patch` and `search_files` through its terminal backend.
@@ -762,8 +884,8 @@ inspect either.
 A tool counts as on-host only in its built-in form. If a plugin or an MCP server registers a tool under
 one of these names, that tool is not treated as on-host.
 
-`terminal` can reach the network. The [Limitations](#limitations-an-upstream-roadmap) section
-explains why the plugin still treats it as on-host.
+`terminal` can reach the network. [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 3, explains
+why the plugin still treats it as on-host.
 
 **Every other tool asks you first.** Before such a tool runs, the plugin asks on Hermes' normal
 approval prompt, with a line like this:
@@ -802,6 +924,12 @@ runs without asking, in these contexts too.
 - `delegate_task` when the call names a route. A route is any field that would send the child agent
   somewhere else: a profile, a provider, a base URL, an ACP command, or a backend other than the
   default. (An ACP command launches an external agent through the Agent Client Protocol.)
+- A `terminal`, `process_manage` or `execute_code` call whose arguments name the plugin's command
+  line, its module or its state files (`pins.yaml`, `ledger.sqlite`, `allowlist.yaml`). A
+  `write_file` or `patch` call that names one of those files is refused too. The ledger records each
+  refusal with the decision `self_approval`. The check reads the text of the call, so a command
+  assembled at run time passes it. [Reviewing a pending pin](#reviewing-a-pending-pin) says what else
+  guards the approval prompt.
 
 Plain delegation on the default backend is allowed. The child agent inherits the locked profile, so
 it stays inside the tier.
@@ -833,7 +961,8 @@ that is always blocked stays blocked whatever the file says.
 
 ## Pins
 
-Pins apply to the `attested` tier only.
+Pins apply to the `attested` tier only. This section describes Tinfoil pins. NEAR pins work
+differently, as [Pins for NEAR](#pins-for-near) explains. The consent rule below applies to both.
 
 ### How the plugin verifies the router
 
@@ -915,8 +1044,8 @@ consent record". This means that a pin some other code wrote straight into `pins
 Each approved entry needs a row of its own. After `pins retire`, the ledger holds a `pin_retired` row
 for the entry, and a later copy of that entry written back by hand does not count either.
 
-This raises the bar. It is not a wall. Other code in the same process could forge the ledger row as
-well.
+This rule raises the bar. The rule is not a wall. Any process running as your user, a tool subprocess
+included, could write a matching ledger row as well.
 
 ### Trust on first use
 
@@ -1037,15 +1166,23 @@ marked "unverified entry" has no evidence, or an incomplete capture. Such a row 
 - Hermes' auxiliary calls, which can leave the locked tier while the profile is locked (for example after a
   runtime model switch). These are recorded after the fact. They are not prevented.
 
-The paragraph states four further limits. First, the ledger is a file on this host, and another plugin can
-write rows that look exactly like this plugin's own. Second, the hash chain behaves as described
-above. Third, locked mode does not apply when Hermes runs in safe-worker mode, which loads no plugins.
-Fourth, timestamps come from this machine's clock and are not attested.
+The paragraph states four further limits. First, the ledger is a file on this host, and another
+plugin can write rows that look exactly like this plugin's own. Second, the hash chain behaves as
+described above. Third, locked mode does not apply when Hermes runs in safe-worker mode, which loads
+no plugins. Fourth, timestamps come from this machine's clock and are not attested.
+
+A receipt that holds a NEAR send adds a second fixed paragraph, on signed responses. That paragraph
+says what a `provider_tee` signature and a `gateway` signature each prove. The paragraph also says
+that the digests are the plugin's own, and that a signature does not name the instance that
+answered. A receipt that holds an
+encrypted NEAR send adds a third fixed paragraph, on request encryption. That paragraph repeats the
+limits stated under [Request encryption](#request-encryption). A JSON receipt that holds an encrypted
+send without that third paragraph fails its chain check.
 
 ### Offline replay
 
-A replay re-runs a stored verification from the evidence alone. The plugin re-runs the SDK's own
-verifier on the stored bytes, under these conditions:
+A replay re-runs a stored verification from the evidence alone. For Tinfoil evidence, the plugin
+re-runs the SDK's own verifier on the stored bytes, under these conditions:
 
 - All network access is blocked for the thread doing the replay. If anything tries to connect, the
   replay fails.
@@ -1054,6 +1191,13 @@ verifier on the stored bytes, under these conditions:
   collateral again.
 - Sigstore is checked against a stored trust root.
 - Every clock the SDK consults is set to the capture time, or to a time you supply.
+
+For NEAR evidence, the replay re-runs the checks listed under
+[What the plugin checks before the first send](#what-the-plugin-checks-before-the-first-send), with
+network access blocked in the same way. The TDX quotes are checked against Intel's root certificate
+that the tinfoil SDK embeds. Intel Trust Authority's tokens are checked against the captured key set,
+whose certificate chain must end at a pinned Intel root. The replay then re-checks each response
+signature against the signing key the replayed evidence binds.
 
 #### From the command line
 
@@ -1064,17 +1208,23 @@ hermes confidential replay receipt.json
 Make `receipt.json` with `/confidential receipts <session> --json`. The command then does the
 following, in order.
 
-1. It reads the receipt and recomputes its hash chain. It prints whether the chain is intact.
-2. For each evidence row, it decides which fingerprints to expect. If you pass
-   `--expected-fingerprints CODE:ENCLAVE`, it uses those. Otherwise it uses the approved pin in this
-   profile's `pins.yaml`, or in the file you name with `--pins`. Only if neither exists does it use
-   the receipt's own claim. It labels that last choice "not independent".
-3. It replays the row. The code must come from the repository `tinfoilsh/confidential-model-router`,
-   unless you name another one with `--expected-repo`.
-4. It prints each row's result, the value of each check, and any problems.
-5. It prints the list of things a replay cannot establish. That list is below.
-6. `hermes confidential replay` exits with status 0 only if the hash chain is intact and every row replayed and matched. A
-   broken chain makes the exit status 1, even when every evidence row replays.
+1. The command reads the receipt and recomputes its hash chain. The command prints whether the
+   chain is intact.
+2. For each evidence row, the command decides which fingerprints to expect. If you pass
+   `--expected-fingerprints CODE:ENCLAVE`, the command uses those. Otherwise the command uses the
+   approved pin in this profile's `pins.yaml`, or in the file you name with `--pins`. Only if neither
+   exists does the command use the receipt's own claim, and the command labels that choice "not
+   independent". With an approved NEAR pin, a NEAR row passes only when every CVM the row reports
+   matches an approved entry.
+3. The command replays the row. Tinfoil code must come from the repository
+   `tinfoilsh/confidential-model-router`, unless you name another one with `--expected-repo`.
+4. The command prints each row's result, the value of each check, and any problems.
+5. For a receipt with NEAR sends, the command replays every signed response and says whether the
+   session is fully attested.
+6. The command prints the list of things a replay cannot establish. That list is below.
+7. `hermes confidential replay` exits with status 0 only if the hash chain is intact, every row
+   replayed and matched, and every NEAR signed response replayed. A broken chain makes the exit
+   status 1, even when every evidence row replays.
 
 By default, the replay uses the trust root recorded in the evidence. The evidence carries the trust
 root's bytes, so the replay works on any machine, not only on the machine that captured it. Whoever
@@ -1163,8 +1313,9 @@ is `True` or `n/a`.
 
 #### What a replay cannot establish
 
-Every replay result comes with the same fixed list, named `NOT_ESTABLISHED`. A replay cannot establish
-any of the following.
+Every replay result comes with a fixed list, named `NOT_ESTABLISHED`. The list for a NEAR row is
+the list in [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 14. For a Tinfoil row, a replay cannot
+establish any of the following.
 
 - **That any request was sent to this enclave or answered by it.** The report commits to the
   enclave's keys, not to any request. It carries no nonce from the client either. A nonce is a random
@@ -1220,177 +1371,28 @@ what moved.
 ## Limitations (an upstream roadmap)
 
 Locked mode closes what a plugin can close. Each gap below is a place where a plugin cannot close the
-road on its own. For each one, this section says four things: what the gap is, why it exists, what
-the plugin does about it today, and which change would close it. Most of the changes belong in Hermes
-core. A few belong to the vendor or to the SDK, and the item says so. The long form, with more
-evidence, is in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+road on its own. [docs/LIMITATIONS.md](docs/LIMITATIONS.md) is the canonical list. For each gap,
+that document says what the gap is, why the gap exists, what the plugin does about the gap today,
+and which change would close the gap. Most of the changes belong in Hermes core. A few belong to the
+vendor or to the SDK.
 
-#### 1. Auxiliary calls do not pass through the `llm_execution` middleware
-
-**The gap.** The plugin cannot refuse an auxiliary call at the moment it is sent.
-
-**Why it exists.** Hermes makes auxiliary calls from `agent/auxiliary_client.py`. That code never
-enters `run_llm_execution_middleware` (`hermes_cli/middleware.py:136`). The only caller of that
-function is the main loop, at `agent/turn_api_call.py:139`. The `pre_auxiliary_call` hook cannot veto
-a call either, because Hermes ignores what it returns (`agent/auxiliary_hooks.py:210-240`).
-
-**What the plugin does today.** It refuses to lock while any auxiliary task routes off-tier. If an
-auxiliary call goes off-tier anyway, it records a breach. It cannot stop the bytes. That includes the
-auxiliary calls that follow a live `/model` switch, before the next turn's check runs.
-
-**The core change that would close it.** Run every auxiliary attempt through the middleware, with
-`purpose="aux:<task>"`. Alternatively, let `pre_auxiliary_call` return a block.
-
-#### 2. The CLI's approve directive grants on any answer except "deny"
-
-**The gap.** A plugin can ask Hermes to put a tool call in front of the user. Hermes' CLI then runs
-the tool on almost any answer.
-
-**Why it exists.** In `tools/approval.py:1006-1010`, the CLI grants the call unless the answer is the
-exact string `"deny"`. An empty answer, `None`, `"d"` and `"yes"` all run the tool.
-
-**What the plugin does today.** It enforces the answer itself, in its `tool_execution` middleware. The
-tool runs only on an exact `once`, `session` or `always`.
-
-**The core change that would close it.** Grant only on an explicit `once`, `session` or `always`.
-
-#### 3. Shell and code-execution tools are not inspected
-
-**The gap.** `terminal` and `execute_code` can send your notes anywhere, for example with `curl`.
-
-**Why it exists.** Hermes gives a plugin the command text. It does not tell the plugin what the
-command will connect to.
-
-**What the plugin does today.** It treats these tools as on-host and lets them run. Every receipt says
-that shell and code tools are not covered. The plugin refuses to lock unless the terminal backend is `local`,
-because on any other backend these tools and the file tools run on another machine or in a container.
-
-**The core change that would close it.** A network policy on the terminal backend that plugins can
-read and require. One example is the docker backend with networking switched off. The plugin could
-then accept that backend too.
-
-#### 4. MCP servers launched as a command on this host are not inspected
-
-**The gap.** An MCP server configured with `command:` runs as a child process on this host. That process can
-itself be a network client, or a proxy to a hosted service.
-
-**Why it exists.** Hermes does not tell plugins what network access an MCP server has.
-
-**What the plugin does today.** It allows tools from command servers. This is the same class of gap
-as the terminal.
-
-**The core change that would close it.** A declared network capability for each MCP server, or a
-sandboxed launcher for each one.
-
-#### 5. Safe-worker mode disables hooks and middleware
-
-**The gap.** Safe-worker mode is a mode for managed Hermes worker processes in which Hermes
-deliberately loads no plugins. Locked mode therefore does not apply there.
-
-**Why it exists.** In a safe worker, Hermes skips plugin discovery (`hermes_cli/plugins.py:1206-1208`).
-Hook dispatch returns nothing (`hermes_cli/plugins_dispatch.py:285-288` and `:561-564`).
-
-**What the plugin does today.** Nothing. It discloses the gap in every lock message and in every
-receipt.
-
-**The core change that would close it.** A locked flag that Hermes core can see and that safe workers
-honour.
-
-#### 6. The trust boundary is the whole Hermes process
-
-**The gap.** Any other plugin in the same process can register its own middleware or patch this
-plugin's code.
-
-**Why it exists.** By default, Hermes plugins share one Python interpreter. Hermes offers an
-alternative, `plugins.isolation: host`. Under host isolation, this plugin's provider and middleware
-register in a separate child process. They become invisible to Hermes, and Hermes gives no warning.
-The project's compatibility tests found this before any plugin code was written
-([docs/C0-spikes.md](docs/C0-spikes.md), spike 2).
-
-**What the plugin does today.** It refuses to lock unless isolation is `in_process` and its provider
-is visible to Hermes. It records each tool's handler at lock time.
-
-**The core change that would close it.** A policy tier for middleware that always runs outermost, and
-a switch that says "only these plugins load while locked".
-
-#### 7. The vendor attests the router, not the model
-
-**The gap.** The pin covers `tinfoilsh/confidential-model-router`. The model backend behind the router
-is not in the pin.
-
-**Why it exists.** This is how Tinfoil's attestation works. It is not a Hermes gap.
-
-**What the plugin does today.** It states the gap in every receipt.
-
-**The change that would close it.** Per-model attestation, on the vendor's side.
-
-#### 8. No nonce and no attested time
-
-**The gap.** The attestation report commits to the enclave's keys, not to any request. Every
-`verified_at` time is your own clock.
-
-**Why it exists.** Tinfoil's report carries no client nonce and no signed time. This is not a Hermes
-gap.
-
-**What the plugin does today.** It labels every time "(host clock)". It makes no freshness claim
-beyond "verified at host-clock time T".
-
-**The change that would close it.** A client nonce in the report, and signed responses. Both are
-changes on the vendor's side.
-
-#### 9. Context-length probes bypassed the attested transport (fixed in the plugin)
-
-**The gap.** When Hermes builds an agent, it asks the provider for the model's context window. It does
-this by sending `GET /models` and `POST /api/show` with plain HTTP and your API key. These requests go
-outside the attested transport.
-
-**Why it exists.** Hermes resolves the context window at `agent/agent_init.py:1883-1884`. It skips the
-probe only if the provider profile answers the question itself.
-
-**What the plugin does today.** Its provider profile answers `get_model_context_length` from
-`confidential.tinfoil.context_length`. Hermes therefore never sends the probe.
-
-**The core change that would close it.** Send metadata probes through the profile's own client.
-
-#### 10. SDK caches outside the plugin's data (fixed in the plugin)
-
-**The gap.** The tinfoil SDK and sigstore-python keep on-disk caches in their default user cache
-directories, outside the plugin's data.
-
-**Why it exists.** Both libraries compute those paths themselves. This is not a Hermes gap.
-
-**What the plugin does today.** It redirects both caches under the plugin's data directory before the
-first verification.
-
-**The change that would close it.** A cache-directory parameter in the SDK.
-
-#### 11. Start-up model-list request on a drifted runtime
-
-**The gap.** Suppose the session's live runtime has been switched to a hosted provider. When the agent
-starts, Hermes lists that provider's models with `GET .../models` and your API key. It sends this
-request on its default transport, before any plugin seam runs (`agent/model_metadata.py:898` and
-`:1026`).
-
-The request carries no conversation text. The plugin refuses the turn that follows. By then, however,
-the request has already gone out.
-
-**Why it exists.** Hermes gives plugins no seam before this request.
-
-**What the plugin does today.** It refuses the turn and records the drift.
-
-**The core change that would close it.** Let a provider profile or a hook veto metadata requests.
-
-#### 12. No mixed "attested or on-host" tier yet (planned)
-
-**The gap.** A lock is one tier. Cheap side jobs cannot run on an on-host model while the main model is
-attested.
-
-**Why it exists.** This is a limit of the plugin, not of Hermes.
-
-**What the plugin does today.** Nothing yet.
-
-**The change that would close it.** A tier inside the plugin whose rule accepts any destination that
-either of the two existing rules accepts. This is planned. It needs no change in Hermes.
+| Section | The gap | What the plugin does today |
+|---|---|---|
+| [1](docs/LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution) | Hermes' auxiliary calls do not pass through the middleware a plugin can block. | Refuses to lock while any auxiliary task routes off-tier, rechecks every turn, and records a breach. The plugin cannot stop the bytes. |
+| [2](docs/LIMITATIONS.md#2-the-cli-approve-directive-grants-on-any-answer-except-deny) | Hermes' CLI runs a tool on any answer except the exact string `deny`. | Enforces the answer itself: only an exact `once`, `session` or `always` runs the tool. |
+| [3](docs/LIMITATIONS.md#3-shell-and-code-execution-tools-are-not-inspected) | Shell and code execution can reach the network. | Lets them run on the `local` terminal backend only, and names them as unproven in every receipt. |
+| [4](docs/LIMITATIONS.md#4-mcp-command-servers-are-not-inspected) | An MCP server started as a command on this host can be a network client. | Allows its tools, and says so. |
+| [5](docs/LIMITATIONS.md#5-safe-worker-mode-disables-hooks-and-middleware) | Safe-worker mode loads no plugins. | Discloses the gap in every lock message and receipt. |
+| [6](docs/LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process) | Every plugin in the process shares the trust boundary. | Refuses to lock unless isolation is `in_process` and its provider is visible. Records each tool's handler at lock time. |
+| [7](docs/LIMITATIONS.md#7-the-vendor-measurement-covers-the-router-not-the-model) | Tinfoil attests its router, not the model behind it. | States the gap in every receipt. |
+| [8](docs/LIMITATIONS.md#8-no-nonce-no-attested-time) | Tinfoil's report carries no client nonce and no signed time. | Labels every time "(host clock)". |
+| [9](docs/LIMITATIONS.md#9-what-the-network-still-sees-and-what-the-receipt-leaks) | The network, the vendor's hosting and DNS still see metadata. | Says so. Receipts never hold prompt text. |
+| [10](docs/LIMITATIONS.md#10-start-up-model-list-probe-on-a-drifted-runtime) | Hermes lists a drifted runtime's models with your API key before any plugin seam runs. | Refuses the turn that follows. |
+| [11](docs/LIMITATIONS.md#11-context-length-probes-bypassed-the-attested-transport-mitigated-in-plugin) | Hermes probes the context window outside the attested transport. | Fixed in the plugin: both attested profiles answer the question themselves. |
+| [12](docs/LIMITATIONS.md#12-sdk-caches-outside-the-plugins-data-mitigated-in-plugin) | The tinfoil SDK and sigstore-python cache outside the plugin's data. | Fixed in the plugin: the caches are redirected. |
+| [13](docs/LIMITATIONS.md#13-no-mixed-attested-or-on-host-tier-planned) | A lock is one tier, so side jobs cannot run on-host while the main model is attested. | Nothing yet. A mixed tier is planned. |
+| [14](docs/LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open) | NEAR's signatures and evidence leave ten things open, such as the shared model key and what runs after launch. | Checks, encrypts, pins and records what this README's NEAR section describes. |
+| [15](docs/LIMITATIONS.md#15-an-agent-with-a-terminal-can-reach-the-approval-prompt) | An agent with a terminal can reach the approval prompt by some routes. | Refuses the plain routes and records every approval with its surface. |
 
 What the plugin touches on your machine and on the network is listed in
 [docs/DISCLOSURE.md](docs/DISCLOSURE.md).
@@ -1404,9 +1406,12 @@ hermes plugins install confidential-mode          # from the catalog, once liste
 
 After installing, do the following.
 
-1. Set `TINFOIL_API_KEY` the way you set any provider key.
-2. Run `hermes confidential setup --model <model id>`.
-3. Leave `plugins.isolation` at its default value, `in_process`. Under host isolation, Hermes cannot
+1. Set `TINFOIL_API_KEY`, or `NEAR_AI_API_KEY` for NEAR, the way you set any provider key.
+2. Run `hermes confidential setup --model <model id>`, or
+   `hermes confidential setup --vendor near --model <model id>` for NEAR.
+3. For NEAR, install `pynacl` into the environment that runs Hermes
+   ([docs/RUNNING_TESTS.md](docs/RUNNING_TESTS.md)).
+4. Leave `plugins.isolation` at its default value, `in_process`. Under host isolation, Hermes cannot
    see the attested provider, and the preflight refuses to lock.
 
 ### Upgrading
@@ -1446,8 +1451,8 @@ The plugin's own keys live under a top-level `confidential:` section of `config.
 | `confidential.on_host.extra_hosts` | `[]` | Extra hosts that the `on-host-only` tier counts as on-host. |
 | `confidential.model` | Unset. | The model id that `hermes confidential setup` writes into the config block it prints. |
 | `confidential.near.base_url` | `https://cloud-api.near.ai/v1` | NEAR AI Cloud's gateway. Attestation, inference and signature requests all go here. |
-| `confidential.near.models` | `[]` | Every NEAR model id Hermes may send. The plugin adds the ids that `model.default` and `auxiliary.<task>.model` name for `attested-near`. The pin covers exactly this list. |
-| `confidential.near.require_provider_tee` | `true` | A NEAR send counts as verified only with a signature made by an attested model server's key. Only the exact value `false` turns it off. |
+| `confidential.near.models` | `[]` | Every NEAR model id Hermes may send. The plugin adds the ids that `model.default` and `auxiliary.<task>.model` name for `attested-near`. A NEAR pin's identity is this list, so changing the list needs a new pin. |
+| `confidential.near.require_provider_tee` | `true` | A NEAR send counts as verified only with a signature made by an attested model server's key. While it is true, a model not on the list is refused before sending, and a model report without a compose-manager attestation is refused. Only the exact value `false` turns it off. |
 | `confidential.near.require_tls_binding` | `true` | The TLS certificate of the attestation connection must be the certificate the gateway's report binds. Every inference and signature connection is checked against it right after the handshake, before any request byte is sent. The attested-tier lock is refused unless it is absent or exactly `true`. |
 | `confidential.near.encrypt` | `true` | Encrypt every chat request to the attested model's key (NEAR's encryption, version 2, all fields). A reply is decrypted only after a verified `provider_tee` signature. Needs `pynacl`. The attested-tier lock is refused unless it is absent or exactly `true`. |
 | `confidential.near.reverify_backoff_seconds` | 30 | At most one re-attestation per this many seconds after an HTTP 421 or a TLS pin mismatch on a send. |
