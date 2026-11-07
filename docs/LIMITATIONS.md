@@ -538,7 +538,7 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   services that a per-model name list, shipped with the plugin, names for that model. Such a list can
   miss services, so every other service follows. A long list is folded into a count, and the command
   `hermes confidential pins` prints every line.
-- A model entry is approved only with its whole service map pinned, together with its socket tags.
+- A model entry is approved only with its whole service map pinned, together with its privilege tags.
   When a verification stages a NEAR entry, the plugin fetches, in the background, each deployed
   docker-compose file the map names, from the GitHub repository that the measured compose names in
   `GITHUB_REPO` (today `nearai/cvm-compose-files`), at the logged commit. Nothing is fetched when the
