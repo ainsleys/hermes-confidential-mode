@@ -32,6 +32,31 @@ it has the same versions, and then add the SDK to it:
 `UV_PROJECT_ENVIRONMENT` tells uv to create the environment in `<dir>/.venv` instead of in Hermes'
 own `.venv`. The second command installs the SDK into that separate environment only.
 
+## Python 3.11
+
+Hermes and the plugin both declare Python 3.11 as the oldest supported version. The suite usually runs
+on a newer interpreter, so `tests/unit/test_python311_syntax.py` parses every plugin source file with
+`ast.parse(..., feature_version=(3, 11))` and also walks each f-string, failing on the forms Python
+3.11 rejects (a quote, backslash, comment or line break inside a replacement field that only 3.12 and
+later accept). That test runs on every interpreter.
+
+To run the whole suite on 3.11 itself, build a separate environment on that interpreter from Hermes'
+lock file, add the SDK and PyNaCl as above, and point the test command at it:
+
+    uv python install 3.11
+    cd ~/hermes-agent && UV_PROJECT_ENVIRONMENT=<dir311>/.venv uv sync --python 3.11
+    uv pip install --python <dir311>/.venv/bin/python tinfoil==0.14.2 pynacl==1.6.*
+    cd ~/hermes-agent && PYTHONDONTWRITEBYTECODE=1 HERMES_HOME=$(mktemp -d) \
+      UV_PROJECT_ENVIRONMENT=<dir311>/.venv uv run --no-sync --with pytest==9.1.1 \
+      --with pytest-asyncio==1.4.0 pytest ~/hermes-confidential-mode/tests -q -p no:cacheprovider
+
+A quicker check that every file compiles on 3.11:
+
+    python3.11 -m compileall -q ~/hermes-confidential-mode/__init__.py \
+      ~/hermes-confidential-mode/confidential_mode ~/hermes-confidential-mode/scripts
+
+`compileall` writes `__pycache__` directories beside the sources; delete them afterwards.
+
 ## PyNaCl, for NEAR request encryption
 
 The plugin encrypts NEAR requests with PyNaCl. PyNaCl is a Python binding to the libsodium library.
