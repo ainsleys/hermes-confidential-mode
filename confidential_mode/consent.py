@@ -215,17 +215,32 @@ def pin_question(pending: Any, *, observers: Optional[list] = None, now: Optiona
     return "\n".join(lines)
 
 
+# Component lines that start with this prefix are what a model CVM's compose-manager reported after launch
+# (verify/near.py _cvm_lines). They are not measurements, and the prompt says so.
+REPORTED_PREFIX = "reported: "
+REPORTED_HEADING = ("Reported after launch by each model CVM's compose-manager. This is not a measurement. A TD of "
+                    "this instance reported this actions log for this nonce, and the log's hash is bound in a "
+                    "hardware quote. The services below are what the operator's own tooling reported, not "
+                    "proof of what runs:")
+REPORTED_NOT_PINNED = ("The pin covers the measured configuration only: a change in the reported lines alone "
+                       "does not ask again.")
+
+
 def _near_pin_question(pending: Any, *, observers: Optional[list] = None) -> str:
     """NEAR has no release tag or Sigstore bundle: the prompt shows the identity (host and model allowlist)
     and the measured docker-compose of each CVM (Amendment 5)."""
-    comps = _value(pending, "components") or ()
+    comps = [str(c) for c in (_value(pending, "components") or ())]
+    measured = [c for c in comps if not c.startswith(REPORTED_PREFIX)]
+    reported = [c[len(REPORTED_PREFIX):] for c in comps if c.startswith(REPORTED_PREFIX)]
     lines = [
         "Approve confidential pin update?",
         _change_line(pending),
         "Vendor: near (NEAR AI Cloud)",
         f"Identity: {_text(_value(pending, 'router_repo'))} (gateway host # attested model allowlist)",
-        "Measured configuration (MRCONFIGID = SHA-256 of each CVM's docker-compose, checked against its quote):",
-        *([f"  {c}" for c in comps] or ["  unknown"]),
+        "Measured configuration (MRCONFIGID = SHA-256 of each CVM's docker-compose; app_id, instance, OS image "
+        "and KMS key as RTMR3 records them; each checked against its quote):",
+        *([f"  {c}" for c in measured] or ["  unknown"]),
+        *([REPORTED_HEADING, *[f"  {c}" for c in reported], REPORTED_NOT_PINNED] if reported else []),
         "NEAR runs instances of one model with different measured configurations under one signing key, so a "
         "new instance can show up here as a change.",
         f"Platform: {_text(_value(pending, 'platform'))}",

@@ -91,6 +91,11 @@ def test_lock_needs_a_human_approved_pin_then_a_turn_is_signed_and_ledgered(plug
     with bind_asker(lambda q, labels: asked.append(q) or "Approve"):
         assert plugin.slash("pins approve").startswith("Pinned near build")
     assert "Identity: cloud-api.near.ai#" in asked[0] and "Measured configuration" in asked[0]
+    consent = _sub(plugin, "consent")
+    head, _, tail = asked[0].partition(consent.REPORTED_HEADING)
+    assert "(recorded in RTMR3)" in head and "compose-manager running" not in head
+    assert "  prod/test.yaml::proxy-test v0.0.2 commit c2c2c2c2c2c2" in tail and "MISMATCH" in tail
+    assert consent.REPORTED_NOT_PINNED in tail and "reported: " not in asked[0]
     out = plugin.slash("on attested")
     assert out.startswith(f"Locked. Model: attested-near/{MODEL} at {HOST}"), out
 
@@ -115,6 +120,13 @@ def test_lock_needs_a_human_approved_pin_then_a_turn_is_signed_and_ledgered(plug
     assert send["signature_kind"] == "provider_tee" and send["replay_verdict"] == "pass"
     text = plugin.slash(f"receipts {agent.session_id}")
     assert "Signed responses (NEAR AI Cloud" in text and "Session fully attested" in text
+    # Amendment 5.2: the verify_ok row keeps blob ids; the blobs sit in the plugin's data directory and the
+    # JSON receipt carries them again.
+    verify_rows = [e for e in plugin.rt.ledger.tail(0) if e.kind == "verify_ok" and e.provider == "attested-near"]
+    ev = verify_rows[-1].detail["evidence"]
+    assert "blobs" not in ev and ev["blob_refs"] and all(plugin.rt.ledger.blob(b) for b in ev["blob_refs"])
+    items = [i for i in receipt["evidence"] if i["evidence"].get("vendor") == "near"]
+    assert items and all(sorted(i["blobs"]) == i["evidence"]["blob_refs"] for i in items)
 
 
 def test_changed_measurement_refuses_until_a_human_approves_it(plugin, near):
