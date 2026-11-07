@@ -442,6 +442,10 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
             return f"Not asked: {exc}"
     if cmd == "blocked":       # pre_gateway_dispatch rewrites a locked /model (or /moa) to this
         what = rest[0] if rest else "that command"
+        if rest[1:2] == ["unresolved"]:
+            return (f"Refused while locked: the plugin cannot resolve /{what} in this Hermes version, so it "
+                    "cannot tell whether the command switches this session's live model runtime. Run "
+                    "/confidential off first.")
         return (f"Refused while locked: /{what} switches this session's live model runtime, and Hermes routes "
                 "auxiliary calls (titles, compression, vision) to the live runtime. Run /confidential off first, "
                 "switch, then lock again.")

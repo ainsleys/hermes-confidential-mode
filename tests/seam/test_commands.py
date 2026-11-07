@@ -244,6 +244,23 @@ def test_gateway_model_switch_is_refused_while_locked(plugin):
     assert invoke_hook("pre_gateway_dispatch", event=NS(text="model please")) == []
 
 
+def test_gateway_commands_fail_closed_when_resolve_command_is_unavailable(plugin, monkeypatch):
+    """Review finding 27: without hermes_cli.commands.resolve_command an alias of /model cannot be told apart,
+    so while locked every slash command except /confidential is refused (it used to match the typed word)."""
+    import types
+    from types import SimpleNamespace as NS
+    from hermes_cli.plugins import invoke_hook
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    monkeypatch.setitem(sys.modules, "hermes_cli.commands", types.ModuleType("hermes_cli.commands"))
+    for text in ("/m openrouter:x", "/help", "/model x"):
+        word = text[1:].split()[0]
+        assert invoke_hook("pre_gateway_dispatch", event=NS(text=text)) == [
+            {"action": "rewrite", "text": f"/confidential blocked {word} unresolved"}]
+    assert invoke_hook("pre_gateway_dispatch", event=NS(text="/confidential off")) == []
+    assert "cannot resolve /m" in plugin.slash("blocked m unresolved")
+    assert ("tool_refused", "command_unresolved") in plugin.kinds()
+
+
 def test_lock_refuses_when_hook_timeout_lets_the_recheck_be_skipped(plugin):
     plugin.cfg.write_text(BASE_CONFIG.replace("plugins:\n", "plugins:\n  hook_callback_timeout: 0.5\n"))
     out = plugin.slash("on on-host-only")

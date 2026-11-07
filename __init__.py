@@ -398,24 +398,30 @@ def _pre_gateway_dispatch(rt: Runtime):
                 return None
             word = text.strip()[1:].split(None, 1)[0] if text.strip()[1:] else ""
             name = word.split("@", 1)[0].lower()
-            canonical = name
+            canonical, resolved = name, True
             try:
                 from hermes_cli.commands import resolve_command
                 found = resolve_command(name)
                 canonical = str(getattr(found, "name", None) or name).lower()
             except Exception:  # noqa: BLE001
-                pass
-            if canonical not in RUNTIME_SWITCH_COMMANDS:
+                resolved = False
+            if resolved and canonical not in RUNTIME_SWITCH_COMMANDS:
                 return None
+            if not resolved and name == "confidential":
+                return None                        # the plugin's own command stays usable to unlock
+            # Review finding 27: without resolve_command an alias of /model cannot be recognised, so while
+            # locked every other slash command is refused (fail closed) instead of matching the typed word.
             try:
                 locked, _tier = rt.is_locked()
             except Exception:  # noqa: BLE001
                 locked = True                      # unreadable lock state: refuse (fail closed)
             if locked is False:
                 return None
-            rt.append({"kind": "tool_refused", "purpose": f"command:{canonical}", "decision": "runtime_switch",
-                       "surface": "gateway", "detail": {"command": canonical}})
-            return {"action": "rewrite", "text": f"/confidential blocked {canonical}"}
+            rt.append({"kind": "tool_refused", "purpose": f"command:{canonical}",
+                       "decision": "runtime_switch" if resolved else "command_unresolved",
+                       "surface": "gateway", "detail": {"command": canonical, "resolved": resolved}})
+            return {"action": "rewrite",
+                    "text": f"/confidential blocked {canonical}" + ("" if resolved else " unresolved")}
         except Exception:  # noqa: BLE001
             return None
     return pre_gateway_dispatch
