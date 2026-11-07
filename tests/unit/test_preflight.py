@@ -36,10 +36,11 @@ def base_config(**over):
     return cfg
 
 
-def run(cfg, tier=Tier.ON_HOST, pred=None, *, plugin=(), isolation="in_process", lookup=None, profile=None):
+def run(cfg, tier=Tier.ON_HOST, pred=None, *, plugin=(), isolation="in_process", lookup=None, profile=None,
+        keys=("TINFOIL_API_KEY", "NEAR_AI_API_KEY")):
     return run_preflight(tier, pred or on_host_pred(), cfg, plugin_aux_tasks=list(plugin), isolation=isolation,
                          provider_lookup=lookup or (lambda n: object() if n in PROFILES else None),
-                         attested_profile=profile)
+                         attested_profile=profile, key_present=lambda env: env in keys)
 
 
 def item(report: PreflightReport, key):
@@ -305,6 +306,53 @@ def test_attested_tier_passes_with_profile():
     assert item(r, "provider_profile[attested-tinfoil]").verdict == "in_tier"
     assert item(r, "auxiliary.compression.provider").verdict == "in_tier"
     assert item(r, "plugins.isolation").verdict == "in_tier"
+
+
+def test_attested_tier_needs_the_vendor_api_key():
+    """ux-pass-1 item 1: verification is public, so a keyless profile verified, pinned and locked, and then
+    failed on its first turn. One row per attested vendor a route uses; the value is never shown."""
+    r = run(attested_config(), tier=Tier.ATTESTED, pred=attested_pred(), profile="attested-tinfoil")
+    assert item(r, "TINFOIL_API_KEY").verdict == "in_tier" and item(r, "TINFOIL_API_KEY").value_redacted == "set"
+    assert "NEAR_AI_API_KEY" not in [i.key for i in r.items]          # no NEAR route, no NEAR row
+    r = run(attested_config(), tier=Tier.ATTESTED, pred=attested_pred(), profile="attested-tinfoil", keys=())
+    i = item(r, "TINFOIL_API_KEY")
+    assert not r.ok and i.verdict == "off_tier" and i.value_redacted == "not set"
+    assert i.fix == "set TINFOIL_API_KEY (export it or add it to Hermes' env file)"
+    # A NEAR route anywhere (here one auxiliary task) adds the NEAR row.
+    both = AttestedPredicate({"attested-tinfoil", "attested-near"}, lambda _p: Verdict(True, "fresh", ""))
+    cfg = attested_config(auxiliary={"vision": {"provider": "attested-tinfoil"},
+                                     "compression": {"provider": "attested-near", "model": "m"}})
+    r = run(cfg, tier=Tier.ATTESTED, pred=both, profile="attested-tinfoil", keys=("TINFOIL_API_KEY",))
+    assert item(r, "NEAR_AI_API_KEY").verdict == "off_tier" and item(r, "TINFOIL_API_KEY").verdict == "in_tier"
+    # The on-host tier never asks for a vendor key.
+    assert "TINFOIL_API_KEY" not in [i.key for i in run(base_config(), keys=()).items]
+
+
+def test_default_key_check_reads_the_secret_scope_and_never_shows_the_value(monkeypatch):
+    from confidential_mode import preflight
+    monkeypatch.setenv("TINFOIL_API_KEY", "sk-secret-value")
+    assert preflight.api_key_present("TINFOIL_API_KEY") is True
+    r = run_preflight(Tier.ATTESTED, attested_pred(), attested_config(), plugin_aux_tasks=[], isolation="in_process",
+                      provider_lookup=lambda n: object(), attested_profile="attested-tinfoil")
+    assert "sk-secret-value" not in format_report(r) and str(len("sk-secret-value")) not in item(r, "TINFOIL_API_KEY").value_redacted
+    monkeypatch.setenv("TINFOIL_API_KEY", "  ")
+    assert preflight.api_key_present("TINFOIL_API_KEY") is False
+
+
+def test_a_pending_pin_is_named_as_the_fix_not_the_route():
+    """ux-pass-1 item 3: with the route right and only the pin missing, the FIX column named the route key."""
+    no_pin = "no approved enclave build pinned; run /confidential pins approve"
+    pred = AttestedPredicate({"attested-tinfoil"}, lambda _p: Verdict(False, no_pin, ""))
+    cfg = attested_config(auxiliary={"vision": {"provider": "attested-tinfoil", "model": "v"}})
+    r = run(cfg, tier=Tier.ATTESTED, pred=pred, profile="attested-tinfoil")
+    pin_fix = "approve the pending pin: hermes confidential pins approve (review it first with pins review)"
+    assert item(r, "model.provider").fix == pin_fix and item(r, "model.default").fix == pin_fix
+    assert item(r, "auxiliary.vision.provider").fix == pin_fix                      # an explicit route
+    assert item(r, "auxiliary.compression.provider").fix == "inherits the main route; fix the main route first"
+    assert item(r, "delegation.provider").fix == "inherits the main route; fix the main route first"
+    # Another cause keeps the route fix.
+    r = run(cfg, tier=Tier.ATTESTED, pred=attested_pred(ok=False), profile="attested-tinfoil")
+    assert item(r, "model.provider").fix.startswith("set model.provider/model.base_url to an in-tier route")
 
 
 def test_attested_tier_profile_missing():

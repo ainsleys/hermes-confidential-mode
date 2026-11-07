@@ -281,10 +281,58 @@ def _falsy(value: Any) -> bool:
         or (isinstance(value, int) and not isinstance(value, bool) and value == 0)
 
 
+#: The API key each attested profile sends with (provider.API_KEY_ENV and provider.NEAR_API_KEY_ENV). The
+#: attestation endpoints are public, so verification, the pin and the lock all succeed without a key; the
+#: first turn then fails. The preflight therefore checks that the key is present (never its value).
+ATTESTED_KEY_ENVS = {"attested-tinfoil": "TINFOIL_API_KEY", "attested-near": "NEAR_AI_API_KEY"}
+
+
+def api_key_present(env_var: str) -> bool:
+    """Whether Hermes' secret scope holds a non-empty ``env_var`` (agent.secret_scope.get_secret, as
+    provider.api_key_for reads it). Any error counts as absent. The value is never returned or logged."""
+    try:
+        from agent.secret_scope import get_secret
+        return bool((get_secret(env_var) or "").strip())
+    except Exception:
+        return False
+
+
+#: The FIX text when the cause of a failing attested route is a pin that is pending or missing
+#: (provider.REASON_NO_PIN and REASON_PIN_MISMATCH both end "run /confidential pins approve"), not the route.
+PIN_FIX = "approve the pending pin: hermes confidential pins approve (review it first with pins review)"
+INHERIT_FIX = "inherits the main route; fix the main route first"
+
+
+def pin_is_the_cause(reason: Any) -> bool:
+    return isinstance(reason, str) and "pins approve" in reason
+
+
+def key_fix(env_var: str) -> str:
+    return f"set {env_var} (export it or add it to Hermes' env file)"
+
+
+def _attested_providers_in_use(config: Mapping, tasks: Sequence[str], plugins: Mapping[str, dict]) -> list[str]:
+    """The attested profiles a route names: the main route, each auxiliary task (an inheriting task uses the
+    main route), each auxiliary fallback entry and delegation. In ATTESTED_KEY_ENVS order."""
+    names: set[str] = {_s(_main_block(config).get("provider")).lower()}
+    for task in tasks:
+        cfg = _effective_aux(config, task, plugins)
+        names.add(_s(cfg.get("provider")).lower())
+        chain = cfg.get("fallback_chain")
+        for entry in chain if isinstance(chain, list) else []:
+            if isinstance(entry, Mapping):
+                names.add(_s(entry.get("provider")).lower())
+    deleg = config.get("delegation")
+    if isinstance(deleg, Mapping):
+        names.add(_s(deleg.get("provider")).lower())
+    return [p for p in ATTESTED_KEY_ENVS if p in names]
+
+
 def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plugin_aux_tasks: Sequence[Any],
                   isolation: Any = _ABSENT, provider_lookup: Callable[[str], object | None],
                   attested_profile: str | None, builtin_aux_tasks: Sequence[str] | None = None,
-                  terminal_env: Any = _ABSENT) -> PreflightReport:
+                  terminal_env: Any = _ABSENT,
+                  key_present: Callable[[str], bool] | None = None) -> PreflightReport:
     """Classify every route in ``config`` for ``tier``. Never mutates ``config``.
 
     ``plugin_aux_tasks``: plugin task names, or the registration dicts from
@@ -294,6 +342,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     ``builtin_aux_tasks`` defaults to :func:`builtin_aux_task_names`.
     ``terminal_env``: the terminal backend Hermes resolves for this profile (locking passes
     ``resolved_terminal_backend()``); omitted => ``os.environ["TERMINAL_ENV"]``. ``None`` means unset.
+    ``key_present(env_var)``: whether an attested vendor's API key is set; default :func:`api_key_present`.
     """
     config = config if isinstance(config, Mapping) else {}
     if terminal_env is _ABSENT:
@@ -313,6 +362,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
         main_fix = "set model.provider to an in-tier provider; moa is not allowed while locked"
     elif main_provider in _AUTO:
         main_fix = "set model.provider explicitly to an in-tier provider"
+    elif pin_is_the_cause(main_reason):
+        main_fix = PIN_FIX
     else:
         main_fix = f"set model.provider/model.base_url to an in-tier route ({main_reason})"
     add("model.provider", block.get("provider", ""), main_verdict, main_fix)
@@ -351,12 +402,14 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             # "auto"/"" resolve to the main route (text tasks); "main" is the main route for every task.
             shown = f"{cfg.get('provider') or 'auto'} -> {main_provider or 'auto'}"
             add(f"{prefix}.provider", shown, main_verdict,
+                INHERIT_FIX if pin_is_the_cause(main_reason) else
                 f"inherits the main route: fix model.provider, or pin {prefix}.provider to an in-tier provider")
         else:
             if provider == "main":  # "main" + base_url: main provider identity on an explicit endpoint
                 cfg = {**cfg, "provider": main_provider}
             v, reason = _route_item_verdict(ctx, cfg, purpose)
-            fix = f"set {prefix}.provider/{prefix}.base_url to an in-tier route ({reason})"
+            fix = PIN_FIX if pin_is_the_cause(reason) else \
+                f"set {prefix}.provider/{prefix}.base_url to an in-tier route ({reason})"
             add(f"{prefix}.provider", cfg.get("provider") or "auto", v, fix)
             if base_url:
                 add(f"{prefix}.base_url", base_url, v, fix)
@@ -373,7 +426,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                 add(key, entry, OFF_TIER, f"give {key}.provider an explicit in-tier provider or remove the entry")
                 continue
             v, reason = _route_item_verdict(ctx, entry, f"{purpose}:fallback")
-            add(key, entry, v, f"remove {key} or point it at an in-tier route ({reason})")
+            add(key, entry, v, PIN_FIX if pin_is_the_cause(reason) else
+                f"remove {key} or point it at an in-tier route ({reason})")
 
     # delegation (delegate_task children; tools/delegate_tool.py resolves these like a main route)
     deleg = config.get("delegation")
@@ -384,7 +438,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     if d_provider in _AUTO and not d_base:
         d_verdict = main_verdict
         shown = f"(inherit) -> {main_provider or 'auto'}"
-        d_fix = "delegation inherits the main route: fix model.provider"
+        d_fix = INHERIT_FIX if pin_is_the_cause(main_reason) else "delegation inherits the main route: fix model.provider"
     else:
         d_cfg = {"provider": d_provider or "custom", "base_url": d_base, "model": deleg.get("model"),
                  "api_mode": deleg.get("api_mode")}
@@ -393,7 +447,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
         else:
             d_verdict, d_reason = _route_item_verdict(ctx, d_cfg, "delegation")
         shown = deleg.get("provider") or "custom"
-        d_fix = f"{d_fix} ({d_reason})"
+        d_fix = PIN_FIX if pin_is_the_cause(d_reason) else f"{d_fix} ({d_reason})"
     add("delegation.provider", shown, d_verdict, d_fix)
     add("delegation.model", _s(deleg.get("model")) or "(inherit)", d_verdict, d_fix)
     if d_base:
@@ -537,6 +591,20 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     # Amendment 10 (backlog D03): each listed extra on-host host must be one exact host.
     if tier == Tier.ON_HOST:
         _extra_hosts_items(config, add, ctx.pass_verdict)
+
+    # The API key of each attested vendor a route uses (ux-pass-1 item 1). Present or not; never the value.
+    if tier == Tier.ATTESTED:
+        present = key_present or api_key_present
+        for profile in _attested_providers_in_use(config, tasks, plugins):
+            env_var = ATTESTED_KEY_ENVS[profile]
+            try:
+                ok = present(env_var) is True
+            except Exception:
+                ok = False
+            # Not through add(): the key name reads as a secret there and both states would show "***". The
+            # value shown is only "set" or "not set".
+            items.append(PreflightItem(env_var, "set" if ok else "not set", IN_TIER if ok else OFF_TIER,
+                                       "" if ok else key_fix(env_var)))
 
     # attested profile presence
     if tier == Tier.ATTESTED:
