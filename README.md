@@ -31,8 +31,9 @@ approved; `on-host-only` allows only your machine. While locked:
   model cannot read the text. (On NEAR it still sees images, the model id, settings, headers, sizes
   and timing, and a gateway that swapped the reply key would be caught only afterwards.)
 - The plugin asks you the first time each tool would send data off the machine during a lock; an
-  allow lasts until you unlock (`confidential.tools.ask: each_call` asks on every call instead). Tool servers on off-tier remote hosts, scheduled jobs and routed delegation are
-  blocked.
+  allow lasts until you unlock (`confidential.tools.ask: each_call` asks on every call instead). When
+  nobody can answer (yolo, approvals off, cron, one-shot runs), the tool is blocked. Tool servers on
+  off-tier remote hosts, scheduled jobs and routed delegation are blocked.
 - Every model call is logged with its host and size, never its text, from the moment the plugin is
   installed. `hermes confidential status` shows where calls have gone; `watch` streams them live.
 
@@ -123,8 +124,8 @@ Then run `hermes confidential check --tier attested` and `/confidential on attes
 For NEAR AI Cloud, use `--vendor near --model Qwen/Qwen3.8-27B`.
 
 **3. Lock.** The preflight checks every route in your config first. If any would leave the tier, the
-lock is refused with a table naming each key to change. Once locked, off-host tools ask you first, on
-both tiers.
+lock is refused with a table naming each key to change. Once locked, each off-host tool asks you
+the first time that tool would send data off the machine, on both tiers.
 
 ```
 $ hermes confidential on attested
@@ -137,12 +138,22 @@ Details: hermes confidential status --verbose; docs/LIMITATIONS.md
 tool wants to send data off the machine, Hermes' approval panel shows the plugin's line:
 
 ```
-Confidential mode: web_search wants to send ~1 KB of this conversation off the machine
+Confidential mode: web_search wants to send ~1 KB of this conversation off the machine; allowing once covers web_search until this profile is unlocked
 ```
 
-Pick Allow once, Allow for this session (that tool then stops asking until the session ends), Add to
-permanent allowlist, or Deny. Hermes titles this panel
-"Dangerous Command" for every plugin approval, and the plugin can't change that title.
+Pick one of four answers:
+
+- **Allow once** runs the tool and covers that tool until you unlock, so later `web_search` calls in
+  this lock run without asking. Each later call still gets a ledger row naming the row that recorded
+  your answer. Set `confidential.tools.ask: each_call` to be asked on every call instead.
+- **Allow for this session** stops that tool asking until the session ends.
+- **Add to permanent allowlist** stops that tool asking across locks, until `/confidential revoke
+  <tool>`.
+- **Deny** refuses the call.
+
+Under yolo, approvals off, cron jobs and one-shot runs nobody can answer, so the tool is blocked, even
+after an Allow once. Hermes titles this panel "Dangerous Command" for every plugin approval, and the
+plugin can't change that title.
 
 **5. Read the receipt.** Receipts are rendered on demand, for the current session or any past one. In
 the chat, `/confidential receipts` renders the current session; from a terminal, pass any session id:
@@ -185,6 +196,11 @@ the change that would close each.
 - **A receipt is a self-report.** It's the plugin's record, from a file on your machine that you or
   another plugin could edit. Only the attached enclave evidence can be checked by someone else.
   ([section 6](docs/LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process))
+- **Tools ask once per lock, then run without asking.** The plugin asks you the first time each tool
+  would send data off the machine during a lock; after Allow once, later calls to that tool run
+  until you unlock, each with a ledger row. The grant lives in the process that asked, so a restart
+  or a second process asks again. `confidential.tools.ask: each_call` asks on every call.
+  ([LIMITATIONS](docs/LIMITATIONS.md), [GUIDE](docs/GUIDE.md))
 - **A locked session has no fallback.** If the provider errors, or can't be verified within 20
   seconds, the turn ends and you resend; nothing is rerouted.
   ([docs/LIMITATIONS.md](docs/LIMITATIONS.md), [docs/COSTS.md](docs/COSTS.md))

@@ -69,7 +69,8 @@ The plugin does four things for a Hermes profile.
    [Locking](#locking)).
 3. **While locked, it guards four of the five other roads.** Side calls must resolve to the tier and
    are rechecked every turn. Fallbacks are refused, and a failed request ends the turn. Off-host tools
-   ask you the first time each would send data off the machine during a lock. Memory must be the built-in store. Shell and code execution stay open.
+   ask you the first time each would send data off the machine during a lock. Memory must be the
+   built-in store. Shell and code execution stay open.
 4. **It renders a receipt for any session.** The receipt lists where the text went, attaches the
    enclave evidence captured at each verification, and ends with fixed paragraphs naming what it
    can't prove. Anyone holding the JSON form can replay the evidence offline; for NEAR, the replay
@@ -578,31 +579,44 @@ machine.
   terminal.backend: local (and unset TERMINAL_ENV), then run /confidential off and lock again."
   `docker` is refused too: a container can have its own network, and a Docker host can be remote.
 
-**Every other tool asks you the first time it would send data off the machine during a lock,** on
+**Every other tool asks you the first time that tool would send data off the machine during a lock,** on
 Hermes' approval prompt:
 
 ```
 Confidential mode: web_search wants to send ~3 KB of this conversation off the machine; allowing once covers web_search until this profile is unlocked
 ```
 
+**How often a tool asks is set by `confidential.tools.ask`.** The default, `once_per_lock`, asks on
+the first call of each tool during a lock, and an exact `once` answer covers that tool until you
+unlock. `each_call` asks on every call. An absent key means
+`once_per_lock`; any other value counts as `each_call`. The plugin reads the key at each decision, so
+a change takes effect on the next tool call.
+
 The size counts the call's arguments and any local image file it names, in MB above 1 MB. The tool
 runs only on exactly `once`, `session` or `always`; any other answer is refused and logged as
 `unexpected_choice`, including answers Hermes' own CLI would take as a yes.
 
-- `once` runs the tool and grants it for the rest of this lock. The grant is the plugin's own, held in
-  the process that asked (a restart asks again), and the `tool_allowed` row of each later call names
-  the row that recorded your answer (`grant_row`). The grant ends at unlock or with `/confidential
-  revoke <tool>`. With `confidential.tools.ask: each_call`, `once` covers this call only, and every
-  call asks.
-- `session` stops the asking for this tool for the rest of the session.
+- `once` runs the tool and grants that tool for the rest of this lock. The grant is the plugin's own, not
+  Hermes': Hermes treats `once` as one call, and the plugin keeps the grant beside the lock. The grant
+  records the lock and the id of the ledger row that recorded your answer. Each later call to that
+  tool runs without a prompt and writes a `tool_allowed` row with decision `lock_grant` and
+  `grant_row` set to that id, so the receipt shows which answer let the call through. The grant is
+  held in the process that asked: a restart asks again, and a second process on the same lock (a CLI
+  next to a gateway) asks on its own. The grant ends at unlock, so the next lock asks again, and
+  `/confidential revoke <tool>` ends the grant sooner. `/confidential status` lists the grants under
+  "Tool grants (answered once, this lock, this process)". With `confidential.tools.ask: each_call`,
+  `once` covers this call only, and every call asks.
+- `session` stops the asking for this tool for the rest of the session. Hermes keeps this grant, in
+  either `confidential.tools.ask` mode.
 - `always` stops the asking across locks. Hermes stores the grant in `command_allowlist` as
   `plugin_rule:confidential-mode:tool:<name>` until you run `/confidential revoke <tool>`.
   `/confidential pins` lists these grants.
 
 **When nobody can answer, the ask becomes a block.** Under yolo mode, `approvals.mode: off`, cron
 jobs, single-query runs (`-q`) and any context with no person present, Hermes would approve without
-asking, so the plugin blocks the tool instead, even when an earlier `once` granted it for this lock. A
-tool you added with `/confidential allow` still runs.
+asking, so the plugin blocks the tool instead, even when an earlier `once` granted the tool for this lock:
+the plugin checks for these cases before looking at a grant. The block holds in both
+`confidential.tools.ask` modes. A tool you added with `/confidential allow` still runs.
 
 **Some tools are always blocked:**
 

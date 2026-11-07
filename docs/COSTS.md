@@ -36,9 +36,12 @@ availability is your hardware's availability.
 
 What the plugin itself adds in this mode:
 
-- A prompt on every off-host tool call, until you answer `session` or `always` for that tool.
-  `/confidential revoke <tool>` brings the prompt back.
-- Off-host tool calls refused outright in yolo mode and unattended mode, because nobody is there to answer.
+- One prompt per off-host tool per lock: the first call of each tool asks, and an exact `once`
+  answer covers that tool until you unlock. A new lock, a restart or a second process asks again.
+  With `confidential.tools.ask: each_call`, every off-host tool call asks until you answer `session`
+  or `always` for that tool. `/confidential revoke <tool>` brings the prompt back in either mode.
+- Off-host tool calls refused outright in yolo mode and unattended mode, because nobody is there to
+  answer, even for a tool an earlier `once` covered.
 - Cron jobs refused while locked.
 - Fallback providers refused while locked.
 - A model on another machine refused until you list its exact host. The tier accepts loopback by
@@ -111,7 +114,8 @@ The guide's sections on [request encryption](GUIDE.md#request-encryption) and on
 
 The plugin's own overhead is small. What you pay for is the tier. Attested inference means
 open-weight models from two vendors, no fallbacks, no streaming on NEAR, images in plaintext to NEAR's
-gateway, and a prompt on every tool call that leaves the machine. If you already run Qwen or DeepSeek
+gateway, and one prompt per lock for each tool that sends data off the machine (every call with
+`confidential.tools.ask: each_call`). If you already run Qwen or DeepSeek
 through an aggregator, the quality change is near zero, and you pay mainly in prompts and lost
 fallbacks. If you're on a Claude or GPT model, you pay for the model switch; the lock makes that cost
 explicit rather than causing it.
@@ -125,7 +129,8 @@ Some of these figures can be read from the ledger once a few locked sessions hav
 - Refusals: every refused send and every refused tool call is a ledger row, so the refusal rate per
   session is a count.
 - Prompts: each tool prompt is a `tool_asked` row and its answer a `tool_allowed` or `tool_refused`
-  row, and each pin answer is a `pin_applied` or `pin_denied` row, so prompts per session are a
+  row; a call that a `once` answer covered for the lock is a `tool_allowed` row with decision
+  `lock_grant` and no prompt; and each pin answer is a `pin_applied` or `pin_denied` row, so prompts per session are a
   count too.
 
 Quality can't be read from the ledger. Measuring quality would take a fixed-task evaluation, run before and after a

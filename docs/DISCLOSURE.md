@@ -187,6 +187,20 @@ back to the full import, and its cache rewrite, only when a recorded tool is sti
 | The same directory, `loaded-commit` | The commit that last started here. The plugin prints its start-up progress lines on the first start of a new commit only ([GUIDE.md, Install in detail](GUIDE.md#install-in-detail)). |
 | The same directory, `sdk-cache/` | The on-disk caches of the tinfoil SDK and of sigstore-python, redirected here. The next section explains how. |
 
+**Tool grants from a `once` answer are held in memory, not on disk.** Under the default
+`confidential.tools.ask: once_per_lock`, an exact `once` answer to a tool prompt grants that tool for
+the rest of the lock. The plugin keeps each grant in the memory of the process that asked, as the
+lock's identity, the tool name and the id of the ledger row that recorded the answer. No file holds
+the grants: a restart or a second process asks again. A grant for an earlier lock never matches, so
+every grant ends at unlock, and `/confidential revoke <tool>` drops the tool's grant in every running
+process that reads the revoke record. Under yolo, approvals off or an unattended run (one-shot, cron,
+an unattended platform) the plugin refuses the call before looking at a grant. The tool prompt
+writes three kinds of ledger row: a `tool_asked` row for the ask (with the prompt line and the size);
+a `tool_allowed` row for an answer of `once`, `session` or `always`, or a `tool_refused` row for any
+other answer; and, for each later call a grant lets through, a `tool_allowed` row with decision
+`lock_grant`, the call's size, and `grant_row` set to the id of the answering row. These rows hold the
+tool name, the call id and byte counts, never the call's arguments.
+
 ### SDK cache redirect
 
 By default, the two libraries cache in your user directories.
@@ -392,7 +406,8 @@ sent:
 - every turn after the routing config changed, and every turn whose live main runtime is off-tier;
 - off-host tool calls you did not approve (by default an exact `once` covers the tool for the rest of
   the lock; `confidential.tools.ask: each_call` asks every call; under yolo, approvals off or an
-  unattended run every off-host call is refused), and tool calls that run the plugin's own commands or
+  unattended run every off-host call is refused unless you added the tool with `/confidential
+  allow`), and tool calls that run the plugin's own commands or
   write its state files;
 - `cronjob_manage`, tools from off-tier MCP URL servers, tools not registered or changed since the
   lock, and `delegate_task` calls that name a route. The plugin refuses to lock while any auxiliary task, vision, delegation, TTS, the memory provider or an MCP
