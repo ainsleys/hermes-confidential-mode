@@ -298,7 +298,9 @@ def _stored_collateral(checks: _Checks, evidence: dict):
 
 def _load_trusted_root(evidence: dict, trust_root_dir: Path | None, supplied=None) -> tuple[bytes, str]:
     """(bytes, source). A supplied root (bytes or a path) is independent of the evidence; otherwise the
-    evidence's own content-addressed root is used and reported as "from_evidence"."""
+    evidence's own content-addressed root is used and reported as "from_evidence": a file named by its
+    sha256 in ``trust_root_dir`` when given, else the bytes embedded in the evidence (``json_b64``), else,
+    for evidence captured before the bytes were embedded, the capturer's local ``path``."""
     if supplied is not None:
         return (bytes(supplied) if isinstance(supplied, (bytes, bytearray)) else Path(supplied).read_bytes()), \
             "supplied"
@@ -306,8 +308,14 @@ def _load_trusted_root(evidence: dict, trust_root_dir: Path | None, supplied=Non
     digest = tr.get("sha256")
     if not digest:
         raise ValueError("evidence has no trusted root")
-    path = Path(trust_root_dir) / f"{digest}.json" if trust_root_dir else Path(tr.get("path") or "")
-    data = path.read_bytes()
+    if trust_root_dir:
+        data = (Path(trust_root_dir) / f"{digest}.json").read_bytes()
+    elif isinstance(tr.get("json_b64"), str):
+        data = base64.b64decode(tr["json_b64"], validate=True)
+    elif tr.get("path"):
+        data = Path(tr["path"]).read_bytes()
+    else:
+        raise ValueError("evidence carries neither the trusted root bytes nor a path to them")
     if hashlib.sha256(data).hexdigest() != digest:
         raise ValueError("stored trusted root does not match its recorded sha256")
     return data, "from_evidence"

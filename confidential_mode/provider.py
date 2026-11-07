@@ -382,10 +382,15 @@ def _policy_check_detail(evidence) -> dict:
         from .verify import policy_check
         ev = evidence or {}
         rel, tr, bundle = ev.get("release") or {}, ev.get("trusted_root") or {}, ev.get("sigstore_bundle")
-        if not (bundle and rel.get("digest") and tr.get("path")):
+        if not (bundle and rel.get("digest") and (tr.get("json_b64") or tr.get("path"))):
             return {"ok": False, "reason": "evidence incomplete: no bundle, digest or trust root captured"}
+        if tr.get("json_b64"):
+            import base64
+            root = base64.b64decode(tr["json_b64"], validate=True)
+        else:
+            root = _P(tr["path"]).read_bytes()      # evidence captured before the bytes were embedded
         r = policy_check.check_bundle(bundle, digest=rel["digest"], repo=ev.get("repo") or "",
-                                      tag=rel.get("tag"), trusted_root=_P(tr["path"]).read_bytes())
+                                      tag=rel.get("tag"), trusted_root=root)
         return {"ok": bool(r.ok), "reason": r.reason, "repo_id": r.repo_id, "owner_id": r.owner_id,
                 "workflow": r.workflow, "commit": r.commit}
     except Exception as exc:

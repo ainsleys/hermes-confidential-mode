@@ -401,9 +401,12 @@ def test_capture_records_every_input_under_the_v1_schema(captured, offline):
     assert base64.b64decode(ev["sev"]["vcek_der_b64"]) == captured.vcek_der
     assert ev["claims"]["code_fingerprint"] == res.code_fingerprint
     assert ev["claims"]["hpke_public_key"] == captured.hpke.hex()
-    tr = Path(ev["trusted_root"]["path"])
-    assert tr.parent == captured.data_dir / "trust-roots"
-    assert hashlib.sha256(tr.read_bytes()).hexdigest() == ev["trusted_root"]["sha256"]
+    # Review finding 5: the trust root bytes are embedded, and no local path is recorded.
+    assert set(ev["trusted_root"]) == {"sha256", "json_b64"}
+    embedded = base64.b64decode(ev["trusted_root"]["json_b64"])
+    assert hashlib.sha256(embedded).hexdigest() == ev["trusted_root"]["sha256"]
+    tr = captured.data_dir / "trust-roots" / f"{ev['trusted_root']['sha256']}.json"
+    assert tr.read_bytes() == embedded                                    # still stored once on disk
     assert ev["tdx"] is None and ev["hardware_measurements"] is None and ev["tls_cert_pem"] is None
     json.dumps(ev)
     assert offline == []  # no socket was touched; every fetch went through the faked requests.get
@@ -749,8 +752,20 @@ def test_expected_fingerprints(captured, offline):
     assert "expected_fingerprints" in r.checks["measurement_match"]
 
 
+def test_evidence_replays_from_the_receipt_alone_on_another_machine(captured, offline, tmp_path):
+    """Review finding 5: with the plugin data directory gone (another machine), the embedded root suffices."""
+    import shutil
+    shutil.rmtree(captured.data_dir / "trust-roots")
+    r = replay(copy.deepcopy(captured.evidence))
+    assert r.ok is True and r.checks["trust_root_source"] == "from_evidence", r.checks
+    bent = copy.deepcopy(captured.evidence)
+    bent["trusted_root"]["json_b64"] = base64.b64encode(b'{"tampered": true}').decode()
+    bad = replay(bent)
+    assert bad.ok is False and "sha256" in bad.checks["code_signature"]
+
+
 def test_supplied_trusted_root_is_independent(captured, offline, tmp_path):
-    root = Path(captured.evidence["trusted_root"]["path"]).read_bytes()
+    root = base64.b64decode(captured.evidence["trusted_root"]["json_b64"])
     r = replay(captured.evidence, trusted_root=root)
     assert r.ok is True and r.checks["trust_root_source"] == "supplied"
     p = tmp_path / "root.json"

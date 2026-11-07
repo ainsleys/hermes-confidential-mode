@@ -921,9 +921,12 @@ following, in order.
 6. It exits with status 0 only if the hash chain is intact and every row replayed and matched. A
    broken chain makes the exit status 1, even when every evidence row replays.
 
-By default, the replay uses the trust root recorded in the evidence. Whoever captured the evidence
-chose that copy, so it is not independent. Pass `--trusted-root <file>` to use a Sigstore
-`trusted_root.json` that you obtained yourself.
+By default, the replay uses the trust root recorded in the evidence. The evidence carries the trust
+root's bytes, so the replay works on any machine, not only on the one that captured it. Whoever
+captured the evidence chose that copy, so it is not independent. Pass `--trusted-root <file>` to use
+a Sigstore `trusted_root.json` that you obtained yourself. Evidence captured by an earlier version
+of the plugin holds only a path to the trust root on the capturing machine. On any other machine,
+replaying such evidence needs `--trusted-root`.
 
 By default, the replay checks certificates as of the capture time recorded in the evidence. That time
 is also asserted by the capturer. Pass `--as-of <ISO time>` to choose the time yourself.
@@ -945,7 +948,7 @@ import json, sys
 from confidential_mode.verify.replay import replay
 doc = json.load(open(sys.argv[1]))
 for item in doc["evidence"]:
-    r = replay(item["evidence"], trust_root_dir="<plugin data dir>/trust-roots")
+    r = replay(item["evidence"])   # the evidence carries its trust root
     print(item["row_id"], "ok" if r.ok else "FAIL", r.checks)
     print("not established:", *r.not_established, sep="\n  ")
 EOF

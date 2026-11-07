@@ -841,8 +841,11 @@ def build_evidence(capture: dict, doc, *, repo: str, enclave_source: str | None,
                     PredicateType.TDX_GUEST_V2.value: "tdx"}.get(att.get("format"), "unknown")
     trusted_root = None
     if capture.get("trusted_root_bytes"):
-        digest, path = store_trust_root(trust_root_dir, capture["trusted_root_bytes"])
-        trusted_root = {"sha256": digest, "path": str(path)}
+        import base64
+        digest, _path = store_trust_root(trust_root_dir, capture["trusted_root_bytes"])
+        # Review finding 5: the bytes (about 7 KB) travel inside the evidence, so a receipt replays on any
+        # machine; no local path is recorded (it named the capturer's home directory).
+        trusted_root = {"sha256": digest, "json_b64": base64.b64encode(capture["trusted_root_bytes"]).decode("ascii")}
     hw = capture.get("hardware_measurements")
     enclave_m = getattr(doc, "enclave_measurement", None)
     evidence = {
