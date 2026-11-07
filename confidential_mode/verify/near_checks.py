@@ -157,8 +157,24 @@ def default_quote_verifier(quote: bytes) -> dict:
 QuoteVerifier = Callable[[bytes], dict]
 
 
+def check_signing_public_key(report: Mapping, *, required: bool) -> None:
+    """For ed25519 the signing address IS the public key (response-signature-verification page), and the
+    E2EE guide sends ``signing_public_key`` as X-Model-Pub-Key. Only ``signing_address`` is bound into
+    report data, so the two must be byte-identical: 32 bytes as lower-case hex, equal. ``required`` (model
+    candidates, whose key encrypts requests) makes an absent ``signing_public_key`` a failure too; a
+    gateway report carries none and is checked only when one is present."""
+    spk = report.get("signing_public_key")
+    if spk is None and not required:
+        return
+    for label, value in (("signing_address", report.get("signing_address")), ("signing_public_key", spk)):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise CheckError(f"{label} is not 32 bytes of lower-case hex")
+    if spk != report.get("signing_address"):
+        raise CheckError("signing_public_key is not the signing_address the quote binds")
+
+
 def check_report(report: Mapping, *, nonce: str, app_composes: Mapping[str, str], quote_verifier: QuoteVerifier,
-                 tls_cert_fingerprint: str | None = None) -> dict:
+                 tls_cert_fingerprint: str | None = None, require_signing_public_key: bool = False) -> dict:
     """One NEAR report (gateway or model candidate), per docs.near.ai quote-nonce-signer. Returns the
     verified quote fields; raises CheckError naming the first failed check."""
     if report.get("signing_algo") != SIGNING_ALGO:
@@ -186,6 +202,7 @@ def check_report(report: Mapping, *, nonce: str, app_composes: Mapping[str, str]
         raise CheckError("MRCONFIGID does not match SHA-256(app_compose)")
     if replay_rtmr3(report.get("event_log_imr3") or []) != hexbytes(q.get("rtmr3"), "quote rtmr3", 48):
         raise CheckError("event log does not replay to the quote's RTMR3")
+    check_signing_public_key(report, required=require_signing_public_key)
     return q
 
 
@@ -342,10 +359,14 @@ def check_signature(sig: Mapping | None, *, model: str | None, request_sha256: s
         return out
     addr = address.lower().removeprefix("0x")
     if kind == "provider_tee":
-        matches = [s for s in model_signers if isinstance(s, str) and s.lower().removeprefix("0x") == addr]
-        if len(matches) != 1:
-            out["reason"] = ("signer matches no verified model report" if not matches else
-                             f"signer matches {len(matches)} verified model reports (ambiguous)")
+        # Instances of one model share one key (NEAR's documentation), so equal keys are one signer, not an
+        # ambiguity; which instance answered is listed as not established.
+        keys = {s.lower().removeprefix("0x") for s in model_signers if isinstance(s, str)}
+        if addr not in keys:
+            out["reason"] = "signer matches no verified model report"
+            return out
+        if len(keys) != 1:
+            out["reason"] = f"the verified model reports name {len(keys)} different signing keys (ambiguous)"
             return out
         out["signer_role"] = "model"
     else:

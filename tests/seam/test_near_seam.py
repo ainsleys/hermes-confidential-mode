@@ -51,7 +51,8 @@ def near(plugin, monkeypatch):
     ad.models = [MODEL]
     ad._transport_factory = lambda: httpx.MockTransport(lambda r: world.handler(r))
     ad._async_transport_factory = lambda: httpx.MockTransport(lambda r: world.handler(r))
-    ad._sync_transport = None
+    ad._send_transport_factory = lambda: httpx.MockTransport(lambda r: world.handler(r))
+    ad._sync_transport = ad._attest_transport = None
     ad._quote_verifier, ad._ita_roots = fake_quote_verifier, world.ita.roots
     ad.signature_wait_seconds = 0.0
     ad._sleep = lambda s: None

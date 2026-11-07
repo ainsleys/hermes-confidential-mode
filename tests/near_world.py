@@ -183,10 +183,13 @@ class NearWorld:
         self.signatures: dict[str, dict] = {}
         self.sig_404_left = 0
         self.model_candidates = 1
+        self.second_model_key: Ed25519PrivateKey | None = None   # a second candidate's own key
         self.gateway_overrides: dict = {}
         self.model_overrides: dict = {}
         self.ita_overrides: dict = {}
         self.serve_tls = True
+        self.chat_tls_der: bytes | None = None     # a different certificate on inference responses
+        self.chat_serve_tls = True
         self.stream_chunks: list[bytes] | None = None
         self.gzip = False
         self.preread = False
@@ -197,13 +200,19 @@ class NearWorld:
         ext = {"network_stream": _FakeStream(self.tls_der)} if self.serve_tls else {}
         return httpx.Response(200, json=payload, extensions=ext)
 
+    def _chat_ext(self) -> dict:
+        if not self.chat_serve_tls:
+            return {}
+        return {"network_stream": _FakeStream(self.chat_tls_der or self.tls_der)}
+
     def gateway_report(self, nonce: str) -> dict:
         rep = report(pub_hex(self.gateway_key), nonce, GATEWAY_COMPOSE, tls_fp=self.tls_fp, app_id="gw")
         rep.update(self.gateway_overrides)
         return {"gateway_attestation": rep}
 
     def model_report(self, nonce: str, model: str) -> dict:
-        cands = [report(pub_hex(self.model_key), nonce, MODEL_COMPOSE, model=model, mrtd="55" * 48, app_id=f"m{i}")
+        keys = [self.model_key] + [self.second_model_key or self.model_key] * max(0, self.model_candidates - 1)
+        cands = [report(pub_hex(keys[i]), nonce, MODEL_COMPOSE, model=model, mrtd="55" * 48, app_id=f"m{i}")
                  for i in range(self.model_candidates)]
         for c in cands:
             c.update(self.model_overrides)
@@ -318,12 +327,12 @@ class NearWorld:
             if stream:
                 parts = [content[i:i + 37] for i in range(0, len(content), 37)]
                 return httpx.Response(200, headers=headers, stream=_ChunkStream(parts),
-                                      extensions={"network_stream": _FakeStream(self.tls_der)})
+                                      extensions=self._chat_ext())
             if self.preread:   # a body httpx holds in memory already (Response(content=...))
                 return httpx.Response(200, headers=headers, content=content,
-                                      extensions={"network_stream": _FakeStream(self.tls_der)})
+                                      extensions=self._chat_ext())
             return httpx.Response(200, headers=headers, stream=_ChunkStream([content[:50], content[50:]]),
-                                  extensions={"network_stream": _FakeStream(self.tls_der)})
+                                  extensions=self._chat_ext())
         if url.path.startswith("/v1/signature/"):
             cid = unquote(url.path[len("/v1/signature/"):])
             if self.sig_mode == "404" or self.sig_404_left > 0:

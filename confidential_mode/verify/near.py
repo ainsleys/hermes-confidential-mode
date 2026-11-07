@@ -55,6 +55,7 @@ import hashlib
 import json
 import logging
 import secrets
+import ssl
 import threading
 import time
 from dataclasses import dataclass, field
@@ -196,6 +197,7 @@ class Appraisal:
     components: tuple = ()
     tcb_status: str | None = None
     first_failure: str | None = None
+    cvms: tuple = ()   # per CVM: {"role", "app_id", "instance_id", "compose_hash", "signing_address"}
 
 
 def identity_for(host: str, models: list[str]) -> str:
@@ -204,6 +206,12 @@ def identity_for(host: str, models: list[str]) -> str:
 
 def _measure(q: Mapping) -> str:
     return ":".join(str(q.get(k) or "") for k in ("mrtd", "rtmr0", "rtmr1", "rtmr2"))
+
+
+def _cvm(role: str, rep: Mapping) -> dict:
+    """What identifies one CVM in the evidence: app_id is recorded per CVM (W12 pins it)."""
+    return {"role": role, "app_id": rep.get("app_id"), "instance_id": rep.get("instance_id"),
+            "compose_hash": rep.get("compose_hash"), "signing_address": str(rep.get("signing_address") or "").lower()}
 
 
 def _app_name(composes: Mapping, h: str | None) -> str:
@@ -249,6 +257,7 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
                               tls_cert_fingerprint=gw.get("tls_cert_fingerprint"))
         checks["gateway_quote"] = True
         out["gateway_signer"] = str(gw.get("signing_address")).lower()
+        cvms = [_cvm("gateway", gw)]
     except Exception as exc:
         checks["gateway_quote"] = f"fail: {exc}"[:320]
         return done(checks["gateway_quote"])
@@ -306,11 +315,19 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
                 if cand.get("model_name") not in (None, model):
                     raise nc.CheckError(f"{model}[{i}]: report names model {cand.get('model_name')!r}")
                 try:
-                    q = nc.check_report(cand, nonce=nonce, app_composes=composes, quote_verifier=qv)
+                    q = nc.check_report(cand, nonce=nonce, app_composes=composes, quote_verifier=qv,
+                                        require_signing_public_key=True)
                 except nc.CheckError as exc:
                     raise nc.CheckError(f"{model}[{i}]: {exc}") from exc
                 model_quotes.setdefault(model, []).append((cand, q))
-            out["model_signers"][model] = [str(c.get("signing_address")).lower() for c, _ in model_quotes[model]]
+            signers = sorted({str(c.get("signing_address")).lower() for c, _ in model_quotes[model]})
+            if len(signers) != 1:
+                # Requests are encrypted to the model key and signatures are judged against it: candidates
+                # naming different keys are refused, never resolved by picking one.
+                raise nc.CheckError(f"{model}: its {len(model_quotes[model])} verified reports name {len(signers)} "
+                                    "different signing keys; refused rather than picking one")
+            out["model_signers"][model] = signers
+            cvms += [_cvm(f"model:{model}", c) for c, _ in model_quotes[model]]
         checks["model_quotes"] = True if models else "n/a: no model allowlisted (gateway only)"
     except Exception as exc:
         checks["model_quotes"] = f"fail: {exc}"[:320]
@@ -343,6 +360,7 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
             for h in code["models"][m]:
                 comps.append(f"model {m} compose sha256:{str(h)[:16]}...{_app_name(composes, h)}")
         out["components"] = tuple(comps)
+        out["cvms"] = tuple(cvms)
         claims = evidence.get("claims") if isinstance(evidence.get("claims"), Mapping) else None
         if claims and (claims.get("code_fingerprint"), claims.get("enclave_fingerprint")) != (
                 out["code_fingerprint"], out["enclave_fingerprint"]):
@@ -359,7 +377,7 @@ def evidence_claims(evidence: Mapping, a: Appraisal) -> dict:
     return {"code_fingerprint": a.code_fingerprint, "enclave_fingerprint": a.enclave_fingerprint,
             "release_tag": None, "identity": a.identity, "tls_public_key_fp": gw.get("tls_cert_fingerprint"),
             "hpke_public_key": None, "gateway_signer": a.gateway_signer, "model_signers": a.model_signers,
-            "components": list(a.components), "tcb_status": a.tcb_status}
+            "components": list(a.components), "tcb_status": a.tcb_status, "cvms": [dict(c) for c in a.cvms]}
 
 
 # ── the adapter ─────────────────────────────────────────────────────────────────────────────────
@@ -377,6 +395,67 @@ def _spki_sha256(der: bytes) -> str:
     return spki_sha256(der)
 
 
+class TLSPinMismatch(VerifyError):
+    """The TLS peer of an inference connection is not the certificate the verified gateway quote binds."""
+
+
+def _default_context() -> ssl.SSLContext:
+    return ssl.create_default_context()
+
+
+def pinned_ssl_context(expected_spki: Callable[[], str | None], *,
+                       base: Callable[[], ssl.SSLContext] | None = None,
+                       required: Callable[[], bool] = lambda: True) -> ssl.SSLContext:
+    """An SSL context that keeps the normal chain and host-name checks and adds one: right after the
+    handshake, and before httpcore writes a request byte, the peer certificate's SPKI SHA-256 must equal
+    ``expected_spki()`` (the fingerprint the verified gateway quote binds). A mismatch, an unreadable peer
+   certificate, or no expected fingerprint (unless ``required()`` is false) raises TLSPinMismatch and the
+    connection is closed.
+
+    Same mechanism as the Tinfoil SDK (tinfoil/client.py ``_create_socket_wrapper``/``_create_bio_wrapper``):
+    the sync httpcore backend completes the handshake inside ``wrap_socket``; the async (anyio) backend and
+    TLS-in-TLS proxying drive an ``SSLObject`` from ``wrap_bio``, whose ``do_handshake`` is wrapped."""
+    ctx = (base or _default_context)()
+    orig_wrap_socket, orig_wrap_bio = ctx.wrap_socket, ctx.wrap_bio
+
+    def check(der: bytes | None) -> None:
+        want = expected_spki()
+        if not want:
+            if not required():
+                return  # confidential.near.require_tls_binding: false and no fingerprint was attested
+            raise TLSPinMismatch("no attested gateway TLS fingerprint to pin this connection to")
+        got = _spki_sha256(der) if der else None
+        if got != str(want).lower():
+            raise TLSPinMismatch("the TLS certificate of this connection is not the one the verified gateway "
+                                 "quote binds; refused before sending")
+
+    def wrap_socket(*args, **kwargs):
+        sock = orig_wrap_socket(*args, **kwargs)
+        try:
+            check(sock.getpeercert(True))
+        except BaseException:
+            try:
+                sock.close()
+            finally:
+                raise
+        return sock
+
+    def wrap_bio(*args, **kwargs):
+        obj = orig_wrap_bio(*args, **kwargs)
+        orig_handshake = obj.do_handshake
+
+        def do_handshake():
+            result = orig_handshake()
+            check(obj.getpeercert(True))
+            return result
+        obj.do_handshake = do_handshake
+        return obj
+
+    ctx.wrap_socket = wrap_socket
+    ctx.wrap_bio = wrap_bio
+    return ctx
+
+
 class NearAdapter:
     """VendorAdapter for NEAR AI Cloud. See the module docstring."""
 
@@ -388,6 +467,7 @@ class NearAdapter:
                  signature_wait_seconds: float = DEFAULT_SIGNATURE_WAIT_SECONDS,
                  transport_factory: Callable[[], httpx.BaseTransport] | None = None,
                  async_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
+                 send_transport_factory: Callable[[], httpx.BaseTransport] | None = None,
                  quote_verifier: nc.QuoteVerifier | None = None, ita_roots: Mapping[str, str] | None = None,
                  hold_until_accepted: bool = True, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep):
@@ -402,13 +482,19 @@ class NearAdapter:
         self.require_tls_binding = bool(require_tls_binding)
         self.accepted_tcb = tuple(accepted_tcb_statuses or DEFAULT_ACCEPTED_TCB)
         self.signature_wait_seconds = max(0.0, float(signature_wait_seconds))
+        # Attestation GETs use an unpinned pool: their certificate is what the quote is checked against
+        # (gateway_tls_binding). Inference sends and signature fetches (both carry the API key) use pools
+        # whose every handshake is pinned to the verified gateway's TLS fingerprint. Tests inject one
+        # factory for both.
         self._transport_factory = transport_factory or (lambda: httpx.HTTPTransport(retries=0))
-        self._async_transport_factory = async_transport_factory or (lambda: httpx.AsyncHTTPTransport(retries=0))
+        self._send_transport_factory = send_transport_factory or transport_factory or self.default_send_transport
+        self._async_transport_factory = async_transport_factory or self.default_async_transport
         self._quote_verifier = quote_verifier
         self._ita_roots = ita_roots
         self._clock, self._sleep = clock, sleep
         self._lock = threading.RLock()
         self._sync_transport: httpx.BaseTransport | None = None
+        self._attest_transport: httpx.BaseTransport | None = None
         self._async_transports: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncBaseTransport]] = {}
         self._accepted: VerificationResult | None = None
         self._appraisal: Appraisal | None = None
@@ -439,11 +525,43 @@ class NearAdapter:
     def identity(self) -> str:
         return identity_for(self.host, self.models)
 
+    def default_send_transport(self) -> httpx.BaseTransport:
+        return httpx.HTTPTransport(retries=0, verify=pinned_ssl_context(
+            self.pinned_spki, required=lambda: self.require_tls_binding))
+
+    def default_async_transport(self) -> httpx.AsyncBaseTransport:
+        return httpx.AsyncHTTPTransport(retries=0, verify=pinned_ssl_context(
+            self.pinned_spki, required=lambda: self.require_tls_binding))
+
+    def pinned_spki(self) -> str | None:
+        """The TLS SPKI fingerprint the accepted gateway quote binds (lower-case hex), or None."""
+        acc = self._accepted
+        fp = (((acc.evidence or {}).get("gateway") or {}).get("tls_cert_fingerprint") if acc else None)
+        return str(fp).lower() if isinstance(fp, str) and fp else None
+
     def _pool(self) -> httpx.BaseTransport:
+        """The pinned pool for inference sends and signature fetches."""
         with self._lock:
             if self._sync_transport is None:
-                self._sync_transport = self._transport_factory()
+                self._sync_transport = self._send_transport_factory()
             return self._sync_transport
+
+    def _attest_pool(self) -> httpx.BaseTransport:
+        with self._lock:
+            if self._attest_transport is None:
+                self._attest_transport = self._transport_factory()
+            return self._attest_transport
+
+    def _drop_send_pools(self) -> None:
+        """A newly accepted TLS fingerprint: no pooled connection made under the old pin is reused."""
+        with self._lock:
+            t, self._sync_transport = self._sync_transport, None
+            self._async_transports.clear()
+        if t is not None:
+            try:
+                t.close()
+            except Exception:
+                pass
 
     def _get(self, client: httpx.Client, path: str, params: dict, headers: dict | None = None):
         url = f"{self._base_url}/{path}"
@@ -460,7 +578,7 @@ class NearAdapter:
     def capture(self, nonce: str) -> tuple[dict, dict | None]:
         """The public attestation responses for ``nonce`` (network). Raises VerifyError."""
         raw: dict = {"model_reports": {}, "ita": {}, "errors": []}
-        client = httpx.Client(transport=_NonClosing(self._pool()), timeout=30.0, follow_redirects=False)
+        client = httpx.Client(transport=_NonClosing(self._attest_pool()), timeout=30.0, follow_redirects=False)
         tls = None
         try:
             base = {"nonce": nonce, "signing_algo": nc.SIGNING_ALGO}
@@ -526,7 +644,10 @@ class NearAdapter:
                     vendor=VENDOR, router_repo=a.identity or self.identity, enclave_host=self.host,
                     code_fingerprint=a.code_fingerprint or "", enclave_fingerprint=a.enclave_fingerprint or "",
                     release_tag=None, verifier=VERIFIER, verified_at_host_clock=now, evidence=evidence)
+                old_pin = self.pinned_spki()
                 self._accepted, self._appraisal = result, a
+                if old_pin is not None and old_pin != self.pinned_spki():
+                    self._drop_send_pools()
                 self.verified_mono = time.monotonic()
                 if self._hold_until_accepted:
                     self.held_reason = "verification not yet accepted against pins"
@@ -570,9 +691,12 @@ class NearAdapter:
 
     def close(self) -> None:
         with self._lock:
-            t, self._sync_transport = self._sync_transport, None
+            ts = [self._sync_transport, self._attest_transport]
+            self._sync_transport = self._attest_transport = None
             self._async_transports.clear()
-        if t is not None:
+        for t in ts:
+            if t is None:
+                continue
             try:
                 t.close()
             except Exception:
@@ -669,6 +793,17 @@ class NearAdapter:
             signature.update(signature_hex=data.get("signature"), signature_kind=data.get("signature_kind"),
                              signing_algo=data.get("signing_algo"), signing_address=data.get("signing_address"),
                              text=data.get("text"))
+        if ex.tls_matches is not True and (self.require_tls_binding or ex.tls_matches is False):
+            # The pinned handshake already refuses another certificate; this per-response observation is
+            # the record, and a send whose certificate is not the attested one is never "verified".
+            check["tls_verified"] = False
+            check["verdict"] = "unverified"
+            check["reason"] = ("the TLS certificate of this send is not the one the gateway quote binds"
+                               if ex.tls_matches is False else
+                               "the TLS certificate of this send was not observable") + (
+                f"; signature: {check['reason']}" if check.get("reason") else "")
+        else:
+            check["tls_verified"] = ex.tls_matches is True
         fully = check["verdict"] == "verified" and check["provider_tee_verified"] is True
         detail = {
             "vendor": VENDOR, "source": "near_signature", "chat_id": ex.chat_id, "endpoint": ex.path,

@@ -11,10 +11,12 @@ import json
 
 import openai
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from confidential_mode.ledger import Ledger
 from confidential_mode.receipts import build_receipt, verify_chain
 from confidential_mode.verify import near_checks as nc, replay_near
+from confidential_mode.verify.base import VerifyError
 
 from ..near_world import BASE, MODEL, NearWorld, fake_quote_verifier, pub_hex
 
@@ -70,11 +72,58 @@ def test_missing_signature_is_explicit(tmp_path):
     assert rows[0]["decision"] == "missing" and rows[0]["detail"]["signature"]["status"] == "missing"
 
 
-def test_two_model_reports_with_one_key_are_ambiguous(tmp_path):
+def test_two_model_reports_with_one_key_are_one_signer(tmp_path):
+    """NEAR serves a model from several instances sharing one key: that is one signer, not an ambiguity
+    (codebase review medium 7). Which instance answered stays not established."""
     world = NearWorld()
     world.model_candidates = 2
-    _, _, rows = _send(world, tmp_path)
-    assert rows[0]["verdict"] == "unverified" and "ambiguous" in rows[0]["detail"]["check"]["reason"]
+    ad, result, rows = _send(world, tmp_path)
+    assert rows[0]["verdict"] == "verified" and rows[0]["detail"]["fully_attested"] is True
+    assert result.evidence["claims"]["model_signers"] == {MODEL: [pub_hex(world.model_key)]}
+    assert [c["role"] for c in result.evidence["claims"]["cvms"]] == ["gateway", f"model:{MODEL}", f"model:{MODEL}"]
+
+
+def test_model_reports_naming_different_keys_are_refused_not_picked(tmp_path):
+    """Two verified candidates with different keys: the plugin refuses the model, never picks the first."""
+    world = NearWorld()
+    world.model_candidates = 2
+    world.second_model_key = Ed25519PrivateKey.generate()
+    with pytest.raises(VerifyError, match="2 different signing keys; refused rather than picking one"):
+        world.adapter(tmp_path).verify()
+
+
+@pytest.mark.parametrize("override,needle", [
+    ({"signing_public_key": "ab" * 32}, "signing_public_key is not the signing_address"),
+    ({"signing_public_key": None}, "signing_public_key is not 32 bytes of lower-case hex"),
+    ({"signing_public_key": "AB" * 32}, "signing_public_key is not 32 bytes of lower-case hex"),
+    ({"signing_public_key": "ab" * 31}, "signing_public_key is not 32 bytes of lower-case hex"),
+])
+def test_model_key_other_than_the_bound_signing_address_fails_the_candidate(tmp_path, override, needle):
+    """Only signing_address is bound into report data; signing_public_key (the key requests are
+    encrypted to) must be that same key, 32 bytes of lower-case hex (plan step 0, review finding 4)."""
+    world = NearWorld()
+    world.model_overrides.update(override)
+    with pytest.raises(VerifyError, match=needle):
+        world.adapter(tmp_path).verify()
+
+
+def test_upper_case_signing_address_is_refused_for_a_model(tmp_path):
+    world = NearWorld()
+    key = pub_hex(world.model_key).upper()
+    world.model_overrides.update(signing_address=key, signing_public_key=key)
+    with pytest.raises(VerifyError, match="lower-case hex"):
+        world.adapter(tmp_path).verify()
+
+
+def test_app_id_is_recorded_per_cvm_in_evidence_and_appraisal(tmp_path):
+    world = NearWorld()
+    _, result, _ = _send(world, tmp_path)
+    cvms = result.evidence["claims"]["cvms"]
+    assert [(c["role"], c["app_id"]) for c in cvms] == [("gateway", "gw"), (f"model:{MODEL}", "m0")]
+    assert result.evidence["gateway"]["app_id"] == "gw" and result.evidence["model_reports"][MODEL][0]["app_id"] == "m0"
+    from confidential_mode.verify import near
+    a = near.appraise(result.evidence, quote_verifier=fake_quote_verifier, ita_roots=world.ita.roots)
+    assert a.ok and [c["app_id"] for c in a.cvms] == ["gw", "m0"]
 
 
 def test_signature_over_another_model_id_is_unverified():
