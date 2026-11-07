@@ -508,7 +508,23 @@ def _lock_held(tier: Tier, base: dict, *, state, ledger, config, registry, plugi
             return LockResult(False, f"Not locked: the tool allowlist could not be written to {allowlist_path} "
                               f"({type(exc).__name__}). Check that the plugin data directory is writable.",
                               tier=tier, report=report)
-    state.lock(tier, report.fingerprint, since=since)
+    try:
+        state.lock(tier, report.fingerprint, since=since)
+    except Exception as exc:  # noqa: BLE001 - FI-4: the lock flag was not written: refuse, record, clean up
+        # The flag is written last, so the profile is still unlocked. The allowlist.yaml written above belongs
+        # to a lock that never happened: remove it (only if it is still this lock's file).
+        lock_id = getattr(allowlist, "lock_id", "") if hasattr(allowlist, "persist") else ""
+        if lock_id:
+            try:
+                from .gate_tools import clear_persisted
+                clear_persisted(allowlist_path, lock_id=lock_id)
+            except Exception:  # noqa: BLE001
+                pass
+        _append(ledger, LedgerEvent(kind="preflight_fail", purpose="lock:state", verdict="error",
+                                    decision="refused", detail={"error_type": type(exc).__name__}, **base))
+        return LockResult(False, f"Not locked: the lock state could not be written ({type(exc).__name__}). "
+                          "Check that the Hermes plugin data directory is writable, then lock again.",
+                          tier=tier, report=report)
     verification_result = (verification or _default_verification)(attested_profile_for(config)) \
         if tier is Tier.ATTESTED else None
     message = lock_message(tier, config, verification=verification_result, clock=clock)

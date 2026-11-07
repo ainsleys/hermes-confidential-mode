@@ -657,9 +657,6 @@ def test_a_state_write_that_fails_on_lock_leaves_the_profile_unlocked_and_unclai
     assert ("lock", "locked") not in plugin.kinds()
 
 
-@pytest.mark.xfail(strict=True, reason="FI-4: a lock whose state.json write fails raises out of locking.lock: no "
-                                       "preflight_fail row, the reply is 'confidential: error (...)', and the "
-                                       "allowlist.yaml written for it is left behind")
 def test_a_lock_refused_by_a_state_write_failure_is_ledgered_and_cleaned_up(plugin, monkeypatch):
     """locking.lock: "Lock the profile to tier or refuse with the reason. Never raises for a refusal"; every
     other refusal there writes a preflight_fail row (purpose lock:*) and the allowlist is written for a lock
@@ -670,6 +667,29 @@ def test_a_lock_refused_by_a_state_write_failure_is_ledgered_and_cleaned_up(plug
     assert out.startswith("Not locked"), out
     assert any(k == "preflight_fail" and r for k, r in plugin.kinds())
     assert not plugin.rt.allowlist_path.exists()
+
+
+def test_a_lock_refused_by_a_state_write_failure_keeps_another_locks_allowlist(plugin, monkeypatch):
+    """FI-4: the cleanup removes allowlist.yaml only while the file is still the refused lock's own."""
+    locking = cm(plugin, "locking")
+    rt = plugin.rt
+    other = {"version": 2, "lock_id": "another-lock", "tools": [], "allowed": []}
+
+    class Racing:
+        def __init__(self, state):
+            self._s = state
+
+        def __getattr__(self, n):
+            return getattr(self._s, n)
+
+        def lock(self, *a, **k):
+            rt.allowlist_path.write_text(json.dumps(other))   # another lock replaced the file meanwhile
+            raise OSError(28, "No space left on device")
+    out = locking.lock("on-host-only", state=Racing(rt.state), ledger=rt.ledger, config=rt.load_config(),
+                       allowlist_path=rt.allowlist_path, surface="cli")
+    assert out.ok is False and out.message.startswith("Not locked: the lock state could not be written"), out
+    assert json.loads(rt.allowlist_path.read_text())["lock_id"] == "another-lock"
+    assert any(e.kind == "preflight_fail" and e.purpose == "lock:state" for e in rows(plugin))
 
 
 # ── grants_revoked.json (revoke) ─────────────────────────────────────────────────────────────────
