@@ -1,5 +1,12 @@
 # C1 interface freeze (2026-11-06)
 
+This file is the developer contract for Hermes Confidential Mode: the package layout, the shared
+types, and the contract each module keeps with Hermes. Its amendments are a change record, kept for
+maintainers in the order they were made; a later amendment can replace part of an earlier one. Users
+need none of it: the [README](../README.md) states what the plugin claims, and the
+[guide](GUIDE.md) describes how it behaves. Names such as W1 to W14, T1 to T4 and C0 to C2 are the
+work packages that owned each part when the contract was written.
+
 Frozen for the C1 -> C2 workstreams. Changes after this point require a note in this file and a message to every open workstream. Hermes is pinned at 84a0301. Facts marked (C0) were proven by tests in tests/spikes.
 
 ## Package layout and ownership
@@ -83,18 +90,18 @@ State (ctx.state, per profile): locked (bool), locked_tier (str), locked_since (
 
 ## Contracts
 
-### W1 gate_llm.py (middleware) — proven constraints (C0)
+### W1 gate_llm.py (middleware): proven constraints (C0)
 - Registered via ctx.register_middleware("llm_execution", fn). The body is wrapped so that NOTHING escapes: any exception is converted to a refusal; an escaping exception is fail-open.
 - Reads context: provider, base_url, model, api_mode, session_id, request. Builds Destination(purpose="main" or "fallback" when agent fallback index > 0 if available, else "main").
 - If not locked: call next_call unchanged, but ledger send_observed with host and byte size of the serialised request (watch view works unlocked).
 - If locked: classify via the active TierPredicate. Off-tier -> ledger send_refused, return refusal (never call next_call). In-tier -> wrap next_call in try/except Exception: unwrap `getattr(exc, "original", exc)`; if InterruptedError re-raise; else ledger and return refusal "attested endpoint unavailable; this turn ended; resend". Never let fallback arm.
-- Refusal builders per api_mode exactly as in docs/C0-spikes.md (ChatCompletion / Response / anthropic-shaped / bedrock dict). finish_reason "stop", stop_reason "end_turn", status "completed". Never a dict, never content_filter/length/refusal. Unknown api_mode -> chat_completions shape and a ledger note.
+- Refusal builders per api_mode exactly as `tests/spikes/test_refusal_shape.py` asserts (ChatCompletion / Response / anthropic-shaped / bedrock dict). finish_reason "stop", stop_reason "end_turn", status "completed". Never a dict, never content_filter/length/refusal. Unknown api_mode -> chat_completions shape and a ledger note.
 - Attested tier: before next_call, ask W2 `attested_ok(provider)`; W2 handles TTL. On mismatch, W2 stages pending_pin; W1 refuses with "enclave build changed; run /confidential pins approve".
 - Tests: one allow test and a mutant twin per branch; assert on a recording transport that the provider received zero requests on refusal; a test that the verifier raising never reaches the provider; a 429/500 test proving `_try_activate_fallback` is never called (reuse the C0 harness in tests/spikes/test_refusal_shape.py).
 
 ### W2 verify/, client.py, provider.py, pins.py
 - Adapter builds `SecureClient(enclave=<host from atc or config>, user_cache_secret=<from plugin data dir, never ~/.tinfoil>)` once per profile; `verify()` via the SDK default path (never pinned-measurement mode); extracts fingerprints from get_verification_document or equivalent; VerifyError on anything.
-- ConfidentialClient per docs/C0-spikes.md follow-up: HERMES_SKIP_TRANSPORT_WRAP = HERMES_SKIP_ASYNC_WRAP = True; sync OpenAI on a non-closing view; AsyncOpenAI per running loop; chat.completions.create dispatches by caller coroutine check; __getattr__ delegates to the sync client; close() closes only the view.
+- ConfidentialClient per `tests/spikes/test_create_client_async.py`: HERMES_SKIP_TRANSPORT_WRAP = HERMES_SKIP_ASYNC_WRAP = True; sync OpenAI on a non-closing view; AsyncOpenAI per running loop; chat.completions.create dispatches by caller coroutine check; __getattr__ delegates to the sync client; close() closes only the view.
 - RefusingClient: same surface; every create raises ConfidentialRefused(reason). Returned by create_client when verification is not fresh and cannot be refreshed. create_client NEVER raises and NEVER returns None (fail-open otherwise).
 - provider.py: `ProviderProfile(name="attested-tinfoil", base_url=<enclave host URL>, env_vars=("TINFOIL_API_KEY",), auth_type="api_key")` with create_client(**kw) -> ConfidentialClient | RefusingClient; registered from register(ctx) via providers.register_provider. Cache verification; TTL default 300 s (`confidential.verify_ttl_seconds`).
 - Dependency: pyproject `tinfoil==0.14.2` exact. No network in unit tests; seam tests stub SecureClient.verify and use httpx.MockTransport recorders.
@@ -108,7 +115,7 @@ State (ctx.state, per profile): locked (bool), locked_tier (str), locked_since (
 ### W4 gate_tools.py, consent.py
 - Allowlist built at lock from tools.registry: on-host set = {terminal, process_manage, execute_code, read_file, write_file, patch, search_files, skills_list, skill_view, skill_manage, todo_list, memory, clarify, session_search}; everything else is off-host. Print the computed lists on lock.
 - pre_tool_call(tool_name, args, task_id, session_id, ...): unlocked -> None (observe only, ledger nothing). Locked: on-host -> None; cronjob_manage -> block; delegate_task -> allow only if route is default backend and no profile/acp fields, else block; MCP tool from a URL server -> block; other off-host tool -> if yolo/bypass active (tools.approval._yolo_active() or approvals.mode off) -> block, else return {"action": "approve", "message": f"{tool_name} wants to send ~{n} KB of this conversation off the machine"} with n from len(json.dumps(args)); ledger tool_asked and, from post_approval_response, tool_allowed/tool_refused.
-- consent.py: `approve_pending_pin(ctx, store, ledger, *, session_key, session_id, platform)` using ctx.ask_choice exactly as in docs/C0-spikes.md; sync only; None -> deny; re-check pending equality before apply; ledger pin_applied/pin_denied with raw_pick. `allow_tool(ctx, name)` same primitive for allowlist additions.
+- consent.py: `approve_pending_pin(ctx, store, ledger, *, session_key, session_id, platform)` using ctx.ask_choice exactly as `tests/spikes/test_ask_choice.py` asserts; sync only; None -> deny; re-check pending equality before apply; ledger pin_applied/pin_denied with raw_pick. `allow_tool(ctx, name)` same primitive for allowlist additions.
 - Tests: registry-driven allowlist from a fake registry; bypass-state -> block not approve; ask_choice returning None -> deny and no apply; pending swapped during wait -> not applied.
 
 ## Decisions carried from C0
@@ -298,7 +305,7 @@ Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only.
 
 ## Amendment 5.2 (2026-11-07): NEAR compose-manager log check, evidence schema v2, evidence blobs
 
-Owner W13 (branch `w13-cm`), revised after its adversarial review (`scratchpad/review/w13-cm-review.md`). Extends Amendments 5 and 5.1. It closes Amendment 6's open finding 6 (the 256 KB ledger cap can drop NEAR evidence). NEAR documents none of the compose-manager attestation; its construction is reverse-engineered from captures of two instances on 2026-11-07, and a change on NEAR's side fails the check closed.
+Owner W13 (branch `w13-cm`). Extends Amendments 5 and 5.1. It closes Amendment 6's open finding 6 (the 256 KB ledger cap can drop NEAR evidence). NEAR documents none of the compose-manager attestation; its construction is reverse-engineered from captures of two instances on 2026-11-07, and a change on NEAR's side fails the check closed.
 
 What the check establishes, and the strongest wording allowed anywhere: a TD of this instance reported this actions log for this nonce, the log's hash is bound in a hardware quote, and the per-service deployment map derived from the log is what the operator's own tooling reported. It does not establish that the inner compose is measured or that the reported services are the ones running.
 
@@ -362,7 +369,7 @@ Review bundle (`review.py`, schema `confidential-mode/pin-review/v1`, `review.BU
 - The brief: `review.BRIEF_RULES`, `NEAR_QUESTIONS` (Q1-Q8), `TINFOIL_QUESTIONS` (T1-T4), `OUTPUT_FORMAT` (one verdict per question with cited bundle line numbers or JSON pointers, then a recommendation). Text output numbers every line (`L0001`) and renders every vendor string with `render_vendor`; JSON output is `ensure_ascii`, so every non-ASCII character is a visible escape.
 - No Hermes tool. `plugin.yaml` `provides_tools` stays `[]`.
 
-Second pass, after the adversarial review of the branch (`scratchpad/review/w12-pins-review.md`):
+Second pass:
 - `selfapproval.py`: `TOOL_PROCESS_ENV = "XDG_CONFIDENTIAL_MODE_TOOL_PROCESS"` holds the id of the process whose tool hooks set it (`os.environ.setdefault`). The `XDG_` prefix is on Hermes' execute_code allowlist (`tools/code_execution_env.py` `_SAFE_ENV_PREFIXES`), so terminal, process_manage and execute_code children all inherit it (tested with `_make_run_env` and `_build_child_env`). `self_approval_reason(environ=None, pid=None)` refuses when the marker names another process. `consent.approve_pending_pin`, `consent.allow_tool` and `TerminalAsker` check it before asking, for every asker, and write `pin_denied` / `tool_refused` with decision `self_approval`. The claim, and no more: while locked, the tool gate refuses tool calls whose arguments name the plugin's command line, module or state files; every approval prompt refuses when the process carries the tool marker; an agent that unsets the marker, assembles the command at run time, or attaches through the gateway socket (whose slash commands the gateway runs itself, `cli.py:1275-1279`) can approve a pin; such an approval is recorded with approved_via. The descendant-process check of the first draft of this pass is removed.
 - `gate_tools`: ANSI-C quoting is expanded before the scan; the token `confidential_mode` refuses; the word `confidential` must be a whole word (no glob matching); `STATE_FILE_TOOLS = {"write_file", "patch"}` are refused when they name `pins.yaml`, `ledger.sqlite` or `allowlist.yaml`.
 - `near_checks.deployment_map`: a log `file` must match `[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*` with no `..` segment, at most 512 characters, or `cm_services` fails. `review.render_text` renders every interpolated value with `render_vendor` and takes the rules, questions and format from the module, never from the bundle passed in.
@@ -378,7 +385,7 @@ Owner W14 (branch `w14-close`). `commands.near_config_block(model, *, tinfoil_vi
 
 ## Amendment 9 (2026-11-07): background re-verification, a narrower tool gate, image parts on NEAR
 
-Branch `tier3-a`, revised after its adversarial review (`scratchpad/review/tier3-a-review.md`). Numbered 9 because Amendment 8 (NEAR setup leaves vision unset) is taken; the image part section below replaces Amendment 8. Backlog items U03 (with C01 and S09), S14 and U02. Amendment 5.1's open finding 19 is closed.
+Branch `tier3-a`. Numbered 9 because Amendment 8 (NEAR setup leaves vision unset) is taken; the image part section below replaces Amendment 8. Backlog items U03 (with C01 and S09), S14 and U02. Amendment 5.1's open finding 19 is closed.
 
 Adapters: prepare and commit (C01, S09):
 - `verify/base.PreparedVerification(result, payload, on_discard)`, `discard()`. Both adapters split `verify()` into `prepare_verification()` (network, publishes nothing) and `commit_verification(prepared, *, hold)` (publishes under the adapter lock); `verify()` is `commit_verification(prepare_verification(), hold=hold_until_accepted)`. With `hold`, `held_reason` is set before the result is published. A closed adapter refuses a commit. Both adapters gain `closed` and `on_close` (wired by the cache to `stop_refresh`).
@@ -412,7 +419,7 @@ Image parts on NEAR (U02; replaces Amendment 8):
 
 ## Amendment 10 (2026-11-07): the on-host tier is loopback plus listed hosts; revoke for tool grants
 
-Owner tier3-b (branch `tier3-b`). Numbered 10 because tier3-a's Amendment 9 merged first; the two are independent, except that Amendment 9's self-approval scan (selfscan.py) also names this amendment's state files (`allowlist.yaml.lock`, `grants_revoked.json`, `grants_revoked.json.lock`) and refuses `hermes confidential revoke` from a tool while locked. This amendment narrows Amendment 1's on-host set and adds one command. Revised after its adversarial review (`scratchpad/review/tier3-b-review.md`).
+Owner tier3-b (branch `tier3-b`). Numbered 10 because tier3-a's Amendment 9 merged first; the two are independent, except that Amendment 9's self-approval scan (selfscan.py) also names this amendment's state files (`allowlist.yaml.lock`, `grants_revoked.json`, `grants_revoked.json.lock`) and refuses `hermes confidential revoke` from a tool while locked. This amendment narrows Amendment 1's on-host set and adds one command.
 
 - On-host rule (backlog D03). `tiers.OnHostPredicate` admits loopback literals (`127.0.0.0/8`, `::1`, and the IPv4-mapped form of a loopback address), the names in `ON_HOST_NAMES`, this machine's own host name when every address the name resolves to is loopback, and the exact hosts in `confidential.on_host.extra_hosts`. Private IPv4 ranges (`10/8`, `172.16/12`, `192.168/16`), carrier-grade NAT (`100.64/10`), IPv4 link-local (`169.254/16`), IPv6 link-local (`fe80::/10`) and IPv6 unique-local (`fc00::/7`) are off-tier unless the exact host is listed. The off-tier reason for such a host names the range and the key `confidential.on_host.extra_hosts`, and the preflight row's fix carries that reason.
 - The own host name. `tiers.own_hostname_is_loopback(host)` resolves `socket.gethostname()` only when the destination host equals that name, one lookup at a time, with a two-second timeout. An error, a timeout, an empty answer or any non-loopback address gives off-tier, cached for the process. A loopback answer is rechecked once it is older than 60 seconds. No other name is ever resolved by the plugin.
@@ -428,7 +435,7 @@ Owner tier3-b (branch `tier3-b`). Numbered 10 because tier3-a's Amendment 9 merg
 
 ## Amendment 11 (2026-11-08): first-time-user and dogfooding fixes (ux-pass-1)
 
-Branch `ux-pass-1`, from the first-time user walkthrough (2026-11-07) and the dogfooding notes (2026-11-08), revised after its adversarial review (`scratchpad/review/ux-pass-1-review.md`). Extends Amendments 2, 3, 4 (F12), 5, 7, 9 and 10.
+Branch `ux-pass-1`, from the first-time user walkthrough (2026-11-07) and the dogfooding notes (2026-11-08). Extends Amendments 2, 3, 4 (F12), 5, 7, 9 and 10.
 
 - CLI allow. Root cause of "not registered when the session was locked" for every tool: a `hermes confidential` process never builds an agent, so the built-in tool modules were never imported and the allowlist rebuild kept no built-in tool. `Runtime.allowlist()` now calls `gate_tools.ensure_tools_for_lock`, which imports only the `tools.*` modules named in allowlist.yaml for non-MCP tools (no discovery-cache write) and falls back to `ensure_builtin_tools` only when a recorded non-MCP built-in tool is still missing. MCP tools (toolset `mcp-*`, handlers in `tools.mcp_tool_handlers`) are gateway-registered: nothing is imported for them, and the CLI refuses them with a message that names the chat allow and the relock from chat. A refusal raised by the attested client before sending (`ConfidentialRefused`) writes no `send_observed` "allowed" row; the `send_refused` row is the record. An allow answer whose hook row could not be written gets its `tool_allowed` row from the middleware. `lock` calls `ensure_builtin_tools` (`discover_builtin_tools`). Side effects that remain: Hermes may rewrite `cache/tool_discovery_cache.json` when stale (lock only), and the imported modules register their exit handlers (terminal, code kernels); the browser reaper's handler (`tools.browser_session._atexit_cleanup`) is unregistered when the plugin's call imported that module, so a terminal command never reaps a gateway's browsers. `consent.unknown_tool_text`: a tool the lock recorded but this process has not registered is to be allowed from chat; a tool the lock never recorded cannot be allowed at all, and the text names a relock from chat (`/confidential off`, then `/confidential on <tier>`), because a lock made from a terminal records no gateway-only tool. Tests: `tests/seam/test_cli_allow_seam.py` (both through a real CLI process).
 - API keys. `run_preflight(key_state=...)` adds one row per attested vendor a route uses (main, auxiliary tasks and their fallback entries, delegation): key `TINFOIL_API_KEY` or `NEAR_AI_API_KEY`, value `set`, `not set` or `not readable in this scope`. `preflight.key_state` reads Hermes' secret scope (`get_secret`; `UnscopedSecretError` gives "not readable in this scope"), a route's `api_key` naming the profile, and Hermes' auth store `<hermes home>/auth.json` (the credential pool and provider entries `hermes auth` writes), opened read-only and parsed by the plugin (`preflight.auth_store_has`), never through Hermes' loaders, which can rewrite or copy the file. Only `lock` and `check` pass `key_state` (`locking.run_tier_preflight(check_keys=True)`); the per-turn recheck never does, so a key a turn's process cannot read is never a config failure or a breach. Instead `provider._create_client` returns a RefusingClient with reason "vendor key unreadable: <ENV> ..." when no key reaches it, and the llm gate's `send_refused` row carries `reason_code: vendor_key_unreadable`. The value and its length are never shown.
