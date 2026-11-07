@@ -618,6 +618,26 @@ def unknown_tool_text(allowlist: Any, name: str) -> str:
             "relock from chat: /confidential off, then /confidential on <tier>.")
 
 
+def _grant_failure_detail(exc: BaseException, allowlist: Any) -> dict:
+    """Path-free detail for an allow whose allowlist.yaml write failed (FI-2)."""
+    import errno as _errno
+    from pathlib import Path as _Path
+    from .filelock import LockBusy
+    code = getattr(exc, "errno", None)
+    out = {"reason_code": "grant_not_recorded", "error_type": type(exc).__name__,
+           "note": "the allow was not recorded; the tool asks again each call"}
+    if isinstance(code, int):
+        out["errno"] = _errno.errorcode.get(code, str(code))
+    elif getattr(exc, "errno_name", None):
+        out["errno"] = exc.errno_name
+    if isinstance(exc, LockBusy):
+        out["file"] = exc.lock_path.name
+    else:
+        target = getattr(allowlist, "added_path", None)
+        out["file"] = _Path(target).name if target is not None else "allowlist.yaml"
+    return out
+
+
 def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key: str = "",
                session_id: str = "", platform: str = "") -> str:
     """Ask the human to add an off-host tool to the locked allowlist (no per-call prompt after).
@@ -657,9 +677,12 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
     try:
         allowlist.add(name)
     except Exception as exc:  # noqa: BLE001  FI-2: the grant is taken only once allowlist.yaml holds it
-        detail["error"] = f"{type(exc).__name__}: {exc}"[:500]
-        _ledger(ledger, _event("tool_refused", session_id=session_id, platform=platform, purpose=f"tool:{name}",
-                             decision="allowlist_write_failed", detail=detail))
+        # A failed grant, not a refused tool call: a notice row with reason code grant_not_recorded. The detail
+        # names the error type, its errno and the file's basename, never the error text (it carries paths).
+        detail.pop("error", None)
+        detail.update(_grant_failure_detail(exc, allowlist))
+        _ledger(ledger, _event("notice", session_id=session_id, platform=platform, purpose=f"tool:{name}",
+                             decision="grant_not_recorded", detail=detail))
         return (f"{name} was not added: the grant could not be recorded in allowlist.yaml "
                 f"({type(exc).__name__}), so {name} will ask again each call.")
     _ledger(ledger, _event("tool_allowed", session_id=session_id, platform=platform, purpose=f"tool:{name}",

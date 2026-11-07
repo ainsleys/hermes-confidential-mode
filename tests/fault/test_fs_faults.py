@@ -582,7 +582,12 @@ def test_an_allow_whose_write_fails_grants_nothing(plugin, monkeypatch):
     assert not out.endswith("added to the allowlist for this lock.")
     assert out.startswith("web_search was not added: the grant could not be recorded"), out
     assert "will ask again" in out                             # the person is told the allow failed
-    assert ("tool_refused", "allowlist_write_failed") in plugin.kinds()
+    row = [e for e in rows(plugin) if e.decision == "grant_not_recorded"][-1]
+    assert row.kind == "notice" and row.purpose == "tool:web_search"
+    assert (row.detail["reason_code"], row.detail["errno"], row.detail["file"]) == (
+        "grant_not_recorded", "ENOSPC", "allowlist.yaml")
+    assert str(plugin.rt.allowlist_path.parent) not in json.dumps(row.detail)
+    assert not any(e.kind == "tool_refused" and e.purpose == "tool:web_search" for e in rows(plugin))
     ran = []
     mw = plugin.mgr._middleware["tool_execution"][0]
     mw(tool_name="web_search", args={"query": "q"}, next_call=lambda a: ran.append(a) or "{}", session_id="s1",
@@ -663,6 +668,39 @@ def test_the_repaired_state_file_is_private_and_gates_read_it_again(plugin):
     assert os.stat(p).st_mode & 0o777 == 0o600
     assert json.loads(p.read_text()) == {"locked": False}
     assert plugin.slash("on on-host-only").startswith("Locked")
+
+
+@pytest.mark.parametrize("damage", ["not_utf8", "not_an_object", "unreadable"])
+def test_confidential_off_repairs_every_documented_unreadable_form(plugin, damage):
+    """FI-3, Amendment 12: off replaces a state.json that is unreadable, not UTF-8 or whose root is not an
+    object, as well as a truncated or garbage one."""
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    p = _state_path(plugin)
+    if damage == "not_utf8":
+        p.write_bytes(b'{"locked": "\xff"}')
+    elif damage == "not_an_object":
+        p.write_text("[]")
+    else:
+        os.chmod(p, 0)
+    try:
+        assert plugin.slash("off").startswith("Lock state was unreadable; it is now cleared")
+    finally:
+        os.chmod(p, 0o600)
+    assert json.loads(p.read_text()) == {"locked": False}
+
+
+def test_a_symlinked_unreadable_state_file_is_replaced_and_its_target_left_alone(plugin, tmp_path):
+    """FI-3: a state.json that is a symlink to a corrupt file is replaced by a regular file; the target keeps
+    its bytes."""
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    p = _state_path(plugin)
+    target = tmp_path / "elsewhere.json"
+    target.write_bytes(b"{not json")
+    p.unlink()
+    p.symlink_to(target)
+    assert plugin.slash("off").startswith("Lock state was unreadable; it is now cleared")
+    assert not p.is_symlink() and json.loads(p.read_text()) == {"locked": False}
+    assert target.read_bytes() == b"{not json"
 
 
 def test_a_state_path_that_is_a_directory_is_not_replaced_and_stays_closed(plugin):
