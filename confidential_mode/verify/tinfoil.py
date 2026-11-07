@@ -226,6 +226,7 @@ class TinfoilAdapter:
         # Serialises the SDK's verifications (an explicit one, a background one, the SDK's own rotation
         # re-verification): each reads the SecureClient's latest document right after attesting.
         self._sdk_lock = threading.RLock()
+        self._obs_lock = threading.Lock()
         self.on_close: Callable[[], None] | None = None   # set by the verification cache: stops its refresh
         self.closed = False
         self._explicit = threading.local()
@@ -310,7 +311,12 @@ class TinfoilAdapter:
         elif bucket == "async":
             self.async_attestation_count += 1
         with self._sdk_lock:
-            return self._guarded_verify_locked(sc, bucket)
+            ground_truth, row = self._guarded_verify_locked(sc, bucket)
+        if row is not None:
+            # Ledgered after the SDK lock is released: observe_key and the ledger sink take other locks, and
+            # lock order is never "SDK lock, then another lock" (review: a rotation racing a new-loop pool).
+            self._emit_verify_row(row[0], source=row[1])
+        return ground_truth
 
     def _guarded_verify_locked(self, sc, bucket):
         with _sdkpatch.capture_sink() as sink, _sdkpatch.overrides(_capture_hooks()):
@@ -329,8 +335,8 @@ class TinfoilAdapter:
                                                                   accepted.enclave_fingerprint):
                 raise VerifyError("enclave fingerprints changed during re-verification; refusing to rebind")
             self._accepted = got  # accepted keys follow the rotation (same build)
-            self._emit_verify_row(got, source="async_pool" if bucket == "async" else "silent_reattest")
-        return ground_truth
+            return ground_truth, (got, "async_pool" if bucket == "async" else "silent_reattest")
+        return ground_truth, None
 
     # ── key observation (warn-only) and ledger hooks ─────────────────────────────────────────────
     KEY_OBSERVATIONS_FILE = "key-observations.json"
@@ -341,7 +347,7 @@ class TinfoilAdapter:
         import json as _json
         key = f"{host}|{tls_fp or ''}|{hpke or ''}"
         path = self.data_dir / self.KEY_OBSERVATIONS_FILE
-        with self._lock:
+        with self._obs_lock:      # its own lock: the file only (never the adapter lock the views take)
             try:
                 seen = _json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(seen, dict):
@@ -566,6 +572,9 @@ class TinfoilAdapter:
         return httpx.Client(transport=_SyncView(self), follow_redirects=False)
 
     def _async_pool_for_running_loop(self) -> httpx.AsyncClient:
+        """The running loop's pool. A missing pool is built (an SDK attestation) OUTSIDE the adapter lock and
+        published under it, so the adapter lock is never held while waiting on the SDK lock or the network:
+        lock order is adapter lock alone, or SDK lock alone, never one inside the other."""
         loop = asyncio.get_running_loop()
         with self._lock:
             if self._accepted is None:
@@ -573,20 +582,30 @@ class TinfoilAdapter:
             for key in [k for k, (lp, _) in self._async_pools.items() if lp.is_closed()]:
                 self._async_pools.pop(key, None)  # cannot aclose on a dead loop; drop the reference
             entry = self._async_pools.get(id(loop))
-            if entry is None or entry[0] is not loop:
-                sc = self._secure_client()
-                self._counter_bucket.name = "async"
-                try:
-                    pool = sc.make_secure_async_http_client()
-                except VerifyError:
-                    raise
-                except Exception as exc:
-                    raise VerifyError(f"async attestation failed: {type(exc).__name__}: {exc}") from exc
-                finally:
-                    self._counter_bucket.name = None
-                entry = (loop, pool)
-                self._async_pools[id(loop)] = entry
-            return entry[1]
+            if entry is not None and entry[0] is loop:
+                return entry[1]
+            build = (self._accepted.code_fingerprint, self._accepted.enclave_fingerprint)
+        sc = self._secure_client()
+        self._counter_bucket.name = "async"
+        try:
+            pool = sc.make_secure_async_http_client()
+        except VerifyError:
+            raise
+        except Exception as exc:
+            raise VerifyError(f"async attestation failed: {type(exc).__name__}: {exc}") from exc
+        finally:
+            self._counter_bucket.name = None
+        with self._lock:
+            if self.closed:
+                raise VerifyError("the Tinfoil adapter is closed")
+            acc = self._accepted
+            if acc is None or (acc.code_fingerprint, acc.enclave_fingerprint) != build:
+                raise VerifyError("the accepted enclave build changed while the async pool was attested; resend")
+            entry = self._async_pools.get(id(loop))
+            if entry is not None and entry[0] is loop:
+                return entry[1]             # another task on this loop published first; ours is dropped
+            self._async_pools[id(loop)] = (loop, pool)
+            return pool
 
     def async_http_for_loop(self) -> httpx.AsyncClient:
         """A non-closing view over the running loop's verified async pool. The pool is attested once
