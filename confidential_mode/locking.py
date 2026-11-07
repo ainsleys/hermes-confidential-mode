@@ -499,6 +499,7 @@ def _clear_verification_cache() -> None:
     from .provider import verification_cache
     for name in ATTESTED_PROFILES:
         verification_cache.invalidate(name)
+    verification_cache.stop_refresh()   # Amendment 9: no background re-verification while unlocked
 
 
 # ── per-turn recheck ─────────────────────────────────────────────────────────────────────────────

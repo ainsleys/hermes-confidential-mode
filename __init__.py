@@ -196,6 +196,16 @@ class _ChangedConfigPredicate:
 
 # ── registration steps ───────────────────────────────────────────────────────────────────────────
 
+def _locked_now(rt: Runtime) -> bool:
+    """True only when the persisted state reads locked. Never raises (unreadable counts as not locked,
+    which stops the background refresh; the gates fail closed on their own)."""
+    try:
+        locked, _tier = rt.is_locked()
+        return locked is True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _step(rt: Runtime, name: str, fn: Callable[[], Any]) -> Any:
     try:
         return fn()
@@ -253,6 +263,8 @@ def _register(rt: Runtime) -> None:
         provider = _cm("provider")
         # ledger= : the verification cache ledgers verify_ok/verify_fail/pin_staged (Amendment 4 F4).
         profile = provider.register_provider_profile(ctx, config=rt.load_config(), ledger=rt.ledger)
+        # Amendment 9: the background re-verification runs only while this profile is locked.
+        provider.set_background_gate(lambda: _locked_now(rt))
         rt.profile = profile
         rt.pins = getattr(profile, "_confidential_pins", None)
         rt.adapter = getattr(profile, "_confidential_adapter", None)

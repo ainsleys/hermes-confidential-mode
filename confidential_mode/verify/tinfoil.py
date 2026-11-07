@@ -92,7 +92,7 @@ from typing import Any, Callable
 import httpx
 
 from . import _sdkpatch
-from .base import VerificationResult, VerifyError
+from .base import PreparedVerification, VerificationResult, VerifyError
 
 VENDOR = "tinfoil"
 ROUTER_REPO = "tinfoilsh/confidential-model-router"
@@ -223,6 +223,11 @@ class TinfoilAdapter:
         if self._configured_enclave:  # known without any network
             self._enclave, self.enclave_source = self._configured_enclave, ENCLAVE_SOURCE_CONFIG
         self._lock = threading.RLock()
+        # Serialises the SDK's verifications (an explicit one, a background one, the SDK's own rotation
+        # re-verification): each reads the SecureClient's latest document right after attesting.
+        self._sdk_lock = threading.RLock()
+        self.on_close: Callable[[], None] | None = None   # set by the verification cache: stops its refresh
+        self.closed = False
         self._explicit = threading.local()
         self._sc: Any = None
         self._sync_http: httpx.Client | None = None
@@ -304,6 +309,10 @@ class TinfoilAdapter:
             self.sync_attestation_count += 1
         elif bucket == "async":
             self.async_attestation_count += 1
+        with self._sdk_lock:
+            return self._guarded_verify_locked(sc, bucket)
+
+    def _guarded_verify_locked(self, sc, bucket):
         with _sdkpatch.capture_sink() as sink, _sdkpatch.overrides(_capture_hooks()):
             ground_truth = type(sc).verify(sc)
         self._capture_local.sink = sink
@@ -448,10 +457,16 @@ class TinfoilAdapter:
         )
 
     def verify(self) -> VerificationResult:
-        """Attest via the SDK default path by building the sync pool; raise VerifyError on anything."""
+        """Attest via the SDK default path by building the sync pool; raise VerifyError on anything. The
+        transport is held before the new pool and result are published (Amendment 9)."""
+        return self.commit_verification(self.prepare_verification(), hold=self._hold_until_accepted)
+
+    def prepare_verification(self) -> PreparedVerification:
+        """Attest and build a new sync pool without publishing either (network I/O). Holds the SDK lock,
+        which serialises the SDK's own verifications, and never the adapter lock the views take."""
         try:
-            with self._lock:
-                sc = self._secure_client()
+            sc = self._secure_client()   # outside the SDK lock: it takes the adapter lock (lock order)
+            with self._sdk_lock:
                 self._explicit.active = True
                 self._counter_bucket.name = "sync"
                 self._capture_local.sink = None
@@ -465,28 +480,41 @@ class TinfoilAdapter:
                 except BaseException:
                     _close_quietly(http)
                     raise
-                prev = self._accepted
-                if prev is not None and (prev.code_fingerprint, prev.enclave_fingerprint) != (
-                        result.code_fingerprint, result.enclave_fingerprint):
-                    # New enclave build: async pools were attested against the old one; rebuild lazily.
-                    self._async_pools.clear()
-                old, self._sync_http = self._sync_http, http
-                if old is not None:
-                    # Keep one generation alive for in-flight requests on another thread.
-                    for stale in self._retired_sync:
-                        _close_quietly(stale)
-                    self._retired_sync = [old]
-                self._accepted = result
-                self.verified_mono = time.monotonic()  # lets the provider adopt this instead of re-attesting
-                if self._hold_until_accepted:
-                    self.held_reason = "verification not yet accepted against pins"
-                if self.tls_probe:
-                    self._probe_tls(http, result)
-                return result
+            if self.tls_probe:
+                self._probe_tls(http, result)
+            return PreparedVerification(result=result, payload=http, on_discard=lambda: _close_quietly(http))
         except VerifyError:
             raise
         except Exception as exc:
             raise VerifyError(f"attestation failed: {type(exc).__name__}: {exc}") from exc
+
+    def commit_verification(self, prepared: PreparedVerification, *, hold: bool) -> VerificationResult:
+        """Publish a prepared verification (its pool and result) under the adapter lock. With ``hold`` the
+        transport is held before anything is published; without it (the background refresh, after the pin
+        check accepted the result) the hold state is left as it is."""
+        result, http = prepared.result, prepared.payload
+        if not isinstance(result, VerificationResult) or http is None:
+            raise VerifyError("not a prepared Tinfoil verification")
+        with self._lock:
+            if self.closed:
+                raise VerifyError("the Tinfoil adapter is closed")
+            if hold:
+                self.held_reason = "verification not yet accepted against pins"
+            prev = self._accepted
+            if prev is not None and (prev.code_fingerprint, prev.enclave_fingerprint) != (
+                    result.code_fingerprint, result.enclave_fingerprint):
+                # New enclave build: async pools were attested against the old one; rebuild lazily.
+                self._async_pools.clear()
+            old, self._sync_http = self._sync_http, http
+            if old is not None:
+                # Keep one generation alive for in-flight requests on another thread.
+                for stale in self._retired_sync:
+                    _close_quietly(stale)
+                self._retired_sync = [old]
+            self._accepted = result
+            self.verified_mono = time.monotonic()  # lets the provider adopt this instead of re-attesting
+            prepared.on_discard = None
+            return result
 
     def _probe_tls(self, http, result) -> None:
         """Observation only (never fails a verify): which key terminated TLS on the EHBP connection?"""
@@ -571,11 +599,18 @@ class TinfoilAdapter:
 
     def close(self) -> None:
         with self._lock:
+            self.closed = True
             for http in [self._sync_http, *self._retired_sync]:
                 if http is not None:
                     _close_quietly(http)
             self._sync_http, self._retired_sync = None, []
             self._async_pools.clear()
+        cb = self.on_close
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
 
 
 ENCAPSULATED_KEY_HEADER = "Ehbp-Encapsulated-Key"  # ehbp.protocol

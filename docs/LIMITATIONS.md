@@ -695,8 +695,8 @@ Each item below is a smaller gap. Each one is stated in full.
   process that loads the plugin after an upgrade (README, "Upgrading").
 
 - **The ledger grows without limit.** The plugin never deletes ledger rows. On the attested tier a
-  `verify_ok` row with its evidence is written every `confidential.verify_ttl_seconds` while sends
-  continue. That is about 15 KB for Tinfoil. For NEAR it is about 20 KB in the row plus about 120 KB
+  `verify_ok` row with its evidence is written about every `confidential.verify_ttl_seconds` minus
+  `confidential.verify_refresh_lead_seconds` (four minutes by default) while sends continue. That is about 15 KB for Tinfoil. For NEAR it is about 20 KB in the row plus about 120 KB
   of evidence files in `evidence/blobs/` beside the ledger, for one model. An evidence file stays
   while any row names it. That is a few megabytes to tens of megabytes
   a day. A receipt reads the ledger from the last unlock before its session. A profile

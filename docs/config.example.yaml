@@ -32,6 +32,13 @@ confidential:
   # verification keeps running in the background, so the next attempt usually succeeds. Default 20.
   verify_wait_seconds: 20
 
+  # While the profile is locked, a background thread verifies the enclave again this many seconds
+  # before the current verification ends, so turns do not wait on it. A new verification is used only
+  # after the pin check accepts it. If the background verification fails, the current one stays valid
+  # until verify_ttl_seconds, and the next send then verifies inline. 0 turns the background thread
+  # off. Default 60.
+  verify_refresh_lead_seconds: 60
+
   pins:
     # A pin is your recorded approval of one router build. When this is true, the plugin applies a
     # new pin without asking you, but only when all three of these hold:

@@ -68,11 +68,13 @@ forces, the removal of fallbacks, the tool gate, and the vendor's own protocol.
   milliseconds. Tinfoil: tens to a few hundred milliseconds for body encryption and certificate
   pinning. NEAR: roughly a third of a second to one and a half seconds for the signature fetch, and up
   to five seconds more when NEAR answers the first fetch with "not found" and the plugin retries.
-- **Lock time, paid once per lock and again every five minutes while locked.** Tinfoil: a few seconds
-  for the attestation fetch, the Sigstore check, the certificate probe and the pin match. NEAR: longer,
-  for the report fetch, two Intel Trust Authority tokens, the key set, and the quote checks. The
-  five-minute re-verification runs on the next call, so a user feels an occasional multi-second pause.
-  A background refresh would remove that pause and is not built.
+- **Lock time, paid once per lock.** Tinfoil: a few seconds for the attestation fetch, the Sigstore
+  check, the certificate probe and the pin match. NEAR: longer, for the report fetch, two Intel Trust
+  Authority tokens, the key set, and the quote checks. While locked, a background thread repeats the
+  verification 60 seconds before each five-minute verification ends, so turns do not wait on it. A
+  turn waits only when the background verification failed or reported a build the pins do not cover,
+  or when the session was idle past the five minutes. That turn then verifies inline, as the first
+  turn does.
 - **Task success in a tool-heavy session.** Close to the baseline when prompts are answered promptly.
   Sharply lower in unattended mode, where every off-host tool call is refused.
 - **Response quality.** The open-weight model's quality. The plugin neither improves nor degrades a

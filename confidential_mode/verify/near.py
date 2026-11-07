@@ -102,7 +102,7 @@ import openai
 
 from .. import sendctx
 from . import near_checks as nc
-from .base import VerificationResult, VerifyError
+from .base import PreparedVerification, VerificationResult, VerifyError
 
 logger = logging.getLogger(__name__)
 
@@ -789,6 +789,8 @@ class NearAdapter:
         self.signature_wait_seconds = max(0.0, float(signature_wait_seconds))
         self.encrypt = bool(encrypt)   # confidential.near.encrypt; the preflight refuses a lock with it off
         self.on_stale: Callable[[], None] | None = None   # set by the verification cache (provider.py)
+        self.on_close: Callable[[], None] | None = None   # set by the verification cache: stops its refresh
+        self.closed = False
         self.reverify_backoff_seconds = max(0.0, float(reverify_backoff_seconds))
         self._last_stale_mono: float | None = None
         # Attestation GETs use an unpinned pool: their certificate is what the quote is checked against
@@ -957,57 +959,85 @@ class NearAdapter:
         return raw, tls
 
     def verify(self) -> VerificationResult:
+        """Capture, appraise and accept one verification (the inline path). The capture runs outside the
+        adapter lock, so sends on the current verification keep moving (codebase review finding 19). The
+        adapter is held before the new result is published, so no send can use a model key the pin check
+        has not accepted yet (Amendment 9)."""
+        return self.commit_verification(self.prepare_verification(), hold=self._hold_until_accepted)
+
+    def prepare_verification(self) -> PreparedVerification:
+        """Capture and appraise a verification (network I/O) without publishing it. Takes the adapter lock
+        only for counters and pool lookups, never across a request. Raises VerifyError."""
         try:
             with self._lock:
                 self.attestation_count += 1
-                if self.require_provider_tee and not self.models:
-                    raise VerifyError("require_provider_tee is on but no NEAR model is allowlisted "
-                                      "(confidential.near.models, or model.default with provider attested-near)")
-                nonce = secrets.token_hex(32)
-                raw, tls = self.capture(nonce)
-                now = self._clock()
-                evidence = build_evidence(raw, base_url=self._base_url, models=self.models, nonce=nonce,
-                                          captured_at_unix=now, tls_observation=tls)
-                a = appraise(evidence, quote_verifier=self._quote_verifier, ita_roots=self._ita_roots,
-                             accepted_tcb=self.accepted_tcb, require_tls_binding=self.require_tls_binding,
-                             require_compose_manager=self.require_provider_tee)
-                evidence["checks"] = a.checks
-                evidence["policy"] = {"require_tls_binding": self.require_tls_binding,
-                                      "require_provider_tee": self.require_provider_tee,
-                                      "accepted_tcb_statuses": list(self.accepted_tcb)}
-                if not a.ok:
-                    raise VerifyError(f"NEAR attestation did not verify: {a.first_failure}"[:300])
-                evidence["claims"] = evidence_claims(evidence, a)
-                evidence["repo"] = a.identity
-                result = VerificationResult(
-                    vendor=VENDOR, router_repo=a.identity or self.identity, enclave_host=self.host,
-                    code_fingerprint=a.code_fingerprint or "", enclave_fingerprint=a.enclave_fingerprint or "",
-                    release_tag=None, verifier=VERIFIER, verified_at_host_clock=now, evidence=evidence)
-                prev = self._appraisal
-                if prev is not None:
-                    changed = sorted(m for m in self.models
-                                     if prev.model_signers.get(m) and prev.model_signers.get(m) != a.model_signers.get(m))
-                    if changed:
-                        # The key requests are encrypted to is not yet covered by a pin (W12). Until it is, a
-                        # key change inside one process is refused rather than adopted silently.
-                        m = changed[0]
-                        raise VerifyError(
-                            f"NEAR model signing key for {m} changed from {prev.model_signers[m][0][:16]}... to "
-                            f"{(a.model_signers.get(m) or ['?'])[0][:16]}...; refused: requests are encrypted to "
-                            "this key and pins do not cover it yet. Check the new report, then restart Hermes to "
-                            "accept it")
-                old_pin = self.pinned_spki()
-                self._accepted, self._appraisal = result, a
-                if old_pin is not None and old_pin != self.pinned_spki():
-                    self._drop_send_pools()
-                self.verified_mono = time.monotonic()
-                if self._hold_until_accepted:
-                    self.held_reason = "verification not yet accepted against pins"
-                return result
+            if self.require_provider_tee and not self.models:
+                raise VerifyError("require_provider_tee is on but no NEAR model is allowlisted "
+                                  "(confidential.near.models, or model.default with provider attested-near)")
+            nonce = secrets.token_hex(32)
+            raw, tls = self.capture(nonce)
+            now = self._clock()
+            evidence = build_evidence(raw, base_url=self._base_url, models=self.models, nonce=nonce,
+                                      captured_at_unix=now, tls_observation=tls)
+            a = appraise(evidence, quote_verifier=self._quote_verifier, ita_roots=self._ita_roots,
+                         accepted_tcb=self.accepted_tcb, require_tls_binding=self.require_tls_binding,
+                         require_compose_manager=self.require_provider_tee)
+            evidence["checks"] = a.checks
+            evidence["policy"] = {"require_tls_binding": self.require_tls_binding,
+                                  "require_provider_tee": self.require_provider_tee,
+                                  "accepted_tcb_statuses": list(self.accepted_tcb)}
+            if not a.ok:
+                raise VerifyError(f"NEAR attestation did not verify: {a.first_failure}"[:300])
+            evidence["claims"] = evidence_claims(evidence, a)
+            evidence["repo"] = a.identity
+            result = VerificationResult(
+                vendor=VENDOR, router_repo=a.identity or self.identity, enclave_host=self.host,
+                code_fingerprint=a.code_fingerprint or "", enclave_fingerprint=a.enclave_fingerprint or "",
+                release_tag=None, verifier=VERIFIER, verified_at_host_clock=now, evidence=evidence)
+            self._check_signers(a)
+            return PreparedVerification(result=result, payload=a)
         except VerifyError:
             raise
         except Exception as exc:
             raise VerifyError(f"NEAR attestation failed: {type(exc).__name__}: {exc}"[:300]) from exc
+
+    def _check_signers(self, a: Appraisal) -> None:
+        prev = self._appraisal
+        if prev is None:
+            return
+        changed = sorted(m for m in self.models
+                         if prev.model_signers.get(m) and prev.model_signers.get(m) != a.model_signers.get(m))
+        if changed:
+            # The key requests are encrypted to is not yet covered by a pin (W12). Until it is, a
+            # key change inside one process is refused rather than adopted silently.
+            m = changed[0]
+            raise VerifyError(
+                f"NEAR model signing key for {m} changed from {prev.model_signers[m][0][:16]}... to "
+                f"{(a.model_signers.get(m) or ['?'])[0][:16]}...; refused: requests are encrypted to "
+                "this key and pins do not cover it yet. Check the new report, then restart Hermes to "
+                "accept it")
+
+    def commit_verification(self, prepared: PreparedVerification, *, hold: bool) -> VerificationResult:
+        """Publish a prepared verification under the adapter lock. With ``hold`` the transport is held
+        BEFORE the result is published (the inline path: the provider releases it once the pins match).
+        Without ``hold`` (the background refresh, which calls this only after the pin check accepted the
+        result) the hold state is left as it is. Raises VerifyError when the adapter is closed or the
+        model key changed since the capture."""
+        a = prepared.payload
+        if not isinstance(a, Appraisal) or not isinstance(prepared.result, VerificationResult):
+            raise VerifyError("not a prepared NEAR verification")
+        with self._lock:
+            if self.closed:
+                raise VerifyError("the NEAR adapter is closed")
+            self._check_signers(a)
+            if hold:
+                self.held_reason = "verification not yet accepted against pins"
+            old_pin = self.pinned_spki()
+            self._accepted, self._appraisal = prepared.result, a
+            if old_pin is not None and old_pin != self.pinned_spki():
+                self._drop_send_pools()
+            self.verified_mono = time.monotonic()
+            return prepared.result
 
     def hold(self, reason: str) -> None:
         self.held_reason = reason or "held"
@@ -1043,6 +1073,7 @@ class NearAdapter:
 
     def close(self) -> None:
         with self._lock:
+            self.closed = True
             ts = [self._sync_transport, self._attest_transport]
             self._sync_transport = self._attest_transport = None
             self._async_transports.clear()
@@ -1053,6 +1084,12 @@ class NearAdapter:
                 t.close()
             except Exception:
                 pass
+        cb = self.on_close
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                logger.warning("confidential-mode: could not stop the NEAR background refresh", exc_info=True)
 
     # ── exchanges and signatures ───────────────────────────────────────────────────────────────
     def _check_request(self, request: httpx.Request) -> None:

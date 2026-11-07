@@ -99,15 +99,18 @@ to turn every such fetch off; NEAR model entries then cannot be approved.
 
 The plugin verifies again in these situations:
 
-1. when the cached result is older than `confidential.verify_ttl_seconds`, which defaults to 300
+1. while locked, on the background thread, `confidential.verify_refresh_lead_seconds` (60 by default)
+   before the cached result is older than `confidential.verify_ttl_seconds`;
+2. when the cached result is older than `confidential.verify_ttl_seconds`, which defaults to 300
    seconds and is measured on a monotonic clock;
-2. after an unlock, which clears the cached result;
-3. for Tinfoil, whenever the SDK re-attests on its own after the enclave rotates a key or certificate;
-4. for NEAR, after the gateway answers HTTP 421 or a send meets a TLS certificate other than the
+3. after an unlock, which clears the cached result;
+4. for Tinfoil, whenever the SDK re-attests on its own after the enclave rotates a key or certificate;
+5. for NEAR, after the gateway answers HTTP 421 or a send meets a TLS certificate other than the
    attested one, at most once per `confidential.near.reverify_backoff_seconds` (30 seconds by
    default).
 
-After a failed verification the plugin waits 10 seconds before it tries again.
+After a failed verification the plugin waits 10 seconds before it tries again. The background thread
+follows the same wait between its own attempts.
 
 ### What it does not contact
 
@@ -218,10 +221,9 @@ anything.
 
 ## Processes and threads
 
-The plugin runs no shell commands and starts no subprocesses. It runs no long-running background
-process.
+The plugin runs no shell commands and starts no subprocesses. It runs no background process.
 
-The plugin starts short-lived daemon threads of three kinds. For NEAR, one thread fetches the compose
+The plugin starts daemon threads of four kinds. Three kinds are short-lived. For NEAR, one thread fetches the compose
 files of a staged model entry from GitHub. Another records which approved entries a verification matched, and
 writes `pins.yaml`. The third kind runs each attestation. The sequence for an attestation is this:
 
@@ -231,6 +233,18 @@ writes `pins.yaml`. The third kind runs each attestation. The sequence for an at
 4. If the verification is not done by then, the plugin refuses the turn. The thread keeps running
    and finishes the verification.
 5. The thread exits when the verification ends.
+
+The fourth kind is the background re-verification thread, one per attested provider (Tinfoil and NEAR).
+Its name is `confidential-refresh-<provider>`. It starts after a turn whose verification the pins
+accepted, and only while the profile is locked. It sleeps until 60 seconds before the five-minute
+verification ends (`confidential.verify_refresh_lead_seconds`). It then runs one verification over the
+network, to the same attestation hosts as any other verification. It refreshes only a verification
+that a turn used, so an idle locked session makes no requests; the thread exits, and the next turn
+starts it again. It holds no lock that a send takes
+while it waits on the network. It checks the lock state at least every five seconds. It stops on
+unlock, when the profile is no longer locked, when the adapter closes, and when an HTTP 421 or a TLS
+certificate change drops the verification. Each verification it runs writes a `verify_ok` or
+`verify_fail` ledger row with `source: background`.
 
 ### Environment variable it sets
 

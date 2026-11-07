@@ -37,6 +37,11 @@ DEFAULT_FAILURE_BACKOFF_SECONDS = 10.0
 # in the background (Amendment 4 ruling 1, revised 2026-11-07: default 20 s). A cold live verify()
 # measured ~5.6 s against router-0.tinfoil.sh, so a 5 s wait would refuse most first turns.
 DEFAULT_VERIFY_WAIT_SECONDS = 20.0
+# The background refresh (Amendment 9) starts a re-verification this long before the TTL ends
+# (confidential.verify_refresh_lead_seconds; 0 turns the refresh off). It checks the lock and the clock at
+# least every REFRESH_POLL_SECONDS.
+DEFAULT_REFRESH_LEAD_SECONDS = 60.0
+REFRESH_POLL_SECONDS = 5.0
 # Context window reported to Hermes without probing the endpoint (confidential.tinfoil.context_length).
 DEFAULT_CONTEXT_LENGTH = 65536
 
@@ -79,6 +84,9 @@ class _Entry:
     consent_scan_id: int = 0
     auto_approve_platform_only: bool = False
     observed_result: Any = None     # the last result counted by PinStore.observe
+    refresh_lead_seconds: float = DEFAULT_REFRESH_LEAD_SECONDS
+    refresher: Any = None           # the entry's BackgroundRefresh, when one was started
+    used_mono: float = float("-inf")  # the last time ensure() accepted the cached result
 
 
 class VerificationCache:
@@ -88,6 +96,10 @@ class VerificationCache:
         self._entries: dict[str, _Entry] = {}
         self._clock = clock
         self._lock = threading.Lock()
+        # Whether the background refresh may run (the plugin passes "the profile is locked"). None defers
+        # to the module's set_background_gate(); with neither, the refresh never runs.
+        self.active: Callable[[], bool] | None = None
+        self.refresh_poll_seconds = REFRESH_POLL_SECONDS
 
     def _wire_adapter_sink(self, provider: str, e: _Entry) -> None:
         """Let the adapter ledger verifications the cache never sees (SDK silent re-attest, per-loop
@@ -95,6 +107,11 @@ class VerificationCache:
         if hasattr(e.adapter, "event_sink"):
             try:
                 e.adapter.event_sink = lambda ev: _emit(e, {**ev, "provider": provider})
+            except Exception:
+                pass
+        if hasattr(e.adapter, "on_close"):
+            try:
+                e.adapter.on_close = lambda: self.stop_refresh(provider)
             except Exception:
                 pass
         if hasattr(e.adapter, "on_stale"):
@@ -107,21 +124,29 @@ class VerificationCache:
     def register(self, provider: str, adapter, pins: PinStore, ttl_seconds: float,
                  failure_backoff_seconds: float = DEFAULT_FAILURE_BACKOFF_SECONDS, *,
                  on_event: Callable[[dict], None] | None = None,
-                 verify_wait_seconds: float = DEFAULT_VERIFY_WAIT_SECONDS) -> None:
+                 verify_wait_seconds: float = DEFAULT_VERIFY_WAIT_SECONDS,
+                 refresh_lead_seconds: float = DEFAULT_REFRESH_LEAD_SECONDS) -> None:
         with self._lock:
+            old = self._entries.get(provider)
             self._entries[provider] = _Entry(adapter=adapter, pins=pins, ttl_seconds=float(ttl_seconds),
                                              failure_backoff_seconds=float(failure_backoff_seconds),
                                              lock=threading.RLock(), on_event=on_event,
-                                             verify_wait_seconds=float(verify_wait_seconds))
+                                             verify_wait_seconds=float(verify_wait_seconds),
+                                             refresh_lead_seconds=float(refresh_lead_seconds))
             self._wire_adapter_sink(provider, self._entries[provider])
+        _stop_entry(old)
 
     def unregister(self, provider: str) -> None:
         with self._lock:
-            self._entries.pop(provider, None)
+            e = self._entries.pop(provider, None)
+        _stop_entry(e)
 
     def clear(self) -> None:
         with self._lock:
+            entries = list(self._entries.values())
             self._entries.clear()
+        for e in entries:
+            _stop_entry(e)
 
     def entry(self, provider: str) -> _Entry | None:
         return self._entries.get(provider)
@@ -139,10 +164,49 @@ class VerificationCache:
         return bool(e and e.result is not None and self._now() - e.verified_mono < e.ttl_seconds)
 
     def invalidate(self, provider: str) -> None:
+        """Drop the cached verification (unlock, an HTTP 421, a TLS pin mismatch) and stop the entry's
+        background refresh; the next call verifies inline."""
         e = self._entries.get(provider)
         if e:
             with e.lock:
                 e.result, e.failed_mono = None, None
+            _stop_entry(e)
+
+    def stop_refresh(self, provider: str | None = None) -> None:
+        """Stop the background refresh of one entry (adapter close) or of every entry (unlock)."""
+        entries = [self._entries.get(provider)] if provider is not None else list(self._entries.values())
+        for e in entries:
+            _stop_entry(e)
+
+    def background_allowed(self, e: _Entry) -> bool:
+        """The background refresh runs only while the profile is locked, the adapter is open and can
+        prepare a verification without publishing it, and the lead is positive. Never raises."""
+        try:
+            gate = self.active if self.active is not None else _BACKGROUND_GATE
+            if gate is None or gate() is not True:
+                return False
+            ad = e.adapter
+            if getattr(ad, "closed", False) is True or e.refresh_lead_seconds <= 0:
+                return False
+            return callable(getattr(ad, "prepare_verification", None)) and \
+                callable(getattr(ad, "commit_verification", None))
+        except Exception:
+            return False
+
+    def _ensure_refresher(self, provider: str, e: _Entry) -> None:
+        """Start the entry's background refresh after an accepted verification, unless one is running.
+        Caller holds e.lock."""
+        try:
+            r = e.refresher
+            if r is not None and r.alive():
+                return
+            if not self.background_allowed(e):
+                return
+            r = BackgroundRefresh(self, provider, e)
+            e.refresher = r
+            r.start()
+        except Exception:
+            logger.warning("attested: could not start the background refresh", exc_info=True)
 
     def _now(self) -> float:
         # Looked up at call time (module ``time``), never the wall clock or verified_at_host_clock.
@@ -165,11 +229,7 @@ class VerificationCache:
                 with e.lock:
                     e.result, e.failed_mono = None, self._now()
                     e.last_error = str(exc) if isinstance(exc, VerifyError) else f"{type(exc).__name__}: {exc}"
-                _emit(e, {"kind": "verify_fail", "provider": provider, "purpose": "verify",
-                          "host": _adapter_host(e.adapter),
-                          "detail": {"vendor": getattr(e.adapter, "vendor", ""),
-                                     "error_type": type(exc).__name__, "error": str(exc)[:300],
-                                     "enclave_host": _adapter_host(e.adapter)}})
+                self._emit_verify_fail(provider, e, exc)
                 raise exc if isinstance(exc, VerifyError) else VerifyError(e.last_error) from exc
             if not self._emit_verify_ok(provider, e, result):
                 reason = REASON_VERIFY_ROW_LOST
@@ -202,7 +262,16 @@ class VerificationCache:
             threading.Thread(target=run, name=f"confidential-verify-{provider}", daemon=True).start()
         return e.inflight
 
-    def _emit_verify_ok(self, provider: str, e: _Entry, result: VerificationResult) -> bool:
+    def _emit_verify_fail(self, provider: str, e: _Entry, exc: BaseException, *, source: str | None = None) -> None:
+        detail = {"vendor": getattr(e.adapter, "vendor", ""), "error_type": type(exc).__name__,
+                  "error": str(exc)[:300], "enclave_host": _adapter_host(e.adapter)}
+        if source is not None:
+            detail["source"] = source
+        _emit(e, {"kind": "verify_fail", "provider": provider, "purpose": "verify",
+                  "host": _adapter_host(e.adapter), "detail": detail})
+
+    def _emit_verify_ok(self, provider: str, e: _Entry, result: VerificationResult, *, source: str = "verify",
+                        accepted: bool | None = None) -> bool:
         """Write the verify_ok row. False only when a ledger sink is configured and the write failed (for
         example a detail over the size cap): the caller then refuses the verification, loudly, rather than
         accept a result whose evidence no receipt could show."""
@@ -215,7 +284,8 @@ class VerificationCache:
             first_seen = None
         return e.on_event is None or _emit(e, {"kind": "verify_ok", "provider": provider, "purpose": "verify",
                   "host": result.enclave_host,
-                  "detail": {"vendor": result.vendor, "source": "verify", "key_first_seen": first_seen,
+                  "detail": {"vendor": result.vendor, "source": source, "key_first_seen": first_seen,
+                             **({} if accepted is None else {"accepted": accepted}),
                              "code_fingerprint": result.code_fingerprint,
                              "enclave_fingerprint": result.enclave_fingerprint,
                              "release_tag": result.release_tag, "enclave_host": result.enclave_host,
@@ -277,49 +347,214 @@ class VerificationCache:
                         _hold(e.adapter, REASON_NO_CONSENT)
                         return False, REASON_NO_CONSENT, result  # stage nothing (F8)
                     _release(e.adapter)
+                    e.used_mono = self._now()
+                    self._ensure_refresher(provider, e)
                     return True, "attested enclave verified and pinned", result
-                try:
-                    had_pin = e.pins.get(result.vendor, result.router_repo) is not None
-                except Exception:
-                    had_pin = False
-                reason = REASON_PIN_MISMATCH if had_pin else REASON_NO_PIN
-                _hold(e.adapter, reason)
-                try:   # this identity's own batch: another identity's batch is not "before" (Amendment 7)
-                    before = (e.pins.pending_for(result.vendor, result.router_repo)
-                              if hasattr(e.pins, "pending_for") else e.pins.pending())
-                except Exception:
-                    before = None
-                try:
-                    staged = e.pins.stage(result)
-                except Exception as exc:  # empty fingerprints, unreadable store: refuse, do not stage
-                    logger.warning("attested: not staging a pending pin: %s", exc)
-                    return False, (REASON_BAD_RESULT if not (result.code_fingerprint and result.enclave_fingerprint)
-                                   else reason), result
-                if had_pin and e.auto_approve_platform_only and _auto_platform_only_ok(staged):
-                    if _auto_apply(provider, e, staged):
-                        if e.pins.match(result) is True and _consent_recorded(e, result):
-                            _release(e.adapter)
-                            return True, "attested enclave verified; platform-only pin applied by policy", result
-                if _needs_composes(staged) and hasattr(e.pins, "prefetch_composes"):
-                    _background(e, "prefetch", lambda s=staged: _prefetch(provider, e, s))
-                if _ckey(staged) != _ckey(before):  # a new pending batch, not a re-stage or a display refresh
-                    _emit(e, {"kind": "pin_staged", "provider": provider, "purpose": "verify",
-                              "host": result.enclave_host,
-                              "detail": {"vendor": staged.vendor, "router_repo": staged.router_repo,
-                                         "code_fingerprint": staged.code_fingerprint,
-                                         "enclave_fingerprint": staged.enclave_fingerprint,
-                                         "release_tag": staged.release_tag, "enclave_host": staged.enclave_host,
-                                         "previous": staged.previous,
-                                         "previous_enclave_fingerprint": staged.previous_enclave_fingerprint,
-                                         "entries": _entry_rows(staged),
-                                         "reason": reason}})
-                return False, reason, result
+                return self._stage(provider, e, result, hold=True)
         except Exception as exc:  # fail closed
             logger.warning("attested verification check failed: %s", exc, exc_info=True)
             reason = f"attested verification check failed: {type(exc).__name__}"
             if e is not None:
                 _hold(e.adapter, reason)
             return False, reason, None
+
+    def _stage(self, provider: str, e: _Entry, result: VerificationResult, *,
+               hold: bool) -> tuple[bool, str, VerificationResult | None]:
+        """The pins do not match ``result``: stage its pending batch (a pin_staged row when the batch is new)
+        and refuse. ``hold`` holds the adapter and allows the platform-only policy (the inline path); the
+        background refresh passes False, so the verification in use keeps vouching until its TTL ends and
+        the next inline verification refuses. Caller holds e.lock."""
+        try:
+            had_pin = e.pins.get(result.vendor, result.router_repo) is not None
+        except Exception:
+            had_pin = False
+        reason = REASON_PIN_MISMATCH if had_pin else REASON_NO_PIN
+        if hold:
+            _hold(e.adapter, reason)
+        try:   # this identity's own batch: another identity's batch is not "before" (Amendment 7)
+            before = (e.pins.pending_for(result.vendor, result.router_repo)
+                      if hasattr(e.pins, "pending_for") else e.pins.pending())
+        except Exception:
+            before = None
+        try:
+            staged = e.pins.stage(result)
+        except Exception as exc:  # empty fingerprints, unreadable store: refuse, do not stage
+            logger.warning("attested: not staging a pending pin: %s", exc)
+            return False, (REASON_BAD_RESULT if not (result.code_fingerprint and result.enclave_fingerprint)
+                           else reason), result
+        if hold and had_pin and e.auto_approve_platform_only and _auto_platform_only_ok(staged):
+            if _auto_apply(provider, e, staged):
+                if e.pins.match(result) is True and _consent_recorded(e, result):
+                    _release(e.adapter)
+                    return True, "attested enclave verified; platform-only pin applied by policy", result
+        if _needs_composes(staged) and hasattr(e.pins, "prefetch_composes"):
+            _background(e, "prefetch", lambda s=staged: _prefetch(provider, e, s))
+        if _ckey(staged) != _ckey(before):  # a new pending batch, not a re-stage or a display refresh
+            _emit(e, {"kind": "pin_staged", "provider": provider, "purpose": "verify",
+                      "host": result.enclave_host,
+                      "detail": {"vendor": staged.vendor, "router_repo": staged.router_repo,
+                                 "code_fingerprint": staged.code_fingerprint,
+                                 "enclave_fingerprint": staged.enclave_fingerprint,
+                                 "release_tag": staged.release_tag, "enclave_host": staged.enclave_host,
+                                 "previous": staged.previous,
+                                 "previous_enclave_fingerprint": staged.previous_enclave_fingerprint,
+                                 "entries": _entry_rows(staged),
+                                 "reason": reason}})
+        return False, reason, result
+
+
+_BACKGROUND_GATE: Callable[[], bool] | None = None
+
+
+def set_background_gate(fn: Callable[[], bool] | None) -> None:
+    """Register the predicate the background refresh checks before every step (the plugin passes "the
+    profile is locked"). None, the default, keeps the refresh off."""
+    global _BACKGROUND_GATE
+    _BACKGROUND_GATE = fn
+
+
+def _stop_entry(e: _Entry | None) -> None:
+    r = getattr(e, "refresher", None) if e is not None else None
+    if r is not None:
+        r.stop()
+
+
+def _accepts(e: _Entry, result: VerificationResult) -> bool:
+    """The pin check the inline path makes before it releases a verification: every CVM matches an
+    approved entry and each match has its consent row. Never raises (False on any error)."""
+    try:
+        return e.pins.match(result) is True and _consent_recorded(e, result)
+    except Exception:
+        return False
+
+
+class BackgroundRefresh:
+    """One daemon thread per cache entry that re-verifies before the TTL ends (Amendment 9).
+
+    The thread starts after an accepted verification while the profile is locked. At
+    ``refresh_lead_seconds`` before the TTL ends it calls the adapter's ``prepare_verification()``, which
+    captures over the network without the adapter's send lock and publishes nothing. The pin check then
+    runs on the new result. Only an accepted result is committed to the adapter and swapped into the
+    cache, both under the entry lock. A failed capture, a lost verify_ok row or a result the pins do not
+    accept changes nothing: the verification in use keeps vouching until its TTL ends, and the next call
+    verifies inline and refuses as it would without the refresh. A failure is retried after the failure
+    backoff while time remains; a staged result is not retried. A verification no call used is not
+    refreshed, so an idle locked session makes no requests; the next call starts the thread again. The
+    thread stops on unlock, on adapter
+    close, on invalidation (an HTTP 421 or a TLS pin mismatch) and when the profile is no longer locked.
+    Each attempt writes a verify_ok or verify_fail row with ``source: background``."""
+
+    def __init__(self, cache: VerificationCache, provider: str, e: _Entry):
+        self.cache, self.provider, self.e = cache, provider, e
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.failed_mono: float | None = None
+        self.done_for: tuple | None = None    # (id(result), verified_mono) the refresh gave up on
+        self.attempts = 0
+        self.outcomes: list[str] = []
+
+    def start(self) -> None:
+        t = threading.Thread(target=self._run, name=f"confidential-refresh-{self.provider}", daemon=True)
+        self.thread = t
+        t.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+    def alive(self) -> bool:
+        return self.thread is not None and self.thread.is_alive() and not self.stop_event.is_set()
+
+    def _run(self) -> None:
+        try:
+            while not self.stop_event.is_set():
+                delay = self.step()
+                if delay is None:
+                    break
+                self.stop_event.wait(max(0.0, float(delay)))
+        except Exception:
+            logger.warning("attested: background refresh stopped on an error", exc_info=True)
+        finally:
+            self.stop_event.set()
+
+    def step(self) -> float | None:
+        """One decision: seconds until the next look, or None to end the thread. Never raises."""
+        try:
+            cache, e = self.cache, self.e
+            poll = max(0.001, float(cache.refresh_poll_seconds))
+            if self.stop_event.is_set() or not cache.background_allowed(e):
+                return None
+            now = cache._now()
+            with e.lock:
+                result, t0 = e.result, e.verified_mono
+            if result is None:
+                return None                      # nothing to refresh: the next call verifies inline
+            expires = t0 + e.ttl_seconds
+            if now >= expires:
+                return None                      # expired: the inline path takes over, as without the refresh
+            due = expires - e.refresh_lead_seconds
+            if now < due:
+                return min(due - now, poll)
+            if self.e.used_mono < t0:
+                return None                      # no call used this verification: an idle session is not refreshed
+            if self.done_for == (id(result), t0):
+                return min(expires - now, poll)
+            if self.failed_mono is not None and now - self.failed_mono < e.failure_backoff_seconds:
+                return min(e.failure_backoff_seconds - (now - self.failed_mono), poll)
+            self.outcomes.append(self.attempt(result, t0))
+            return 0.0
+        except Exception:
+            logger.warning("attested: background refresh step failed", exc_info=True)
+            return None
+
+    def _current(self, result, t0) -> bool:
+        e = self.e
+        return (not self.stop_event.is_set() and e.result is result and e.verified_mono == t0
+                and self.cache.background_allowed(e))
+
+    def attempt(self, result: VerificationResult, t0: float) -> str:
+        """One background verification. Returns accepted, staged, failed, discarded or busy."""
+        cache, e, provider = self.cache, self.e, self.provider
+        if not e.verify_lock.acquire(blocking=False):
+            return "busy"                        # an inline verification is running
+        try:
+            self.attempts += 1
+            try:
+                prepared = e.adapter.prepare_verification()   # network; no send lock, nothing published
+                if not isinstance(getattr(prepared, "result", None), VerificationResult):
+                    raise VerifyError(f"adapter prepared {type(getattr(prepared, 'result', None)).__name__}, "
+                                      "not VerificationResult")
+            except Exception as exc:
+                self.failed_mono = cache._now()
+                cache._emit_verify_fail(provider, e, exc, source="background")
+                return "failed"
+            new = prepared.result
+            with e.lock:
+                if not self._current(result, t0):
+                    prepared.discard()           # unlocked, invalidated or replaced during the capture
+                    return "discarded"
+                if not _accepts(e, new):
+                    cache._emit_verify_ok(provider, e, new, source="background", accepted=False)
+                    cache._stage(provider, e, new, hold=False)
+                    prepared.discard()
+                    self.done_for = (id(result), t0)
+                    return "staged"
+                if not cache._emit_verify_ok(provider, e, new, source="background", accepted=True):
+                    prepared.discard()
+                    self.failed_mono = cache._now()
+                    cache._emit_verify_fail(provider, e, VerifyError(REASON_VERIFY_ROW_LOST), source="background")
+                    return "failed"
+                try:
+                    e.adapter.commit_verification(prepared, hold=False)
+                except Exception as exc:
+                    prepared.discard()
+                    self.failed_mono = cache._now()
+                    cache._emit_verify_fail(provider, e, exc, source="background")
+                    return "failed"
+                e.result, e.verified_mono, e.last_error, e.failed_mono = new, cache._now(), None, None
+                self.failed_mono, self.done_for = None, None
+                return "accepted"
+        finally:
+            e.verify_lock.release()
 
 
 def _sync_profile_base_url(e: _Entry) -> None:
@@ -632,7 +867,8 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
                  consent_ledger=None, auto_approve_platform_only: bool = False,
                  name: str = PROFILE_NAME, display_name: str = "Tinfoil (attested)",
                  description: str = "Tinfoil confidential inference; every client is bound to an attested enclave",
-                 env_var: str = API_KEY_ENV, supports_streaming: bool | None = None):
+                 env_var: str = API_KEY_ENV, supports_streaming: bool | None = None,
+                 refresh_lead_seconds: float = DEFAULT_REFRESH_LEAD_SECONDS):
     """Build an attested ProviderProfile (default 'attested-tinfoil') and register its cache entry. Never
     touches the network: base_url is the configured enclave URL, or the adapter's .invalid placeholder
     until the first verify() resolves the host by router discovery (then it is updated in place).
@@ -669,7 +905,7 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
     if on_event is None and ledger is not None:
         on_event = ledger.append
     cache.register(name, adapter, pins, ttl_seconds, failure_backoff_seconds, on_event=on_event,
-                   verify_wait_seconds=verify_wait_seconds)
+                   verify_wait_seconds=verify_wait_seconds, refresh_lead_seconds=refresh_lead_seconds)
     if consent_ledger is None and ledger is not None and callable(getattr(ledger, "tail", None)):
         consent_ledger = ledger
     cache.entry(name).consent_ledger = consent_ledger
@@ -768,6 +1004,15 @@ def api_key_for(env_var: str) -> str:
         return ""
 
 
+def refresh_lead_from(config: dict | None) -> float:
+    """confidential.verify_refresh_lead_seconds: a number (0 or less turns the background refresh off);
+    anything else is the default."""
+    v = _cfg_get(config, "confidential", "verify_refresh_lead_seconds", default=DEFAULT_REFRESH_LEAD_SECONDS)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return DEFAULT_REFRESH_LEAD_SECONDS
+    return float(v)
+
+
 def _cfg_get(config: dict | None, *path, default=None):
     node: Any = config or {}
     for key in path:
@@ -821,7 +1066,8 @@ def register_provider_profile(ctx, *, config: dict | None = None, data_dir: Path
         verify_wait_seconds=float(_cfg_get(config, "confidential", "verify_wait_seconds",
                                            default=DEFAULT_VERIFY_WAIT_SECONDS)),
         auto_approve_platform_only=_cfg_get(config, "confidential", "pins", "auto_approve_platform_only",
-                                            default=False) is True)
+                                            default=False) is True,
+        refresh_lead_seconds=refresh_lead_from(config))
     providers.register_provider(profile)
     return profile
 
@@ -898,6 +1144,7 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
         env_var=NEAR_API_KEY_ENV, supports_streaming=streaming,
         context_length=int(near("context_length", default=DEFAULT_CONTEXT_LENGTH)),
         verify_wait_seconds=float(_cfg_get(config, "confidential", "verify_wait_seconds",
-                                           default=DEFAULT_VERIFY_WAIT_SECONDS)))
+                                           default=DEFAULT_VERIFY_WAIT_SECONDS)),
+        refresh_lead_seconds=refresh_lead_from(config))
     providers.register_provider(profile)
     return profile

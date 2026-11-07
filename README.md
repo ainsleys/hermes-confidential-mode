@@ -1447,6 +1447,7 @@ The plugin's own keys live under a top-level `confidential:` section of `config.
 | `confidential.tinfoil.tls_probe` | `true` | After each verification, sends one request without a body over the verified connection and records the TLS certificate it saw. The record is an observation and never fails a verification. Only the exact value `false` turns it off. |
 | `confidential.verify_ttl_seconds` | 300 | How many seconds one verification vouches for the router. It is measured on a monotonic clock, which does not jump when the system time changes. |
 | `confidential.verify_wait_seconds` | 20 | How many seconds a turn waits for a verification before the turn is refused. |
+| `confidential.verify_refresh_lead_seconds` | 60 | While locked, a background thread verifies again this many seconds before the current verification ends. A new verification is used only after the pin check accepts it. A failed or unapproved background verification changes nothing; when the current verification ends, the next send verifies inline. 0 turns the thread off. |
 | `confidential.pins.auto_approve_platform_only` | `false` | When `true`, the plugin applies a new pin without asking if only the platform changed and the SDK's signed hardware check passed. That check exists for TDX only. |
 | `confidential.on_host.extra_hosts` | `[]` | Extra hosts that the `on-host-only` tier counts as on-host. |
 | `confidential.model` | Unset. | The model id that `hermes confidential setup` writes into the config block it prints. |

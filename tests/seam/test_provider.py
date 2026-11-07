@@ -703,3 +703,31 @@ def test_a_ledger_still_locked_after_the_retry_refuses(env, monkeypatch):
             raise sqlite3.OperationalError("database is locked")
     profile = env["register"](on_event=locked)
     assert isinstance(profile.create_client(api_key="tf-key", base_url=BASE_URL), RefusingClient)
+
+
+def test_tinfoil_background_refresh_swaps_the_pool_only_after_the_pin_check(env, monkeypatch):
+    """Amendment 9 on Tinfoil: the background capture builds a new pool without publishing it; an accepted
+    result swaps pool and result in, a changed build stages a pin and the old pool keeps serving."""
+    profile = env["register"]()
+    cache = provider_mod.verification_cache
+    cache.active = lambda: True
+    monkeypatch.setattr(provider_mod.BackgroundRefresh, "start", lambda self: None)
+    client = profile.create_client(api_key="tf-key", base_url=BASE_URL)
+    client.chat.completions.create(model="m", messages=MSG)
+    ad, e = profile._confidential_adapter, cache.entry(PROFILE)
+    old_pool, old_result = ad._sync_http, e.result
+    e.verified_mono -= 250                                 # inside the 60 s lead window
+    r = e.refresher
+    r.step()
+    assert r.outcomes == ["accepted"] and env["sdk"]["verify_calls"] == 2
+    assert ad._sync_http is not old_pool and e.result is not old_result and ad.held_reason is None
+    client.chat.completions.create(model="m", messages=MSG)
+
+    env["sdk"]["code"] = "c-other"                         # the next capture reports another build
+    pool, result = ad._sync_http, e.result
+    e.verified_mono -= 250
+    r.step()
+    assert r.outcomes[-1] == "staged" and ad._sync_http is pool and e.result is result
+    assert ad.last_result is result and ad.held_reason is None
+    client.chat.completions.create(model="m", messages=MSG)  # still served by the accepted pool
+    assert env["pins"].pending().code_fingerprint == "c-other"

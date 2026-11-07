@@ -526,7 +526,10 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
     verifies: list[dict] = []
     for r in rows:
         if r["kind"] == "verify_ok":
-            verifies.append(r)
+            # A background verification the pins did not accept was never used (Amendment 9): sends keep
+            # the verification in use, so it covers no send.
+            if not (isinstance(r["detail"], Mapping) and r["detail"].get("accepted") is False):
+                verifies.append(r)
             continue
         if r["kind"] != "send_observed" or r.get("tier") != "attested":
             continue
