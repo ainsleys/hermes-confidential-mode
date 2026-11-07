@@ -17,15 +17,20 @@ writes is scoped to one profile.
 To **lock** a profile is to hold it to one **tier**, a rule about where the model may run. The word
 is "lock" and not "seal", because sealing means something else in confidential computing. A
 destination the rule accepts is "in-tier", and any other is "off-tier". The `on-host-only` tier
-accepts loopback and private-range hosts. The `attested` tier accepts only Tinfoil's verified
-enclave. **On-host** means on the machine that runs Hermes, and **off-host** means anywhere else.
+accepts loopback and private-range hosts. The `attested` tier accepts two vendors: a Tinfoil enclave,
+or NEAR AI Cloud's gateway and models, in each case only a verified build you have approved.
+**On-host** means on the machine that runs Hermes, and **off-host** means anywhere else.
 
 An **enclave** is a virtual machine whose memory the CPU encrypts, so that the host's operator cannot
 read it. **Attestation** is the enclave proving what it runs, through a report signed by the CPU
 vendor's hardware. The **platform** is the CPU vendor's enclave technology: AMD SEV-SNP or Intel TDX.
 
-Tinfoil's **router** is the enclave your requests connect to. A **pin** is your recorded approval of
-one router build. **Verification** is the plugin checking the router's attestation before it sends
+Tinfoil's **router** is the enclave your requests connect to. NEAR AI Cloud's **gateway** is the
+service your requests to NEAR connect to. The gateway runs in a **CVM** (a confidential virtual
+machine, here an Intel TDX enclave) and routes each request to a model that runs in its own CVM. NEAR
+signs each response with a key held inside the model's CVM. A **pin** is your recorded approval of
+one build: for Tinfoil, the router's build; for NEAR, the gateway's build together with the build of
+every model you allow. **Verification** is the plugin checking the attestation before it sends
 anything.
 
 **Collateral** is the certificates and signed documents a client needs from the CPU vendor to check a
@@ -50,14 +55,14 @@ operation, which can refuse to pass the operation on.
 
 ### When the plugin first touches the network
 
-Loading the plugin makes no network call. Registering the plugin and its `attested-tinfoil` provider
-makes no network call either.
+Loading the plugin makes no network call. Registering the plugin and its two attested providers,
+`attested-tinfoil` and `attested-near`, makes no network call either.
 
 The first network traffic happens at the first verification. One of three events triggers it:
 
 - the first time Hermes asks the attested provider for a client (`create_client`);
 - the first send on the attested tier;
-- running `hermes confidential setup`.
+- running `hermes confidential setup`, or `hermes confidential setup --vendor near`.
 
 ### Which hosts it contacts
 
@@ -166,14 +171,19 @@ override.
 
 ## Credentials
 
-The plugin uses one secret, `TINFOIL_API_KEY`.
+The plugin uses two secrets, one for each attested vendor. `TINFOIL_API_KEY` is for the
+`attested-tinfoil` provider. `NEAR_AI_API_KEY` is for the `attested-near` provider. You need only the
+key of the vendor you use. The `on-host-only` tier needs neither.
 
-It declares the key in `requires_env` and in `env_vars` on the provider profile. Hermes therefore
+`plugin.yaml` declares `TINFOIL_API_KEY` in `requires_env` and `NEAR_AI_API_KEY` in `optional_env`.
+NEAR's key is optional because most installs use one vendor, and an install-time prompt for a key you
+will never use helps nobody. Each key is also in `env_vars` on its provider profile. Hermes therefore
 resolves it like any provider key and passes it to `create_client`.
 
 When Hermes passes no key, the client and `hermes confidential setup` read it through
 `agent.secret_scope.get_secret`. That function honours the active profile. The plugin never reads
-`os.environ` for the key itself.
+`os.environ` for either key itself. NEAR's attestation requests carry no key. Only inference and
+signature requests to NEAR carry `NEAR_AI_API_KEY`.
 
 The plugin reads no `.env` file, no `auth.json`, nothing under `~/.tinfoil`, and no keychain. It
 stores no credential.
@@ -226,17 +236,18 @@ which means it happens inside a function, not when the plugin loads.
 | `tools.approval_context` | `get_current_session_key`, `set_current_observability_context`, `reset_current_observability_context`, `_get_approval_mode` | To get the session key for remembered grants. To tie an approval answer to its tool call. To detect `approvals.mode: off`. |
 | `tools.registry` | `registry` | To build the tool allowlist at lock, and to record each tool's handler identity. |
 | `agent.auxiliary_client` | `_RUNTIME_MAIN_CONTEXT` | To read the live main runtime on each locked turn. Auxiliary tasks set to `auto` follow the live runtime, not the config. |
-| `agent.secret_scope` | `get_secret` | To resolve `TINFOIL_API_KEY` for the active profile. |
+| `agent.secret_scope` | `get_secret` | To resolve `TINFOIL_API_KEY` and `NEAR_AI_API_KEY` for the active profile. |
+| `tools.terminal_scope`, `tools.terminal_tool` | `terminal_env`, `resolve_task_overrides` | To read the terminal backend a terminal, code or file tool call would run on, and block the call unless it is `local`. |
 | `hermes_cli.commands` | `resolve_command` | To recognise `/model` and `/moa`, and their aliases, in `pre_gateway_dispatch`. |
 | `tools.mcp_tool`, `tools.mcp_tool_config`, `tools.mcp_tool_scope` | `_servers`, `_mcp_tool_server_names`, `_load_mcp_config`, `_key_name` | To map an MCP tool to its server, and to read whether that server is a URL or an on-host command. |
 | `tools.delegate_tool_config` | `_load_config` | To read the delegation backend and route keys for `delegate_task`. |
-| `providers`, `providers.base` | `register_provider`, `get_provider_profile`, `ProviderProfile` | To register `attested-tinfoil`, and to check at lock time that it is visible in the process. |
+| `providers`, `providers.base` | `register_provider`, `get_provider_profile`, `ProviderProfile` | To register `attested-tinfoil` and `attested-near`, and to check at lock time that the locked profile is visible in the process. |
 | `hermes_cli.config`, `hermes_cli.config_defaults` | `load_config_readonly`, `DEFAULT_CONFIG` | To read the config, and to list the built-in auxiliary tasks. |
 | `hermes_cli.plugins` | `get_plugin_manager`, `get_plugin_auxiliary_tasks` | To tell plugin tools from built-in tools, and to include plugin-registered auxiliary tasks in the preflight. |
 | `plugins.plugin_storage` | `plugin_db`, `plugin_data_dir` | To open the ledger database. |
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
 
-`hermes plugins validate` reports 21 of these import sites as private core imports. This is a warning,
+`hermes plugins validate` reports 23 of these import sites as private core imports. This is a warning,
 not a failure. The imports are the price of classifying tools and approvals without a public seam. The
 upstream roadmap in [LIMITATIONS.md](LIMITATIONS.md) lists the seams that would remove them.
 

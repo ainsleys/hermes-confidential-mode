@@ -659,3 +659,30 @@ def test_per_send_fields_absent_render_nothing(ledger):
     c = doc["sections"]["send_coverage"][0]
     assert "hpke_key_used" not in c and "response_decrypted" not in c and "hpke_matches" not in c
     assert "hpke_key_used" not in render(ledger, SID)
+
+
+def test_unstamped_checkout_reports_its_git_commit_without_running_git(tmp_path):
+    """Review finding 12: a source checkout names its commit (read from .git files, no subprocess)."""
+    from confidential_mode._version import checkout_commit
+    sha = "ab" * 20
+    loose = tmp_path / "loose"
+    (loose / ".git" / "refs" / "heads").mkdir(parents=True)
+    (loose / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (loose / ".git" / "refs" / "heads" / "main").write_text(sha + "\n")
+    assert checkout_commit(loose) == sha
+    packed = tmp_path / "packed"
+    (packed / ".git").mkdir(parents=True)
+    (packed / ".git" / "HEAD").write_text("ref: refs/heads/dev\n")
+    (packed / ".git" / "packed-refs").write_text(f"# pack-refs with: peeled\n{'cd' * 20} refs/heads/dev\n")
+    assert checkout_commit(packed) == "cd" * 20
+    detached = tmp_path / "detached"
+    (detached / ".git").mkdir(parents=True)
+    (detached / ".git" / "HEAD").write_text("ef" * 20 + "\n")
+    assert checkout_commit(detached) == "ef" * 20
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {loose / '.git'}\n")
+    assert checkout_commit(worktree) == sha
+    assert checkout_commit(tmp_path / "nothing") is None
+    (detached / ".git" / "HEAD").write_text("not a sha\n")
+    assert checkout_commit(detached) is None

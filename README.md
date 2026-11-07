@@ -1261,11 +1261,20 @@ The plugin's own keys live under a top-level `confidential:` section of `config.
 |---|---|---|
 | `confidential.tinfoil.enclave` | Unset, which means router discovery. | Names one router host to verify and use. Setting it stops the AMD/Intel switching described under Pins. |
 | `confidential.tinfoil.context_length` | 65536 | The context window the plugin reports to Hermes. Because the plugin reports it, Hermes never sends its own probe. |
+| `confidential.tinfoil.tls_probe` | `true` | After each verification, sends one request without a body over the verified connection and records the TLS certificate it saw. The record is an observation and never fails a verification. Only the exact value `false` turns it off. |
 | `confidential.verify_ttl_seconds` | 300 | How many seconds one verification vouches for the router. It is measured on a monotonic clock, which does not jump when the system time changes. |
 | `confidential.verify_wait_seconds` | 20 | How many seconds a turn waits for a verification before the turn is refused. |
 | `confidential.pins.auto_approve_platform_only` | `false` | When `true`, the plugin applies a new pin without asking if only the platform changed and the SDK's signed hardware check passed. That check exists for TDX only. |
 | `confidential.on_host.extra_hosts` | `[]` | Extra hosts that the `on-host-only` tier counts as on-host. |
 | `confidential.model` | Unset. | The model id that `hermes confidential setup` writes into the config block it prints. |
+| `confidential.near.base_url` | `https://cloud-api.near.ai/v1` | NEAR AI Cloud's gateway. Attestation, inference and signature requests all go here. |
+| `confidential.near.models` | `[]` | Every NEAR model id Hermes may send. The plugin adds the ids that `model.default` and `auxiliary.<task>.model` name for `attested-near`. The pin covers exactly this list. |
+| `confidential.near.require_provider_tee` | `true` | A NEAR send counts as verified only with a signature made by an attested model server's key. Only the exact value `false` turns it off. |
+| `confidential.near.require_tls_binding` | `true` | The TLS certificate of the attestation connection must be the one the gateway's report binds. |
+| `confidential.near.accepted_tcb_statuses` | `[UpToDate]` | The Intel TCB status values accepted for the gateway, from Intel Trust Authority's token. |
+| `confidential.near.signature_wait_seconds` | 5 | How many seconds the plugin keeps asking for a response's signature after the response ended. |
+| `confidential.near.streaming` | `false` | Whether Hermes may stream main calls to NEAR. NEAR's gateway re-signs streamed responses with its own key. |
+| `confidential.near.context_length` | 65536 | The context window reported to Hermes for `attested-near`. |
 
 ## Tests
 

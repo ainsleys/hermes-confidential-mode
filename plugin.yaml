@@ -7,6 +7,10 @@ kind: standalone
 requires_hermes: ">=0.22.7"
 requires_env:
   - TINFOIL_API_KEY
+# Needed only for the attested-near provider; most installs use one vendor (docs/DISCLOSURE.md, Credentials).
+optional_env:
+  - name: NEAR_AI_API_KEY
+    description: "NEAR AI Cloud API key, for the attested-near provider only"
 provides_tools: []
 provides_hooks:
   - pre_tool_call

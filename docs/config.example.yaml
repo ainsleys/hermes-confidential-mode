@@ -74,6 +74,12 @@ confidential:
     # higher value is not safe.
     context_length: 256000
 
+    # After each verification, send one request without a body over the verified connection and record
+    # the TLS certificate it saw (the tls_observation in the evidence). This is an observation: the
+    # SDK's pinned transport enforces the TLS key, and the probe never fails a verification. Only the
+    # exact value false turns it off. Default true.
+    tls_probe: true
+
   near:
     # NEAR AI Cloud, the second attested vendor (provider attested-near). These keys matter only when
     # model.provider or an auxiliary task uses attested-near. README: "The attested tier with NEAR AI".

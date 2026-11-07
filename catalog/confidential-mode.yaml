@@ -2,7 +2,7 @@
 # The plugin name appears once, on the next line; keep it equal to plugin.yaml `name:`.
 name: confidential-mode
 repo: https://github.com/ainsleys/hermes-confidential-mode
-sha: "<40-char sha at submission>"
+sha: "<40-char sha at submission>"   # filled in at submission: the entry cannot name the commit that contains it
 description: >-
   Locks a Hermes profile so that the model runs only on this host or a private-range host, or in a
   Tinfoil enclave or behind NEAR AI Cloud's attested gateway and models, whose builds you approved.
@@ -53,13 +53,15 @@ description: >-
   module attributes before the first verification. It reads Hermes' config read-only and never
   writes it.
 
-  Disclosure, credentials and processes. The plugin uses TINFOIL_API_KEY through the provider
+  Disclosure, credentials and processes. The plugin uses TINFOIL_API_KEY for attested-tinfoil and,
+  optionally, NEAR_AI_API_KEY for attested-near (plugin.yaml optional_env), each through its provider
   profile's env_vars, or else through agent.secret_scope.get_secret. It runs no shell command, no
   subprocess and no background process. It starts one short-lived thread per attestation, and a turn
   waits at most 20 seconds for it (confidential.verify_wait_seconds).
 
   Disclosure, core imports (catalog rule 9; all lazy). agent.auxiliary_client
-  (_RUNTIME_MAIN_CONTEXT, to read the live runtime), agent.secret_scope, hermes_cli.commands
+  (_RUNTIME_MAIN_CONTEXT, to read the live runtime), agent.secret_scope, tools.terminal_scope and
+  tools.terminal_tool (terminal_env and resolve_task_overrides, to read the terminal backend), hermes_cli.commands
   (resolve_command), tools.approval.* (request_tool_approval, is_approved, _yolo_active, _presence,
   _lock, _session_approved, _permanent_set), tools.approval_context, tools.registry,
   tools.mcp_tool, tools.mcp_tool_config and tools.mcp_tool_scope (MCP config readers),
@@ -69,7 +71,8 @@ description: >-
 
   What locked mode does not block. It does not block auxiliary calls at runtime; it observes them
   and records a breach. It does not block terminal, execute_code, process_manage or the other
-  on-host tools, or MCP servers launched as a command on this host. It does not apply in safe-worker
+  on-host tools on Hermes' local terminal backend, or MCP servers launched as a command on this host.
+  It refuses to lock on any other terminal backend. It does not apply in safe-worker
   mode, where Hermes loads no plugins. It does not cover the messaging platform, other in-process plugins,
   Hermes' start-up model-list request on a drifted runtime, or the vendor's control plane and the
   model backends behind its router. Isolation: in_process only.
@@ -91,7 +94,7 @@ known_issues:
   - "Remembered 'always' tool grants live in Hermes' command_allowlist as plugin_rule:confidential-mode:tool:<name>. They persist across locks. There is no revoke command yet, so remove the entry from command_allowlist to revoke one."
   - "Suppose the live runtime is switched to a hosted provider, for example with /model on the CLI. Hermes' agent start-up then lists that provider's models with your API key, before any plugin seam runs (agent/model_metadata.py). No conversation text is sent, and the plugin refuses the turn. The request still goes out."
   - "If Hermes runs on someone else's machine, such as a cloud agent or a VPS, that machine's operator sees every prompt. Locked mode protects the road out of the Hermes process, not the process itself."
-  - "hermes confidential replay requires the tinfoilsh/confidential-model-router repository by default, and takes the expected fingerprints from your approved pin. By default it still uses the trust root and the capture time recorded in the evidence; pass --trusted-root and --as-of to supply your own. It cannot yet check numeric repository or owner IDs. The first pin is trust on first use."
+  - "hermes confidential replay requires the tinfoilsh/confidential-model-router repository by default, and takes the expected fingerprints from your approved pin. By default it still uses the trust root and the capture time recorded in the evidence; pass --trusted-root and --as-of to supply your own. Pass --expected-repo-id and --expected-owner-id to bind the repository by its numeric GitHub IDs as well as its name. A broken hash chain makes the replay exit 1. The first pin is trust on first use."
   - "There is no mixed 'attested or on-host' tier yet. It is planned. Until then, side jobs cannot run on an on-host model while the main model is attested."
 capabilities:
   provides_tools: []
