@@ -2,7 +2,7 @@
 
 Register with ``ctx.register_middleware("llm_execution", build_middleware(...))``.
 
-Proven constraints (docs/C0-spikes.md, tests/spikes/test_refusal_shape.py):
+Proven constraints (docs/dev/C0-spikes.md, tests/spikes/test_refusal_shape.py):
 - An exception escaping a middleware is FAIL-OPEN: Hermes skips the frame and calls the
   provider itself (hermes_cli/middleware.py ``_run_execution_chain``). So nothing the gate
   itself raises may escape; every internal failure becomes a refusal.

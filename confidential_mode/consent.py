@@ -1,6 +1,6 @@
 """Human consent outside a turn (W4), on ``ctx.ask_choice`` only.
 
-Why ask_choice and not ``tools.approval.request_tool_approval`` (docs/C0-spikes.md, spike 3):
+Why ask_choice and not ``tools.approval.request_tool_approval`` (docs/dev/C0-spikes.md, spike 3):
 request_tool_approval asks nobody from a slash command (no turn -> no gateway notifier -> it returns
 ``approval_required`` at once) and auto-approves under every bypass state (yolo, approvals.mode off,
 remembered grants, cron/unattended approve modes). ``ctx.ask_choice`` blocks on the surface with no

@@ -25,7 +25,7 @@ Hermes facts this module relies on (pinned checkout 84a0301):
 * The approval gate auto-approves WITHOUT asking anybody under: yolo (``_yolo_active``: --yolo,
   session /yolo, ``hermes -z`` unattended turns), ``approvals.mode: off``, and cron /
   unattended-platform / single-query contexts whose mode is ``approve`` (tools/approval.py:1071-1113).
-  Locked mode BLOCKS in those instead of returning the approve directive (docs/C0-spikes.md, spike 3).
+  Locked mode BLOCKS in those instead of returning the approve directive (docs/dev/C0-spikes.md, spike 3).
   A remembered once/session/always grant on OUR rule key is a human's answer to our own prompt and is
   honoured (INTERFACES.md Amendment 2): ledgered as tool_allowed, decision "remembered".
 """

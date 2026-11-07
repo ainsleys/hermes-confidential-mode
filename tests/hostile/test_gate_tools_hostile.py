@@ -1,7 +1,7 @@
 """T4 hostile tests for the W4 locked-mode tool gate (confidential_mode.gate_tools).
 
 Labels used below: the project ran in workstreams. W4 built the tool gate; T4 is the tester who attacked
-it; C0 is the compatibility spike phase (docs/C0-spikes.md); C1 is the interface freeze
+it; C0 is the compatibility spike phase (docs/dev/C0-spikes.md); C1 is the interface freeze
 (docs/INTERFACES.md) that the tests were written against.
 
 Written BEFORE the implementation, against the C1 contract in docs/INTERFACES.md ("W4"). Every

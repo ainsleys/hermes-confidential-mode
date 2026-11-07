@@ -1,6 +1,6 @@
 """T4 hostile tests for W4 consent (confidential_mode.consent.approve_pending_pin / allow_tool).
 
-Written BEFORE the implementation, against docs/INTERFACES.md ("W4") and docs/C0-spikes.md spike 3:
+Written BEFORE the implementation, against docs/INTERFACES.md ("W4") and docs/dev/C0-spikes.md spike 3:
 ctx.ask_choice is the consent primitive, sync only, None -> deny, pending re-checked before apply,
 ledger pin_applied / pin_denied with raw_pick.
 
@@ -11,7 +11,7 @@ Two kinds of ctx:
     strips/casefolds typed text and RAISES AttributeError when an asker returns a non-str
     (plugin_choices.py:94) -- consent must survive that;
   * a FAKE ctx whose ask_choice returns values the real one never would ("Approve" label,
-    "approve " with whitespace, 1, True). The contract says "exactly as in docs/C0-spikes.md", whose
+    "approve " with whitespace, 1, True). The contract says "exactly as in docs/dev/C0-spikes.md", whose
     primitive returns a choice VALUE or None; anything else must be treated as deny, never as a pick.
 
 PinStore (W2) and Ledger (W1) are not merged: FakeStore / FakeLedger stand in. FakeStore.pending()

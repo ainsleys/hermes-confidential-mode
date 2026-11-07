@@ -1,7 +1,7 @@
 """The 'attested-tinfoil' ProviderProfile, its verification cache, and the attested_ok() verdict.
 
 create_client(**kw) NEVER raises and NEVER returns None (either makes Hermes build a plain
-openai.OpenAI to the same base_url, docs/C0-spikes.md spike 2). It returns a ConfidentialClient when
+openai.OpenAI to the same base_url, docs/dev/C0-spikes.md spike 2). It returns a ConfidentialClient when
 verification is fresh and the pins match, otherwise refreshes once (if the cached result is stale or
 missing), otherwise a RefusingClient.
 """

@@ -1,6 +1,6 @@
 """Clients handed to Hermes by the attested provider profile's create_client().
 
-ConfidentialClient is the dual client proven in docs/C0-spikes.md (spike 2 follow-up):
+ConfidentialClient is the dual client proven in docs/dev/C0-spikes.md (spike 2 follow-up):
 - declares HERMES_SKIP_TRANSPORT_WRAP / HERMES_SKIP_ASYNC_WRAP so auxiliary code uses it as-is;
 - sync ``openai.OpenAI`` on a non-closing view over the adapter's verified sync pool;
 - one ``openai.AsyncOpenAI`` per running event loop on the adapter's per-loop verified async pool;

@@ -4,7 +4,7 @@ One SecureClient per profile, bound to an explicit enclave host. Attestation run
 SDK's default path (GitHub release digest + Sigstore code measurement compared against the enclave's
 hardware attestation); pinned-measurement mode is never used.
 
-Pool model (docs/C0-spikes.md, spike 2 follow-up):
+Pool model (docs/dev/C0-spikes.md, spike 2 follow-up):
 - sync: ``verify()`` builds ONE attested ``httpx.Client`` via ``SecureClient.make_secure_http_client()``
   (that build is the attestation), and ``sync_http_view()`` hands out cheap non-closing views over it.
   Hermes closes request-scoped clients every turn; closing a view never touches the pool.
