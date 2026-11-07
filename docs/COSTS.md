@@ -25,13 +25,14 @@ which tool calls are not shown to a person for approval.
 If you install the plugin and don't lock, nothing changes in what Hermes does. Each send gets a few
 milliseconds slower: one tier check and one ledger append. Nothing is refused or rerouted, so
 response quality and task success match the baseline. The plugin writes the ledger on disk, and
-`hermes confidential status` and `watch` show where calls went.
+`hermes confidential watch` shows where calls went.
 
 ## The on-host-only lock
 
 The quality change in this mode comes from the model, not from the plugin. If you already run a
 local model, you lose nothing. If you switch from a hosted frontier model to a local one to use this
-tier, you take that local model's quality drop, which is large on most hardware.
+tier, you take that local model's quality drop, which is large on most hardware. The model's
+availability is your hardware's availability.
 
 What the plugin itself adds in this mode:
 
@@ -50,7 +51,7 @@ the baseline when a person is present to answer prompts.
 
 ## The attested tier, Tinfoil or NEAR AI
 
-This is the mode with real differences. They come from four places: the models the tier allows, the
+This is the mode with real differences. The differences come from four places: the models the tier allows, the
 removal of fallbacks, the tool gate, and the vendor's own protocol.
 
 | Factor | Change versus the baseline | Cause |
@@ -127,6 +128,6 @@ Some of these figures can be read from the ledger once a few locked sessions hav
   row, and each pin answer is a `pin_applied` or `pin_denied` row, so prompts per session are a
   count too.
 
-Quality can't be read from the ledger. It would take a fixed-task evaluation, run before and after a
+Quality can't be read from the ledger. Measuring quality would take a fixed-task evaluation, run before and after a
 routing change, for the main path and for compression summaries. No such evaluation exists, so the
 quality statements above are expectations.
