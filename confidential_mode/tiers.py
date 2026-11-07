@@ -36,6 +36,8 @@ class TierPredicate(Protocol):
 
 # --- W3 adds predicates below this line -------------------------------------
 
+import contextlib
+import contextvars
 import ipaddress
 import re
 import socket
@@ -268,6 +270,27 @@ _OWN_HOSTNAME_CACHE: dict[str, tuple[bool, float]] = {}
 _OWN_HOSTNAME_TIMEOUT_SECONDS = 2.0
 _OWN_HOSTNAME_TTL_SECONDS = 60.0
 _OWN_HOSTNAME_LOCK = threading.Lock()
+#: True inside ``cached_lookups_only()``: the own-host-name check answers from the cache only (Amendment 13).
+_CACHED_ONLY: "contextvars.ContextVar[bool]" = contextvars.ContextVar("confidential_mode_cached_lookups_only",
+                                                                      default=False)
+
+
+class LookupDeferred(BaseException):
+    """Raised by the own-host-name check inside ``cached_lookups_only()`` when answering would need a DNS
+    lookup. A BaseException on purpose: the preflight's ``except Exception`` handlers must not turn it into
+    a verdict. The caller that opened the scope catches it and leaves the check to a path that may resolve."""
+
+
+@contextlib.contextmanager
+def cached_lookups_only():
+    """Within this scope the own-host-name check never resolves: it returns the cached answer (even past its
+    TTL) or raises LookupDeferred. The pre_llm_call hook runs its recheck here so the hook does no network
+    I/O."""
+    token = _CACHED_ONLY.set(True)
+    try:
+        yield
+    finally:
+        _CACHED_ONLY.reset(token)
 
 
 def own_hostname_is_loopback(host: str, *, resolver: Callable[[str], list[str]] | None = None,
@@ -284,6 +307,15 @@ def own_hostname_is_loopback(host: str, *, resolver: Callable[[str], list[str]] 
         own = own.strip().rstrip(".").lower() if isinstance(own, str) else ""
         if not own or host != own or own in ON_HOST_NAMES:
             return False
+    except Exception:
+        return False
+    if _CACHED_ONLY.get():
+        with _OWN_HOSTNAME_LOCK:
+            cached = _OWN_HOSTNAME_CACHE.get(own)
+        if cached is None:
+            raise LookupDeferred(own)
+        return cached[0]
+    try:
         if resolver is not None:
             return _lookup_own(own, resolver)
         with _OWN_HOSTNAME_LOCK:

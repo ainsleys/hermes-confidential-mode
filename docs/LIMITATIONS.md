@@ -127,13 +127,20 @@ seconds by default, `hermes_cli/plugins_dispatch.py:183`), Hermes abandons it, s
 seconds and runs the turn anyway (`:42-52` and `:301-312`). Hermes also skips the hook for agents with
 persistence disabled (`agent/turn_context.py:858`). The `llm_execution` gate is never skipped, so the
 plugin runs the whole per-turn check there too: the structural preflight recheck, its breach rows and
-the live-runtime check, once per turn, sharing one result with the hook. A turn whose hook was skipped
-still has every main call refused when that check fails.
+the live-runtime check, once per turn, sharing one result with the hook. The check runs once even when
+both ask at the same time: a gate call that arrives while the hook's check is still running (Hermes
+abandoned the hook at its time bound) waits for that result, so the breach rows are written once. A
+new lock or another tier within the same turn is checked again. A turn whose hook was skipped still
+has every main call refused when that check fails.
 
 What a skipped hook still loses: the veto over the side calls Hermes makes before the first main call
 of a turn (turn-start compaction, memory prefetch, title generation), which run and are only recorded,
 and the locked note in the model's context. The hook does no network I/O and only the per-turn check,
-so on a normal config it ends far inside the timeout.
+so on a normal config it ends far inside the timeout. A route that names this machine's own host name
+needs a DNS lookup; the hook answers it from the answer cached at the lock or an earlier check, even
+an old one, and when nothing is cached (a lock taken by another process) the hook leaves the whole
+check to the `llm_execution` gate, which resolves the name before the first main call. In that case
+the hook also loses the veto over the side calls above for that turn.
 
 The plugin also guards the timeout itself, in three steps.
 

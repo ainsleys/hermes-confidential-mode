@@ -39,6 +39,10 @@ RUNTIME_SWITCH_COMMANDS = frozenset({"model", "moa"})
 UNRESOLVED_SAFE_COMMANDS = frozenset({"confidential", "stop", "pause", "approve", "deny", "new", "help", "status"})
 MIDDLEWARE = ("llm_execution", "tool_execution")
 TURN_CACHE_MAX = 256   # per-turn recheck results kept (Runtime.turn_check)
+TURN_CHECK_WAIT_SECONDS = 60.0   # how long a second caller waits for the recheck already running for its turn
+#: Runtime.turn_check's answer when the hook's recheck would have needed a DNS lookup: the hook adds no block
+#: and the llm gate runs the whole check before the main call (Amendment 13).
+TURN_CHECK_DEFERRED = ("", "deferred")
 NO_SESSION = "(no session)"
 
 _RUNTIME: Optional["Runtime"] = None   # the last registered runtime (commands, tests)
@@ -49,6 +53,16 @@ def _cm(name: str):
     imported outside a package)."""
     base = f"{__name__}.confidential_mode" if __package__ else "confidential_mode"
     return importlib.import_module(f"{base}.{name}")
+
+
+class _TurnCheck:
+    """One turn's recheck in flight or done (Runtime.turn_check)."""
+    __slots__ = ("done", "result", "deferred")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: Any = None
+        self.deferred = False
 
 
 class Runtime:
@@ -81,9 +95,10 @@ class Runtime:
         self.reply_notices: dict = {}
         self._notice_lock = threading.Lock()
         self.progress: Any = None   # progress.Progress while a terminal command runs (cli_verb); else quiet
-        # Amendment 13 (S17): the per-turn recheck's result, keyed by (session id, turn id), shared by the
-        # pre_llm_call hook and the llm gate so the work runs once per turn whichever of the two runs first.
-        self._turn_checks: "OrderedDict[tuple[str, str], Any]" = OrderedDict()
+        # Amendment 13 (S17): the per-turn recheck, keyed by (session id, turn id, lock id, tier), shared by
+        # the pre_llm_call hook and the llm gate so the work runs once per turn whichever of the two runs
+        # first; each value is a _TurnCheck, which a second caller waits on while the first computes.
+        self._turn_checks: "OrderedDict[tuple[str, str, str, str], Any]" = OrderedDict()
         self._turn_lock = threading.Lock()
 
     # ── shared collaborators ──────────────────────────────────────────────────────────────────
@@ -162,26 +177,63 @@ class Runtime:
                      "detail": {"tools": len(allowlist.tools)}})
         return allowlist
 
-    def turn_check(self, session_id: str, turn_id: str, tier: Any) -> Optional[tuple[str, str]]:
+    def turn_check(self, session_id: str, turn_id: str, tier: Any, *,
+                   lookups: bool = True) -> Optional[tuple[str, str]]:
         """The full per-turn recheck (Amendment 13, S17): the structural preflight recheck
         (``locking.recheck``, which writes the ``config_changed`` / ``preflight_failed`` breach rows) and the
-        live-runtime check (``live_runtime_off_tier`` / ``live_runtime_unreadable`` rows, mark_breached). Returns
-        None, or (block text, reason code). Read-only apart from those rows; no network. Cached per
-        (session id, turn id): the pre_llm_call hook and the llm gate share one result per turn, and a turn
-        whose hook Hermes skipped still gets the whole check from the gate. A turn with no id is never cached.
-        Never raises."""
-        key = (str(session_id or ""), str(turn_id or ""))
-        if key[1]:
+        live-runtime check (``live_runtime_off_tier`` / ``live_runtime_unreadable`` rows, mark_breached).
+        Returns None, or (block text, reason code). Read-only apart from those rows. Never raises.
+
+        Single flight per (session id, turn id, lock id, tier): the first caller computes, and a caller that
+        arrives while that runs (the llm gate after Hermes abandoned the hook at its time bound) waits for the
+        same result, at most TURN_CHECK_WAIT_SECONDS, so the breach rows are written once. A turn with no id
+        is never cached. A new lock or another tier is another key.
+
+        ``lookups=False`` (the pre_llm_call hook): no network I/O at all. The own-host-name check answers from
+        its cache; when it would need a DNS lookup the result is TURN_CHECK_DEFERRED, nothing is cached, and
+        the llm gate runs the whole check (with the lookup) before the main call."""
+        tiers = _cm("tiers")
+        if not turn_id:
+            return self._turn_check_scoped(str(session_id or ""), tier, lookups, tiers)
+        try:
+            lock_id = _cm("gate_tools").lock_id_for(self.state)
+        except Exception:  # noqa: BLE001
+            lock_id = ""
+        key = (str(session_id or ""), str(turn_id), str(lock_id), str(getattr(tier, "value", tier)))
+        while True:
             with self._turn_lock:
-                if key in self._turn_checks:
-                    return self._turn_checks[key]
-        result = self._turn_check_uncached(key[0], tier)
-        if key[1]:
+                entry = self._turn_checks.get(key)
+                owner = entry is None
+                if owner:
+                    entry = _TurnCheck()
+                    self._turn_checks[key] = entry
+                    while len(self._turn_checks) > TURN_CACHE_MAX:
+                        self._turn_checks.popitem(last=False)
+            if not owner:
+                if not entry.done.wait(TURN_CHECK_WAIT_SECONDS):
+                    return ("Confidential mode: the per-turn recheck did not finish, so this turn was not sent. "
+                            "Run /confidential check.", "recheck_timeout")
+                if entry.deferred:
+                    continue            # the hook could not finish without a lookup: compute it here
+                return entry.result
+            result = self._turn_check_scoped(key[0], tier, lookups, tiers)
             with self._turn_lock:
-                self._turn_checks[key] = result
-                while len(self._turn_checks) > TURN_CACHE_MAX:
-                    self._turn_checks.popitem(last=False)
-        return result
+                if result is TURN_CHECK_DEFERRED:
+                    entry.deferred = True
+                    if self._turn_checks.get(key) is entry:
+                        del self._turn_checks[key]
+                entry.result = result
+            entry.done.set()
+            return result
+
+    def _turn_check_scoped(self, session_id: str, tier: Any, lookups: bool, tiers: Any) -> Optional[tuple[str, str]]:
+        if lookups:
+            return self._turn_check_uncached(session_id, tier)
+        try:
+            with tiers.cached_lookups_only():
+                return self._turn_check_uncached(session_id, tier)
+        except tiers.LookupDeferred:
+            return TURN_CHECK_DEFERRED
 
     def _turn_check_uncached(self, session_id: str, tier: Any) -> Optional[tuple[str, str]]:
         try:
@@ -581,10 +633,12 @@ def _pre_llm_call(rt: Runtime):
         if locked is not True:
             return None
         try:
-            found = rt.turn_check(session_id or "", turn_id or "", tier)
+            found = rt.turn_check(session_id or "", turn_id or "", tier, lookups=False)   # no network I/O
         except Exception as exc:  # noqa: BLE001
             found = (f"Confidential mode: the locked-config recheck failed ({type(exc).__name__}), so this turn "
                      "was not sent. Run /confidential check.", "recheck_failed")
+        if found == TURN_CHECK_DEFERRED:
+            found = None        # needs a DNS lookup: the llm gate runs the whole check before the main call
         if found:
             return {"action": "block", "message": found[0]}
         try:
