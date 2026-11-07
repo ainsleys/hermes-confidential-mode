@@ -75,11 +75,12 @@ description: >-
   that carries it with another process's id.
 
   Disclosure, core imports (catalog rule 9; all lazy). agent.auxiliary_client
-  (_RUNTIME_MAIN_CONTEXT, to read the live runtime), agent.secret_scope, tools.terminal_tool,
+  (_RUNTIME_MAIN_CONTEXT, to read the live runtime), agent.error_classifier
+  (_CONTEXT_OVERFLOW_PATTERNS, to classify NEAR context-length errors), agent.secret_scope, tools.terminal_tool,
   tools.terminal_tool_lifecycle and tools.terminal_scope (_get_env_config, _active_environments,
   get_active_env and terminal_env, to read the terminal backend and the cached task environments), hermes_cli.commands
   (resolve_command), tools.approval.* (request_tool_approval, is_approved, _yolo_active, _presence,
-  _lock, _session_approved, _permanent_set), tools.approval_context, tools.registry,
+  _lock, _session_approved, _permanent_set), tools.approval_context, tools.registry (registry, discover_builtin_tools),
   tools.mcp_tool, tools.mcp_tool_config and tools.mcp_tool_scope (MCP config readers),
   tools.delegate_tool_config, providers and providers.base (the provider profile is registered
   through providers.register_provider), hermes_cli.config, hermes_cli.config_defaults,
