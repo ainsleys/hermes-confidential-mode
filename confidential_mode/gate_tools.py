@@ -385,6 +385,18 @@ def _read_added(path: Path) -> set[str]:
 # allowlist from the live registry
 # --------------------------------------------------------------------------------------------------
 
+def ensure_builtin_tools() -> None:
+    """Import Hermes' built-in tool modules so their registry entries exist in this process. Built-in tools
+    register themselves on import. A `hermes confidential` CLI process never builds an agent, so it never
+    imports them; an allowlist built or rebuilt from that registry would classify no built-in tool (review
+    finding: `hermes confidential allow web_search` refused every tool). Idempotent; never raises."""
+    try:
+        from tools.registry import discover_builtin_tools
+        discover_builtin_tools()
+    except Exception:
+        pass
+
+
 def _default_mcp_configs() -> dict[str, dict]:
     """Every MCP server config Hermes knows: ``mcp_servers`` (incl. portable packages) overlaid with
     the live connection configs. Never raises."""

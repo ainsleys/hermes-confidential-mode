@@ -587,6 +587,21 @@ def _apply(store: Any, pending: Any, surface: str, *, reviewed_by: Optional[str]
     return store.apply(pending, **kw)
 
 
+def unknown_tool_text(allowlist: Any, name: str) -> str:
+    """Why ``name`` cannot be allowed from this process. A tool the locking process recorded but this process
+    has not registered (an MCP server only the gateway connected, a tool a plugin adds at run time) is named
+    as such, with the chat command that can allow it."""
+    persisted = getattr(allowlist, "persisted_identity", None) or {}
+    ident = persisted.get(name) if isinstance(persisted, dict) else None
+    if ident is not None:
+        toolset = str(ident[0]) if isinstance(ident, (tuple, list)) and ident else ""
+        what = "an MCP tool" if toolset.startswith("mcp-") else "a tool"
+        return (f"{name} is {what} that the process which locked this profile registered, but this process "
+                f"has not registered it (only the gateway connected it), so it cannot be allowed from here. "
+                f"Run /confidential allow {name} in the chat session instead.")
+    return f"Unknown tool {name!r}; it was not registered when the session was locked."
+
+
 def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key: str = "",
                session_id: str = "", platform: str = "") -> str:
     """Ask the human to add an off-host tool to the locked allowlist (no per-call prompt after).
@@ -601,7 +616,7 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
         return f"{SELF_APPROVAL_REPLY} ({reason}.) {name} was not added."
     info = allowlist.get(name)
     if info is None:
-        return f"Unknown tool {name!r}; it was not registered when the session was locked."
+        return unknown_tool_text(allowlist, name)
     if info.route is Route.ON_HOST:
         return f"{name} is on-host and already runs without asking."
     if info.route is not Route.ASK:

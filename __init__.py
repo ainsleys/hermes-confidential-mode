@@ -138,6 +138,9 @@ class Runtime:
                 # not merged into; merging adds approvals only and would keep every tool blocked.
                 self._allowlist = None
         from tools.registry import registry
+        # A CLI process (`hermes confidential allow`) has not imported the built-in tools; without them the
+        # rebuild below would keep no built-in tool, and every allow would be refused as unregistered.
+        gt.ensure_builtin_tools()
         predicate = _cm("locking").predicate_for(tier, config=self.load_config())
         # Amendment 4 F5 (W4): rebuild from the identities persisted at THIS lock; anything registered
         # after the lock, changed, or a missing/other-lock file is unclassified until a relock.
