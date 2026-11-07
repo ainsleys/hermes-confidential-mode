@@ -118,10 +118,6 @@ them. A plugin named `sealed`, an encrypted secrets store, also exists in the He
 
 ## Comparison with earlier approaches
 
-The closest everyday comparison is Little Snitch, the macOS firewall that asks before an
-application connects to the network. confidential-mode applies the same pattern to your agent:
-every destination is logged, off-host tools get an allow-once prompt while locked, and you can keep
-a list of the tools you have allowed.
 
 Five earlier pull requests tried to add confidential inference to Hermes core. Each added a
 verified provider for the main chat, and each was closed with the instruction to ship it as a
