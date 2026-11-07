@@ -373,11 +373,12 @@ when the plugin loads.
 | Module | Names | Why |
 |---|---|---|
 | `tools.approval` | `request_tool_approval`, `is_approved`, `_yolo_active`, `_presence`, and, in `/confidential status` and `pins`, `_lock`, `_session_approved`, `_permanent_set` (read only) | To ask before an off-host tool call. To detect bypass states that would approve a call without asking. To list the remembered grants stored under the plugin's own rule key. |
-| `tools.approval_context` | `get_current_session_key`, `set_current_observability_context`, `reset_current_observability_context`, `_get_approval_mode` | To get the session key for remembered grants. To tie an approval answer to its tool call. To detect `approvals.mode: off`. |
+| `tools.approval_context` | `get_current_session_key`, `set_current_observability_context`, `reset_current_observability_context`, `_get_approval_mode` | To get the session key for remembered grants and for the conversation a once-per-lock grant covers. To tie an approval answer to its tool call. To detect `approvals.mode: off`. |
 | `tools.registry` | `registry`, `discover_builtin_tools` | To build the tool allowlist at lock, and to record each tool's handler identity. A lock from the `hermes confidential` command line first loads the built-in tools, as a chat process would. |
 | `agent.error_classifier` | `_CONTEXT_OVERFLOW_PATTERNS` | To recognise a NEAR context-length error, so that Hermes can compress the context as it would for any provider. |
 | `agent.auxiliary_client` | `_RUNTIME_MAIN_CONTEXT`, `_RELAY_AUX_CALL_CONTEXT` | To read the live main runtime on each locked turn. Auxiliary tasks set to `auto` follow the live runtime, not the config. The second name gives a NEAR auxiliary send its purpose (`aux:<task>`) and session in the ledger. Without it, such a send takes the purpose and session of the turn around it, or reads "unattributed" with an empty session. |
 | `agent.secret_scope` | `get_secret` | To resolve `TINFOIL_API_KEY` and `NEAR_AI_API_KEY` for the active profile, and to check whether `OPENROUTER_API_KEY` or `NOUS_API_KEY` is set. |
+| `hermes_cli.env_loader` (in `scripts/near_first_contact.py` only) | `load_hermes_dotenv` | To load the `HERMES_HOME` env file before the script reads `NEAR_AI_API_KEY` through `get_secret`, as `hermes` does at start-up. |
 | `tools.terminal_tool`, `tools.terminal_tool_lifecycle`, `tools.terminal_scope` | `_get_env_config`, `_active_environments`, `_env_lock`, `get_active_env`, and `terminal_env` as a fallback | To read the terminal backend a terminal, code or file tool call would run on, the way Hermes' tools resolve it, and the backend of the environment Hermes has cached for the task. The plugin blocks the call, and refuses to lock, unless both are `local`. |
 | `hermes_cli.commands` | `resolve_command` | To recognise `/model` and `/moa`, and their aliases, in `pre_gateway_dispatch`. |
 | `tools.mcp_tool`, `tools.mcp_tool_config`, `tools.mcp_tool_scope` | `_servers`, `_mcp_tool_server_names`, `_load_mcp_config`, `_key_name` | To map an MCP tool to its server, and to read whether that server is a URL or an on-host command. |
@@ -388,7 +389,7 @@ when the plugin loads.
 | `plugins.plugin_storage` | `plugin_db`, `plugin_data_dir` | To open the ledger database. |
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
 
-`hermes plugins validate` reports 30 of these import sites as private core imports, counting module
+`hermes plugins validate` reports 32 of these import sites as private core imports, counting module
 imports as it does; it does not count the private attributes read, such as `approval._lock`,
 `_session_approved`, `_permanent_set` and `mcp_tool._servers`. This is a warning, not a failure.
 
