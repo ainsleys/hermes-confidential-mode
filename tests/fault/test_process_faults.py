@@ -99,10 +99,78 @@ def test_a_lock_while_another_process_holds_the_transition_lock_is_refused_and_r
     finally:
         holder.kill()
         holder.wait(5)
-    assert out.startswith("Not locked: another lock or unlock of this profile is in progress"), out
+    assert out.startswith("Not locked: another lock or an unlock of this profile is in progress"), out
     assert plugin.rt.state.locked() == (False, None)
     assert not plugin.rt.allowlist_path.exists()
     assert any(e.kind == "preflight_fail" and e.purpose == "lock:busy" for e in rows(plugin))
+
+
+_HOLDER_RW = textwrap.dedent("""
+    import fcntl, sys, time
+    fh = open(sys.argv[1], "a")
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    print("held", flush=True)
+    time.sleep(30)
+""")
+
+
+def _hold(path):
+    holder = subprocess.Popen([sys.executable, "-c", _HOLDER_RW, str(path)], stdout=subprocess.PIPE, text=True)
+    assert holder.stdout.readline().strip() == "held"
+    return holder
+
+
+def test_an_unlock_while_another_process_holds_the_transition_lock_is_refused(plugin, monkeypatch):
+    """FI-5 (review item 3): unlock takes the transition lock too, so /confidential off cannot run while a lock
+    is in progress in another process. The lock stays, allowlist.yaml stays, and the refusal is recorded."""
+    monkeypatch.setattr(filelock, "INTERVAL_SECONDS", 0.02)
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    before = plugin.rt.allowlist_path.read_bytes()
+    holder = _hold(plugin.rt.allowlist_path.with_name(cm(plugin, "locking").TRANSITION_LOCK_NAME))
+    try:
+        out = plugin.slash("off")
+    finally:
+        holder.kill()
+        holder.wait(5)
+    assert out.startswith("Not unlocked (the lock is unchanged): a lock or another unlock"), out
+    assert plugin.rt.state.locked()[0] is True
+    assert plugin.rt.allowlist_path.read_bytes() == before
+    assert any(e.kind == "preflight_fail" and e.purpose == "unlock:busy" for e in rows(plugin))
+    assert ("unlock", "unlocked") not in plugin.kinds()
+    assert plugin.slash("off").startswith("Unlocked")
+
+
+def _cli(plugin, *argv):
+    exe = Path(sys.executable).with_name("hermes")
+    cmd = [str(exe)] if exe.exists() else [sys.executable, "-m", "hermes_cli.main"]
+    env = {**os.environ, "HERMES_HOME": str(plugin.home), "PYTHONDONTWRITEBYTECODE": "1"}
+    return subprocess.Popen(cmd + ["confidential", *argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env, stdin=subprocess.DEVNULL)
+
+
+def test_two_cli_processes_locking_at_once_give_one_lock(plugin):
+    """FI-5 with two real processes: two `hermes confidential on` started together. Exactly one reports Locked,
+    the ledger holds one lock row, and allowlist.yaml belongs to the lock in force."""
+    gt = cm(plugin, "gate_tools")
+    procs = [_cli(plugin, "on", "on-host-only") for _ in range(2)]
+    outs = [p.communicate(timeout=180)[0] for p in procs]
+    assert len([o for o in outs if o.lstrip().startswith("Locked")]) == 1, outs
+    assert [k for k, _ in plugin.kinds()].count("lock") == 1
+    assert plugin.rt.state.locked()[0] is True
+    assert json.loads(plugin.rt.allowlist_path.read_text())["lock_id"] == gt.lock_id_for(plugin.rt.state)
+
+
+def test_a_cli_lock_and_a_cli_unlock_at_once_leave_a_consistent_profile(plugin):
+    """FI-5 with two real processes: a lock and an off started together. Whichever order they take, a locked
+    profile has its own allowlist.yaml, and an unlocked one has none."""
+    gt = cm(plugin, "gate_tools")
+    procs = [_cli(plugin, "on", "on-host-only"), _cli(plugin, "off")]
+    for p in procs:
+        p.communicate(timeout=180)
+    if plugin.rt.state.locked()[0] is True:
+        assert json.loads(plugin.rt.allowlist_path.read_text())["lock_id"] == gt.lock_id_for(plugin.rt.state)
+    else:
+        assert not plugin.rt.allowlist_path.exists()
 
 
 def test_a_cli_unlock_reaches_the_gateway_on_its_next_call(plugin):
@@ -490,6 +558,22 @@ def test_a_lock_file_that_cannot_be_opened_at_all_fails_closed(tmp_path):
     with pytest.raises(PinStoreError):
         store.apply(store.pending(), approved_via="cli")
     assert store.approved_entries() == []
+
+
+def test_an_flock_error_other_than_held_fails_closed(tmp_path, monkeypatch):
+    """FI-7 (review item 1): on NFS flock on a read-only descriptor fails with EBADF. Any flock error other than
+    "held" raises LockUnusable naming the errno; nothing runs under the thread lock alone."""
+    import errno
+    import fcntl
+
+    def bad(fd, op):
+        raise OSError(errno.EBADF, "Bad file descriptor")
+    monkeypatch.setattr(fcntl, "flock", bad)
+    ran = []
+    with pytest.raises(filelock.LockUnusable) as info:
+        with filelock.exclusive(tmp_path / "x.lock"):
+            ran.append(1)
+    assert ran == [] and info.value.errno_name == "EBADF" and "EBADF" in str(info.value)
 
 
 def test_a_read_only_lock_file_nobody_holds_still_locks(tmp_path):

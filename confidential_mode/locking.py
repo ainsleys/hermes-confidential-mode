@@ -371,18 +371,16 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
                                     detail={"reason": ZDR_REASON}, **base))
         return LockResult(False, f"Not locked: {ZDR_REASON}. Use on-host-only or attested.", tier=tier)
 
-    # FI-5: one lock at a time across processes. The already-locked check, the allowlist write and the state
-    # write happen under one file lock, so a second lock either waits and then finds the profile locked
-    # ("Already locked") or is refused while the first is in progress. Neither writes a file.
+    # FI-5: one lock or unlock at a time across processes. The already-locked check, the allowlist write and
+    # the state write happen under one file lock (unlock takes it too), so a second lock either waits and then
+    # finds the profile locked ("Already locked") or is refused while the first is in progress. Neither writes
+    # allowlist.yaml, state.json or a lock row.
     from .filelock import LockBusy
     guard = _transition_lock(allowlist_path)
     try:
         guard.__enter__()
     except LockBusy as exc:
-        _append(ledger, LedgerEvent(kind="preflight_fail", purpose="lock:busy", verdict="error", decision="refused",
-                                    detail={"error_type": "LockBusy", "lock_file": exc.lock_path.name}, **base))
-        return LockResult(False, f"Not locked: another lock or unlock of this profile is in progress ({exc}). "
-                          "Run /confidential status, then lock again if it is still unlocked.", tier=tier)
+        return _transition_refused("lock", exc, ledger, base, tier=tier)
     try:
         return _lock_held(tier, base, state=state, ledger=ledger, config=config, registry=registry,
                           plugin_aux_tasks=plugin_aux_tasks, provider_lookup=provider_lookup,
@@ -392,6 +390,27 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
                           cached_environments=cached_environments, clock=clock, progress=progress)
     finally:
         guard.__exit__(None, None, None)
+
+
+def _transition_refused(what: str, exc: Any, ledger: Any, base: dict, *, tier: Any = None) -> "LockResult":
+    """The refusal of a lock or unlock that could not take the transition lock: a read-only data directory is
+    named as such (purpose ``<what>:data_dir``), an unusable lock file by its error (``<what>:lockfile``), and
+    a held lock as another transition in progress (``<what>:busy``). The ledger row carries no path."""
+    from .filelock import LockUnusable, describe, ledger_reason
+    detail = ledger_reason(exc)
+    if isinstance(exc, LockUnusable):
+        purpose = f"{what}:data_dir" if not exc.dir_writable else f"{what}:lockfile"
+    else:
+        purpose = f"{what}:busy"
+    _append(ledger, LedgerEvent(kind="preflight_fail", purpose=purpose, verdict="error", decision="refused",
+                                detail=detail, **base))
+    head = "Not locked" if what == "lock" else "Not unlocked (the lock is unchanged)"
+    if isinstance(exc, LockUnusable):
+        return LockResult(False, f"{head}: {describe(exc)}. Check the plugin data directory's permissions, then "
+                          f"run /confidential {'on' if what == 'lock' else 'off'} again.", tier=tier)
+    others = "another lock or an unlock" if what == "lock" else "a lock or another unlock"
+    return LockResult(False, f"{head}: {others} of this profile is in progress "
+                      f"({describe(exc)}). Run /confidential status, then try again.", tier=tier)
 
 
 _TRANSITION_THREAD_LOCK = threading.Lock()
@@ -563,8 +582,35 @@ def period_counts(ledger: Any, since: float | None, *, page: int = 1000) -> dict
 
 
 def unlock(*, state, ledger, session_id: str = "", surface: str = "",
-           clear_cache: Callable[[], None] | None = None, clock: Callable[[], float] = time.time) -> LockResult:
-    """Clear the lock (also repairs unreadable lock state) and print the lock period's counts."""
+           clear_cache: Callable[[], None] | None = None, clock: Callable[[], float] = time.time,
+           allowlist_path: Any = None) -> LockResult:
+    """Clear the lock (also repairs unreadable lock state) and print the lock period's counts. Holds the
+    transition lock (FI-5), so an unlock never runs while a lock is in progress, and removes allowlist.yaml
+    before clearing the flag, only when the file belongs to the lock being cleared."""
+    from .filelock import LockBusy
+    base = dict(session_id=session_id or "", surface=surface or None)
+    guard = _transition_lock(allowlist_path)
+    try:
+        guard.__enter__()
+    except LockBusy as exc:
+        return _transition_refused("unlock", exc, ledger, base)
+    try:
+        return _unlock_held(state=state, ledger=ledger, session_id=session_id, surface=surface,
+                            clear_cache=clear_cache, clock=clock, allowlist_path=allowlist_path)
+    finally:
+        guard.__exit__(None, None, None)
+
+
+def _unlock_held(*, state, ledger, session_id, surface, clear_cache, clock, allowlist_path) -> LockResult:
+    # Amendment 4 F6: allow grants are scoped to the lock. The file is removed BEFORE the flag is cleared, and
+    # only when its lock_id is the lock being cleared. With unreadable state the lock id is unknown; the
+    # transition lock rules out a lock in progress, so the file can only be the unreadable lock's own.
+    if allowlist_path is not None:
+        try:
+            from .gate_tools import clear_persisted, lock_id_for
+            clear_persisted(allowlist_path, lock_id=lock_id_for(state))
+        except Exception:  # noqa: BLE001
+            pass
     try:
         locked, tier = state.locked()
     except Exception:

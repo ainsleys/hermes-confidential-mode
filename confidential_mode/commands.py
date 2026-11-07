@@ -513,18 +513,15 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
                 return f"{result.message}\n{note}"
         return result.message
     if cmd in ("off", "unlock"):
-        # Amendment 4 F6 (W4): allow grants are scoped to the lock. Second review, minor item: the file is
-        # removed BEFORE the flag is cleared, and only if it belongs to the lock being cleared, so a lock
-        # made concurrently by another process never loses its own allowlist.
-        try:
-            from .gate_tools import clear_persisted, lock_id_for
-            clear_persisted(rt.allowlist_path, lock_id=lock_id_for(rt.state))
-        except Exception:  # noqa: BLE001
-            pass
+        # Amendment 4 F6 (W4): allow grants are scoped to the lock. locking.unlock removes allowlist.yaml
+        # BEFORE clearing the flag, only if it belongs to the lock being cleared, under the transition lock
+        # (FI-5), so a lock in progress in another process never loses its own allowlist.
         result = _locking.unlock(state=rt.state, ledger=rt.ledger, session_id=sid, surface=surface,
+                                 allowlist_path=rt.allowlist_path,
                                  clear_cache=lambda: [_provider_module(rt).verification_cache.invalidate(n)
                                                       for n in _locking.ATTESTED_PROFILES])
-        rt.set_allowlist(None)
+        if result.ok:
+            rt.set_allowlist(None)
         return result.message
     if cmd == "status":
         if rest not in ([], ["--verbose"], ["-v"]):

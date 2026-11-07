@@ -178,6 +178,7 @@ back to the full import, and its cache rewrite, only when a recorded tool is sti
 | `plugin-data/confidential-mode/evidence/blobs/` | Large pieces of NEAR evidence (each docker-compose, compose-manager attestation, TDX quote and Intel Trust Authority token), one file each, named by its SHA-256. A ledger row names the files it uses. A file no row names is deleted by a later evidence write once it is more than 24 hours old. |
 | The same directory as `state.json`, `pins/composes/` | The docker-compose files fetched for NEAR entries, each named `<sha256>.yaml` by its content hash, and (from `pins review`) `commit-<sha>.json` with each commit's GitHub metadata. |
 | The same directory, `allowlist.yaml.lock`, `grants_revoked.json`, `grants_revoked.json.lock` | `allowlist.yaml.lock` and `grants_revoked.json.lock` are empty lock files that serialise writes between processes. `grants_revoked.json` holds the most recent revoke records (at most 200), which a running gateway reads to drop session approvals. |
+| The same directory, `lock-transition.lock` | Empty. A lock or an unlock holds it, so two processes never lock or unlock the profile at the same time. |
 | The same directory, `allowlist.yaml` | This lock's tool identities: each tool's name, toolset, handler module and handler name. The file also holds the tools you allowed with `/confidential allow`, tagged with the lock's identity. After a restart, the plugin rebuilds the allowlist from this file. `/confidential off` deletes it, so additions never outlive the lock. |
 | The same directory, `tinfoil_user_cache_secret` | A random 32-byte secret, stored as hex with file mode 0600. The SDK sends it as `user_cache_secret`, which keeps Tinfoil's prompt cache separate for you. The SDK's own default location is `~/.tinfoil/user_cache_secret`. The plugin never uses that path. |
 | The same directory, `trust-roots/<sha256>.json` | The Sigstore trust root used at verification. Each distinct trust root is stored once, named by the hash of its content. The evidence in the ledger also carries the trust root's bytes, so a receipt replays offline on any machine. The evidence records no local path. |
@@ -273,6 +274,11 @@ verification. A capture already in progress then finishes, and its result is dis
 verification it runs writes a `verify_ok` or `verify_fail` ledger row with `source: background`. A
 verification the pins did not accept is written with `accepted: false`. The receipt marks it "NOT
 ACCEPTED" and never counts it for a send.
+
+Writes to `pins.yaml`, `allowlist.yaml` and `grants_revoked.json`, and every lock and unlock, take an
+advisory lock file (`flock`) so that two processes never interleave them. A lock file that cannot be opened
+or locked refuses the change. On a platform without the `fcntl` module, which is Windows, only a lock
+inside one process is taken, so two processes on Windows are not kept apart.
 
 ### Environment variables
 

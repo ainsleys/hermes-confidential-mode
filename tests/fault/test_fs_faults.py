@@ -546,8 +546,11 @@ def test_a_read_only_data_directory_refuses_the_lock(plugin):
     d.mkdir(parents=True, exist_ok=True)
     with chmod_ro(d):
         out = plugin.slash("on on-host-only")
-    assert out.startswith("Not locked"), out
+    assert out.startswith(f"Not locked: the data directory is not writable: {d}"), out
     assert plugin.rt.state.locked() == (False, None)
+    row = [e for e in rows(plugin) if e.kind == "preflight_fail"][-1]
+    assert row.purpose == "lock:data_dir" and row.detail["reason_code"] == "data_dir_not_writable"
+    assert str(d) not in json.dumps(row.detail)
 
 
 def test_an_allow_whose_write_fails_grants_nothing(plugin, monkeypatch):
