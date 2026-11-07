@@ -288,13 +288,16 @@ class LlmGate:
         return self.guarded_call(request, next_call, dest, context, tier, verdict)
 
     @staticmethod
-    def send_context(dest: Destination, context: Mapping[str, Any], tier: Tier | None):
+    def send_context(dest: Destination, context: Mapping[str, Any], tier: Tier | None, *,
+                     records_refusals: bool = False):
         """Session and purpose for adapters that ledger their own per-send rows (NEAR signatures, sendctx.py).
-        Never fails the call: a broken import degrades to no context."""
+        ``records_refusals``: the caller writes the send_refused row for a transport refusal (guarded_call),
+        so the adapter writes none. Never fails the call: a broken import degrades to no context."""
         try:
             from .sendctx import send_context
             return send_context(session_id=str(context.get("session_id") or ""), purpose=dest.purpose,
-                                provider=dest.provider, model=dest.model, tier=tier.value if tier else None)
+                                provider=dest.provider, model=dest.model, tier=tier.value if tier else None,
+                                refusals_ledgered_by="llm_gate" if records_refusals else None)
         except Exception:  # noqa: BLE001
             import contextlib
             return contextlib.nullcontext()
@@ -345,7 +348,7 @@ class LlmGate:
                         nbytes=nbytes, tier=tier.value, verdict="in_tier", decision="allowed",
                         detail={**send_record_detail(records), **started})
         try:
-            with self.send_context(dest, context, tier), self.capture_records(records):
+            with self.send_context(dest, context, tier, records_refusals=True), self.capture_records(records):
                 response = next_call(request)
         except BaseException as exc:
             observed()

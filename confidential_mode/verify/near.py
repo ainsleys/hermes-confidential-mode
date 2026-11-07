@@ -60,13 +60,17 @@ adapter fetches GET /v1/signature/<id>?signing_algo=ed25519 with the request's o
 header, retrying 404 until ``signature_wait_seconds`` (default 5 s) after the body ended, and judges it
 with near_checks.check_signature. A body closed before its end (an interrupted stream) gets no fetch,
 because NEAR records no signature for it. One ledger row of kind ``send_signed`` is written per
-exchange through ``event_sink``; the gate's send context (sendctx.py) supplies session and purpose.
+exchange through ``event_sink``; the gate's send context (sendctx.py) supplies session and purpose
+(``main``, or ``aux:<task>`` from the pre_auxiliary_call hook). Every NearRefusal the views raise, before
+sending or after the reply arrived, also gets a ``send_refused`` row (``record_refusal``), except inside
+the llm gate's guarded call, where the gate writes that row itself.
 
 Request encryption (``encrypt``, config confidential.near.encrypt, default true; near_e2ee.py): the only
 POST that leaves is chat completions, rebuilt as a new request whose body has every field of NEAR's table
 sealed to the one verified model key (``model_public_key``), with a fresh Ed25519 client key held on the
-exchange. Streaming, non-text parts, unlisted top-level text and every other POST raise VerifyError
-before sending. The digests are over the ciphertext bytes, which is what NEAR signs (live probe,
+exchange. Streaming, non-text parts, unlisted top-level text (structured settings such as
+``reasoning: {"effort": "low", "summary": "auto"}`` pass when their shape is one near_e2ee.STRUCTURED_KEYS
+allows) and every other POST raise VerifyError before sending. The digests are over the ciphertext bytes, which is what NEAR signs (live probe,
 2026-11-07). The reply is buffered, hashed and finished first; it is decrypted and handed over only when
 the send is fully attested (a verified provider_tee signature over those digests, on the attested TLS
 connection). HTTP 421 means the gateway no longer accepts the model key: the adapter holds and asks the
@@ -686,6 +690,14 @@ def _refusal(exc: BaseException) -> NearRefusal:
     return exc if isinstance(exc, NearRefusal) else NearRefusal(str(exc) or type(exc).__name__)
 
 
+def _refuse(adapter: "NearAdapter", exc: BaseException, stage: str, *, ex: "_Exchange | None" = None,
+            request: httpx.Request | None = None) -> NearRefusal:
+    """The NearRefusal for ``exc``, ledgered as a send_refused row (NearAdapter.record_refusal)."""
+    refusal = _refusal(exc)
+    adapter.record_refusal(refusal, stage=stage, ex=ex, request=request)
+    return refusal
+
+
 class TLSPinMismatch(VerifyError):
     """The TLS peer of an inference connection is not the certificate the verified gateway quote binds."""
 
@@ -1283,7 +1295,51 @@ class NearAdapter:
             try:
                 sink(row)
             except Exception:
-                logger.warning("confidential-mode: could not ledger a NEAR signature row", exc_info=True)
+                logger.warning("confidential-mode: could not ledger a NEAR %s row", row.get("kind"), exc_info=True)
+
+    def record_refusal(self, refusal: BaseException, *, stage: str, ex: "_Exchange | None" = None,
+                       request: httpx.Request | None = None) -> None:
+        """Write one ``send_refused`` row (the llm gate's refusal kind) for a refusal this transport raises,
+        before sending (``stage`` "before_send") or after the reply arrived ("after_receive"), so the
+        receipt's Refusals section lists it. Skipped when the llm gate's guarded call wraps the send: the
+        gate records the refusal it returns (sendctx ``refusals_ledgered_by``), one row either way. Each
+        refusal object is recorded at most once. Never raises."""
+        try:
+            if getattr(refusal, "ledgered", False) is True:
+                return
+            refusal.ledgered = True
+            ctx = (ex.context if ex is not None else None) or sendctx.current() or {}
+            if ctx.get("refusals_ledgered_by") == "llm_gate":
+                return
+            nbytes, model, path = None, None, None
+            if ex is not None:
+                nbytes, model, path = (ex.request_bytes or None), ex.model, ex.path
+            if request is not None:
+                path = path or request.url.path
+                if nbytes is None or model is None:
+                    try:
+                        body = request.content
+                        nbytes = nbytes if nbytes is not None else len(body)
+                        if model is None:
+                            parsed = json.loads(body) if body else None
+                            model = parsed.get("model") if isinstance(parsed, dict) else None
+                    except Exception:
+                        pass
+            detail = {"vendor": VENDOR, "source": "near_transport",
+                      "reason_code": "near_refused_" + stage, "reason": (str(refusal) or type(refusal).__name__)[:300],
+                      "stage": stage, "endpoint": path}
+            status = getattr(refusal, "status_code", None)
+            if isinstance(status, int) and not isinstance(status, bool):
+                detail["status_code"] = status
+            if ex is not None and ex.chat_id:
+                detail["chat_id"] = ex.chat_id
+            self._emit_row({"kind": "send_refused", "session_id": str(ctx.get("session_id") or ""),
+                            "purpose": str(ctx.get("purpose") or "unattributed"), "provider": self.provider_name,
+                            "host": self.host, "model": str(model or ctx.get("model") or ""),
+                            "bytes": nbytes if isinstance(nbytes, int) else None, "tier": ctx.get("tier"),
+                            "verdict": "refused", "decision": "refused", "detail": detail})
+        except Exception:
+            logger.warning("confidential-mode: could not ledger a NEAR refusal", exc_info=True)
 
 
 def _close_quietly(t) -> None:
@@ -1655,12 +1711,12 @@ class _SyncView(httpx.BaseTransport):
             a._check_not_held()
             a._check_request(request)
         except VerifyError as exc:
-            raise _refusal(exc) from exc
+            raise _refuse(a, exc, "before_send", request=request) from exc
         try:
             request.read()
             ex = a.begin_exchange(request)
         except VerifyError as exc:
-            raise _refusal(exc) from exc
+            raise _refuse(a, exc, "before_send", request=request) from exc
         pool, release_pool = a._acquire()
         try:
             response = pool.handle_request(ex.request if ex is not None else request)
@@ -1671,7 +1727,7 @@ class _SyncView(httpx.BaseTransport):
                 a.mark_stale("a NEAR connection presented a certificate other than the attested one; re-verifying")
                 refusal = _refusal(next(e for e in _chain(exc) if isinstance(e, TLSPinMismatch)))
             if refusal is not None:
-                raise refusal from exc
+                raise _refuse(a, refusal, "before_send", ex=ex, request=request) from exc
             raise
         if ex is None:
             response.stream = _Releasing(response.stream, release_pool)
@@ -1681,7 +1737,7 @@ class _SyncView(httpx.BaseTransport):
             try:
                 return _sealed_sync(a, ex, response)
             except VerifyError as exc:
-                raise _refusal(exc) from exc
+                raise _refuse(a, exc, "after_receive", ex=ex) from exc
             finally:
                 release_pool()
         if _already_read(response, ex):
@@ -1735,7 +1791,7 @@ class _AsyncView(httpx.AsyncBaseTransport):
             await request.aread()
             ex = a.begin_exchange(request)
         except VerifyError as exc:
-            raise _refusal(exc) from exc
+            raise _refuse(a, exc, "before_send", request=request) from exc
         try:
             response = await a._async_pool().handle_async_request(ex.request if ex is not None else request)
         except BaseException as exc:
@@ -1744,7 +1800,7 @@ class _AsyncView(httpx.AsyncBaseTransport):
                 a.mark_stale("a NEAR connection presented a certificate other than the attested one; re-verifying")
                 refusal = _refusal(next(e for e in _chain(exc) if isinstance(e, TLSPinMismatch)))
             if refusal is not None:
-                raise refusal from exc
+                raise _refuse(a, refusal, "before_send", ex=ex, request=request) from exc
             raise
         if ex is None:
             return response
@@ -1763,7 +1819,7 @@ class _AsyncView(httpx.AsyncBaseTransport):
             try:
                 return await _sealed_async(a, ex, response, finish)
             except VerifyError as exc:
-                raise _refusal(exc) from exc
+                raise _refuse(a, exc, "after_receive", ex=ex) from exc
         if _already_read(response, ex):
             await asyncio.wait_for(asyncio.to_thread(ex.finish), bound)
             return response

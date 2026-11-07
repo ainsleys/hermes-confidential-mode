@@ -661,7 +661,8 @@ def near_config_block(model: str, *, tinfoil_vision_model: str = DEFAULT_VISION_
             continue
         lines += [f"  {task}:", f"    provider: {name}", f"    model: {model}"]
     lines += ["memory:", '  provider: ""', "voice:", "  auto_tts: false", "confidential:", "  near:",
-              "    # every model id Hermes may send to NEAR; the pin covers exactly this list",
+              "    # every model id Hermes may send to NEAR. A NEAR pin's identity is this list, so changing it",
+              "    # needs a new pin.",
               f"    models: [{model}]",
               "    require_provider_tee: true"]
     return "\n".join(lines)

@@ -227,7 +227,9 @@ def test_model_off_the_allowlist_is_refused_before_sending(world, tmp_path):
     ad, _, rows = _accepted(world, tmp_path)
     with pytest.raises(Exception):
         _client(ad).chat.completions.create(model="anthropic/claude-external", messages=MSG)
-    assert world.chat_posts() == 0 and rows == []
+    assert world.chat_posts() == 0 and [r["kind"] for r in rows] == ["send_refused"]
+    assert rows[0]["model"] == "anthropic/claude-external" and rows[0]["detail"]["stage"] == "before_send"
+    assert rows[0]["purpose"] == "unattributed" and "not an attested NEAR model" in rows[0]["detail"]["reason"]
 
 
 def test_compressed_response_is_hashed_after_decoding(world, tmp_path):

@@ -74,7 +74,9 @@ def test_encrypted_response_is_withheld_unless_provider_tee_verifies(tmp_path, m
     with pytest.raises(VerifyError) as ei:
         client.chat.completions.create(model=MODEL, messages=MSG)
     assert isinstance(ei.value, openai.OpenAIError) and "withheld" in str(ei.value)
-    (row,) = rows
+    (row, refused) = rows                     # the send_signed row, then the refusal's send_refused row
+    assert refused["kind"] == "send_refused" and refused["detail"]["stage"] == "after_receive"
+    assert "withheld" in refused["detail"]["reason"] and refused["bytes"] == row["detail"]["request_bytes"]
     assert row["verdict"] == "unverified" and row["detail"]["near_e2ee"] is True
     assert row["detail"]["fully_attested"] is False
 

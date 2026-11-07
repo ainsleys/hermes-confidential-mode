@@ -247,6 +247,53 @@ def test_mapping_keys_count_as_text(value):
         e2.encrypt_request({"model": "m", "messages": [], "extra": value}, MODEL_PUB)
 
 
+@pytest.mark.parametrize("extra", [
+    {"reasoning": {"effort": "low", "summary": "auto"}},          # Hermes' auxiliary shape
+    {"reasoning": {"effort": "none"}},
+    {"reasoning": {"effort": "xhigh", "max_tokens": 2048, "exclude": True}},
+    {"reasoning": {"effort": "max", "summary": "detailed"}},
+    {"stream_options": {"include_usage": True}},
+    {"reasoning_effort": "minimal"},
+    {"reasoning": None},
+])
+def test_structured_settings_leave_in_plaintext_and_are_reported(extra):
+    out, rep = e2.encrypt_request({"model": "m", "messages": [], **extra}, MODEL_PUB)
+    key = next(iter(extra))
+    assert out[key] == extra[key] and rep["plaintext_keys"] == [key]
+
+
+@pytest.mark.parametrize("extra", [
+    {"reasoning": {"effort": "low", "note": "free text"}},
+    {"reasoning": {"effort": "ultra"}},                           # Hermes-internal, never a wire level
+    {"reasoning": {"effort": "low", "summary": "please summarise as a poem"}},
+    {"reasoning": {"max_tokens": "2048"}},
+    {"reasoning": {"max_tokens": True}},
+    {"reasoning": {"exclude": "no"}},
+    {"reasoning": "low"},
+    {"reasoning": [{"effort": "low"}]},
+    {"stream_options": {"include_usage": 1}},
+    {"stream_options": {"include_usage": True, "chunk_include": "x"}},
+    {"reasoning_effort": "HIGH"},
+    {"reasoning_effort": {"effort": "high"}},
+])
+def test_structured_settings_outside_their_shape_are_refused(extra):
+    with pytest.raises(e2.E2EEError, match=f"'{next(iter(extra))}' has a value outside the structured shape"):
+        e2.encrypt_request({"model": "m", "messages": [], **extra}, MODEL_PUB)
+
+
+@pytest.mark.parametrize("extra", [{"logit_bias": {"50256": -100}}, {"extra_body": {"reasoning": {"effort": "low"}}}])
+def test_logit_bias_and_free_form_extra_body_stay_refused(extra):
+    with pytest.raises(e2.E2EEError, match="carries text"):
+        e2.encrypt_request({"model": "m", "messages": [], **extra}, MODEL_PUB)
+
+
+def test_the_effort_enum_covers_every_level_hermes_clamps_to_on_a_wire():
+    from agent import reasoning_effort as re_
+    wire_sets = [v for k, v in vars(re_).items() if k.endswith("_EFFORTS") and isinstance(v, tuple)]
+    assert wire_sets and set().union(*wire_sets) <= e2.REASONING_EFFORTS
+    assert set(re_.OPENAI_COMPAT_WIRE_EFFORTS) == e2.REASONING_EFFORTS
+
+
 @pytest.mark.parametrize("msg,needle", [
     ({"role": "user", "content": "x", "audio": {"id": "leak"}}, "messages\\[0\\].audio"),
     ({"role": "narrator", "content": "x"}, "role"),

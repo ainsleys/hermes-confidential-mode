@@ -295,6 +295,10 @@ def test_a_withheld_reply_is_not_resent_by_hermes_retry_loop(plugin, near):
     assert near.chat_posts() == 1, near.chat_posts()
     rows = [e for e in plugin.rt.ledger.tail(0) if e.kind == "send_signed"]
     assert len(rows) == 1 and rows[0].detail["reply_released"] is False
+    # One refusal row for the withheld reply: the llm gate's (the NEAR transport writes none inside it).
+    refused = [e for e in plugin.rt.ledger.tail(0) if e.kind == "send_refused"]
+    assert len(refused) == 1 and refused[0].purpose == "main", [(e.purpose, e.detail) for e in refused]
+    assert refused[0].detail["reason_code"] == "provider_error"
     from agent.error_classifier import classify_api_error
     from confidential_mode.verify.near import NearRefusal
     c = classify_api_error(NearRefusal("NEAR response withheld"), provider="attested-near", model=MODEL)
@@ -355,3 +359,54 @@ def test_a_withheld_reply_stays_non_retryable_through_the_classifier(plugin, nea
     from agent.error_classifier import classify_api_error
     c = classify_api_error(ei.value, provider="attested-near", model=MODEL)
     assert ei.value.status_code is None and c.retryable is False and c.should_fallback is False
+
+
+# ── auxiliary calls: structured settings and refusal rows (live finding 2026-11-07) ─────────────
+
+def _aux_title_call(plugin, reasoning):
+    """A title_generation call through Hermes' real auxiliary client path (call_llm, the relay funnel and
+    pre/post_auxiliary_call), with ``reasoning`` riding in extra_body as Hermes sends it."""
+    from agent import auxiliary_client
+    return auxiliary_client.call_llm(task="title_generation", provider="attested-near", model=MODEL,
+                                     base_url=BASE, api_key="sk-near-seam",
+                                     messages=[{"role": "user", "content": "AUX-SECRET name this chat"}],
+                                     max_tokens=32, extra_body={"reasoning": reasoning})
+
+
+def test_an_aux_title_call_with_a_structured_reasoning_setting_leaves_encrypted(plugin, near):
+    plugin.slash("on attested")
+    _approve(plugin)
+    assert plugin.slash("on attested").startswith("Locked")
+    resp = _aux_title_call(plugin, {"effort": "low", "summary": "auto"})
+    assert "NEAR-FAKE-REPLY" in str(resp.choices[0].message.content)
+    assert near.chat_bodies and all(b"AUX-SECRET" not in b for b in near.chat_bodies)
+    assert json.loads(near.chat_bodies[-1])["reasoning"] == {"effort": "low", "summary": "auto"}
+    rows = [e for e in plugin.rt.ledger.tail(0) if e.kind == "send_signed"]
+    assert rows and rows[-1].purpose == "aux:title_generation", [(e.kind, e.purpose) for e in rows]
+    assert "reasoning" in rows[-1].detail["plaintext_keys"] and rows[-1].detail["fully_attested"] is True
+    assert not [e for e in plugin.rt.ledger.tail(0) if e.kind == "send_refused"]
+
+
+def test_an_aux_title_call_with_free_text_in_reasoning_is_refused_and_ledgered(plugin, near):
+    plugin.slash("on attested")
+    _approve(plugin)
+    assert plugin.slash("on attested").startswith("Locked")
+    posts = near.chat_posts()
+    with pytest.raises(Exception) as ei:
+        _aux_title_call(plugin, {"effort": "low", "note": "free text"})
+    assert "refused before sending" in repr(ei.value) + repr(ei.value.__cause__)
+    assert near.chat_posts() == posts                       # nothing left this host
+    refused = [e for e in plugin.rt.ledger.tail(0) if e.kind == "send_refused"]
+    assert len(refused) == 1, [(e.kind, e.purpose) for e in plugin.rt.ledger.tail(0)]
+    row = refused[0]
+    assert row.purpose == "aux:title_generation" and row.host == HOST and row.provider == "attested-near"
+    assert row.detail["stage"] == "before_send" and "'reasoning'" in row.detail["reason"]
+    assert isinstance(row.bytes, int) and row.bytes > 0 and row.tier == "attested"
+    if row.session_id:
+        text = plugin.slash(f"receipts {row.session_id}")
+    else:
+        receipts = _sub(plugin, "receipts")
+        text = receipts.render(plugin.rt.ledger, "", fmt="text")
+    refusals = text.split("\nRefusals\n", 1)[1].split("\n\n", 1)[0]
+    assert "send_refused  aux:title_generation" in refusals and f"host={HOST}" in refusals, refusals
+    assert "near_refused_before_send" in refusals

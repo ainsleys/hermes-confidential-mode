@@ -341,10 +341,12 @@ def test_async_signature_timeout_is_recorded_withheld(tmp_path, monkeypatch):
         asyncio.run(go())
     import time
     for _ in range(50):
-        if rows:
+        if any(r["kind"] == "send_signed" for r in rows):
             break
         time.sleep(0.05)
-    (row,) = rows
+    (row,) = [r for r in rows if r["kind"] == "send_signed"]
+    (refused,) = [r for r in rows if r["kind"] == "send_refused"]
+    assert refused["detail"]["stage"] == "after_receive" and "did not finish in time" in refused["detail"]["reason"]
     assert row["verdict"] == "unverified" and row["detail"]["fully_attested"] is False
     assert row["detail"]["check"]["signature_valid"] is True and row["detail"]["reply_released"] is False
 
@@ -399,7 +401,8 @@ def test_streaming_is_refused_while_encrypting(tmp_path):
     _, client, rows = _setup(world, tmp_path)
     with pytest.raises(VerifyError) as ei:
         list(client.chat.completions.create(model=MODEL, messages=MSG, stream=True))
-    assert "streaming is refused while encrypting" in str(_cause(ei)) and _no_chat_left(world) and rows == []
+    assert "streaming is refused while encrypting" in str(_cause(ei)) and _no_chat_left(world)
+    assert [(r["kind"], r["detail"]["stage"]) for r in rows] == [("send_refused", "before_send")]
 
 
 @pytest.mark.parametrize("call", [

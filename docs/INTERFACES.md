@@ -227,7 +227,15 @@ Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only.
   `httpx.Request` (encrypted body, fresh Content-Length, the original headers and extensions, the E2EE
   headers with `X-Encrypt-All-Fields: true`); `stream: true`, non-text content parts, top-level keys
   outside `near_e2ee.PLAINTEXT_KEYS` that carry text, `logprobs`, and every other POST raise
-  `VerifyError` before sending. While `require_provider_tee` (encrypting or not), POSTs outside the
+  `VerifyError` before sending. `near_e2ee.STRUCTURED_KEYS` lets three structured settings leave as
+  plaintext, each checked by shape: `reasoning` (a mapping with only `effort`, one of
+  `near_e2ee.REASONING_EFFORTS` = none, minimal, low, medium, high, xhigh, max, the widest wire set
+  Hermes' `clamp_effort` returns; `summary`, one of auto, concise, detailed, none; `max_tokens`, an
+  int; `exclude`, a bool), `stream_options` (only `include_usage`, a bool) and `reasoning_effort` (an
+  effort word). Their keys are fixed and their values are bools, ints or enumerated words, so they
+  carry no free text. Any other key, any other value type, or a word outside the enum raises
+  `VerifyError`. `logit_bias` and free-form `extra_body` entries stay refused (token ids could encode
+  text). A structured setting that passes is named in the row's `plaintext_keys`. While `require_provider_tee` (encrypting or not), POSTs outside the
   signable set raise too. An unstreamed reply is buffered, hashed, completed, finished (signature fetch
   and verdict). Only one outcome hands a body over: HTTP 200, a `fully_attested` send, and a body that
   decrypts under the exchange's key; it is returned without `content-length`/`content-encoding`. Every
@@ -235,6 +243,17 @@ Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only.
   decrypt) raises. HTTP 421 (the gateway no longer accepts the model key) also holds the adapter and
   invalidates the cache entry, at most once per `confidential.near.reverify_backoff_seconds` (default
   30); a TLS pin mismatch on a send does the same and drops the pooled connections.
+- Every NearRefusal the views raise, before sending (`begin_exchange`, `_encrypt`, a held adapter, a
+  TLS pin mismatch) or after receiving (`_release_sealed`: 421, non-200, withheld), gets one
+  `send_refused` row through `event_sink` (`NearAdapter.record_refusal`): purpose from sendctx (`main`,
+  or `aux:<task>` from the relay context Hermes binds around each auxiliary call,
+  `agent/auxiliary_client.py` `_RELAY_AUX_CALL_CONTEXT`, with session and tier that the
+  `pre_auxiliary_call` hook notes by relay request id; the hook runs on a Hermes timeout worker, so it
+  cannot set a ContextVar for the send itself), host, model, `bytes` when known, `verdict`/`decision` `refused`, and
+  detail `reason_code` (`near_refused_before_send` or `near_refused_after_receive`), `reason`, `stage`,
+  `endpoint` and `status_code` when the gateway answered. Inside the llm gate's guarded call the send
+  context carries `refusals_ledgered_by: llm_gate` and the adapter writes no row: the gate's own
+  `send_refused` row (reason_code `provider_error`) records the refusal, so each refusal has one row.
 - Refusals from the NEAR views are `verify.near.NearRefusal`, a `VerifyError` and an `openai.OpenAIError`:
   the OpenAI SDK re-raises it as is, without its own retries. The attested profiles set
   `ProviderProfile.classify_api_error = provider.classify_refusal`, which Hermes' error classifier

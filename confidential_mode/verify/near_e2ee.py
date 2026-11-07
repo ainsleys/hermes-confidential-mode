@@ -27,6 +27,10 @@ The field table, per that page, with ``X-Encrypt-All-Fields: true`` always on he
 What this module adds to that table, all fail-closed (``E2EEError``, raised before anything is sent):
   * a top-level plaintext allowlist (``PLAINTEXT_KEYS``): any other top-level key that carries a string
     anywhere inside it is refused and named, since NEAR would forward it as plaintext;
+  * structured settings validated by shape (``STRUCTURED_KEYS``): ``reasoning`` (keys ``effort``,
+    ``summary``, ``max_tokens``, ``exclude`` only), ``stream_options`` (``include_usage`` only) and
+    ``reasoning_effort``. Each string must be one of a fixed set of words, so these settings carry no
+    free text; any other key or value is refused;
   * ``logprobs`` and ``top_logprobs`` are refused (the page does not define the encrypted token format);
   * message content that is a list is flattened to one string when every part is text; a message with any
     other part (an image, audio, a file) is refused: NEAR's encryption does not cover image parts, and the
@@ -82,6 +86,47 @@ PLAINTEXT_KEYS = frozenset({
     # plaintext: a response_format schema, stop strings, metadata and the user id are visible to the gateway.
     "response_format", "stop", "metadata", "user",
 })
+#: Reasoning effort levels: Hermes' widest OpenAI-compatible wire vocabulary
+#: (agent/reasoning_effort.py OPENAI_COMPAT_WIRE_EFFORTS at Hermes 84a0301). clamp_effort only returns a
+#: level from a declared wire set, and every declared set is a subset of this one (Hermes-internal
+#: "ultra" never reaches a wire).
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+REASONING_SUMMARIES = frozenset({"auto", "concise", "detailed", "none"})
+
+
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _enum(allowed: frozenset):
+    return lambda v: isinstance(v, str) and v in allowed
+
+
+#: Structured top-level settings that may leave as plaintext, each checked by shape: a mapping may hold
+#: only the listed keys, each value of the listed type, and every string is one of a fixed set of words.
+#: Nothing in them is free text, so they carry no conversation content. Any other key, or any value
+#: outside the shape, is refused. ``logit_bias`` and free-form ``extra_body`` entries stay refused:
+#: token ids could encode text.
+STRUCTURED_KEYS: dict = {
+    "reasoning": {"effort": _enum(REASONING_EFFORTS), "summary": _enum(REASONING_SUMMARIES),
+                  "max_tokens": _is_int, "exclude": lambda v: isinstance(v, bool)},
+    "stream_options": {"include_usage": lambda v: isinstance(v, bool)},
+    "reasoning_effort": _enum(REASONING_EFFORTS),
+}
+
+
+def _structured_ok(key: str, value: Any) -> bool:
+    """True when ``value`` has the shape STRUCTURED_KEYS[key] allows (``None`` counts as unset)."""
+    if value is None:
+        return True
+    shape = STRUCTURED_KEYS[key]
+    if callable(shape):
+        return shape(value) is True
+    if not isinstance(value, Mapping):
+        return False
+    return all(isinstance(k, str) and k in shape and shape[k](v) is True for k, v in value.items())
+
+
 PROCESSED_KEYS = frozenset({"messages", "tools", "tool_choice"})
 REFUSED_KEYS = frozenset({"logprobs", "top_logprobs"})
 ROLES = frozenset({"system", "developer", "user", "assistant", "tool"})
@@ -431,6 +476,13 @@ def encrypt_request(body: Mapping, model_pub: str, *, plaintext_keys=PLAINTEXT_K
             out[key] = value
             if key != "model":
                 report.plaintext_keys.append(key)
+        elif key in STRUCTURED_KEYS:
+            if not _structured_ok(key, value):
+                raise E2EEError(f"request key {key!r} has a value outside the structured shape this plugin "
+                                "lets leave as plaintext (fixed keys, booleans, integers and enumerated "
+                                "words only); refused before sending")
+            out[key] = value
+            report.plaintext_keys.append(key)
         elif _carries_string(value):
             raise E2EEError(f"request key {key!r} carries text that would leave as plaintext (not in NEAR's "
                             "encrypted-field table, not on this plugin's plaintext allowlist); refused before sending")

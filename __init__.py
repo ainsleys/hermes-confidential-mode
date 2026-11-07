@@ -508,9 +508,27 @@ def _aux(rt: Runtime, source: str):
                      platform=platform, decision="observed", source=source, breach_on_off_tier=True)
         except Exception:  # noqa: BLE001
             pass
+        _aux_send_context(rt, source, api_request_id=api_request_id, session_id=session_id)
         return None
     aux_call.__name__ = source
     return aux_call
+
+
+def _aux_send_context(rt: Runtime, source: str, *, api_request_id: Any, session_id: Any) -> None:
+    """Note session and tier for the vendor adapters' own rows (NEAR's send_signed and send_refused) during
+    one auxiliary call, keyed by Hermes' relay request id (sendctx.note_aux). Never raises."""
+    if source != "pre_auxiliary_call":
+        return
+    try:
+        tier = None
+        try:
+            locked, t = rt.is_locked()
+            tier = t.value if locked is True and t is not None else None
+        except Exception:  # noqa: BLE001
+            pass
+        _cm("sendctx").note_aux(str(api_request_id or ""), session_id=str(session_id or ""), tier=tier)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _pre_auxiliary_call(rt: Runtime):

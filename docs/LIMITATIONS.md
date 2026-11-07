@@ -518,10 +518,25 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   new, for the reviewer. Within one Hermes process, a re-verification that reports a different model
   key is refused. So when NEAR rotates a model key, NEAR requests are refused until Hermes restarts.
   The restart accepts the new key without a prompt.
-- Settings whose value is a mapping, such as `extra_body` entries, are refused while encryption is on,
-  unless the plugin knows the key. Examples are a reasoning setting (`reasoning: {"effort": ...}`),
-  `stream_options` and `logit_bias`. A mapping would leave this host in plaintext, so every NEAR request
-  that carries one is refused before it is sent.
+- Settings whose value is a mapping, such as `extra_body` entries, leave this host in plaintext. While
+  encryption is on, the plugin lets three structured settings pass, each checked by shape, and refuses
+  every other such setting before the request is sent:
+  - `reasoning`, a mapping with only these keys: `effort` (one of `none`, `minimal`, `low`, `medium`,
+    `high`, `xhigh`, `max`), `summary` (one of `auto`, `concise`, `detailed`, `none`), `max_tokens` (an
+    integer) and `exclude` (true or false). Hermes sends `reasoning: {"effort": ..., "summary": "auto"}`
+    or `{"effort": "none"}` on auxiliary calls such as title generation.
+  - `stream_options`, a mapping with only `include_usage` (true or false).
+  - `reasoning_effort`, one of the same effort words.
+
+  These settings carry no free text: every key is fixed, and every value is a boolean, an integer or a
+  word from a fixed list. Any other key, or a word outside the list, is refused. `logit_bias` and every
+  other `extra_body` entry are still refused, because token ids could encode text. The gateway reads the
+  structured settings, and the `send_signed` row names them in `plaintext_keys`.
+- Every NEAR refusal is recorded. A request the plugin refuses before sending, or a reply it withholds
+  after receiving, gets a `send_refused` row with the purpose (`main` or `aux:<task>`), the host, the
+  reason and the request size when the plugin knows the size. The receipt lists the row under Refusals.
+  For a main call while locked, the LLM gate writes that row; for any other call, the NEAR transport
+  writes the row.
 - It pins each CVM it saw as an entry of its own: the gateway, and each model instance. An entry pins
   the CVM's measured docker-compose, its app_id, OS image and KMS key as RTMR3 records them, and its
   firmware and kernel measurements. A model entry also pins the compose-manager image the log reports
