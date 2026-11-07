@@ -486,7 +486,7 @@ block. It never writes your config. Set `NEAR_AI_API_KEY` for inference. The scr
 ## Look before you lock
 
 Two commands let you see where your conversation goes without locking anything. Both work on an
-install that has never been locked. `check --tier attested` is the one that changes something: it
+install that has never been locked. `check --tier attested` does change something: it
 verifies the enclave over the network, writes `verify_ok` and `pin_staged` rows to the ledger, and may
 stage a pending pin in `pins.yaml`. It never applies a pin and never changes your config.
 
@@ -938,7 +938,7 @@ following, in order.
    broken chain makes the exit status 1, even when every evidence row replays.
 
 By default, the replay uses the trust root recorded in the evidence. The evidence carries the trust
-root's bytes, so the replay works on any machine, not only on the one that captured it. Whoever
+root's bytes, so the replay works on any machine, not only on the machine that captured it. Whoever
 captured the evidence chose that copy, so it is not independent. Pass `--trusted-root <file>` to use
 a Sigstore `trusted_root.json` that you obtained yourself. Evidence captured by an earlier version
 of the plugin holds only a path to the trust root on the capturing machine. On any other machine,
@@ -1014,7 +1014,7 @@ is `True` or `n/a`.
   TLS public key the report commits to, and that its subject alternative names bind the HPKE key and
   the attestation hash. A pass means the TLS connection ended inside the attested router. A row
   captured before the plugin recorded certificates reads n/a. A certificate whose key is not the
-  report's TLS key also reads n/a, not fail. The check is a record: EHBP seals each request body to
+  report's TLS key also reads n/a, not fail. The check is a record: EHBP encrypts each request body to
   the attested HPKE key whoever ends the TLS connection, and the SDK's transport is what enforces the
   TLS key on every connection.
 - `policy_check` re-runs the plugin's own restated Sigstore policy check, the standalone file named
@@ -1290,7 +1290,7 @@ The plugin's own keys live under a top-level `confidential:` section of `config.
 | `confidential.near.base_url` | `https://cloud-api.near.ai/v1` | NEAR AI Cloud's gateway. Attestation, inference and signature requests all go here. |
 | `confidential.near.models` | `[]` | Every NEAR model id Hermes may send. The plugin adds the ids that `model.default` and `auxiliary.<task>.model` name for `attested-near`. The pin covers exactly this list. |
 | `confidential.near.require_provider_tee` | `true` | A NEAR send counts as verified only with a signature made by an attested model server's key. Only the exact value `false` turns it off. |
-| `confidential.near.require_tls_binding` | `true` | The TLS certificate of the attestation connection must be the one the gateway's report binds. |
+| `confidential.near.require_tls_binding` | `true` | The TLS certificate of the attestation connection must be the certificate the gateway's report binds. |
 | `confidential.near.accepted_tcb_statuses` | `[UpToDate]` | The Intel TCB status values accepted for the gateway, from Intel Trust Authority's token. |
 | `confidential.near.signature_wait_seconds` | 5 | How many seconds the plugin keeps asking for a response's signature after the response ended. |
 | `confidential.near.streaming` | `false` | Whether Hermes may stream main calls to NEAR. NEAR's gateway re-signs streamed responses with its own key. |
