@@ -1,5 +1,5 @@
-<!-- PLUGIN_NAME: confidential-mode  (working name; swap it here and in the title below) -->
-# confidential-mode: limitations, as an upstream roadmap
+<!-- PLUGIN_NAME: confidential-mode  (final catalog slug; the prose name is Hermes Confidential Mode) -->
+# Hermes Confidential Mode: limitations, as an upstream roadmap
 
 Every gap in this document is a place where a plugin cannot close a road on its own. A "road" here
 means a way for your conversation, or data about it, to leave the machine.
@@ -8,30 +8,32 @@ Each numbered section says four things:
 
 - **The gap:** what happens.
 - **Why it exists:** which part of Hermes, the vendor or the SDK causes it. Line references are to
-  Hermes at commit 84a0301 unless the section says otherwise. The tests named in
-  [C0-spikes.md](C0-spikes.md) and [INTERFACES.md](INTERFACES.md) prove these references.
+  Hermes at commit 84a0301 unless the section says otherwise. The seam tests under `tests/` run
+  against that commit.
 - **What the plugin does today:** the mitigation, or the plain statement that there is none.
 - **The change that would close it:** usually a change to Hermes core, sometimes a change on the
   vendor's or the SDK's side.
 
-If you maintain Hermes, this is the list of seams we would use.
+For Hermes maintainers, the closing changes are the seams the plugin would use.
+
+The last section, "Smaller gaps, disclosed", lists gaps that need no section of their own.
 
 ## Terms used here
+
+The [guide's glossary](GUIDE.md#glossary) defines every term. The ones this document relies on most
+are repeated here.
 
 **Hermes** is an agent harness: the program that runs the loop around a language model, sends it
 your messages, and runs the tools it asks for. A **profile** is a separate Hermes home directory with
 its own config and data. A **session** is one conversation.
 
 To **lock** a profile is to hold it to one **tier**, which is a rule about where the model may run.
-The word is "lock" and not "seal", because sealing means something else in confidential computing.
 **On-host** means on the machine that runs Hermes, and **off-host** means anywhere else.
-The `on-host-only` tier accepts loopback hosts and the exact hosts you list in
-`confidential.on_host.extra_hosts`. A private-range, carrier-grade NAT, link-local or unique-local
-address is off-tier unless you list that address. A listed DNS name is resolved by the HTTP client at every
-send, so whoever answers DNS for that name picks the destination. The plugin cannot check that a listed host is a machine you
-control. The `attested` tier accepts only
-Tinfoil's verified enclave, or NEAR AI Cloud's verified gateway and models (section 14). A
-destination the rule accepts is "in-tier", and any other is "off-tier".
+The `on-host-only` tier accepts loopback hosts and the exact hosts listed in
+`confidential.on_host.extra_hosts`. The `attested` tier accepts only Tinfoil's verified enclave, or
+NEAR AI Cloud's verified gateway and models (section 14). A destination the rule accepts is
+"in-tier", and any other is "off-tier". The guide's [tiers chapter](GUIDE.md#tiers) states each rule
+in full.
 
 The **preflight** is the check the plugin runs over your config before it locks. It records a
 fingerprint of the routing config so that later changes can be detected.
@@ -125,7 +127,7 @@ runs longer than `plugins.hook_callback_timeout`, Hermes skips it and runs the t
 The plugin handles this in three steps.
 
 1. The preflight includes every `plugins.*` key that governs hooks in the config fingerprint
-   (`confidential_mode/preflight.py:55-56`).
+   (`_PLUGIN_EXECUTION_KEYS` in `confidential_mode/preflight.py`).
 2. The preflight refuses to lock if the timeout is more than 0 and less than 5 seconds.
 3. If someone edits the timeout after locking, the fingerprint changes. The `llm_execution` gate
    then refuses the main call.
@@ -252,8 +254,7 @@ A policy plugin cannot require a particular order of middleware between plugins.
 **Why it exists.** Hermes loads plugins into its own process by default. It offers an alternative,
 `plugins.isolation: host`, which runs plugins in a separate child process. Under host isolation,
 however, this plugin's provider and middleware register in that child process. They are then invisible
-to Hermes, and Hermes gives no warning. The project's compatibility tests found this before any
-plugin code was written ([C0-spikes.md](C0-spikes.md), spike 2).
+to Hermes, and Hermes gives no warning.
 
 **What the plugin does today.** It refuses to lock unless isolation is `in_process` and the attested
 provider is visible in the process. At lock time it records each tool's handler, and it blocks any
@@ -320,12 +321,13 @@ and signed responses.
 **The gap.** Suppose every road above is closed. The following remain.
 
 - **Where TLS ends, and what is visible anyway.** TLS is the encryption HTTPS uses. After each
-  verification the plugin records the TLS certificate the router presents. On 2026-11-06, against
-  `router-0.tinfoil.sh` release v0.0.170, that certificate carried exactly the TLS public key the
-  attestation report commits to. A proxy in front of the enclave could only terminate TLS if it held
-  the matching private key, and that key lives in the attested router. So the TLS connection ends
-  inside the attested enclave. The replay's `tls_cert_binding` check confirms this from the captured
-  certificate alone.
+  verification the plugin records the TLS certificate the router presents
+  (`confidential.tinfoil.tls_probe`). When that certificate carries the TLS public key the
+  attestation report commits to, a proxy in front of the enclave could terminate TLS only if it held
+  the matching private key, and that key lives in the attested router. The TLS connection then ends
+  inside the attested enclave. The replay's `tls_cert_binding` check reports this from the captured
+  certificate alone. The tinfoil SDK's transport enforces the attested TLS key on every connection;
+  the recorded certificate is an observation and never fails a verification.
 
   That settles where the connection ends. It does not hide the metadata of the connection. Any
   network hop, and the vendor's hosting, still see your IP address, the sizes of requests and
@@ -486,7 +488,7 @@ A `gateway` signature is made inside the gateway's CVM over `<request hash>:<res
   model public keys) and any extra headers Hermes adds. With encryption off the gateway reads the whole
   request. The attestation says which code the gateway runs. The attestation does not say what that
   code does with what the gateway reads.
-- **The gateway can read a reply, and is caught only afterwards.** The model seals its reply to the key
+- **The gateway can read a reply, and is caught only afterwards.** The model encrypts its reply to the key
   in the `X-Client-Pub-Key` request header. NEAR's signature does not cover that header. A gateway that
   puts its own key there can read the reply. If it forwards the reply unchanged, the reply does not
   decrypt for the plugin. If it re-encrypts the reply to the plugin's key, the signed response digest no
@@ -519,9 +521,9 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
 - It sends image parts in plaintext beside the encrypted text, by default
   (`confidential.near.image_parts: disclose`). Every text part of such a message (`text` or
   `input_text`, in any letter case) is encrypted. An `image_url` or `input_image` part that holds an
-  inline raster `data:image/...;base64,` image (png, jpeg, gif, webp, bmp or tiff) leaves this host in plaintext to NEAR's gateway. Any other
-  part type, a remote image URL, or an extra field on an image part is refused before sending. The
-  live probe of 2026-11-07 showed that NEAR accepts this shape and still returns a `provider_tee`
+  inline raster `data:image/...;base64,` image (png, jpeg, gif, webp, bmp or tiff) leaves this host
+  in plaintext to NEAR's gateway. Any other part type, a remote image URL, or an extra field on an
+  image part is refused before sending. NEAR accepts this shape and still returns a `provider_tee`
   signature. Each send's ledger row counts the plaintext parts by type, and the receipt says how many
   left. The first time per lock, the plugin writes a `notice` row and, once the row is written, appends
   one line naming the part types to that session's next reply through Hermes' `transform_llm_output`
@@ -531,7 +533,7 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   stay either way. With `confidential.near.image_parts: refuse`, the plugin refuses a message with any
   non-text part before it is sent.
 - It checks the TLS certificate of every inference and signature connection right after the
-  handshake, before any request byte is sent. The certificate's key must be the one the gateway's
+  handshake, before any request byte is sent. The certificate's key must be the key the gateway's
   quote binds. A send over any other certificate is refused.
 - It records every send's digests and signature in a `send_signed` ledger row. A send without a
   `provider_tee` signature that verifies is marked unverified, and the receipt says "SESSION NOT FULLY
@@ -618,8 +620,7 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
 - The plugin reads each CVM's app_id, OS image and KMS key from dstack's boot events in RTMR3. Each event
   must appear once, before the `system-ready` event, with dstack's boot event type. A report that lacks
   one, or repeats one, is refused. Whether a program inside the CVM can add an event with one of those
-  names after boot could not be determined from the captures. If such a program adds one, the repeat
-  rule refuses the report.
+  names after boot is not established. If such a program adds one, the repeat rule refuses the report.
 - The replay's `NOT_ESTABLISHED` list names every item above.
 
 **The change that would close it.** On NEAR's side: one signature chain from the model's bytes through
@@ -768,19 +769,18 @@ Each item below is a smaller gap. Each one is stated in full.
   call such an agent makes on a drifted runtime is recorded, not refused.
 
 - **A timing window around yolo.** If yolo mode is switched on or off between the hook's thread and the
-  agent's thread, there is a short window in which the two disagree. The project accepted this window
-  when it fixed the interfaces (docs/INTERFACES.md, Amendment 2).
+  agent's thread, there is a short window in which the two disagree.
 
 - **The lock is profile-wide.** Concurrent gateway sessions on one profile share the same lock.
 
 - **Group chats and untested surfaces.** In a group chat, `ctx.ask_choice` may accept an answer from
-  any authorised member. The consent spike did not exercise Desktop, the Ink TUI or shared-runtime
+  any authorised member. The consent prompt is not tested on Desktop, the Ink TUI or shared-runtime
   routing.
 
 - **Delegation and cron config.** The hook cannot see the delegation backend that an agent has pinned.
   The preflight does not enumerate `cron.model_provider`. Cron jobs are blocked while locked instead.
 
-- **Voice paths.** The voice-chat and gateway voice-note TTS paths were not traced. The preflight's
+- **Voice paths.** The plugin does not examine the voice-chat and gateway voice-note TTS paths. The preflight's
   "disabled" verdict for `tts.provider` holds only while `voice.auto_tts` is false and the
   `text_to_speech` tool asks on each call.
 
@@ -792,7 +792,9 @@ Each item below is a smaller gap. Each one is stated in full.
   `revoke --all` removes every grant the plugin holds. A revoke reads Hermes' private approval state
   at 84a0301 (`_lock`, `_session_approved`, `_permanent_set`) to drop a session approval. A Hermes
   release that renames that state leaves a session approval in place until its session ends, while
-  the revoke still removes the `command_allowlist` entry.
+  the revoke still removes the `command_allowlist` entry. An approval prompt already open in the
+  gateway can still be answered after a revoke, and that answer grants the tool again. A tool call
+  already past the gate finishes.
 
 - **`/confidential allow` additions last for one lock only.** The plugin stores additions in
   `allowlist.yaml`, tagged with the lock's identity. A new lock starts with none. A file tagged with
@@ -846,6 +848,25 @@ Each item below is a smaller gap. Each one is stated in full.
   When you call the Python function `replay()` without `expected_fingerprints`, it compares the
   fingerprints only with those recorded in the evidence. Compare the result's fingerprints with your
   pin yourself.
+
+- **A listed on-host host is trusted, not checked.** A host in `confidential.on_host.extra_hosts`
+  counts as on-host because the list says so. The plugin cannot check that the host is a machine you
+  control. A private-range, carrier-grade NAT, link-local or unique-local address can belong to
+  another machine, so such an address is off-tier unless listed. A listed DNS name is resolved by the
+  HTTP client at every send, so whoever answers DNS for that name picks the destination.
+
+- **A locked session has no fallback.** While locked, any provider error on a main call ends the turn
+  with "attested endpoint unavailable; this turn ended; resend", and a verification that does not
+  finish within `confidential.verify_wait_seconds` (20 by default) ends the turn too. Nothing is
+  retried or rerouted. [COSTS.md](COSTS.md) states the effect on task success.
+
+- **A lock from a terminal records only the tools a terminal process registers.** A tool that only
+  the gateway connects, such as an MCP tool, is not in a lock made with `hermes confidential on`, and
+  is blocked as unregistered. A lock made from chat records such tools.
+
+- **The `zero-retention` tier is not implemented.** `/confidential on zero-retention` refuses. A
+  hosted provider's promise not to keep data is a policy, and nothing the plugin can observe from this
+  host confirms it.
 
 - **The first pin is trust on first use.** The pin prompt shows the full fingerprints. It says whether
   the code changed or only the platform changed. For a first pin, it says there is nothing to compare
