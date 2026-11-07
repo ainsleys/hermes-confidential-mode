@@ -17,6 +17,8 @@ state, so unit tests pass fakes and register(ctx) passes nothing.
 """
 from __future__ import annotations
 
+import contextlib
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
@@ -369,6 +371,55 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
                                     detail={"reason": ZDR_REASON}, **base))
         return LockResult(False, f"Not locked: {ZDR_REASON}. Use on-host-only or attested.", tier=tier)
 
+    # FI-5: one lock at a time across processes. The already-locked check, the allowlist write and the state
+    # write happen under one file lock, so a second lock either waits and then finds the profile locked
+    # ("Already locked") or is refused while the first is in progress. Neither writes a file.
+    from .filelock import LockBusy
+    guard = _transition_lock(allowlist_path)
+    try:
+        guard.__enter__()
+    except LockBusy as exc:
+        _append(ledger, LedgerEvent(kind="preflight_fail", purpose="lock:busy", verdict="error", decision="refused",
+                                    detail={"error_type": "LockBusy", "lock_file": exc.lock_path.name}, **base))
+        return LockResult(False, f"Not locked: another lock or unlock of this profile is in progress ({exc}). "
+                          "Run /confidential status, then lock again if it is still unlocked.", tier=tier)
+    try:
+        return _lock_held(tier, base, state=state, ledger=ledger, config=config, registry=registry,
+                          plugin_aux_tasks=plugin_aux_tasks, provider_lookup=provider_lookup,
+                          attested_ok=attested_ok, profile_base_url=profile_base_url,
+                          builtin_aux_tasks=builtin_aux_tasks, allowlist_builder=allowlist_builder,
+                          allowlist_path=allowlist_path, verification=verification, live_runtime=live_runtime,
+                          cached_environments=cached_environments, clock=clock, progress=progress)
+    finally:
+        guard.__exit__(None, None, None)
+
+
+_TRANSITION_THREAD_LOCK = threading.Lock()
+TRANSITION_LOCK_NAME = "lock-transition.lock"
+
+
+def _transition_lock(allowlist_path: Any):
+    """filelock.exclusive on ``lock-transition.lock`` beside allowlist.yaml (the pins-style bounded lock), or a
+    thread lock alone when no allowlist path is given (in-memory tests). Not reentrant."""
+    from pathlib import Path
+    from .filelock import ATTEMPTS, INTERVAL_SECONDS, LockBusy, exclusive
+    if allowlist_path is None:
+        @contextlib.contextmanager
+        def _thread_only():
+            if not _TRANSITION_THREAD_LOCK.acquire(timeout=ATTEMPTS * INTERVAL_SECONDS):
+                raise LockBusy(Path(TRANSITION_LOCK_NAME))
+            try:
+                yield
+            finally:
+                _TRANSITION_THREAD_LOCK.release()
+        return _thread_only()
+    return exclusive(Path(allowlist_path).with_name(TRANSITION_LOCK_NAME))
+
+
+def _lock_held(tier: Tier, base: dict, *, state, ledger, config, registry, plugin_aux_tasks, provider_lookup,
+               attested_ok, profile_base_url, builtin_aux_tasks, allowlist_builder, allowlist_path, verification,
+               live_runtime, cached_environments, clock, progress) -> LockResult:
+    """The body of ``lock`` after the tier checks, run under the transition lock."""
     try:
         locked, current = state.locked()
     except Exception:

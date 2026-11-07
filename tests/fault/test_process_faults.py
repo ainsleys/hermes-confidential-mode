@@ -42,8 +42,6 @@ def _kinds(ledger):
 
 # ── two processes locking, locking against unlocking ─────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="FI-5: locking.lock checks 'already locked' and writes the lock without a "
-                                       "lock held across both, so two concurrent locks both report Locked")
 def test_two_concurrent_locks_one_of_them_wins(plugin):
     """locking.lock: an existing lock is refused ("Already locked ... Run /confidential off first, then lock
     again"); Amendment 6 finding 9 orders the writes so another process "that sees the new lock always finds
@@ -71,6 +69,40 @@ def test_two_concurrent_locks_one_of_them_wins(plugin):
     oks = [gateway.startswith("Locked"), out["cli"].ok]
     assert oks.count(True) == 1, f"both locked: gateway={gateway[:30]!r} cli={out['cli'].message[:30]!r}"
     assert [k for k, _ in plugin.kinds()].count("lock") == 1
+
+
+def test_a_lock_after_a_concurrent_lock_finished_is_already_locked(plugin):
+    """FI-5: the already-locked check runs under the transition lock, so a lock that starts once another lock
+    finished is refused "Already locked" and writes no allowlist.yaml and no lock row of its own."""
+    locking = cm(plugin, "locking")
+    rt = plugin.rt
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    before = rt.allowlist_path.read_bytes()
+    out = locking.lock("on-host-only", state=rt.state, ledger=rt.ledger, config=rt.load_config(),
+                       allowlist_path=rt.allowlist_path, surface="cli")
+    assert out.ok is False and out.message.startswith("Already locked"), out.message
+    assert rt.allowlist_path.read_bytes() == before
+    assert [k for k, _ in plugin.kinds()].count("lock") == 1
+
+
+def test_a_lock_while_another_process_holds_the_transition_lock_is_refused_and_recorded(plugin, monkeypatch):
+    """FI-5: a lock started while another process holds lock-transition.lock is refused once the bounded wait
+    ends; the refusal is a preflight_fail row (purpose lock:busy) and no allowlist.yaml is written."""
+    monkeypatch.setattr(filelock, "INTERVAL_SECONDS", 0.02)
+    lock = plugin.rt.allowlist_path.with_name(cm(plugin, "locking").TRANSITION_LOCK_NAME)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("")
+    holder = subprocess.Popen([sys.executable, "-c", _RO_HOLDER, str(lock)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        out = plugin.slash("on on-host-only")
+    finally:
+        holder.kill()
+        holder.wait(5)
+    assert out.startswith("Not locked: another lock or unlock of this profile is in progress"), out
+    assert plugin.rt.state.locked() == (False, None)
+    assert not plugin.rt.allowlist_path.exists()
+    assert any(e.kind == "preflight_fail" and e.purpose == "lock:busy" for e in rows(plugin))
 
 
 def test_a_cli_unlock_reaches_the_gateway_on_its_next_call(plugin):
