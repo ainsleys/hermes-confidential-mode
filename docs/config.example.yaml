@@ -85,9 +85,12 @@ confidential:
     context_length: 256000
 
     # After each verification, send one request without a body over the verified connection and record
-    # the TLS certificate it saw (the tls_observation in the evidence). This is an observation: the
-    # SDK's pinned transport enforces the TLS key, and the probe never fails a verification. Only the
-    # exact value false turns it off. Default true.
+    # the TLS certificate it saw and whether its key is the TLS key the attestation report commits to
+    # (the tls_observation in the evidence). This is an observation and never fails a verification. The
+    # SDK's ehbp transport, which the plugin uses, encrypts request bodies to the enclave's HPKE key but
+    # does not pin the TLS certificate, and the plugin does not pin TLS per send on Tinfoil, so a TLS
+    # intermediary can read request headers, the API key included (docs/LIMITATIONS.md section 9).
+    # Only the exact value false turns the probe off. Default true.
     tls_probe: true
 
   near:
