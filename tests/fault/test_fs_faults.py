@@ -589,9 +589,6 @@ def test_an_unreadable_state_file_fails_every_gate_closed(plugin, damage):
     assert any(e.kind == "tool_refused" and e.decision == "lock_state_unreadable" for e in rows(plugin))
 
 
-@pytest.mark.xfail(strict=True, reason="FI-3: /confidential off cannot repair a state.json Hermes cannot parse "
-                                       "(PluginState.set re-reads the file and raises), so the documented repair "
-                                       "path never clears the lock")
 @pytest.mark.parametrize("damage", ["truncated", "garbage"])
 def test_confidential_off_repairs_an_unreadable_state_file(plugin, damage):
     """Amendment 2: "the gate refuses every send until /confidential status or off repairs it"; status text:
@@ -607,6 +604,31 @@ def test_confidential_off_repairs_an_unreadable_state_file(plugin, damage):
     out = plugin.slash("off")
     assert out.startswith("Lock state was unreadable; it is now cleared"), out
     assert plugin.rt.state.locked() == (False, None)
+
+
+def test_the_repaired_state_file_is_private_and_gates_read_it_again(plugin):
+    """FI-3: the replacement state.json is mode 0600 and parses, so a later status and lock work normally."""
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    p = _state_path(plugin)
+    p.write_bytes(b"{\"locked\": tr")
+    assert plugin.slash("off").startswith("Lock state was unreadable; it is now cleared")
+    assert os.stat(p).st_mode & 0o777 == 0o600
+    assert json.loads(p.read_text()) == {"locked": False}
+    assert plugin.slash("on on-host-only").startswith("Locked")
+
+
+def test_a_state_path_that_is_a_directory_is_not_replaced_and_stays_closed(plugin):
+    """FI-3: only a regular file that does not parse is replaced; a directory in its place is left alone, the
+    off reply is an error, and every gate still fails closed."""
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    p = _state_path(plugin)
+    p.unlink()
+    p.mkdir()
+    out = plugin.slash("off")
+    assert not out.startswith(("Unlocked", "Lock state was unreadable")), out
+    assert p.is_dir()
+    block = _hook(plugin, "pre_llm_call")(session_id="s1")
+    assert block == {"action": "block", "message": TEXT_STATE_UNREADABLE}
 
 
 def test_a_state_write_that_fails_on_unlock_keeps_the_lock_and_says_so(plugin, monkeypatch):

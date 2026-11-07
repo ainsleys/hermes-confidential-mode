@@ -12,7 +12,12 @@ instead of guessing whether the profile is locked.
 """
 from __future__ import annotations
 
+import contextlib
+import json
+import os
+import tempfile
 import time
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .tiers import Tier
@@ -23,6 +28,46 @@ KEY_LOCKED_SINCE = "locked_since"
 KEY_CONFIG_FINGERPRINT = "config_fingerprint"
 KEY_BREACHED_SESSIONS = "breached_sessions"
 KEYS = (KEY_LOCKED, KEY_LOCKED_TIER, KEY_LOCKED_SINCE, KEY_CONFIG_FINGERPRINT, KEY_BREACHED_SESSIONS)
+
+
+def _parses(path: Path) -> bool:
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            return isinstance(json.load(fh), dict)
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _replace_unparseable(path: Path, data: dict) -> bool:
+    """Replace ``path`` with ``data`` when the file is a regular file that does not parse as a JSON object.
+    Holds the sibling ``.<name>.lock`` flock Hermes' PluginState takes, so a concurrent Hermes write is not
+    interleaved; re-checks under that lock, and returns False (nothing written) when the file parses (another
+    process repaired it, or the failure was something else) or is not a regular file. Atomic: a temp file,
+    fsync, then os.replace, mode 0600."""
+    from .filelock import LockBusy, exclusive
+    if not path.is_file() or _parses(path):
+        return False
+    try:
+        with exclusive(path.with_name(f".{path.name}.lock")):
+            if not path.is_file() or _parses(path):
+                return False
+            fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(data, indent=2))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
+    except LockBusy:
+        return False
+    return True
 
 
 class StateError(RuntimeError):
@@ -84,7 +129,16 @@ class ConfidentialState:
         self._store.set(KEY_LOCKED, True)
 
     def unlock(self) -> None:
-        self._store.set(KEY_LOCKED, False)
+        """Clear the lock flag. When the store's file does not parse (truncated, not JSON), Hermes'
+        ``PluginState.set`` re-reads that file and raises, so the file is replaced instead (FI-3): this is
+        the repair ``/confidential off`` promises. Any other failure (a write error on a readable file)
+        propagates, and the profile stays locked."""
+        try:
+            self._store.set(KEY_LOCKED, False)
+        except Exception:
+            path = getattr(self._store, "path", None)
+            if not isinstance(path, (str, os.PathLike)) or not _replace_unparseable(Path(path), {KEY_LOCKED: False}):
+                raise
 
     def locked_since(self) -> float | None:
         value = self._store.get(KEY_LOCKED_SINCE)
