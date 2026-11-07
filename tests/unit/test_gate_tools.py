@@ -797,3 +797,34 @@ def test_format_allowlist_escapes_control_characters():
     assert forged not in text and "\x1b" not in text and "\u200b" not in text
     assert "x\\non-host" in text
     assert len([ln for ln in text.splitlines() if ln.startswith("on-host (")]) == 1
+
+
+def test_unlock_removes_only_its_own_locks_allowlist(tmp_path):
+    """Second review, minor item: an unlock must not delete the allowlist a concurrent lock just wrote."""
+    from confidential_mode.gate_tools import clear_persisted
+    path = tmp_path / "allowlist.yaml"
+    path.write_text(json.dumps({"version": 2, "lock_id": "NEW", "tools": [], "allowed": []}))
+    clear_persisted(path, lock_id="OLD")
+    assert path.exists()
+    clear_persisted(path, lock_id="NEW")
+    assert not path.exists()
+    path.write_text("not json: [")
+    clear_persisted(path, lock_id="OLD")                      # unreadable: removed
+    assert not path.exists()
+    path.write_text(json.dumps({"lock_id": "X"}))
+    clear_persisted(path)                                      # lock state unreadable: removed
+    assert not path.exists()
+
+
+
+def test_choice_repr_checks_the_type_before_comparing():
+    """Second review, minor item: a str subclass whose __eq__ lies is never stored verbatim."""
+    from confidential_mode.gate_tools import _choice_repr
+
+    class Liar(str):
+        def __eq__(self, other):
+            return True
+
+        __hash__ = str.__hash__
+    assert _choice_repr(Liar("hunter2")) == "other" and _choice_repr("once") == "once"
+    assert _choice_repr("") == "" and _choice_repr(None) is None and _choice_repr(7) == "<int>"

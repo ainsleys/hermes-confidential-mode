@@ -33,6 +33,10 @@ HOOKS = ("pre_tool_call", "post_approval_response", "pre_llm_call", "pre_api_req
 # Gateway slash commands that switch the session's live model runtime (Amendment 4 F1(c)); refused while
 # locked. The CLI/TUI never fire pre_gateway_dispatch: there the per-turn live-runtime check ends the turn.
 RUNTIME_SWITCH_COMMANDS = frozenset({"model", "moa"})
+# Built-ins kept usable while locked when the command table cannot be read (second review, minor item):
+# stopping the agent, answering the plugin's own approval prompts, a new session, help and status. None of
+# them switches the model runtime. Matched on the exact typed word, so an alias is refused.
+UNRESOLVED_SAFE_COMMANDS = frozenset({"confidential", "stop", "pause", "approve", "deny", "new", "help", "status"})
 MIDDLEWARE = ("llm_execution", "tool_execution")
 NO_SESSION = "(no session)"
 
@@ -407,8 +411,8 @@ def _pre_gateway_dispatch(rt: Runtime):
                 resolved = False
             if resolved and canonical not in RUNTIME_SWITCH_COMMANDS:
                 return None
-            if not resolved and name == "confidential":
-                return None                        # the plugin's own command stays usable to unlock
+            if not resolved and name in UNRESOLVED_SAFE_COMMANDS:
+                return None                        # /confidential to unlock, and the escape hatches
             # Review finding 27: without resolve_command an alias of /model cannot be recognised, so while
             # locked every other slash command is refused (fail closed) instead of matching the typed word.
             try:

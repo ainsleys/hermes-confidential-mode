@@ -266,8 +266,8 @@ access blocked. It shows whether the stored bytes still check out.
 >   response, their timing, and your IP address. EHBP encrypts the request body. It does not hide
 >   any of these. The TLS connection itself ends inside the attested router, so your API key header
 >   is decrypted by the measured router code rather than by a separate front proxy. The tinfoil SDK
->   enforces this: its transport pins the TLS key from the attestation report on every connection.
->   The plugin's own TLS probe only corroborates it. The probe records the certificate it saw and
+>   enforces where TLS ends: its transport pins the TLS key from the attestation report on every
+>   connection. The plugin's own TLS probe only corroborates the SDK's pinning. The probe records the certificate it saw and
 >   never fails a verification.
 > - **The vendor's collateral proxies.** These are `github-proxy.tinfoil.sh`, `kds-proxy.tinfoil.sh`
 >   and `tdx-proxy.tinfoil.sh`. The SDK fetches verification material through them. They therefore
@@ -899,8 +899,9 @@ marked "unverified entry" has no evidence, or an incomplete capture. Such a row 
 - that the plugin itself checked the evidence during this session;
 - that this session's requests actually went to that enclave;
 - that the request bodies were encrypted to that key;
-- which HPKE key each send used, and whether its response decrypted (these are the plugin's own
-  observations);
+- which HPKE key each send was encrypted to, as the SDK's EHBP transport reports it, and whether
+  its response decrypted (these are the plugin's own observations; a streamed response the client
+  closed before its end is recorded as not known);
 - that the attested build was the vendor's latest release at the time;
 - whether the build or its key was revoked after the evidence was captured;
 - what shell, terminal and code-execution tools sent off the machine;
@@ -945,7 +946,7 @@ following, in order.
    unless you name another one with `--expected-repo`.
 4. It prints each row's result, the value of each check, and any problems.
 5. It prints the list of things a replay cannot establish. That list is below.
-6. It exits with status 0 only if the hash chain is intact and every row replayed and matched. A
+6. `hermes confidential replay` exits with status 0 only if the hash chain is intact and every row replayed and matched. A
    broken chain makes the exit status 1, even when every evidence row replays.
 
 By default, the replay uses the trust root recorded in the evidence. The evidence carries the trust
@@ -1134,7 +1135,7 @@ tool runs only on an exact `once`, `session` or `always`.
 command will connect to.
 
 **What the plugin does today.** It treats these tools as on-host and lets them run. Every receipt says
-that shell and code tools are not covered. It refuses to lock unless the terminal backend is `local`,
+that shell and code tools are not covered. The plugin refuses to lock unless the terminal backend is `local`,
 because on any other backend these tools and the file tools run on another machine or in a container.
 
 **The core change that would close it.** A network policy on the terminal backend that plugins can

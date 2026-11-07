@@ -498,8 +498,12 @@ Each item below is a smaller gap. Each one is stated in full.
 - **`/confidential allow` additions last for one lock only.** The plugin stores additions in
   `allowlist.yaml`, tagged with the lock's identity. A new lock starts with none. A file tagged with
   another lock's identity adds nothing. `/confidential off` deletes the file. The file has mode 0600.
-  Anyone who can edit it can add a tool for the current lock without a prompt or a ledger row; that
-  is inside the stated trust boundary (section 6).
+  Anyone who can edit it can add a tool for the current lock without a prompt or a ledger row. Such
+  an edit is inside the stated trust boundary (section 6).
+
+- **Older ledger rows keep raw approval answers.** This version stores a classification of each
+  approval answer instead of the text. Rows written by an earlier version are not rewritten, so a
+  receipt that covers them can still show the answer as typed.
 
 - **Mixed plugin versions disagree about the lock.** The lock records a fingerprint of the routing
   config, and this version added the terminal backend to it. A lock made by an earlier version still

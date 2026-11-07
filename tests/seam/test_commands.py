@@ -252,11 +252,13 @@ def test_gateway_commands_fail_closed_when_resolve_command_is_unavailable(plugin
     from hermes_cli.plugins import invoke_hook
     assert plugin.slash("on on-host-only").startswith("Locked")
     monkeypatch.setitem(sys.modules, "hermes_cli.commands", types.ModuleType("hermes_cli.commands"))
-    for text in ("/m openrouter:x", "/help", "/model x"):
+    for text in ("/m openrouter:x", "/usage", "/model x", "/retry"):
         word = text[1:].split()[0]
         assert invoke_hook("pre_gateway_dispatch", event=NS(text=text)) == [
             {"action": "rewrite", "text": f"/confidential blocked {word} unresolved"}]
-    assert invoke_hook("pre_gateway_dispatch", event=NS(text="/confidential off")) == []
+    # The escape hatches stay usable: unlock, stop the agent, answer approvals, new session, help, status.
+    for text in ("/confidential off", "/stop", "/approve", "/deny", "/new", "/help", "/status", "/pause"):
+        assert invoke_hook("pre_gateway_dispatch", event=NS(text=text)) == [], text
     assert "cannot resolve /m" in plugin.slash("blocked m unresolved")
     assert ("tool_refused", "command_unresolved") in plugin.kinds()
 

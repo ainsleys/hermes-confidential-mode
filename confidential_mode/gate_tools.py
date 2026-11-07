@@ -235,10 +235,16 @@ class Allowlist:
         return fresh
 
 
-def clear_persisted(path: Optional[Path]) -> None:
-    """Unlock: drop the lock's persisted allowlist and its additions (Amendment 4 F6)."""
+def clear_persisted(path: Optional[Path], *, lock_id: str = "") -> None:
+    """Unlock: drop the lock's persisted allowlist and its additions (Amendment 4 F6). With ``lock_id``, only
+    a file written for that lock (or an unreadable one) is removed: a file another process wrote for a newer
+    lock is kept. Without it (unreadable lock state), the file is removed."""
     if path is None:
         return
+    if lock_id:
+        data = _read_json_or_yaml(Path(path))
+        if isinstance(data, dict) and isinstance(data.get("lock_id"), str) and data["lock_id"] != lock_id:
+            return
     with contextlib.suppress(FileNotFoundError):
         Path(path).unlink()
 
@@ -1099,10 +1105,12 @@ def _choice_repr(choice: Any) -> Any:
     """A classification of an approval answer, safe to store and to show the model. A human may type a
     secret at the prompt by mistake (review finding 20), so free text is never kept: Hermes' fixed answers
     and "" stay as they are, None stays None, any other string is "other", any other value is its type."""
-    if choice is None or choice == "" and isinstance(choice, str):
-        return choice
+    if choice is None:
+        return None
+    if type(choice) is str:                   # exact type first: a str subclass's __eq__ is never consulted
+        return choice if choice == "" or choice in KNOWN_CHOICES else "other"
     if isinstance(choice, str):
-        return choice if choice in KNOWN_CHOICES else "other"
+        return "other"
     return f"<{type(choice).__name__}>"
 
 

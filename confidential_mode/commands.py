@@ -394,15 +394,18 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
                 return result.message + "\n\nPreflight:\n" + _pf.format_report(result.report)
         return result.message
     if cmd in ("off", "unlock"):
+        # Amendment 4 F6 (W4): allow grants are scoped to the lock. Second review, minor item: the file is
+        # removed BEFORE the flag is cleared, and only if it belongs to the lock being cleared, so a lock
+        # made concurrently by another process never loses its own allowlist.
+        try:
+            from .gate_tools import clear_persisted, lock_id_for
+            clear_persisted(rt.allowlist_path, lock_id=lock_id_for(rt.state))
+        except Exception:  # noqa: BLE001
+            pass
         result = _locking.unlock(state=rt.state, ledger=rt.ledger, session_id=sid, surface=surface,
                                  clear_cache=lambda: [_provider_module(rt).verification_cache.invalidate(n)
                                                       for n in _locking.ATTESTED_PROFILES])
         rt.set_allowlist(None)
-        try:   # Amendment 4 F6 (W4): allow grants are scoped to the lock
-            from .gate_tools import clear_persisted
-            clear_persisted(rt.allowlist_path)
-        except Exception:  # noqa: BLE001
-            pass
         return result.message
     if cmd == "status":
         return status_text(rt, session_key=skey)

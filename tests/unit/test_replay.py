@@ -887,6 +887,11 @@ def test_verify_time_policy_check_detail(captured):
     bad["release"]["tag"] = "v0.0.0"
     assert provider_mod._policy_check_detail(bad)["ok"] is False
     assert provider_mod._policy_check_detail({})["ok"] is False
+    # Second review, minor item: the embedded trust root is checked against its sha256 before use.
+    swapped = copy.deepcopy(captured.evidence)
+    swapped["trusted_root"]["json_b64"] = base64.b64encode(b'{"other": "root"}').decode()
+    assert provider_mod._policy_check_detail(swapped) == {"ok": False,
+                                                           "reason": "trusted root does not match its recorded sha256"}
 
 
 # ── TLS certificate on the EHBP connection (stubbed TLS server) ───────────────────────────────

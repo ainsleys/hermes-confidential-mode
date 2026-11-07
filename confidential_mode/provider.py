@@ -389,6 +389,9 @@ def _policy_check_detail(evidence) -> dict:
             root = base64.b64decode(tr["json_b64"], validate=True)
         else:
             root = _P(tr["path"]).read_bytes()      # evidence captured before the bytes were embedded
+        import hashlib
+        if hashlib.sha256(root).hexdigest() != tr.get("sha256"):
+            return {"ok": False, "reason": "trusted root does not match its recorded sha256"}
         r = policy_check.check_bundle(bundle, digest=rel["digest"], repo=ev.get("repo") or "",
                                       tag=rel.get("tag"), trusted_root=root)
         return {"ok": bool(r.ok), "reason": r.reason, "repo_id": r.repo_id, "owner_id": r.owner_id,
