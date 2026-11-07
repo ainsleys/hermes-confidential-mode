@@ -25,7 +25,10 @@ its own config and data. A **session** is one conversation.
 To **lock** a profile is to hold it to one **tier**, which is a rule about where the model may run.
 The word is "lock" and not "seal", because sealing means something else in confidential computing.
 **On-host** means on the machine that runs Hermes, and **off-host** means anywhere else.
-The `on-host-only` tier accepts loopback and private-range hosts. The `attested` tier accepts only
+The `on-host-only` tier accepts loopback hosts and the exact hosts you list in
+`confidential.on_host.extra_hosts`. A private-range, carrier-grade NAT, link-local or unique-local
+address is off-tier unless you list that address. The plugin cannot check that a listed host is a machine you
+control. The `attested` tier accepts only
 Tinfoil's verified enclave, or NEAR AI Cloud's verified gateway and models (section 14). A
 destination the rule accepts is "in-tier", and any other is "off-tier".
 
@@ -146,7 +149,7 @@ In the bypass modes listed above, the plugin blocks the tool instead of asking.
 
 `session` and `always` are real grants. Hermes stores an `always` grant in its `command_allowlist`
 as `plugin_rule:confidential-mode:tool:<name>`. That grant stops the asking for the tool, across
-locks, until you remove the entry.
+locks, until you revoke the grant with `/confidential revoke <tool>`.
 
 **The core change that would close it.** Grant only on an explicit allow choice, and treat `None`,
 empty and unknown values as deny. Let a plugin's approve directive carry its own header text. Fire
@@ -748,7 +751,11 @@ Each item below is a smaller gap. Each one is stated in full.
 
 - **Remembered `always` grants outlive the lock.** Hermes stores them in `command_allowlist` as
   `plugin_rule:confidential-mode:tool:<name>`. They survive an unlock. `/confidential pins` lists them.
-  This build has no revoke command. To revoke a grant, remove its entry from `command_allowlist`.
+  `/confidential revoke <tool>` (or `hermes confidential revoke <tool>`) removes the grant, and
+  `revoke --all` removes every grant the plugin holds. A revoke reads Hermes' private approval state
+  at 84a0301 (`_lock`, `_session_approved`, `_permanent_set`) to drop a session approval. A Hermes
+  release that renames that state leaves a session approval in place until its session ends, while
+  the revoke still removes the `command_allowlist` entry.
 
 - **`/confidential allow` additions last for one lock only.** The plugin stores additions in
   `allowlist.yaml`, tagged with the lock's identity. A new lock starts with none. A file tagged with

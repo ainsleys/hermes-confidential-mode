@@ -18,7 +18,9 @@ writes is scoped to one profile.
 To **lock** a profile is to hold it to one **tier**, a rule about where the model may run. The word
 is "lock" and not "seal", because sealing means something else in confidential computing. A
 destination the rule accepts is "in-tier", and any other is "off-tier". The `on-host-only` tier
-accepts loopback and private-range hosts. The `attested` tier accepts two vendors: a Tinfoil enclave,
+accepts loopback hosts and the exact hosts you list in `confidential.on_host.extra_hosts`. A
+private-range address is off-tier unless you list the address, because such an address can be another
+machine. The `attested` tier accepts two vendors: a Tinfoil enclave,
 or NEAR AI Cloud's gateway and models, in each case only a verified build you have approved.
 **On-host** means on the machine that runs Hermes, and **off-host** means anywhere else.
 
@@ -291,7 +293,7 @@ which means it happens inside a function, not when the plugin loads.
 
 | Module | Names | Why |
 |---|---|---|
-| `tools.approval` | `request_tool_approval`, `is_approved`, `_yolo_active`, `_presence`, and, in `/confidential pins`, `_lock`, `_session_approved`, `_permanent_set` | To ask before an off-host tool call. To detect bypass states that would approve a call without asking. To read remembered grants stored under the plugin's own rule key. |
+| `tools.approval` | `request_tool_approval`, `is_approved`, `_yolo_active`, `_presence`, and, in `/confidential pins` and `revoke`, `_lock`, `_session_approved`, `_permanent_set` | To ask before an off-host tool call. To detect bypass states that would approve a call without asking. To read remembered grants stored under the plugin's own rule key, and to drop them on a revoke. |
 | `tools.approval_context` | `get_current_session_key`, `set_current_observability_context`, `reset_current_observability_context`, `_get_approval_mode` | To get the session key for remembered grants. To tie an approval answer to its tool call. To detect `approvals.mode: off`. |
 | `tools.registry` | `registry`, `discover_builtin_tools` | To build the tool allowlist at lock, and to record each tool's handler identity. A lock from the `hermes confidential` command line first loads the built-in tools, as a chat process would. |
 | `agent.error_classifier` | `_CONTEXT_OVERFLOW_PATTERNS` | To recognise a NEAR context-length error, so that Hermes can compress the context as it would for any provider. |
@@ -302,7 +304,7 @@ which means it happens inside a function, not when the plugin loads.
 | `tools.mcp_tool`, `tools.mcp_tool_config`, `tools.mcp_tool_scope` | `_servers`, `_mcp_tool_server_names`, `_load_mcp_config`, `_key_name` | To map an MCP tool to its server, and to read whether that server is a URL or an on-host command. |
 | `tools.delegate_tool_config` | `_load_config` | To read the delegation backend and route keys for `delegate_task`. |
 | `providers`, `providers.base` | `register_provider`, `get_provider_profile`, `ProviderProfile` | To register `attested-tinfoil` and `attested-near`, and to check at lock time that the locked profile is visible in the process. |
-| `hermes_cli.config`, `hermes_cli.config_defaults` | `load_config_readonly`, `DEFAULT_CONFIG` | To read the config, and to list the built-in auxiliary tasks. |
+| `hermes_cli.config`, `hermes_cli.config_defaults` | `load_config_readonly`, `load_config`, `save_config`, `DEFAULT_CONFIG` | To read the config, and to list the built-in auxiliary tasks. A revoke uses `load_config` and `save_config` to remove the plugin's own `command_allowlist` entries, as Hermes does when Hermes saves an `always` answer. |
 | `hermes_cli.plugins` | `get_plugin_manager`, `get_plugin_auxiliary_tasks` | To tell plugin tools from built-in tools, and to include plugin-registered auxiliary tasks in the preflight. |
 | `plugins.plugin_storage` | `plugin_db`, `plugin_data_dir` | To open the ledger database. |
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
@@ -360,7 +362,8 @@ whole profile. While locked, the plugin blocks the following.
 
   Enforcement happens in the `tool_execution` middleware. It runs the tool only on an exact `once`,
   `session` or `always`. `session` stops the asking for that session. `always` stops it, across locks,
-  until you remove `plugin_rule:confidential-mode:tool:<name>` from `command_allowlist`.
+  until you run `/confidential revoke <tool>`, which removes `plugin_rule:confidential-mode:tool:<name>`
+  from `command_allowlist`.
 
   Under yolo mode, `approvals.mode: off`, or an unattended context such as cron, `-q` or no surface
   at all, the ask becomes a block.

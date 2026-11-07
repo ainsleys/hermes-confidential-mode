@@ -37,9 +37,14 @@ use this tier takes the quality drop of that local model, which is large on most
 What the plugin itself adds in this mode:
 
 - An allow-once prompt on every off-host tool call, until the user answers "always" for that tool.
+  `/confidential revoke <tool>` brings the prompt back.
 - Off-host tool calls refused outright in yolo mode and unattended mode, because there is nobody to ask.
 - Cron jobs refused while locked.
 - Fallback providers refused while locked.
+- A model on another machine refused until you list its exact host. The tier accepts loopback by
+  rule. A model server on your LAN, a tailnet or a cloud private network has a private-range
+  address, and the lock refuses that address until you list the address in `confidential.on_host.extra_hosts`.
+  The preflight row for such a host names its range and the key.
 
 Task success therefore drops for tasks that need web tools in yolo or unattended mode, and is close to
 the baseline when a person is present to answer prompts.

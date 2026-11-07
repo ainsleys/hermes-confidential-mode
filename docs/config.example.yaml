@@ -169,11 +169,16 @@ confidential:
     context_length: 65536
 
   on_host:
-    # Extra hostnames or IP addresses that the on-host-only tier counts as on-host.
+    # Extra hosts that the on-host-only tier counts as on-host. Each entry is one exact host name or
+    # one IP address, for example gpu-box.lan or 192.168.1.20. A range (10.0.0.0/8), a wildcard
+    # (*.lan), a URL or a port is refused, and the lock fails until the entry is fixed.
     #
-    # Without this list, the on-host-only tier accepts loopback addresses, the RFC 1918 private ranges,
-    # 100.64/10, fe80::/10, fc00::/7 and localhost. The plugin never looks a hostname up in DNS, so
-    # any other hostname is off-tier unless it is listed here. Default [].
+    # Without this list, the on-host-only tier accepts loopback addresses (127.0.0.0/8, ::1),
+    # localhost, and this machine's own host name when that name resolves only to loopback. Private ranges
+    # (10/8, 172.16/12, 192.168/16), carrier-grade NAT (100.64/10), IPv6 link-local (fe80::/10) and
+    # unique-local (fc00::/7) addresses are off-tier unless listed here, because they can be another
+    # machine. The plugin never looks a listed name up in DNS. The list is part of the config
+    # fingerprint, so changing the list after locking counts as a config change. Default [].
     extra_hosts: []
 
 # ── Core keys the attested preflight checks ───────────────────────────────────────────────────

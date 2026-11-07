@@ -31,7 +31,7 @@ The plugin does four things for a Hermes profile.
    runs Hermes. You can watch that log live in a terminal, and this works before you lock anything.
 
 2. **It locks the profile to one tier.** A tier is a rule for which destinations are acceptable.
-   The `on-host-only` tier accepts a host whose network address is loopback or in a private range.
+   The `on-host-only` tier accepts a loopback host and any exact host you list in the config.
    The `attested` tier accepts a Tinfoil enclave, or NEAR AI Cloud's gateway and models, whose build
    you have approved. Before locking, the plugin checks every configured route: the main model,
    every side call, delegation, text to speech, MCP servers, fallbacks and the terminal backend. If
@@ -43,7 +43,8 @@ The plugin does four things for a Hermes profile.
    chat and are rechecked every turn. No fallback provider may be configured, and a failed request
    ends the turn instead of being rerouted. Off-host tools ask you before each call; an answer of
    `session` or `always` stops the asking, and an `always` answer is written to Hermes' own
-   allowlist and outlives the lock. Memory must be the built-in store.
+   allowlist and outlives the lock. `/confidential revoke <tool>` withdraws such a grant. Memory must
+   be the built-in store.
 
 4. **It writes a receipt for each session.** The receipt lists where the text went, attaches the
    enclave evidence captured at each verification, and ends with fixed paragraphs naming what the
@@ -69,9 +70,9 @@ pass through the middleware a plugin can block. The limitations section at the e
 lists every gap of this kind. [docs/LIMITATIONS.md](docs/LIMITATIONS.md) gives the Hermes change that
 would close each.
 
-A private-range address is not the same thing as a machine you control. A neighbour in a cloud
-provider's private network has a private-range address too, and so does a carrier-grade NAT
-address. The plugin cannot tell those apart from your own machine.
+A host you list in `confidential.on_host.extra_hosts` counts as on-host because you say so. The
+plugin cannot check that a listed host is a machine you control. A listed private-range address can
+belong to a neighbour in a cloud provider's private network or behind a carrier-grade NAT.
 
 On NEAR AI Cloud, the gateway still reads each request's model id, plaintext parameters, headers,
 sizes and timing. Every instance of a model shares the key a request is encrypted to, so the
@@ -168,8 +169,8 @@ that satisfies the rule is "in-tier". Any other destination is "off-tier".
 
 **On-host and off-host.** On-host means on the machine that runs Hermes. Off-host means anywhere
 else. An on-host tool, such as `read_file`, does its work on that machine. An off-host tool, such as
-`web_search`, sends data to another machine. The `on-host-only` tier is wider than its name: it also
-accepts private-range addresses, as the `on-host-only` section below explains.
+`web_search`, sends data to another machine. The `on-host-only` tier also accepts hosts you list by
+name, as the `on-host-only` section below explains.
 
 **Lock.** To lock a profile is to hold it to one tier. While a profile is locked, the plugin refuses
 off-tier model calls and gates off-host tools. To unlock is to remove that hold. The time between a
@@ -384,20 +385,28 @@ today.
 
 **Where the model may run.** The model's host must be one of the following:
 
-- a loopback address: `127.0.0.0/8` or `::1`;
-- an address in a private IPv4 range: `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16`;
-- an address in `100.64.0.0/10`, the carrier-grade NAT range, which tailnets also use;
-- an IPv6 link-local address (`fe80::/10`) or unique local address (`fc00::/7`);
+- a loopback address: `127.0.0.0/8` or `::1`, including the IPv4-mapped form `::ffff:127.0.0.1`;
 - one of the names `localhost`, `localhost.localdomain`, `ip6-localhost` or `ip6-loopback`;
-- a host you list in `confidential.on_host.extra_hosts`.
+- this machine's own host name, when every address that name resolves to is loopback;
+- an exact host you list in `confidential.on_host.extra_hosts`.
 
-The plugin never looks a hostname up in DNS. Any other hostname is off-tier unless you list it in
-`extra_hosts`.
+The plugin looks up one name in DNS: this machine's own host name, and only when a route names that host.
+The plugin looks that name up once per process and fails closed on an error or a two-second timeout. Any
+other hostname is off-tier unless you list that hostname in `extra_hosts`.
 
-**What "private-range" does and does not mean.** A private-range address is not proof that the
-machine is yours. A neighbour in the same cloud provider's private network passes the check. So does
-an address handed out by a carrier-grade NAT. When you list a host in `extra_hosts`, you are telling
-the plugin that you trust that host.
+**Private ranges are off-tier unless listed.** These ranges can hold another machine, so the tier
+refuses them by default: the private IPv4 ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`,
+the carrier-grade NAT range `100.64.0.0/10` (which tailnets also use), IPv6 link-local `fe80::/10` and
+IPv6 unique-local `fc00::/7`. A user on a cloud VM or a corporate network could otherwise lock
+`on-host-only` while the model runs on a neighbour's machine. The preflight row for such a host names
+its range and the `confidential.on_host.extra_hosts` key.
+
+**What listing a host means.** Each entry in `extra_hosts` is one exact host name or one IP address.
+A range, a wildcard, a URL or a port is refused, and the lock fails until you fix the entry. Listing
+`10.0.0.5` admits that one address and no other address in `10.0.0.0/8`. A listed host name matches
+only that name, never an address the name resolves to. When you list a host, you are telling the
+plugin that you trust that host. The plugin cannot check that the host is yours. The list is part of
+the config fingerprint, so a change to the list after locking counts as a config change.
 
 **What it costs you.** The model's quality is whatever your hardware can run. Its availability is
 your hardware's availability.
@@ -919,7 +928,8 @@ The three answers differ in how long they last:
 - `session` stops the asking for this tool for the rest of the session.
 - `always` stops the asking for this tool permanently, across locks. Hermes stores the grant in
   `command_allowlist` under the name `plugin_rule:confidential-mode:tool:<name>`. The grant stays
-  there until you delete that entry. `/confidential pins` lists these grants.
+  there until you revoke the grant with `/confidential revoke <tool>`. `/confidential pins` lists these
+  grants.
 
 **When nobody can answer, the ask becomes a block.** Hermes sometimes approves tool calls without
 asking anyone. This happens under yolo mode, which turns off all approval prompts. It also happens
@@ -979,6 +989,32 @@ current lock, and the tool then runs without asking. No ledger row records such 
 yours, like the ledger, so this is inside the trust boundary the plugin states: the plugin defends
 against what the model and remote hosts do, not against you or other code on your account. A tool
 that is always blocked stays blocked whatever the file says.
+
+### `/confidential revoke <tool>`
+
+`/confidential revoke <tool>` withdraws the grants the plugin holds for one tool. The command line
+form is `hermes confidential revoke <tool>`. `revoke --all` withdraws every such grant. After a
+revoke, the next call of the tool asks again while locked.
+
+A revoke removes these entries and no others:
+
+- the tool's name in the `allowed` list of `allowlist.yaml`, when the file belongs to the current
+  lock (an addition from `/confidential allow`);
+- the entry `plugin_rule:confidential-mode:tool:<tool>` in Hermes' `command_allowlist` (an `always`
+  answer to the plugin's prompt);
+- the same key in Hermes' session approvals (a `session` or `always` answer).
+
+Any other `command_allowlist` entry was written by you or by another plugin, so a revoke leaves that entry
+alone and names the entry in the reply. A revoke that finds no grant changes nothing and says so. Each
+revoke that removes a grant writes a `grant_revoked` row to the ledger, with the tool, the surface
+and the lock's identity.
+
+A revoke from the command line reaches a running gateway on the gateway's next tool call. The
+gateway re-reads `allowlist.yaml` when the file changes, and Hermes re-reads `command_allowlist` on
+every check. Session approvals live only in the gateway's memory. So the revoke also appends a
+record to `grants_revoked.json` in the plugin's data directory, and the gateway drops the matching
+session approvals when the gateway sees a new record. Revoking only narrows what runs, so the command asks
+nobody, and the command works in a process a Hermes tool started.
 
 ## Pins
 
@@ -1470,7 +1506,7 @@ The plugin's own keys live under a top-level `confidential:` section of `config.
 | `confidential.verify_wait_seconds` | 20 | How many seconds a turn waits for a verification before the turn is refused. |
 | `confidential.verify_refresh_lead_seconds` | 60 | While locked, a background thread verifies again this many seconds before the current verification ends. A new verification is used only after the pin check accepts it. A failed or unapproved background verification changes nothing; when the current verification ends, the next send verifies inline. 0 turns the thread off. |
 | `confidential.pins.auto_approve_platform_only` | `false` | When `true`, the plugin applies a new pin without asking if only the platform changed and the SDK's signed hardware check passed. That check exists for TDX only. |
-| `confidential.on_host.extra_hosts` | `[]` | Extra hosts that the `on-host-only` tier counts as on-host. |
+| `confidential.on_host.extra_hosts` | `[]` | Exact hosts (one name or one IP address each, no ranges) that the `on-host-only` tier counts as on-host. |
 | `confidential.model` | Unset. | The model id that `hermes confidential setup` writes into the config block it prints. |
 | `confidential.near.base_url` | `https://cloud-api.near.ai/v1` | NEAR AI Cloud's gateway. Attestation, inference and signature requests all go here. |
 | `confidential.near.models` | `[]` | Every NEAR model id Hermes may send. The plugin adds the ids that `model.default` and `auxiliary.<task>.model` name for `attested-near`. A NEAR pin's identity is this list, so changing the list needs a new pin. |

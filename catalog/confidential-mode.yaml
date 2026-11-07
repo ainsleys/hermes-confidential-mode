@@ -4,7 +4,7 @@ name: confidential-mode
 repo: https://github.com/ainsleys/hermes-confidential-mode
 sha: "<40-char sha at submission>"   # filled in at submission: the entry cannot name the commit that contains it
 description: >-
-  Locks a Hermes profile so that the model runs only on this host or a private-range host, or in a
+  Locks a Hermes profile so that the model runs only on this host or on a host you list, or in a
   Tinfoil enclave or behind NEAR AI Cloud's attested gateway and models, whose builds you approved.
   For NEAR it encrypts each chat request to the verified model key, checks each response's
   signature, and records whether a model TEE signed it. A locked profile is held to one tier,
@@ -16,7 +16,7 @@ description: >-
   runtime has drifted off-tier. On gateway surfaces it refuses /model and /moa while locked.
 
   Before each tool call that would send data off the machine, it asks you on Hermes' approval
-  prompt. An always answer lasts until you remove it from Hermes' command_allowlist. Under yolo,
+  prompt. An always answer lasts until you run /confidential revoke <tool>. Under yolo,
   approvals off, cron and other unattended runs, nobody can answer, so the ask becomes a block. The
   plugin always blocks cronjob_manage, tools from off-tier MCP URL servers, and delegate_task calls
   that name a route.
@@ -27,8 +27,9 @@ description: >-
   this host, which you can watch with hermes confidential watch or render with /confidential receipts.
 
   If Hermes runs on someone else's machine, that operator sees every prompt before any of this
-  applies. On-host-only means a loopback or private-range address. Private-range addresses include
-  cloud VPC neighbours and carrier-grade NAT, so they are not proof that a host is yours.
+  applies. On-host-only means a loopback address or an exact host you list in
+  confidential.on_host.extra_hosts. A private-range address is off-tier unless you list the address, because
+  cloud VPC neighbours and carrier-grade NAT hosts have private-range addresses too.
 
   Disclosure, network. The plugin makes no network call at load. All network traffic serves the
   attested tier. It contacts atc.tinfoil.sh for router discovery, which is skipped when
@@ -108,7 +109,7 @@ known_issues:
   - "Every other plugin in the same Hermes process shares the trust boundary. Under plugins.isolation: host, the attested provider is invisible to Hermes, so the preflight refuses to lock."
   - "Tinfoil's attestation covers its model router, not the model backend behind the router. The attestation report carries no client nonce. Every timestamp the plugin records comes from the host clock."
   - "AMD and Intel routers have different enclave fingerprints for the same release. After a restart, router discovery can pick a router on the other platform, and the plugin then asks you to approve again. Set confidential.tinfoil.enclave to one router host to stop this. Alternatively, confidential.pins.auto_approve_platform_only: true approves a platform-only change without asking, but only when the SDK's signed hardware check passed, which tinfoil 0.14.2 performs for TDX only."
-  - "Remembered 'always' tool grants live in Hermes' command_allowlist as plugin_rule:confidential-mode:tool:<name>. They persist across locks. There is no revoke command yet, so remove the entry from command_allowlist to revoke one."
+  - "Remembered 'always' tool grants live in Hermes' command_allowlist as plugin_rule:confidential-mode:tool:<name>. They persist across locks. /confidential revoke <tool> (or hermes confidential revoke <tool>, or revoke --all) removes them, and a running gateway drops the matching session approvals on its next tool call. Revoke reads Hermes' private approval state to do that, so a Hermes release that renames that state leaves a session approval in place until its session ends."
   - "Suppose the live runtime is switched to a hosted provider, for example with /model on the CLI. Hermes' agent start-up then lists that provider's models with your API key, before any plugin seam runs (agent/model_metadata.py). No conversation text is sent, and the plugin refuses the turn. The request still goes out."
   - "If Hermes runs on someone else's machine, such as a cloud agent or a VPS, that machine's operator sees every prompt. Locked mode protects the road out of the Hermes process, not the process itself."
   - "hermes confidential replay requires the tinfoilsh/confidential-model-router repository by default, and takes the expected fingerprints from your approved pin. By default it still uses the trust root and the capture time recorded in the evidence; pass --trusted-root and --as-of to supply your own. Pass --expected-repo-id and --expected-owner-id to bind the repository by its numeric GitHub IDs as well as its name. A broken hash chain makes the replay exit 1. The first pin is trust on first use."
