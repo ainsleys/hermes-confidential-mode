@@ -757,7 +757,8 @@ def _expected_for_row(*, flag: Optional[tuple], pin_records: Optional[dict], pin
 
 def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None, rt: Any = None) -> int:
     """`hermes confidential replay <receipt.json>`: re-run every evidence blob in a receipt offline.
-    Exit 0 only when every row replays ok AND matches the expected repo and the expected fingerprints
+    Exit 0 only when the hash chain is intact and every row replays ok AND matches the expected repo and
+    the expected fingerprints
     (from --expected-fingerprints, else the approved pin in --pins / the profile's pins.yaml, else, labelled
     as not independent, the receipt's own row)."""
     out = out or sys.stdout
@@ -797,9 +798,11 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
     expected_repo = getattr(args, "expected_repo", None) or DEFAULT_EXPECTED_REPO
     trusted_root = getattr(args, "trusted_root", None)
     as_of = getattr(args, "as_of", None)
+    chain_ok = False
     try:
         from .receipts import verify_chain
-        chain = "intact" if verify_chain(doc) else "BROKEN (receipt edited, or rows no longer match)"
+        chain_ok = verify_chain(doc) is True
+        chain = "intact" if chain_ok else "BROKEN (receipt edited, or rows no longer match)"
     except Exception as exc:  # noqa: BLE001
         chain = f"not checked ({type(exc).__name__})"
     items = [i for i in (doc.get("evidence") or []) if isinstance(i, dict) and isinstance(i.get("evidence"), dict)]
@@ -901,7 +904,11 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
     out.write(f"\n{len(items) - failed}/{len(items)} evidence row(s) replayed OK.\n")
     if near is not None:
         out.write(f"{len(near['sends']) - signed_failed}/{len(near['sends'])} signed response(s) replayed OK.\n")
-    return 1 if (failed or signed_failed) else 0
+    if not chain_ok:
+        # Review finding 10: a receipt whose rows no longer match their hash chain fails the replay, even
+        # when every evidence blob in it replays.
+        out.write(f"Hash chain {chain}: the replay fails.\n")
+    return 1 if (failed or signed_failed or not chain_ok) else 0
 
 
 CLI_VERBS = ("on", "off", "receipts", "pins", "allow")

@@ -340,6 +340,33 @@ def test_cli_replay_passes_identity_arguments_and_exits_zero_only_when_all_match
     assert commands.cli_replay(args, out=io.StringIO(), replay_fn=new_replay) == 2
 
 
+def test_cli_replay_exits_nonzero_on_a_broken_hash_chain_even_when_evidence_replays(plugin, tmp_path):
+    """Review finding 10: an edited receipt (a row changed without re-hashing) whose evidence still
+    replays must not exit 0."""
+    import io
+    path, r = _receipt_with_scenario_evidence(plugin, tmp_path)
+    commands, replay = _sub(plugin, "commands"), _sub(plugin, "verify.replay")
+
+    def ok_replay(evidence, *, as_of=None, expected_repo=None, expected_fingerprints=None, trusted_root=None):
+        return replay.ReplayResult(ok=True, checks={k: True for k in replay.CHECK_KEYS},
+                                   code_fingerprint=r.code_fingerprint, enclave_fingerprint=r.enclave_fingerprint,
+                                   release_tag=r.release_tag, tls_key_fp=None, hpke_public_key=None,
+                                   as_of="2026-11-06T00:00:00Z", sdk_version="0.14.2")
+
+    args = argparse.Namespace(receipt=str(path), expected_repo="tinfoilsh/confidential-model-router",
+                              trusted_root=None, as_of=None)
+    out = io.StringIO()
+    assert commands.cli_replay(args, out=out, replay_fn=ok_replay) == 0, out.getvalue()
+    doc = json.loads(path.read_text())
+    edited = next(row for row in doc["rows"] if isinstance(row, dict) and row.get("kind") != "verify_ok")
+    edited["decision"] = "edited-after-render"
+    path.write_text(json.dumps(doc))
+    out = io.StringIO()
+    assert commands.cli_replay(args, out=out, replay_fn=ok_replay) == 1
+    assert "hash chain BROKEN" in out.getvalue() and "1/1 evidence row(s) replayed OK" in out.getvalue()
+    assert "the replay fails" in out.getvalue()
+
+
 def test_receipt_states_the_configured_ttl_and_status_shows_the_plugin_commit(plugin, monkeypatch):
     receipts = _sub(plugin, "receipts")
     seen = {}

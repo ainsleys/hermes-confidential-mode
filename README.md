@@ -358,7 +358,7 @@ seconds.
 - You can use only the open-weight models Tinfoil serves. At the time of writing these are Kimi
   K3.1 Pro, GLM-5.3, DeepSeek V4.1 Flash, Gemma 4 31B, gpt-oss-120b and Llama 3.3 70B.
 - You need a Tinfoil API key.
-- A failure ends the turn instead of falling back. If the enclave cannot be verified within 5
+- A failure ends the turn instead of falling back. If the enclave cannot be verified within 20
   seconds, the turn ends with a refusal, and you resend your message. If the enclave answers with an
   error, the same thing happens. The plugin does not retry. It does not fall back to another
   provider.
@@ -899,7 +899,8 @@ following, in order.
    unless you name another one with `--expected-repo`.
 4. It prints each row's result, the value of each check, and any problems.
 5. It prints the list of things a replay cannot establish. That list is below.
-6. It exits with status 0 only if every row replayed and matched.
+6. It exits with status 0 only if the hash chain is intact and every row replayed and matched. A
+   broken chain makes the exit status 1, even when every evidence row replays.
 
 By default, the replay uses the trust root recorded in the evidence. Whoever captured the evidence
 chose that copy, so it is not independent. Pass `--trusted-root <file>` to use a Sigstore
@@ -1237,7 +1238,7 @@ The plugin's own keys live under a top-level `confidential:` section of `config.
 | `confidential.tinfoil.enclave` | Unset, which means router discovery. | Names one router host to verify and use. Setting it stops the AMD/Intel switching described under Pins. |
 | `confidential.tinfoil.context_length` | 65536 | The context window the plugin reports to Hermes. Because the plugin reports it, Hermes never sends its own probe. |
 | `confidential.verify_ttl_seconds` | 300 | How many seconds one verification vouches for the router. It is measured on a monotonic clock, which does not jump when the system time changes. |
-| `confidential.verify_wait_seconds` | 5 | How many seconds a turn waits for a verification before the turn is refused. |
+| `confidential.verify_wait_seconds` | 20 | How many seconds a turn waits for a verification before the turn is refused. |
 | `confidential.pins.auto_approve_platform_only` | `false` | When `true`, the plugin applies a new pin without asking if only the platform changed and the SDK's signed hardware check passed. That check exists for TDX only. |
 | `confidential.on_host.extra_hosts` | `[]` | Extra hosts that the `on-host-only` tier counts as on-host. |
 | `confidential.model` | Unset. | The model id that `hermes confidential setup` writes into the config block it prints. |
