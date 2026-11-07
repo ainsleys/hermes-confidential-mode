@@ -481,6 +481,32 @@ def test_an_image_leaves_beside_sealed_text_and_the_row_and_signature_say_so(tmp
     assert d["plaintext_parts_note"] == "1 image part(s) left this host in plaintext to NEAR's gateway"
 
 
+@pytest.mark.parametrize("content", [
+    [{"type": "input_text", "text": "PLAINTEXT-SECRET-PROMPT"}, IMAGE],
+    [{"type": "TEXT", "text": "PLAINTEXT-SECRET-PROMPT"}, IMAGE],
+    [{"type": "input_text", "text": "PLAINTEXT-SECRET-PROMPT"}],
+])
+def test_text_parts_of_any_spelling_reach_the_gateway_sealed(tmp_path, content):
+    world = NearWorld()
+    _, client, _ = _setup(world, tmp_path)
+    client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": content}])
+    assert b"PLAINTEXT-SECRET-PROMPT" not in world.chat_bodies[-1]
+
+
+@pytest.mark.parametrize("part", [
+    {"type": "refusal", "refusal": "PLAINTEXT-SECRET-PROMPT"},
+    {"type": "file", "file": {"filename": "PLAINTEXT-SECRET-PROMPT.pdf", "file_data": "data:application/pdf;base64,AA"}},
+    {"type": "image_url", "image_url": {"url": "https://x.example/PLAINTEXT-SECRET-PROMPT"}},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}, "text": "PLAINTEXT-SECRET-PROMPT"},
+])
+def test_no_part_beside_an_image_leaves_text_in_plaintext(tmp_path, part):
+    world = NearWorld()
+    _, client, _ = _setup(world, tmp_path)
+    with pytest.raises(VerifyError):
+        client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": [IMAGE, part]}])
+    assert _no_chat_left(world)
+
+
 def test_an_image_part_cannot_smuggle_text_into_a_text_part(tmp_path):
     world = NearWorld()
     _, client, _ = _setup(world, tmp_path)

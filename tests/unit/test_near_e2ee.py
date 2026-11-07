@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 import pytest
 
@@ -239,16 +240,46 @@ def test_image_parts_are_disclosed_by_default_and_the_text_beside_them_is_sealed
         "2 image part(s) left this host in plaintext to NEAR's gateway"
 
 
-def test_other_non_text_parts_are_disclosed_and_named():
-    body = {"model": "m", "messages": [{"role": "user", "content": [
-        {"type": "input_audio", "input_audio": {"data": "AA", "format": "wav"}}]}]}
-    _, rep = e2.encrypt_request(body, MODEL_PUB)
-    assert rep["plaintext_parts"] == {"count": 1, "types": {"input_audio": 1}}
-    assert "non-text part(s) (input_audio x1)" in e2.plaintext_parts_note(rep["plaintext_parts"])
+SECRET = "SECRET-TEXT-OUTSIDE-A-TEXT-PART"
 
 
 @pytest.mark.parametrize("content,needle", [
-    (["bare string part"], "has no type"),
+    # the review's e2ee_probe cases (Amendment 9, second pass): none of them may leave text in plaintext
+    ([{"type": "refusal", "refusal": SECRET}, IMG], "no slot for 'refusal'"),
+    ([{"type": "text", "text": "hi"}, {"type": "image_url", "image_url": {"url": f"https://x/{SECRET}",
+                                                                          "detail": "high"}}], "remote URL"),
+    ([{"type": "text", "text": "hi"}, {"type": "file", "file": {"filename": f"{SECRET}.pdf",
+                                                                "file_data": "data:application/pdf;base64,AAAA"}}],
+     "does not cover 'file'"),
+    ([{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}, "text": SECRET}], "(text)"),
+    ([{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "alt": SECRET}}], "url and detail"),
+    ([{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": SECRET}}], "detail"),
+    ([{"type": "image_url", "image_url": f"data:text/plain;base64,{SECRET}"}], "data:image"),
+    ([{"type": "input_audio", "input_audio": {"data": "AA", "format": "wav"}}, IMG], "no slot for 'input_audio'"),
+    ([{"type": "image", "source": {"data": SECRET}}, IMG], "no slot for 'image'"),
+    ([{"type": "input_image"}, {"type": "text", "text": "x"}], "without an image reference"),
+])
+def test_disclose_refuses_every_part_that_could_carry_text_in_plaintext(content, needle):
+    body = {"model": "m", "messages": [{"role": "user", "content": content}]}
+    with pytest.raises(e2.E2EEError, match=re.escape(needle)):
+        e2.encrypt_request(body, MODEL_PUB)
+
+
+@pytest.mark.parametrize("content", [
+    [{"type": "input_text", "text": SECRET}, IMG],
+    [{"type": "TEXT", "text": SECRET}, IMG],
+    [{"type": "input_text", "text": SECRET}],                  # no image: flattened and sealed
+    [{"type": "Input_Text", "text": SECRET}, {"type": "text", "text": "b"}],
+])
+def test_text_part_types_are_sealed_whatever_their_spelling(content):
+    body = {"model": "m", "messages": [{"role": "user", "content": content}]}
+    out, rep = e2.encrypt_request(body, MODEL_PUB)
+    assert SECRET not in json.dumps(out)
+    assert rep["plaintext_parts"]["count"] == sum(1 for p in content if p.get("type") == "image_url")
+
+
+@pytest.mark.parametrize("content,needle", [
+    ([IMG, "bare string part"], "has no type"),
     ([IMG, {"text": "no type"}], "has no type"),
     ([IMG, {"type": "text", "text": "x", "annotation": "leak"}], "carries fields"),
     ([IMG, {"type": "text", "text": 3}], "text is not a string"),
@@ -475,3 +506,17 @@ def test_available_names_the_package_when_nacl_is_missing(monkeypatch):
         e2.seal(MODEL_PUB, b"x")
     with pytest.raises(e2.E2EEError, match="pynacl"):
         e2.ClientKey.generate()
+
+
+@pytest.mark.parametrize("key,value", [("prompt_token_ids", [72, 101, 108]), ("custom", {"a": [1, 2]}),
+                                       ("reasoning", {"max_tokens": 10 ** 30}), ("reasoning", {"max_tokens": -5})])
+def test_numeric_channels_are_refused(key, value):
+    """Review item 15: token ids or an unbounded integer could carry text; refused before sending."""
+    with pytest.raises(e2.E2EEError):
+        e2.encrypt_request({"model": "m", "messages": [], key: value}, MODEL_PUB)
+
+
+def test_bounded_max_tokens_and_scalars_still_pass():
+    out, rep = e2.encrypt_request({"model": "m", "messages": [], "reasoning": {"max_tokens": 4096},
+                                   "top_k": 5, "parallel_tool_calls": True}, MODEL_PUB)
+    assert out["reasoning"] == {"max_tokens": 4096} and "top_k" in rep["plaintext_keys"]

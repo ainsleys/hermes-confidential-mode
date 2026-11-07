@@ -75,7 +75,7 @@ class Runtime:
         # Amendment 9: the lock (its locked_since) whose first plaintext image part was already noticed,
         # and the sessions whose next reply gets the one-line notice.
         self.image_notice_lock: Any = _NO_LOCK
-        self.reply_notices: set = set()
+        self.reply_notices: dict = {}
 
     # ── shared collaborators ──────────────────────────────────────────────────────────────────
     def module(self, name: str):
@@ -201,11 +201,11 @@ class _ChangedConfigPredicate:
 # ── registration steps ───────────────────────────────────────────────────────────────────────────
 
 def _locked_now(rt: Runtime) -> bool:
-    """True only when the persisted state reads locked. Never raises (unreadable counts as not locked,
+    """True only when the persisted state reads locked on the attested tier. Never raises (unreadable counts as not locked,
     which stops the background refresh; the gates fail closed on their own)."""
     try:
-        locked, _tier = rt.is_locked()
-        return locked is True
+        locked, tier = rt.is_locked()
+        return locked is True and getattr(tier, "value", tier) == "attested"
     except Exception:  # noqa: BLE001
         return False
 
@@ -267,8 +267,6 @@ def _register(rt: Runtime) -> None:
         provider = _cm("provider")
         # ledger= : the verification cache ledgers verify_ok/verify_fail/pin_staged (Amendment 4 F4).
         profile = provider.register_provider_profile(ctx, config=rt.load_config(), ledger=rt.ledger)
-        # Amendment 9: the background re-verification runs only while this profile is locked.
-        provider.set_background_gate(lambda: _locked_now(rt))
         rt.profile = profile
         rt.pins = getattr(profile, "_confidential_pins", None)
         rt.adapter = getattr(profile, "_confidential_adapter", None)
@@ -285,6 +283,12 @@ def _register(rt: Runtime) -> None:
             rt.near_adapter.on_plaintext_parts = _image_notice(rt)   # Amendment 9
         rt.registered["providers"].append(profile.name)
     _step(rt, "provider_near", near_profile)
+
+    def background_gate():
+        # Amendment 9: the background re-verification runs only while this profile is locked on the attested
+        # tier. Its own step, so a failed Tinfoil or NEAR registration does not leave it unset.
+        _cm("provider").set_background_gate(lambda: _locked_now(rt))
+    _step(rt, "background_refresh_gate", background_gate)
     if rt.pins is None:
         def fallback_pins():
             rt.pins = _cm("pins").PinStore(ctx.state.data_dir / "pins.yaml")
@@ -340,14 +344,24 @@ def _register(rt: Runtime) -> None:
 # ── hooks ────────────────────────────────────────────────────────────────────────────────────────
 
 _NO_LOCK = object()
-IMAGE_NOTICE_LINE = ("Confidential mode: an image in this turn went to NEAR's gateway in plaintext; the text around "
-                     "it was encrypted.")
+def image_notice_line(parts: Any) -> str:
+    """The reply line, naming the part types that left in plaintext, for example "Confidential mode: an image
+    part (image_url) in this turn went to NEAR's gateway in plaintext; the text around it was encrypted." """
+    types = (parts or {}).get("types") if isinstance(parts, dict) else None
+    types = types if isinstance(types, dict) and types else {"image_url": 1}
+    n = sum(int(v) for v in types.values() if isinstance(v, int)) or 1
+    names = ", ".join(sorted(types))
+    what = f"an image part ({names})" if n == 1 else f"{n} image parts ({names})"
+    return (f"Confidential mode: {what} in this turn went to NEAR's gateway in plaintext; the text around "
+            f"{'it' if n == 1 else 'them'} was encrypted.")
 
 
 def _image_notice(rt: Runtime):
-    """NearAdapter.on_plaintext_parts: the first time per lock a non-text part left as plaintext to NEAR's
-    gateway, write a ``notice`` ledger row and mark the session so ``transform_llm_output`` appends
-    IMAGE_NOTICE_LINE to its next reply. Every send's own row already records the parts. Never raises."""
+    """NearAdapter.on_plaintext_parts: the first time per lock an image part left as plaintext to NEAR's
+    gateway, write a ``notice`` ledger row and, once that row is written, mark the session so
+    ``transform_llm_output`` appends the line naming the part types to its next reply. A failed write
+    leaves the lock unmarked, so the next image tries again. An unreadable lock time never deduplicates.
+    Every send's own row already records the parts. Never raises."""
     def notice(context: dict, row: dict) -> None:
         try:
             locked, tier = rt.is_locked()
@@ -359,18 +373,20 @@ def _image_notice(rt: Runtime):
                 since = None
             sid = str((context or {}).get("session_id") or "")
             with rt._lock:
-                if rt.image_notice_lock == since:
+                if since is not None and rt.image_notice_lock == since:
                     return
-                rt.image_notice_lock = since
-                rt.reply_notices.add(sid)
             d = row.get("detail") or {}
-            rt.append({"kind": "notice", "session_id": sid, "purpose": row.get("purpose") or "",
-                       "provider": row.get("provider") or "", "host": row.get("host") or "",
-                       "model": row.get("model") or "", "tier": getattr(tier, "value", None),
-                       "verdict": "disclosed", "decision": "image_plaintext",
-                       "detail": {"notice": IMAGE_NOTICE_LINE, "note": d.get("plaintext_parts_note"),
-                                  "plaintext_parts": d.get("plaintext_parts"), "chat_id": d.get("chat_id"),
-                                  "locked_since": since, "reply_line": "transform_llm_output"}})
+            line = image_notice_line(d.get("plaintext_parts"))
+            rt.ledger.append({"kind": "notice", "session_id": sid, "purpose": row.get("purpose") or "",
+                              "provider": row.get("provider") or "", "host": row.get("host") or "",
+                              "model": row.get("model") or "", "tier": getattr(tier, "value", None),
+                              "verdict": "disclosed", "decision": "image_plaintext",
+                              "detail": {"notice": line, "note": d.get("plaintext_parts_note"),
+                                         "plaintext_parts": d.get("plaintext_parts"), "chat_id": d.get("chat_id"),
+                                         "locked_since": since, "reply_line": "transform_llm_output"}})
+            with rt._lock:
+                rt.image_notice_lock = since
+                rt.reply_notices[sid] = line
             logger.info("confidential-mode: %s", d.get("plaintext_parts_note"))
         except Exception:  # noqa: BLE001
             logger.warning("confidential-mode: could not record the plaintext image notice", exc_info=True)
@@ -378,7 +394,7 @@ def _image_notice(rt: Runtime):
 
 
 def _transform_llm_output(rt: Runtime):
-    """Append IMAGE_NOTICE_LINE to the reply of a session whose turn sent the lock's first plaintext image
+    """Append the image notice line to the reply of a session whose turn sent the lock's first plaintext image
     part to NEAR (a notice with no session id goes to the next reply). Returns None otherwise, so the reply
     is unchanged. Never raises."""
     def transform(response_text: str = "", session_id: str = "", **_kw: Any):
@@ -390,8 +406,8 @@ def _transform_llm_output(rt: Runtime):
                 key = sid if sid in rt.reply_notices else ("" if "" in rt.reply_notices else None)
                 if key is None:
                     return None
-                rt.reply_notices.discard(key)
-            return f"{response_text.rstrip()}\n\n{IMAGE_NOTICE_LINE}"
+                line = rt.reply_notices.pop(key)
+            return f"{response_text.rstrip()}\n\n{line}"
         except Exception:  # noqa: BLE001
             return None
     return transform

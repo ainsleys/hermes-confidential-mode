@@ -143,8 +143,13 @@ def test_live_image_part_leaves_in_plaintext_beside_encrypted_text_and_is_provid
     ad.verify()
     ad.release()
     img = {"type": "image_url", "image_url": {"url": _PNG_1PX}}
-    _client(ad).chat.completions.create(model=VISION_MODEL, messages=[{"role": "user", "content": [
+    out = _client(ad).chat.completions.create(model=VISION_MODEL, messages=[{"role": "user", "content": [
         {"type": "text", "text": "What colour is this pixel? One word."}, img]}], max_tokens=200)
+    reply = (out.choices[0].message.content or "").casefold()
+    # The model read the sealed question: it answers with a colour (the probe of 2026-11-07 said pink).
+    colours = ("pink", "red", "magenta", "purple", "white", "black", "grey", "gray", "blue", "green", "yellow",
+               "orange", "brown", "violet", "rose", "fuchsia")
+    assert any(c in reply for c in colours), reply[:200]
     d = rows[-1]["detail"]
     assert rows[-1]["decision"] == "provider_tee" and rows[-1]["verdict"] == "verified", d["check"]
     assert d["fully_attested"] is True and d["reply_released"] is True

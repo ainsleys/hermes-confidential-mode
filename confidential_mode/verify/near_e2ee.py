@@ -97,6 +97,9 @@ REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhig
 REASONING_SUMMARIES = frozenset({"auto", "concise", "detailed", "none"})
 
 
+MAX_TOKENS_BOUND = 2 ** 31 - 1   # a reasoning token budget outside 0..2^31-1 is refused
+
+
 def _is_int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
@@ -115,7 +118,8 @@ STRUCTURED_KEYS: dict = {
                   # effort may be null: Hermes' clamp_reasoning_config passes {"enabled": True, "effort": None}
                   # through unchanged, and a null carries no text.
                   "effort": _enum(REASONING_EFFORTS, null=True), "summary": _enum(REASONING_SUMMARIES),
-                  "max_tokens": _is_int, "exclude": lambda v: isinstance(v, bool)},
+                  "max_tokens": lambda v: _is_int(v) and 0 <= v <= MAX_TOKENS_BOUND,
+                  "exclude": lambda v: isinstance(v, bool)},
     "stream_options": {"include_usage": lambda v: isinstance(v, bool)},
     "reasoning_effort": _enum(REASONING_EFFORTS),
 }
@@ -146,6 +150,11 @@ TEXT_PART_KEYS = frozenset({"type", "text", "cache_control"})
 IMAGE_PARTS_MODES = ("disclose", "refuse")
 DEFAULT_IMAGE_PARTS = "disclose"
 IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
+# The part types sealed as text (case-folded), and the image part types that may leave in plaintext under
+# disclose, each with the only keys it may carry (Amendment 9, second pass).
+TEXT_PART_TYPES = frozenset({"text", "input_text"})
+IMAGE_PART_KEYS = {"image_url": frozenset({"type", "image_url"}),
+                   "input_image": frozenset({"type", "image_url", "detail"})}
 
 
 def plaintext_parts_note(parts: Mapping | None) -> str | None:
@@ -349,22 +358,30 @@ def _seal_str(model_pub: str, value: Any, path: str, report: _Report) -> Any:
     return seal(model_pub, value.encode("utf-8"))
 
 
+def _ptype(part: Any) -> str | None:
+    """A content part's type, case-folded, or None when the part has no string type."""
+    t = part.get("type") if isinstance(part, Mapping) else None
+    return t.casefold() if isinstance(t, str) and t else None
+
+
+def _is_text_part(part: Any) -> bool:
+    return _ptype(part) in TEXT_PART_TYPES
+
+
 def _flatten(content: list, where: str) -> str:
+    """A list of text parts (``text`` or ``input_text``, any case) joined into one string. Any other part
+    is refused here; ``_mixed`` handles image parts under image_parts=disclose."""
     texts = []
     for part in content:
-        ptype = part.get("type") if isinstance(part, Mapping) else None
-        if ptype != "text":
-            kind = ptype if isinstance(ptype, str) else type(part).__name__
-            if kind in ("image_url", "input_image", "image"):
+        kind = _ptype(part)
+        if kind not in TEXT_PART_TYPES:
+            shown = kind or type(part).__name__
+            if kind in IMAGE_PART_TYPES:
                 raise E2EEError(f"{where}: NEAR's encryption does not cover image parts; refused before sending "
                                 "(confidential.near.image_parts is refuse)")
-            raise E2EEError(f"{where}: NEAR's encryption does not cover {kind!r} content parts; refused before "
+            raise E2EEError(f"{where}: NEAR's encryption does not cover {shown!r} content parts; refused before "
                             "sending")
-        extra = sorted(k for k in part if k not in TEXT_PART_KEYS and _carries_string(part[k]))
-        if extra or not isinstance(part.get("text"), str):
-            raise E2EEError(f"{where}: a text part carries fields this plugin does not encrypt "
-                            f"({', '.join(extra) or 'text is not a string'}); refused")
-        texts.append(part["text"])
+        texts.append(_text_part(part, where))
     return "\n".join(texts)
 
 
@@ -376,22 +393,72 @@ def _text_part(part: Mapping, where: str) -> str:
     return part["text"]
 
 
+_RE_DATA_IMAGE = re.compile(r"^data:image/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]*$", re.IGNORECASE)
+
+
+def _image_ref(value: Any, where: str) -> Any:
+    """An image reference that may leave in plaintext: a ``data:image/...;base64,`` URI, alone or as
+    ``{"url": <that>, "detail": low|high|auto}``. Anything else (a remote URL, which would name a host and a
+    path, or any other key) is refused."""
+    if isinstance(value, str):
+        url, extra = value, {}
+    elif isinstance(value, Mapping):
+        if set(value) - {"url", "detail"}:
+            raise E2EEError(f"{where}: an image reference carries fields other than url and detail; refused")
+        url, extra = value.get("url"), {k: v for k, v in value.items() if k == "detail"}
+        if "detail" in extra and extra["detail"] not in ("low", "high", "auto"):
+            raise E2EEError(f"{where}: an image detail outside low, high and auto; refused")
+    else:
+        raise E2EEError(f"{where}: an image part without an image reference; refused")
+    if not isinstance(url, str) or not _RE_DATA_IMAGE.match(url):
+        raise E2EEError(f"{where}: only an inline data:image/...;base64 image leaves in plaintext; a remote URL "
+                        "or another reference is refused before sending")
+    return value
+
+
+def _image_part(part: Mapping, kind: str, where: str) -> dict:
+    allowed = IMAGE_PART_KEYS[kind]
+    extra = sorted(k for k in part if k not in allowed)
+    if extra:
+        raise E2EEError(f"{where}: an {kind} part carries fields this plugin does not let leave in plaintext "
+                        f"({', '.join(extra)}); refused")
+    out = {"type": part["type"]}
+    for k in sorted(allowed - {"type"}):
+        if k not in part:
+            continue
+        if k == "detail":
+            if part[k] not in ("low", "high", "auto"):
+                raise E2EEError(f"{where}: an image detail outside low, high and auto; refused")
+            out[k] = part[k]
+        else:
+            out[k] = _image_ref(part[k], where)
+    if not any(k in part for k in allowed - {"type", "detail"}):
+        raise E2EEError(f"{where}: an {kind} part without an image reference; refused")
+    return out
+
+
 def _mixed(content: list, where: str, model_pub: str, report: _Report) -> list:
-    """A list with a non-text part, under image_parts=disclose: text parts sealed in place, every other part
-    unchanged (plaintext) and counted. A part without a string type is refused."""
+    """A list with an image part, under image_parts=disclose. Text parts (``text`` or ``input_text``, any
+    case) are sealed in place as ``{"type": "text", "text": <sealed>}``. Image parts (``image_url``,
+    ``input_image``) leave in plaintext, only with an inline image and a detail word, and are counted. Any
+    other part type, and any extra field, is refused with the type named: NEAR's table has no encrypted
+    slot for it, so its text could only leave in plaintext."""
     out = []
     for part in content:
-        ptype = part.get("type") if isinstance(part, Mapping) else None
-        if not isinstance(ptype, str) or not ptype:
+        kind = _ptype(part)
+        if kind is None:
             raise E2EEError(f"{where}: a content part has no type; refused before sending")
-        if ptype == "text":
+        if kind in TEXT_PART_TYPES:
             text = _text_part(part, where)
             if "cache_control" in part:
                 report.drop("messages[].content[].cache_control")
             out.append({"type": "text", "text": _seal_str(model_pub, text, "messages[].content[].text", report)})
+        elif kind in IMAGE_PART_KEYS:
+            out.append(_image_part(part, kind, where))
+            report.plaintext_parts[kind] = report.plaintext_parts.get(kind, 0) + 1
         else:
-            report.plaintext_parts[ptype] = report.plaintext_parts.get(ptype, 0) + 1
-            out.append(dict(part))
+            raise E2EEError(f"{where}: NEAR's encryption has no slot for {kind!r} content parts and this plugin "
+                            "sends only images in plaintext; refused before sending")
     return out
 
 
@@ -410,7 +477,7 @@ def _message(msg: Any, i: int, model_pub: str, report: _Report, image_parts: str
             report.drop(f"messages[].{key}")
         elif key == "content":
             if isinstance(value, list) and image_parts == "disclose" and any(
-                    not (isinstance(p, Mapping) and p.get("type") == "text") for p in value):
+                    _ptype(p) in IMAGE_PART_KEYS for p in value):
                 out[key] = _mixed(value, where, model_pub, report)
                 continue
             if isinstance(value, list):
@@ -547,6 +614,10 @@ def encrypt_request(body: Mapping, model_pub: str, *, plaintext_keys=PLAINTEXT_K
         elif _carries_string(value):
             raise E2EEError(f"request key {key!r} carries text that would leave as plaintext (not in NEAR's "
                             "encrypted-field table, not on this plugin's plaintext allowlist); refused before sending")
+        elif isinstance(value, (list, tuple, Mapping)) and value:
+            # A list or mapping of numbers could carry token ids, which can encode text (as logit_bias can).
+            raise E2EEError(f"request key {key!r} is a list or mapping this plugin does not know; it would leave "
+                            "as plaintext; refused before sending")
         else:
             out[key] = value
             report.plaintext_keys.append(key)
