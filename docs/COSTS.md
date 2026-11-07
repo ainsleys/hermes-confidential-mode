@@ -1,17 +1,16 @@
-# What the plugin costs you
+# What Hermes Confidential Mode costs you
 
-This document states what changes for a Hermes user who installs this plugin, compared with the same
-user running Hermes without the plugin. The changes fall into four kinds: latency, response quality,
-task success, and prompts the user has to answer. Each is given per mode.
+This page says what changes when you install the plugin, compared with running Hermes without it:
+latency, response quality, task success, and the prompts you'll have to answer. Each is given per
+mode.
 
-Every number here is an expectation, not a measurement. The one measured figure is a single live turn
-through Tinfoil on 2026-11-06, which took 6.6 seconds end to end, almost all of which was the model's own
-generation time. The last section says which figures the plugin can measure from data the ledger already
-records.
+Every number here is an expectation, not a measurement, except one: a single live turn through
+Tinfoil on 2026-11-06 took 6.6 seconds end to end, almost all of it the model's own generation time.
+The last section says which figures you can measure from what the ledger already records.
 
 ## The baseline
 
-The comparison baseline is a typical Hermes install: a hosted frontier model (a Claude or GPT model)
+The baseline is a typical Hermes install: a hosted frontier model (a Claude or GPT model)
 through OpenRouter or Nous Portal, streaming on, fallback providers on, side jobs such as compression
 and title generation on a cheap third-party model, and web tools enabled.
 
@@ -23,27 +22,27 @@ which tool calls are not shown to a person for approval.
 
 ## Observe-only, the default after install
 
-A user who installs the plugin and does not lock sees no change. Latency per send grows by a few
-milliseconds: one predicate check and one database append. Nothing is refused and nothing is rerouted,
-so response quality and task success are identical to the baseline. The plugin writes a ledger on disk
-and renders the egress map on request.
+If you install the plugin and don't lock, nothing changes in what Hermes does. Each send gets a few
+milliseconds slower: one tier check and one ledger append. Nothing is refused or rerouted, so
+response quality and task success match the baseline. The plugin writes the ledger on disk, and
+`hermes confidential status` and `watch` show where calls went.
 
 ## The on-host-only lock
 
-The quality change in this mode comes from the model, not from the plugin. A user who already runs a
-local model loses nothing. A user who switches from a hosted frontier model to a local model in order to
-use this tier takes the quality drop of that local model, which is large on most hardware.
+The quality change in this mode comes from the model, not from the plugin. If you already run a
+local model, you lose nothing. If you switch from a hosted frontier model to a local one to use this
+tier, you take that local model's quality drop, which is large on most hardware.
 
 What the plugin itself adds in this mode:
 
-- An allow-once prompt on every off-host tool call, until the user answers "always" for that tool.
+- A prompt on every off-host tool call, until you answer `session` or `always` for that tool.
   `/confidential revoke <tool>` brings the prompt back.
-- Off-host tool calls refused outright in yolo mode and unattended mode, because there is nobody to ask.
+- Off-host tool calls refused outright in yolo mode and unattended mode, because nobody is there to answer.
 - Cron jobs refused while locked.
 - Fallback providers refused while locked.
 - A model on another machine refused until you list its exact host. The tier accepts loopback by
   rule. A model server on your LAN, a tailnet or a cloud private network has a private-range
-  address, and the lock refuses that address until you list the address in `confidential.on_host.extra_hosts`.
+  address, and the lock refuses that address until you list it in `confidential.on_host.extra_hosts`.
   The preflight row for such a host names its range and the key.
 
 Task success therefore drops for tasks that need web tools in yolo or unattended mode, and is close to
@@ -51,12 +50,12 @@ the baseline when a person is present to answer prompts.
 
 ## The attested tier, Tinfoil or NEAR AI
 
-This is the mode where the differences are real. They come from four places: the model choice the tier
-forces, the removal of fallbacks, the tool gate, and the vendor's own protocol.
+This is the mode with real differences. They come from four places: the models the tier allows, the
+removal of fallbacks, the tool gate, and the vendor's own protocol.
 
 | Factor | Change versus the baseline | Cause |
 |---|---|---|
-| Model choice | Frontier models unavailable. Open-weight models only: the Qwen, DeepSeek, Llama and gpt-oss families as served by the vendor. | Only models served inside enclaves are in tier. |
+| Model choice | Frontier models unavailable. Open-weight models only, such as the Qwen, DeepSeek, Llama and gpt-oss families, as the vendor serves them. | Only models served inside enclaves are in tier. |
 | Response quality | Drops to the chosen open-weight model's level. The expected gap is noticeable on coding and reasoning and larger on long-context work. | The model, plus any quantization and context limit the enclave host applies. |
 | Side-job quality | Compression, titles and memory must run on an in-tier model. Summaries may differ from the default aux model's. | The preflight refuses side routes that leave the tier. |
 | Task success | Lower. A provider outage fails the turn instead of falling back. Off-host tools are asked or refused. Image inputs on NEAR work, but each image leaves in plaintext to NEAR's gateway, and a remote image URL is refused. On NEAR, settings whose value is a mapping are refused, except `reasoning` and `stream_options`, which pass when their shape is known. Cron is refused. | Fallbacks removed, tool gate, NEAR encryption scope. |
@@ -80,7 +79,7 @@ forces, the removal of fallbacks, the tool gate, and the vendor's own protocol.
   turn waits only when the background verification failed or reported a build the pins do not cover,
   or when the session was idle past the five minutes. That turn then verifies inline, as the first
   turn does.
-- **Task success in a tool-heavy session.** Close to the baseline when prompts are answered promptly.
+- **Task success in a tool-heavy session.** Close to the baseline when you answer prompts promptly.
   Sharply lower in unattended mode, where every off-host tool call is refused.
 - **Response quality.** The open-weight model's quality. The plugin neither improves nor degrades a
   given model's output. On NEAR, image tasks run, and each image reaches NEAR's gateway in plaintext
@@ -104,26 +103,30 @@ locked.
 - **GitHub unreachable during a NEAR approval.** A pending NEAR model entry cannot be approved, so
   the attested tier keeps refusing on that profile until the fetch succeeds.
 
-The guide's sections (GUIDE.md) on request encryption and on what happens while locked state each rule.
+The guide's sections on [request encryption](GUIDE.md#request-encryption) and on
+[what happens while locked](GUIDE.md#what-happens-while-locked) state each rule.
 
-## The honest summary
+## Summary
 
-The plugin's own overhead is small. The cost a user pays is the choice of tier. Attested inference
-means open-weight models served by two vendors, no fallbacks, no streaming on NEAR, images in plaintext to NEAR's gateway, and
-a prompt on every tool call that leaves the machine. A user who already runs Qwen or DeepSeek through
-an aggregator sees a quality change near zero, and pays mainly in prompts and lost fallbacks. A user on a Claude or
-GPT model pays the model switch, and that is a cost the lock makes explicit rather than causes.
+The plugin's own overhead is small. What you pay for is the tier. Attested inference means
+open-weight models from two vendors, no fallbacks, no streaming on NEAR, images in plaintext to NEAR's
+gateway, and a prompt on every tool call that leaves the machine. If you already run Qwen or DeepSeek
+through an aggregator, the quality change is near zero, and you pay mainly in prompts and lost
+fallbacks. If you're on a Claude or GPT model, you pay for the model switch; the lock makes that cost
+explicit rather than causing it.
 
 ## What the plugin can measure
 
-Two of these figures can be measured from data the ledger already records, once a few locked sessions
-have run:
+Some of these figures can be read from the ledger once a few locked sessions have run:
 
-- Latency: the ledger stores a timestamp per send and per signature fetch, so the per-turn overhead and
-  the re-verification pauses can be read from the ledger directly.
-- Refusals: every refused route, tool call and fallback is a ledger row, so the refusal rate per session
-  is a count.
+- Latency: the ledger records one timestamp per row, so per-turn totals can be read from it; a
+  per-phase breakdown needs timestamps the plugin does not record yet.
+- Refusals: every refused send and every refused tool call is a ledger row, so the refusal rate per
+  session is a count.
+- Prompts: each tool prompt is a `tool_asked` row and its answer a `tool_allowed` or `tool_refused`
+  row, and each pin answer is a `pin_applied` or `pin_denied` row, so prompts per session are a
+  count too.
 
-The quality comparison cannot be read from the ledger. The design notes list a fixed-task evaluation,
-before and after a routing change, for the main path and for compression summaries. That evaluation is
-not built. Until the evaluation exists, the quality statements above remain expectations.
+Quality can't be read from the ledger. It would take a fixed-task evaluation, run before and after a
+routing change, for the main path and for compression summaries. No such evaluation exists, so the
+quality statements above are expectations.
