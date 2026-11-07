@@ -136,6 +136,10 @@ class BlobStore:
         if len(data) > MAX_BLOB_BYTES:
             raise LedgerError("evidence blob exceeds the blob size cap")
         if path.exists() and self.get(blob_id) is not None:
+            try:   # a row is about to list it: keep it young, so another process's cleanup leaves it alone
+                os.utime(path)
+            except OSError:
+                pass
             return False
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{blob_id}.{os.getpid()}.{threading.get_ident()}.tmp")

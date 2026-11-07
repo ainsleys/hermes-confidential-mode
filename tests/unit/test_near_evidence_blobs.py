@@ -195,3 +195,16 @@ def test_a_mixed_v1_and_v2_receipt_prints_every_rows_caveats(tmp_path):
     assert "schema: confidential-mode/near-evidence/v1" in text and "schema: confidential-mode/near-evidence/v2" in text
     for line in set(replay_near.NOT_ESTABLISHED) | set(replay_near.NOT_ESTABLISHED_V1):
         assert f"  - {line}\n" in text
+
+
+def test_putting_an_existing_blob_refreshes_its_modified_time(tmp_path):
+    import os
+    import time
+    store = BlobStore(tmp_path / "b")
+    blob = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    assert store.put(blob, "") is True
+    old = time.time() - 2 * 24 * 3600
+    os.utime(store.root / blob, (old, old))
+    assert store.put(blob, "") is False
+    assert (store.root / blob).stat().st_mtime > old + 24 * 3600
+    assert store.gc(set()) == []          # young again: another process's cleanup leaves it

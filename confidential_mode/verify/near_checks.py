@@ -453,22 +453,37 @@ def rtmr3_identity(report: Mapping) -> dict:
 
 # ── display ─────────────────────────────────────────────────────────────────────────────────────
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 CONTROL_TAG = " [control characters in vendor string]"
+
+
+def _hidden(ch: str) -> bool:
+    """A character a reader cannot see as itself: not printable, Unicode category Cc, Cf, Co or Cn, or in the
+    tag block U+E0000-U+E007F."""
+    import unicodedata
+    return (not ch.isprintable() or unicodedata.category(ch) in ("Cc", "Cf", "Co", "Cn")
+            or 0xE0000 <= ord(ch) <= 0xE007F)
+
+
+def _has_hidden(text: str) -> bool:
+    return any(_hidden(ch) for ch in text)
+
+
+def _esc(ch: str) -> str:
+    o = ord(ch)
+    return f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}"
 
 
 def render_vendor(text: Any) -> str:
     """One line of text that carries vendor-supplied strings, made safe to show a person on a terminal or a
     chat surface that renders markdown. A rendering step only: hashes, pins, the ledger and receipt JSON
-    keep the raw bytes. Nothing is stripped or cut: a backslash becomes \\\\, every control character
-    (C0, DEL, C1 and so ANSI escape sequences, line and paragraph separators, bidirectional and zero-width
-    marks) and every backtick becomes a visible \\xNN or \\uNNNN escape, the line is wrapped in a code span
-    so markdown characters are inert, and a line that held a control character ends with CONTROL_TAG."""
+    keep the raw bytes. Nothing is stripped or cut: a backslash becomes two, every hidden character (not
+    printable, Unicode category Cc, Cf, Co or Cn, or the tag block; this covers ANSI escape sequences, line
+    separators, bidirectional, zero-width and soft-hyphen marks) and every backtick becomes a visible
+    \\xNN, \\uNNNN or \\UNNNNNNNN escape, the line is wrapped in a code span so markdown characters are
+    inert, and a line that held a hidden character ends with CONTROL_TAG."""
     raw = str(text)
-    bad = bool(_CONTROL.search(raw))
-    out = raw.replace("\\", "\\\\")
-    out = re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069`]",
-                 lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100 else f"\\u{ord(m.group()):04x}", out)
+    bad = _has_hidden(raw)
+    out = "".join(_esc(ch) if (ch == "`" or _hidden(ch)) else ("\\\\" if ch == "\\" else ch) for ch in raw)
     return f"`{out}`" + (CONTROL_TAG if bad else "")
 
 
@@ -477,7 +492,7 @@ def render_if_needed(text: Any) -> str:
     (backtick, asterisk, a link "](", an angle bracket); else render_vendor(text). For text that is mostly
     the plugin's own (check results, receipt fields): plain values stay readable, vendor strings stay inert."""
     raw = str(text)
-    if _CONTROL.search(raw) or any(t in raw for t in ("`", "*", "](", "<", ">")):
+    if _has_hidden(raw) or any(t in raw for t in ("`", "*", "](", "<", ">")):
         return render_vendor(raw)
     return raw
 

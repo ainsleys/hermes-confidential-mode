@@ -372,3 +372,11 @@ def test_a_long_service_list_folds_into_a_count_and_pins_prints_every_line(tmp_p
     listed = commands.pins_text(SimpleNamespace(pins=store, ledger=None))
     for i in range(MAX_REPORTED_LINES + 5):
         assert f"prod/test.yaml::svc-{i} v1 commit {'c1' * 20}" in listed
+
+
+@pytest.mark.parametrize("ch,shown", [("﻿", "\\ufeff"), ("​", "\\u200b"), ("\U000e0041", "\\U000e0041"),
+                                      ("­", "\\xad"), ("⁠", "\\u2060"), ("؜", "\\u061c")])
+def test_invisible_characters_are_shown_escaped_and_tagged(ch, shown):
+    from confidential_mode.receipts import _p
+    for out in (nc.render_vendor(f"v1{ch}x"), _p(f"v1{ch}x")):
+        assert ch not in out and shown in out and out.endswith(nc.CONTROL_TAG)

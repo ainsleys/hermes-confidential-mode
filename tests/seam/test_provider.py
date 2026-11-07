@@ -678,3 +678,28 @@ def test_verification_pending_is_distinguishable_and_the_wait_can_be_extended(en
     finally:
         gate.set()
         mp.undo()
+
+
+def test_a_transient_locked_ledger_is_retried_once(env, monkeypatch):
+    import sqlite3
+    monkeypatch.setattr(provider_mod, "LEDGER_RETRY_DELAY_SECONDS", 0.0)
+    calls = []
+
+    def locked_once(ev):
+        calls.append(ev["kind"])
+        if ev["kind"] == "verify_ok" and calls.count("verify_ok") == 1:
+            raise sqlite3.OperationalError("database is locked")
+    profile = env["register"](on_event=locked_once)
+    assert isinstance(profile.create_client(api_key="tf-key", base_url=BASE_URL), ConfidentialClient)
+    assert calls.count("verify_ok") == 2 and "verify_fail" not in calls
+
+
+def test_a_ledger_still_locked_after_the_retry_refuses(env, monkeypatch):
+    import sqlite3
+    monkeypatch.setattr(provider_mod, "LEDGER_RETRY_DELAY_SECONDS", 0.0)
+
+    def locked(ev):
+        if ev["kind"] == "verify_ok":
+            raise sqlite3.OperationalError("database is locked")
+    profile = env["register"](on_event=locked)
+    assert isinstance(profile.create_client(api_key="tf-key", base_url=BASE_URL), RefusingClient)

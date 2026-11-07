@@ -443,16 +443,26 @@ def _adapter_host(adapter) -> str:
         return ""
 
 
+LEDGER_RETRY_DELAY_SECONDS = 0.25   # one retry on a transient "database is locked"
+
+
 def _emit(e: _Entry, event: dict) -> bool:
-    """Best effort: a failing ledger never changes a verification decision. True iff written."""
+    """Write one ledger row; True iff written. A transient "database is locked" is retried once after
+    LEDGER_RETRY_DELAY_SECONDS. A failed verify_ok write refuses that verification (Amendment 5.2); other
+    rows stay best effort."""
     if e.on_event is None:
         return False
-    try:
-        e.on_event(event)
-        return True
-    except Exception:
-        logger.warning("confidential-mode: ledger write for %s failed", event.get("kind"), exc_info=True)
-        return False
+    for attempt in (0, 1):
+        try:
+            e.on_event(event)
+            return True
+        except Exception as exc:
+            if attempt == 0 and "database is locked" in str(exc).lower():
+                time.sleep(LEDGER_RETRY_DELAY_SECONDS)
+                continue
+            logger.warning("confidential-mode: ledger write for %s failed", event.get("kind"), exc_info=True)
+            return False
+    return False
 
 
 def _fail_reason(err: str | None) -> str:
