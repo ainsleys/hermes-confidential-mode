@@ -94,6 +94,19 @@ of them fails, Hermes logs the failure and carries on.
 4. **At runtime.** It writes a ledger row for every auxiliary attempt. If an attempt goes off-tier
    anyway, it writes a `breach` row and marks the session as breached.
 
+**Where an `auto` side call can go.** A side call whose provider is `auto` resolves to the main model
+first. Hermes' built-in discovery chain then tries OpenRouter and then Nous (`_get_provider_chain`,
+`agent/auxiliary_client.py:3080`). OpenRouter is used when Hermes' credential pool holds an `openrouter`
+entry or `OPENROUTER_API_KEY` is set (`_try_openrouter`). Nous is used when Hermes holds Nous
+authentication from `hermes auth` (`_try_nous`). At 84a0301 Hermes runs that chain for a text task only
+when the main provider is unset or `auto` (`_discovery_chain_allowed`, `:4529`), and for vision on `auto`
+(`_vision_auto_route`, `:5545`). The preflight refuses both. If a stray call went out anyway, the plugin
+could only record it as a breach afterwards. So, as a second line, the lock and `check` treat every
+`auxiliary.<task>.provider: auto` as off-tier while an OpenRouter or Nous credential is readable,
+from the same sources as the vendor keys. The FIX says to pin the task to the main provider. With no
+such credential, `auto` stays in-tier, and the row says why. The per-turn check does not repeat this
+credential test.
+
 An auxiliary call can still go off-tier in three situations. The first is between turns after a
 `/model` switch on the CLI. The second is in the middle of a turn. The third is when Hermes skips the
 per-turn check. The plugin cannot stop the bytes in any of them.

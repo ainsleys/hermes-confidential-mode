@@ -116,8 +116,8 @@ def test_leak_hook_timeout_config_disables_recheck_and_aux_reaches_openrouter(pl
     breach/config_changed, but its block is discarded => the turn titles the session through the hosted aux
     route (the llm gate's fingerprint check refuses only the main call; aux calls cannot be refused)."""
     openrouter = h.BodyRouter(net.openrouter)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     _locked_on_host(plugin)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")     # after the lock (Amendment 11)
     plugin.cfg.write_text(h.BASE_CONFIG.replace("plugins:\n", "plugins:\n  hook_callback_timeout: 0.0001\n")
                           + OR_CONFIG_TAIL)
     rec = h.Rec()
@@ -135,8 +135,9 @@ def test_config_edit_after_lock_title_route_blocked_withstood(plugin, net, monke
     """Control for the test above: the same aux edit WITHOUT the hook-timeout key is caught by the
     per-turn recheck; nothing reaches openrouter."""
     openrouter = h.BodyRouter(net.openrouter)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     _locked_on_host(plugin)
+    # Set after the lock: with an OpenRouter key readable the lock refuses side calls on auto (Amendment 11).
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     plugin.cfg.write_text(h.BASE_CONFIG + OR_CONFIG_TAIL)
     rec = h.Rec()
     agent = h.make_agent(monkeypatch, rec, session_db=h.session_db(plugin.home))

@@ -791,3 +791,25 @@ def test_fingerprint_covers_extra_hosts():
     c = base_config(confidential={"on_host": {"extra_hosts": ["gpu-box.lan", "10.0.0.5"]}})
     assert len({config_fingerprint(a), config_fingerprint(b), config_fingerprint(c)}) == 3
     assert config_fingerprint(b, version=1) != config_fingerprint(a, version=1)
+
+
+def test_auto_side_calls_are_off_tier_while_an_openrouter_or_nous_credential_is_readable():
+    """Amendment 11: Hermes' discovery chain (OpenRouter, then Nous) is the place an `auto` side call could
+    fall through to. With either credential readable the preflight wants the task pinned; without one, `auto`
+    stays in-tier and the row says why."""
+    r = run(base_config(), keys=("OPENROUTER_API_KEY",))
+    i = item(r, "auxiliary.compression.provider")
+    assert not r.ok and i.verdict == "off_tier" and "OpenRouter credential readable" in i.value_redacted
+    assert i.fix == ("pin auxiliary.compression.provider to ollama (auto can fall through to OpenRouter or Nous "
+                     "on failure)")
+    r = run(base_config(), keys=())
+    i = item(r, "auxiliary.compression.provider")
+    assert r.ok and i.verdict == "on_host"
+    assert i.value_redacted.endswith("(no OpenRouter or Nous credential readable, so auto cannot fall through)")
+    # A pinned task is not affected; the per-turn recheck (no key_state) adds nothing.
+    pinned = base_config(auxiliary={"vision": {"provider": "ollama", "model": "llava", "base_url": ON_HOST_URL},
+                                    "compression": {"provider": "ollama", "base_url": ON_HOST_URL}})
+    assert item(run(pinned, keys=("OPENROUTER_API_KEY",)), "auxiliary.compression.provider").verdict == "on_host"
+    r = run_preflight(Tier.ON_HOST, on_host_pred(), base_config(), plugin_aux_tasks=[], isolation="in_process",
+                      provider_lookup=lambda n: None, attested_profile=None)
+    assert item(r, "auxiliary.compression.provider").value_redacted == "auto -> ollama"

@@ -335,6 +335,28 @@ def key_state(profile: str, env_var: str, config: Mapping | None = None) -> str:
     return KEY_UNSCOPED if unscoped else KEY_NOT_SET
 
 
+#: The providers Hermes' built-in discovery chain tries after the main route (agent/auxiliary_client.py
+#: _get_provider_chain: OpenRouter, then Nous), with the variable each reads. OpenRouter is enabled by an
+#: "openrouter" credential-pool entry or OPENROUTER_API_KEY (_try_openrouter); Nous by a "nous" pool entry or
+#: Nous auth from `hermes auth` (_try_nous). At 84a0301 the chain runs for a text task only when the main
+#: provider is unset or auto (_discovery_chain_allowed), which the preflight already refuses, and for vision
+#: auto (_vision_auto_route), also refused. The rule below is a second line in case a Hermes update relaxes that
+#: gate: an `auto` side call is off-tier while either credential is readable (Amendment 11).
+AUTO_CHAIN_KEYS = (("openrouter", "OPENROUTER_API_KEY"), ("nous", "NOUS_API_KEY"))
+
+
+def auto_chain_readable(key_state: Callable[[str, str], str]) -> list[str]:
+    """The discovery-chain providers with a readable credential (names only). Never raises."""
+    found = []
+    for provider, env_var in AUTO_CHAIN_KEYS:
+        try:
+            if key_state(provider, env_var) == KEY_SET:
+                found.append(provider)
+        except Exception:
+            continue
+    return found
+
+
 def api_key_present(env_var: str, profile: str = "", config: Mapping | None = None) -> bool:
     return key_state(profile, env_var, config) == KEY_SET
 
@@ -431,6 +453,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     builtins = list(builtin_aux_tasks) if builtin_aux_tasks is not None else builtin_aux_task_names()
     plugins = _normalize_plugin_tasks(plugin_aux_tasks)
     tasks = list(dict.fromkeys([*builtins, *plugins]))
+    # Only when the caller checks credentials (lock and `check`), like the vendor-key rows.
+    stray = auto_chain_readable(key_state) if key_state is not None else None
     for task in tasks:
         cfg = _effective_aux(config, task, plugins)
         prefix = f"auxiliary.{task}"
@@ -446,9 +470,17 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
         elif (provider in _AUTO or provider == "main") and not base_url:
             # "auto"/"" resolve to the main route (text tasks); "main" is the main route for every task.
             shown = f"{cfg.get('provider') or 'auto'} -> {main_provider or 'auto'}"
-            add(f"{prefix}.provider", shown, main_verdict,
-                INHERIT_FIX if pin_is_the_cause(main_reason) else
-                f"inherits the main route: fix model.provider, or pin {prefix}.provider to an in-tier provider")
+            if provider in _AUTO and stray:
+                names = " and ".join({"openrouter": "OpenRouter", "nous": "Nous"}[n] for n in stray)
+                add(f"{prefix}.provider", f"{shown} ({names} credential readable)", OFF_TIER,
+                    f"pin {prefix}.provider to {main_provider or 'the main provider'} (auto can fall through to "
+                    "OpenRouter or Nous on failure)")
+            else:
+                if provider in _AUTO and stray == []:
+                    shown += " (no OpenRouter or Nous credential readable, so auto cannot fall through)"
+                add(f"{prefix}.provider", shown, main_verdict,
+                    INHERIT_FIX if pin_is_the_cause(main_reason) else
+                    f"inherits the main route: fix model.provider, or pin {prefix}.provider to an in-tier provider")
         else:
             if provider == "main":  # "main" + base_url: main provider identity on an explicit endpoint
                 cfg = {**cfg, "provider": main_provider}

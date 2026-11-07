@@ -718,7 +718,9 @@ def config_block(rt: Any, model: str, *, vision_model: str = DEFAULT_VISION_MODE
                                    + [e if isinstance(e, str) else e.get("key") for e in _locking._plugin_aux(None)]))
     except Exception:  # noqa: BLE001
         tasks = list(_pf.BUILTIN_AUX_TASKS_SNAPSHOT)
-    tasks = [t for t in tasks if t and not t.startswith("moa")]   # moa is refused while locked
+    # Every side call is pinned, the moa tasks too (MoA itself is refused while locked): a task left on auto
+    # fails the preflight while an OpenRouter or Nous credential is readable (Amendment 11).
+    tasks = [t for t in tasks if t]
     groups = {"vision": [t for t in tasks if t == "vision"],
               "cheap": [t for t in tasks if t in CHEAP_AUX_TASKS],
               "main": [t for t in tasks if t != "vision" and t not in CHEAP_AUX_TASKS]}
@@ -762,7 +764,7 @@ def near_config_block(model: str, vision_model: str = DEFAULT_NEAR_VISION_MODEL,
                                    + [e if isinstance(e, str) else e.get("key") for e in _locking._plugin_aux(None)]))
     except Exception:  # noqa: BLE001
         tasks = list(_pf.BUILTIN_AUX_TASKS_SNAPSHOT)
-    tasks = [t for t in tasks if t and not t.startswith("moa")]
+    tasks = [t for t in tasks if t]
     name = _locking.NEAR_PROFILE_NAME
     lines = ["# Add to config.yaml (review first; setup never writes your config):",
              "model:", f"  provider: {name}", f"  default: {model}", "fallback_providers: []", "auxiliary:"]

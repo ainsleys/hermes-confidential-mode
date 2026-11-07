@@ -540,7 +540,7 @@ def test_setup_block_gives_vision_and_side_jobs_suitable_models(plugin, capsys, 
         assert aux[task] == {"provider": "attested-tinfoil", "model": "deepseek-v4-1-flash"}, task
     assert aux["background_review"]["model"] == "llama3-3-70b"
     assert all(v["provider"] == "attested-tinfoil" for v in aux.values())
-    assert not any(k.startswith("moa") for k in aux)
+    assert {"moa_reference", "moa_aggregator"} <= set(aux)      # every side call pinned (Amendment 11)
     for marker in ("# vision: a vision-capable model", "# short side jobs", "# tasks that reason over"):
         assert out.count(marker) == 1, marker
     assert "confidential:" not in out                          # --no-verify resolved no host

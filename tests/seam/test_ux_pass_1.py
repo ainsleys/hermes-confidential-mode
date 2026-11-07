@@ -203,3 +203,24 @@ def test_a_key_unreadable_mid_lock_refuses_the_call_and_records_no_breach(plugin
     refused = [e for e in rows if e.kind == "send_refused"]
     assert len(refused) == 1 and refused[0].detail["reason_code"] == "vendor_key_unreadable"
     assert refused[0].detail["reason"].startswith("vendor key unreadable")
+
+
+def test_tinfoil_setup_pins_every_side_call_and_an_openrouter_key_blocks_auto(plugin, monkeypatch, capsys):
+    import hermes_yaml
+    parser, handler = _cli(plugin)
+    assert handler(parser.parse_args(["setup", "--no-verify", "--model", "llama3-3-70b"])) == 0
+    out = capsys.readouterr().out
+    cfg = hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Then run")])
+    pf, locking = _sub(plugin, "preflight"), _sub(plugin, "locking")
+    tasks = set(pf.builtin_aux_task_names())
+    assert tasks <= set(cfg["auxiliary"]) and all(v["provider"] == "attested-tinfoil" for v in cfg["auxiliary"].values())
+    monkeypatch.setenv("TINFOIL_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    report = locking.run_tier_preflight("attested", config=cfg, check_keys=True,
+                                        predicate=locking.structural_predicate("attested", config=cfg))
+    assert report.ok, pf.format_report(report)                      # nothing is left on auto
+    # The on-host test config leaves side calls on auto: with an OpenRouter key readable, the lock refuses.
+    out = plugin.slash("on on-host-only")
+    assert out.startswith("Not locked") and "auto can fall through to OpenRouter or Nous on failure" in out
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    assert plugin.slash("on on-host-only").startswith("Locked to this machine")
