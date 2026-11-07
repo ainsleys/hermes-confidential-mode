@@ -5,8 +5,7 @@ from __future__ import annotations
 
 import io
 import json
-import lzma
-import tarfile
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,9 +21,15 @@ GPU13 = json.loads((FIX / "near_real_capture" / "model_candidate_gpu13.json").re
 
 
 def _texts() -> dict[str, bytes]:
-    """The 14 inner compose files saved from github.com/nearai/cvm-compose-files on 2026-11-07, by SHA-256."""
-    with tarfile.open(fileobj=io.BytesIO(lzma.decompress((FIX / "near_inner_composes.tar.xz").read_bytes()))) as tf:
-        return {m.name.removesuffix(".yaml"): tf.extractfile(m).read() for m in tf.getmembers() if m.isfile()}
+    """The 14 inner compose files saved from github.com/nearai/cvm-compose-files on 2026-11-07, as plain files
+    named by their SHA-256 (catalog rule 17: no archive in the repository). Each name is checked."""
+    out = {}
+    for path in sorted((FIX / "near_inner_composes").glob("*.yaml")):
+        data = path.read_bytes()
+        assert hashlib.sha256(data).hexdigest() == path.stem, path.name
+        out[path.stem] = data
+    assert len(out) == 14
+    return out
 
 
 TEXTS = _texts()
