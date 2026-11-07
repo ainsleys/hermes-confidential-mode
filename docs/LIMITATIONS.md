@@ -26,7 +26,8 @@ To **lock** a profile is to hold it to one **tier**, which is a rule about where
 The word is "lock" and not "seal", because sealing means something else in confidential computing.
 **On-host** means on the machine that runs Hermes, and **off-host** means anywhere else.
 The `on-host-only` tier accepts loopback and private-range hosts. The `attested` tier accepts only
-Tinfoil's verified enclave, or NEAR AI Cloud's verified gateway and models (section 14). A destination the rule accepts is "in-tier", and any other is "off-tier".
+Tinfoil's verified enclave, or NEAR AI Cloud's verified gateway and models (section 14). A
+destination the rule accepts is "in-tier", and any other is "off-tier".
 
 The **preflight** is the check the plugin runs over your config before it locks. It records a
 fingerprint of the routing config so that later changes can be detected.
@@ -51,7 +52,8 @@ short hash of a measurement. The **platform** is the CPU vendor's TEE technology
 Intel TDX.
 
 Tinfoil's **router** is the enclave your requests connect to. A **pin** is your recorded approval of
-one router build's code fingerprint and enclave fingerprint.
+an enclave build. A Tinfoil pin holds one router build's code fingerprint and enclave fingerprint. A
+NEAR pin is a set of approved entries, one for each CVM configuration (section 14).
 
 **Evidence** is the raw bytes captured during one verification. A **replay** re-runs that
 verification later, offline, from the evidence.
@@ -365,8 +367,9 @@ attested transport.
 **Why it exists.** Hermes treats the profile's answer as optional and falls back to the network probe.
 
 **What the plugin does today.** The `attested-tinfoil` profile answers `get_model_context_length` with
-the value of `confidential.tinfoil.context_length`. The default is 65536. Because the profile answers,
-the probe never runs.
+the value of `confidential.tinfoil.context_length`. The `attested-near` profile answers with
+`confidential.near.context_length`. Both default to 65536. Because the profile answers, the probe
+never runs.
 
 Set the value for the model you use. [config.example.yaml](config.example.yaml) lists the windows
 Tinfoil documents.
@@ -396,8 +399,12 @@ default paths.
 **The gap.** A lock is one tier. You cannot run the main model attested and send cheap side jobs, such
 as titles and compression, to an on-host model.
 
-**Why it exists.** The `on-host-only` rule refuses the enclave, and the `attested` rule refuses the on-host
-host (`confidential_mode/tiers.py`). This is a limit of the plugin, not of Hermes.
+**Why it exists.** The `on-host-only` rule refuses the enclave, and the `attested` rule refuses the
+on-host host (`confidential_mode/tiers.py`). This is a limit of the plugin, not of Hermes.
+
+One consequence concerns vision on NEAR. With request encryption on, NEAR refuses every image, so a
+profile locked to NEAR alone has no vision route that describes images. An on-host vision model would
+be the natural choice, and only a mixed tier would accept it.
 
 **Plan.** A tier inside the plugin whose rule accepts any destination that either existing rule
 accepts. The attested checks would stay unchanged for attested routes. No core change is needed.
@@ -451,9 +458,12 @@ A `gateway` signature is made inside the gateway's CVM over `<request hash>:<res
   the request to route it. With request encryption on (`confidential.near.encrypt`, the default), the
   message text, tool definitions and tool calls reach the gateway as ciphertext. The gateway still reads
   the model id, the plaintext parameters (for example `max_tokens`, `stop`, `response_format`, `user`
-  and `metadata`), the sizes and the timing. It also reads the request headers: the `Authorization` header with the API key, `User-Agent` and the OpenAI SDK's `x-stainless-*` headers (SDK version, operating system, Python version), `content-type`, the encryption headers (the client and model public keys) and any extra headers Hermes adds. With
-  encryption off it reads the whole request. The attestation says which code the gateway runs. It does
-  not say what that code does with what it reads.
+  and `metadata`), the sizes and the timing. The gateway also reads the request headers. These are the
+  `Authorization` header with the API key, `User-Agent`, the OpenAI SDK's `x-stainless-*` headers (SDK
+  version, operating system, Python version), `content-type`, the encryption headers (the client and
+  model public keys) and any extra headers Hermes adds. With encryption off the gateway reads the whole
+  request. The attestation says which code the gateway runs. The attestation does not say what that
+  code does with what the gateway reads.
 - **The gateway can read a reply, and is caught only afterwards.** The model seals its reply to the key
   in the `X-Client-Pub-Key` request header. NEAR's signature does not cover that header. A gateway that
   puts its own key there can read the reply. If it forwards the reply unchanged, the reply does not
@@ -493,23 +503,29 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   `provider_tee` signature that verifies is marked unverified, and the receipt says "SESSION NOT FULLY
   ATTESTED". With encryption on, the reply of such a send never reaches the agent: the plugin decrypts
   a reply only after a verified `provider_tee` signature over the encrypted bytes. Only an HTTP 200
-  reply that verifies and decrypts is handed over; any other status is refused. Hermes retries only a
-  rate limit (429), a server error (5xx) or a context-length error (which it first compresses), and a
-  timeout or a reset. A reply that fails its checks, an HTTP 421 and every other refusal are not
-  resent. Each attempt is a new encrypted request and gets its own ledger row.
-- The model key is not part of a pin yet. Within one Hermes process, a re-verification that reports a
-  different model key is refused. So when NEAR rotates a model key, NEAR requests are refused until
-  Hermes restarts. The restart accepts the new key without a prompt, until pins cover the key
-  (planned).
+  reply that verifies and decrypts is handed over; any other status is refused. While the profile is
+  locked, any error on a main call ends the turn (README, "What happens while locked"). While it is
+  unlocked, Hermes retries only a rate limit (429), a server error (5xx), a context-length error
+  (which it first compresses), and a timeout or a reset. A reply that fails its checks, an HTTP 421
+  and every other refusal are not resent. Each attempt is a new encrypted request and gets its own
+  ledger row. With encryption off, a send without a verified signature is recorded as unverified but
+  not refused, because the response has already arrived when the signature is fetched.
+- An HTTP 421 means the gateway no longer accepts the model key. A send that meets a TLS certificate
+  other than the attested one is treated the same way. The plugin then verifies again, at most once
+  per `confidential.near.reverify_backoff_seconds` (default 30), and refuses NEAR sends until that
+  verification passes.
+- The model key is not part of a pin. The review bundle shows the verified signing address, old and
+  new, for the reviewer. Within one Hermes process, a re-verification that reports a different model
+  key is refused. So when NEAR rotates a model key, NEAR requests are refused until Hermes restarts.
+  The restart accepts the new key without a prompt.
 - Settings whose value is a mapping, such as `extra_body` entries, are refused while encryption is on,
   unless the plugin knows the key. Examples are a reasoning setting (`reasoning: {"effort": ...}`),
   `stream_options` and `logit_bias`. A mapping would leave this host in plaintext, so every NEAR request
-  that carries one is refused before it is sent. With encryption
-  off, the send is not refused, because the response has already arrived when the signature is
-  fetched.
+  that carries one is refused before it is sent.
 - It pins each CVM it saw as an entry of its own: the gateway, and each model instance. An entry pins
   the CVM's measured docker-compose, its app_id, OS image and KMS key as RTMR3 records them, and its
-  firmware and kernel measurements. A model entry also pins the compose-manager image the log reports.
+  firmware and kernel measurements. A model entry also pins the compose-manager image the log reports
+  and the whole service map (below).
   The approved entries form a set. A verification passes when every CVM it reports matches an
   approved entry, so a new instance with another configuration is a pin prompt. Approving adds to the
   set. An entry no verification has matched for 20 verifications is flagged, and `hermes confidential
@@ -526,14 +542,13 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   When a verification stages a NEAR entry, the plugin fetches, in the background, each deployed
   docker-compose file the map names, from the GitHub repository that the measured compose names in
   `GITHUB_REPO` (today `nearai/cvm-compose-files`), at the logged commit. Nothing is fetched when the
-  measured compose names no repository on github.com, and such an entry cannot be approved. It keeps a file only when its SHA-256 equals the log's `file_sha256`. The approve
+  measured compose names no repository on github.com, and such an entry cannot be approved. The plugin
+  keeps a file only when its SHA-256 equals the log's `file_sha256`. The approve
   command fetches again before it asks, and so does `hermes confidential pins review`. From those files
-  the plugin tags every service that holds `dstack.sock` or `docker.sock`, mounts a run directory, runs
-  privileged, adds capabilities, maps host devices, shares the host's network, pid or ipc namespace,
-  runs as root explicitly or by the image's default user, or is built from `dockerfile_inline` or from
-  an image not pinned by digest. Until every file of an entry is kept, the entry cannot be approved,
-  and the approve command says so and names `pins review`. A file that is kept but does not parse
-  blocks approval of that entry for good, which fails closed. The tags read the compose text only. A
+  the plugin tags each service's privileges, such as holding `dstack.sock` or running privileged. The
+  README's section "Reviewing a pending pin" lists every tag. Until every file of an entry is kept, the
+  entry cannot be approved, and the approve command says so and names `pins review`. A file that is
+  kept but does not parse blocks approval of that entry for good, which fails closed. The tags read the compose text only. A
   missing tag is not evidence, and the tags do not show what runs, because what runs after launch is
   not measured (above). Setting `CONFIDENTIAL_MODE_NO_FETCH` turns the fetch off; NEAR model entries
   then cannot be approved.
@@ -557,8 +572,8 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
 the gateway to the bytes the client received; a signing key per instance, or the instance id inside
 the signed text; TCB status and GPU evidence bound to the model CVM's own quote; each deployment after
 launch measured into the TD (for example extended into RTMR3), and the quote socket kept away from the
-services it deploys. In the plugin: the approved-set pin is built (section 15 covers who may approve
-it). The model key is still not part of a pin.
+services it deploys. In the plugin: pinning the model signing key, so that a key change becomes a
+pin prompt instead of a refusal until restart.
 
 ## 15. An agent with a terminal can reach the approval prompt
 
@@ -664,8 +679,10 @@ Each item below is a smaller gap. Each one is stated in full.
   process that loads the plugin after an upgrade (README, "Upgrading").
 
 - **The ledger grows without limit.** The plugin never deletes ledger rows. On the attested tier a
-  `verify_ok` row with its evidence (about 15 KB for Tinfoil, about 100 KB for NEAR) is written every
-  `confidential.verify_ttl_seconds` while sends continue. That is a few megabytes to tens of megabytes
+  `verify_ok` row with its evidence is written every `confidential.verify_ttl_seconds` while sends
+  continue. That is about 15 KB for Tinfoil. For NEAR it is about 20 KB in the row plus about 120 KB
+  of evidence files in `evidence/blobs/` beside the ledger, for one model. An evidence file stays
+  while any row names it. That is a few megabytes to tens of megabytes
   a day. A receipt reads the ledger from the last unlock before its session. A profile
   that has never been unlocked therefore still reads from the start of the ledger, and rendering
   slows as the file grows. To start a new
@@ -675,6 +692,16 @@ Each item below is a smaller gap. Each one is stated in full.
 - **Pins need a consent record.** The attested check refuses a pin that has no matching `pin_applied`
   row in the ledger, with the message "pin has no consent record". Any process running as your user,
   not only code in the same process, can write such a row into the ledger file.
+
+- **A ledger that cannot be written blocks attested sends.** A verification whose `verify_ok` row
+  cannot be written is refused, so that no send rests on a verification the ledger does not hold. A
+  transient "database is locked" error is retried once. Any other write failure, such as a full disk,
+  a corrupt file or a row over the size cap, blocks attested sends for Tinfoil and NEAR until a later
+  verification writes its row. The plugin tries again after a 10-second backoff.
+
+- **NEAR model entries need GitHub.** A NEAR model entry can be approved only with its service map
+  pinned, and that needs the deployed docker-compose files from GitHub (section 14). While GitHub is
+  unreachable, or with `CONFIDENTIAL_MODE_NO_FETCH` set, such an entry cannot be approved.
 
 - **The offline replay's identity checks have limits.** `hermes confidential replay` requires the
   repository `tinfoilsh/confidential-model-router` by default. It takes the expected fingerprints from

@@ -54,7 +54,8 @@ and `tests/fixtures/near_real_capture/` holds a real public capture that replays
 
 `scripts/near_first_contact.py` is the manual counterpart. It attests NEAR, sends one unstreamed and
 one streamed request when the key is set, writes what it recorded to a JSON file, and replays that
-file offline. It prints no secrets.
+file offline. With request encryption on, the streamed request is refused before it is sent, and the
+script reports that as expected. It prints no secrets.
 
 ## Real captures in the fixtures
 

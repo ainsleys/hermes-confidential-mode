@@ -30,9 +30,9 @@ Tinfoil's **router** is the enclave your requests connect to. NEAR AI Cloud's **
 service your requests to NEAR connect to. The gateway runs in a **CVM** (a confidential virtual
 machine, here an Intel TDX enclave) and routes each request to a model that runs in its own CVM. NEAR
 signs each response with a key held inside the model's CVM. A **pin** is your recorded approval of
-one build: for Tinfoil, the router's build; for NEAR, the gateway's build together with the build of
-every model you allow. **Verification** is the plugin checking the attestation before it sends
-anything.
+an enclave build. For Tinfoil it covers one router build. For NEAR it is a set of approved entries,
+one for each CVM configuration: the gateway, and each model instance. **Verification** is the plugin
+checking the attestation before it sends anything.
 
 **Collateral** is the certificates and signed documents a client needs from the CPU vendor to check a
 hardware report. For AMD, the main piece is the **VCEK**, the certificate for the signing key of the
@@ -92,29 +92,27 @@ to turn every such fetch off; NEAR model entries then cannot be approved.
 
 | Host | Who calls it | What for |
 |---|---|---|
-| `raw.githubusercontent.com` | Staging, the approve command, `pins review`. | Each docker-compose file a NEAR model CVM's deployment log names, at `<repository>/<commit>/<file>`, where the repository is the one the measured compose names in `GITHUB_REPO` (today `nearai/cvm-compose-files`); nothing is fetched when it names none on github.com. Only a 40-digit commit and a plain relative path are ever put in the URL. The text is kept only when its SHA-256 equals the log's. GitHub serves a fork's commit under the same URL, so the fetch does not prove the commit belongs to that repository. |
+| `raw.githubusercontent.com` | Staging, the approve command, `pins review`. | Each docker-compose file a NEAR model CVM's deployment log names, at `<repository>/<commit>/<file>`, where the repository is the one the measured compose names in `GITHUB_REPO` (today `nearai/cvm-compose-files`); nothing is fetched when the measured compose names no repository on github.com. Only a 40-digit commit and a plain relative path are ever put in the URL. The text is kept only when its SHA-256 equals the log's. GitHub serves a fork's commit under the same URL, so the fetch does not prove the commit belongs to that repository. |
 | `api.github.com` | `pins review` only. | The author, date and message of each of those commits, as unsigned metadata for the reviewer. |
 
 ### When it verifies again
 
-The plugin verifies the router again in three situations:
+The plugin verifies again in these situations:
 
 1. when the cached result is older than `confidential.verify_ttl_seconds`, which defaults to 300
    seconds and is measured on a monotonic clock;
 2. after an unlock, which clears the cached result;
-3. whenever the SDK re-attests on its own after the enclave rotates a key or certificate.
+3. for Tinfoil, whenever the SDK re-attests on its own after the enclave rotates a key or certificate;
+4. for NEAR, after the gateway answers HTTP 421 or a send meets a TLS certificate other than the
+   attested one, at most once per `confidential.near.reverify_backoff_seconds` (30 seconds by
+   default).
+
+After a failed verification the plugin waits 10 seconds before it tries again.
 
 ### What it does not contact
 
-The plugin itself calls no other host. It sends no telemetry and no usage data anywhere.
-
-The plugin sets one environment variable in the Hermes process, `XDG_CONFIDENTIAL_MODE_TOOL_PROCESS`, to
-that process's id, before the first tool runs. Terminal, process_manage and execute_code children inherit
-it. Every approval prompt refuses in a process whose variable names another process. An agent that removes
-the variable, builds the command at run time, or attaches a client through the gateway socket can still
-approve a pin; the ledger records every approval with its surface. So can an agent in another profile
-that does not load this plugin, since nothing marks its processes, and any process running as your user
-can write the pins file and a matching ledger row (docs/LIMITATIONS.md, section 15).
+The plugin itself calls no host beyond those listed above. The plugin sends no telemetry and no
+usage data anywhere.
 
 ### What those hosts can see even when everything works
 
@@ -123,6 +121,12 @@ can write the pins file and a matching ledger row (docs/LIMITATIONS.md, section 
   proxy (see LIMITATIONS, "Where TLS ends"). The router therefore decrypts your API key header.
   Tinfoil's network and hosting still see the request and response sizes, their timing, and your
   IP address. EHBP encrypts the body. It does not hide this metadata.
+- **NEAR's gateway** is where TLS ends for NEAR. The gateway reads your API key header, the model
+  id, the plaintext parameters, the request headers, sizes and timing, and your IP address. With
+  request encryption on, the gateway does not read the message text, the tool definitions or the
+  tool calls. A gateway that swaps the client key header can read a reply. The plugin detects the swap only afterwards
+  ([LIMITATIONS.md](LIMITATIONS.md), section 14).
+- **GitHub** sees each fetch of a NEAR compose file and of its commit metadata, from your IP address.
 - **The three `*.tinfoil.sh` proxies** are run by the vendor. They see each verification, from your
   IP address.
 - **Your DNS resolver** sees every lookup.
@@ -156,7 +160,8 @@ Everything the plugin writes is under your Hermes home, scoped to the profile.
 | `plugin-data/confidential-mode/ledger.sqlite` | The ledger. It holds one row per observed send, refusal, question, answer, lock, unlock, session start and session end, verification (with the captured attestation evidence), pin event, breach and compaction. Rows hold hosts, byte counts, verdicts and decisions only. That is still a metadata trail, and a shared receipt shares it. Rows hold no prompt or response text. `Ledger.append` rejects any row whose details carry one of these keys at any depth: `messages`, `prompt`, `prompts`, `request`, `input`, `instructions`, `system`, `content` or `contents`. |
 | `plugin-data/agent-plugin-confidential-mode-<digest>/state.json` | `ctx.state`, Hermes' per-plugin key-value store. It holds the locked flag, the tier, the time of locking, the routing-config fingerprint and the list of breached sessions. |
 | The same directory, `pins.yaml` | Version 3 of the pins file: for each vendor and identity, the approved entries and the pending entries. The plugin writes a pending entry when a verification finds a CVM or build that no approved entry covers. It turns pending entries into approved entries only on an explicit Approve from you. The one exception is the platform-only policy, `confidential.pins.auto_approve_platform_only`, which is off by default and applies to Tinfoil only. Beside it: `pins.yaml.lock` (empty; it serialises writes between processes) and, after an upgrade, `pins.yaml.v2.bak` (the version-2 file as it was before the first version-3 write). |
-| The same directory, `pins/composes/` | The docker-compose files fetched for NEAR entries, each named `<sha256>.yaml` by its content hash, and (from `pins review`) `commit-<sha>.json` with each commit's GitHub metadata. |
+| `plugin-data/confidential-mode/evidence/blobs/` | Large pieces of NEAR evidence (each docker-compose, compose-manager attestation, TDX quote and Intel Trust Authority token), one file each, named by its SHA-256. A ledger row names the files it uses. A file no row names is deleted by a later evidence write once it is more than 24 hours old. |
+| The same directory as `state.json`, `pins/composes/` | The docker-compose files fetched for NEAR entries, each named `<sha256>.yaml` by its content hash, and (from `pins review`) `commit-<sha>.json` with each commit's GitHub metadata. |
 | The same directory, `allowlist.yaml` | This lock's tool identities: each tool's name, toolset, handler module and handler name. It also holds the tools you allowed with `/confidential allow`, tagged with the lock's identity. After a restart, the plugin rebuilds the allowlist from this file. `/confidential off` deletes it, so additions never outlive the lock. |
 | The same directory, `tinfoil_user_cache_secret` | A random 32-byte secret, stored as hex with file mode 0600. The SDK sends it as `user_cache_secret`, which keeps Tinfoil's prompt cache separate for you. The SDK's own default location is `~/.tinfoil/user_cache_secret`. The plugin never uses that path. |
 | The same directory, `trust-roots/<sha256>.json` | The Sigstore trust root used at verification. Each distinct trust root is stored once, named by the hash of its content. The evidence in the ledger also carries the trust root's bytes, so a receipt replays offline on any machine. The evidence records no local path. |
@@ -216,7 +221,9 @@ anything.
 The plugin runs no shell commands and starts no subprocesses. It runs no long-running background
 process.
 
-It starts one short-lived daemon thread for each attestation. The sequence is this:
+The plugin starts short-lived daemon threads of three kinds. For NEAR, one thread fetches the compose
+files of a staged model entry from GitHub. Another records which approved entries a verification matched, and
+writes `pins.yaml`. The third kind runs each attestation. The sequence for an attestation is this:
 
 1. `create_client`, or the attested check on a turn, needs a fresh verification.
 2. The plugin starts the thread, which runs the verification.
@@ -224,6 +231,14 @@ It starts one short-lived daemon thread for each attestation. The sequence is th
 4. If the verification is not done by then, the plugin refuses the turn. The thread keeps running
    and finishes the verification.
 5. The thread exits when the verification ends.
+
+### Environment variable it sets
+
+The plugin sets one environment variable in the Hermes process, `XDG_CONFIDENTIAL_MODE_TOOL_PROCESS`,
+to that process's id, before the first tool runs. Terminal, process_manage and execute_code children
+inherit it. Every approval prompt refuses in a process whose variable names another process. Some
+routes still reach the prompt, such as a nested chat attached through the gateway.
+[LIMITATIONS.md](LIMITATIONS.md), section 15, lists them.
 
 ## Hermes surfaces used
 
@@ -287,8 +302,16 @@ whole profile. While locked, the plugin blocks the following.
 
 - **Sends to an unverified or unpinned enclave (attested tier only).** The plugin refuses any send
   while the enclave is unverified. It refuses when the last verification is stale and cannot be
-  repeated within `confidential.verify_wait_seconds` (20 seconds by default). It refuses when the enclave is verified but does not match the pin you
-  approved.
+  repeated within `confidential.verify_wait_seconds` (20 seconds by default). The plugin refuses
+  when the enclave is verified but no approved pin matches the enclave. The plugin refuses when the
+  verification's `verify_ok` row could not be written to the ledger.
+
+- **NEAR requests the encryption cannot cover (attested-near).** With `confidential.near.encrypt` on,
+  which the lock requires, the plugin refuses before sending: images and other non-text parts,
+  streaming, every POST other than chat completions, and settings whose value is a mapping it does not
+  know. The plugin releases a reply only after a verified `provider_tee` signature. The plugin
+  refuses a model not on `confidential.near.models`, and any connection whose TLS certificate is not
+  the attested one.
 
 - **A pin with no consent record (attested tier only).** The plugin refuses a pin that has no matching
   `pin_applied` row in the ledger, with the message "pin has no consent record".
@@ -311,6 +334,10 @@ whole profile. While locked, the plugin blocks the following.
 
   Under yolo mode, `approvals.mode: off`, or an unattended context such as cron, `-q` or no surface
   at all, the ask becomes a block.
+
+- **Tool calls that name the plugin's own commands or state files.** A `terminal`, `process_manage`
+  or `execute_code` call whose arguments name the plugin's command line, module or state files is
+  refused. So is a `write_file` or `patch` call that names a state file.
 
 - **Tools that are always blocked.** These are the following:
   - `cronjob_manage`, because a scheduled job would run later, outside the locked session;
@@ -338,8 +365,8 @@ whole profile. While locked, the plugin blocks the following.
   The request carries no conversation text.
 
 - **Network metadata.** This covers the sizes, timing and addresses visible on the connection to
-  Tinfoil's router, the vendor-run collateral proxies, DNS, and the host operator if Hermes runs
-  on someone else's machine.
+  Tinfoil's router or NEAR's gateway, the vendor-run collateral proxies, GitHub, DNS, and the host
+  operator if Hermes runs on someone else's machine.
 
 - **On-host tools.** These are `terminal`, `process_manage`, `execute_code`, `read_file`, `write_file`,
   `patch`, `search_files`, `skills_list`, `skill_view`, `skill_manage`, `todo_list`, `memory`,
