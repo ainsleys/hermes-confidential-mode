@@ -35,6 +35,14 @@ def plain_adapter(tmp_path):
     return _adapter(tmp_path, encrypt=False)
 
 
+def _one_refusal_row(rows, before, text):
+    """A refusal before sending writes exactly one send_refused row (the transport's own, outside a turn)."""
+    new = rows[before:]
+    assert len(new) == 1 and new[0]["kind"] == "send_refused", [r.get("kind") for r in new]
+    assert new[0]["provider"] == "attested-near" and new[0]["purpose"] == "unattributed", new[0]
+    assert text in new[0]["detail"]["reason"], new[0]["detail"]
+
+
 def _client(ad):
     import openai
     from confidential_mode.verify.near import DEFAULT_BASE_URL
@@ -121,7 +129,8 @@ def test_live_image_part_is_refused_before_sending_under_image_parts_refuse(tmp_
     with pytest.raises(VerifyError) as ei:
         _client(ad).chat.completions.create(model=MODEL, messages=[{"role": "user", "content": [
             {"type": "text", "text": "Describe"}, img]}], max_tokens=8)
-    assert "does not cover image parts" in str(ei.value) and len(rows) == before
+    assert "does not cover image parts" in str(ei.value)
+    _one_refusal_row(rows, before, "does not cover image parts")
 
 
 def test_live_image_part_leaves_in_plaintext_beside_encrypted_text_and_is_provider_tee_verified(tmp_path):
@@ -150,4 +159,5 @@ def test_live_streaming_is_refused_while_encrypting(adapter):
     with pytest.raises(VerifyError) as ei:
         list(_client(ad).chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "hi"}],
                                                  max_tokens=8, stream=True))
-    assert "streaming is refused while encrypting" in str(ei.value) and len(rows) == before
+    assert "streaming is refused while encrypting" in str(ei.value)
+    _one_refusal_row(rows, before, "streaming is refused while encrypting")
