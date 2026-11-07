@@ -569,6 +569,10 @@ def _near_encryption_items(config: Mapping, tasks: Sequence[str], plugins: Mappi
         cfg = _effective_aux(config, task, plugins)
         if _s(cfg.get("provider")).lower() == _NEAR:
             routes.append((f"auxiliary.{task}.api_mode", cfg.get("api_mode")))
+        chain = cfg.get("fallback_chain")
+        for i, entry in enumerate(chain if isinstance(chain, list) else []):
+            if isinstance(entry, Mapping) and _s(entry.get("provider")).lower() == _NEAR:
+                routes.append((f"auxiliary.{task}.fallback_chain[{i}].api_mode", entry.get("api_mode")))
     deleg = config.get("delegation") if isinstance(config.get("delegation"), Mapping) else {}
     if _s(deleg.get("provider")).lower() == _NEAR:
         routes.append(("delegation.api_mode", deleg.get("api_mode")))
@@ -579,7 +583,11 @@ def _near_encryption_items(config: Mapping, tasks: Sequence[str], plugins: Mappi
             add(key, mode, OFF_TIER, f"remove {key} or set it to chat_completions: NEAR encrypts chat completions "
                                      "only, and the attested-near transport refuses every other API")
     near_cfg = (config.get("confidential") or {}).get("near") if isinstance(config.get("confidential"), Mapping) else None
-    configured = near_cfg.get("encrypt", True) if isinstance(near_cfg, Mapping) else True
+    near_cfg = near_cfg if isinstance(near_cfg, Mapping) else {}
+    # One rule for both switches: absent or exactly true passes; any other value is refused. (The adapter
+    # reads them as "on unless exactly false", so every disagreement between the two is fail-closed.)
+    configured = near_cfg.get("encrypt", True)
+    tls = near_cfg.get("require_tls_binding", True)
     try:
         profile = provider_lookup(_NEAR)
     except Exception:
@@ -588,11 +596,18 @@ def _near_encryption_items(config: Mapping, tasks: Sequence[str], plugins: Mappi
     running = getattr(adapter, "encrypt", None)
     enc_fix = ("remove confidential.near.encrypt (default true) or set it to true, then restart Hermes: the "
                "attested tier never sends NEAR requests unencrypted")
-    if _falsy(configured) or configured is None or running is False:
+    if configured is not True or running is False:
         shown = configured if running is not False else f"{configured} (running adapter: off)"
         add("confidential.near.encrypt", shown, OFF_TIER, enc_fix)
     else:
         add("confidential.near.encrypt", configured, IN_TIER)
+    running_tls = getattr(adapter, "require_tls_binding", None)
+    if tls is not True or running_tls is False:
+        add("confidential.near.require_tls_binding", tls if running_tls is not False else f"{tls} (running adapter: off)",
+            OFF_TIER, "remove confidential.near.require_tls_binding (default true) or set it to true, then restart "
+                      "Hermes: without it no NEAR connection is pinned to the attested gateway certificate")
+    else:
+        add("confidential.near.require_tls_binding", tls, IN_TIER)
     try:
         ready = adapter.encryption_ready() if callable(getattr(adapter, "encryption_ready", None)) else None
         if ready is None:
