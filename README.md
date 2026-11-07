@@ -831,6 +831,8 @@ The function takes these keyword arguments:
 
 - `expected_repo` is the repository the code must come from. It defaults to
   `tinfoilsh/confidential-model-router`.
+- `expected_repo_id` and `expected_owner_id` are the numeric GitHub repository and owner IDs. When
+  you pass both, the `repo_identity` check reports `name+id`; otherwise it reports `name`.
 - `expected_fingerprints` is a pair: the code fingerprint and the enclave fingerprint you expect.
 - `trusted_root` is a Sigstore trust root you supply, as bytes or as a file path.
 - `as_of` is the time at which certificates are checked. It defaults to the capture time.
