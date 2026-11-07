@@ -881,8 +881,19 @@ class NearAdapter:
         exchange built on an accepted verification that was replaced since is refused (S09, atomic)."""
         if self.held_reason is not None:
             raise VerifyError(f"attested transport held: {self.held_reason}")
-        if ex is not None and ex.accepted is not self._accepted:
-            raise VerifyError("the accepted NEAR verification changed while this request was prepared; resend")
+        if ex is None or ex.accepted is self._accepted:
+            return
+        # A newer verification was accepted meanwhile (a background refresh). Only the values this exchange
+        # was prepared with matter: the pinned TLS fingerprint and the request model's signing key.
+        if self.pinned_spki() != ex.prepared_spki:
+            raise VerifyError("the attested NEAR TLS certificate changed while this request was prepared; resend")
+        if ex.model is not None and self._model_key_or_none(ex.model) != ex.prepared_key:
+            raise VerifyError("the NEAR model signing key changed while this request was prepared; resend")
+
+    def _model_key_or_none(self, model: str | None) -> str | None:
+        a = self._appraisal
+        keys = (a.model_signers.get(model) if (a and model) else None) or []
+        return keys[0] if len(keys) == 1 else None
 
     def _acquire(self, ex: "_Exchange | None" = None, *, check: bool = False) -> tuple[httpx.BaseTransport, Callable[[], None]]:
         """The current send pool, counted as in use until the returned release() is called (once). With
@@ -1185,8 +1196,10 @@ class NearAdapter:
         if self.require_provider_tee and model not in self.models:
             raise VerifyError(f"model {model!r} is not an attested NEAR model on the allowlist "
                               "(confidential.near.models); refused before sending")
-        acc = self._accepted
+        with self._lock:
+            acc, prepared_spki, prepared_key = self._accepted, self.pinned_spki(), self._model_key_or_none(model)
         ex = _Exchange(adapter=self, path=path, model=model, stream=stream, accepted=acc,
+                       prepared_spki=prepared_spki, prepared_key=prepared_key,
                        request_sha256="", request_bytes=0,
                        authorization=request.headers.get("authorization"), context=sendctx.current() or {},
                        attestation_nonce=((acc.evidence or {}).get("nonce") if acc else None),
@@ -1455,6 +1468,8 @@ class _Exchange:
     code_fingerprint: str | None
     responses_api: bool = False
     accepted: Any = None            # the accepted verification this exchange was built on (S09 re-check)
+    prepared_spki: str | None = None   # the pinned TLS fingerprint and model key when it was built
+    prepared_key: str | None = None
     status: int | None = None
     content_encoding: str | None = None
     chat_id: str | None = None

@@ -151,8 +151,8 @@ def test_a_send_prepared_before_a_held_commit_is_refused_at_the_pool(tmp_path):
     with pytest.raises(VerifyError, match="held"):
         ad._acquire(ex, check=True)
     ad.release()
-    with pytest.raises(VerifyError, match="changed while this request was prepared"):
-        ad._acquire(ex, check=True)
+    _pool, release = ad._acquire(ex, check=True)     # same key and certificate: the prepared send proceeds
+    release()
     ad.close()
     with pytest.raises(VerifyError, match="closed"):
         ad.prepare_verification()
@@ -166,3 +166,30 @@ def test_the_text_receipt_marks_an_unaccepted_background_row():
     assert "source=background" in text
     ok = dict(row, detail={"enclave_host": "h", "source": "background", "accepted": True, "vendor": "tinfoil"})
     assert "NOT ACCEPTED" not in receipts._verify_body(ok) and "source=background" in receipts._verify_body(ok)
+
+
+def test_a_background_commit_with_the_same_key_and_certificate_does_not_refuse_a_prepared_send(tmp_path):
+    """N1: only the values an exchange was prepared with matter, not the verification object."""
+    pytest.importorskip("nacl")
+    import httpx
+    from tests.near_world import BASE, MODEL
+    world, ad, _gate, _entered, _blocking = _blocking_world(tmp_path)
+    ad.verify()
+    ad.release()
+
+    def prepared_exchange():
+        req = httpx.Request("POST", f"{BASE}/chat/completions",
+                            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]})
+        req.read()
+        return ad.begin_exchange(req)
+    ex = prepared_exchange()
+    ad.commit_verification(ad.prepare_verification(), hold=False)     # same key, same certificate
+    assert ex.accepted is not ad.last_result
+    pool, release = ad._acquire(ex, check=True)
+    release()
+    import dataclasses
+    ex = prepared_exchange()
+    ad._appraisal = dataclasses.replace(ad._appraisal, model_signers={MODEL: ["ab" * 32]})   # another key
+    ad._accepted = dataclasses.replace(ad._accepted)
+    with pytest.raises(VerifyError, match="signing key changed"):
+        ad._acquire(ex, check=True)

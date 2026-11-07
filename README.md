@@ -570,7 +570,8 @@ The plugin refuses some requests before they are sent.
 Images are not refused by default. NEAR's encryption covers only text. In a message that holds an
 image, the plugin encrypts every text part (`text` or `input_text`, in any letter case) and sends each
 image part in plaintext. An image part may be `image_url` or `input_image`, and it must hold an inline
-`data:image/...;base64,` image, with an optional `detail` of `low`, `high` or `auto`. Any other part
+raster image as a `data:image/...;base64,` URI (png, jpeg, gif, webp, bmp or tiff; SVG is refused),
+with an optional `detail` of `low`, `high` or `auto`. Any other part
 type, a remote image URL, or an extra field on an image part is refused before sending, with the part
 type named, because its text could only leave in plaintext. So NEAR's gateway reads each image you
 send. The text around the image stays encrypted. NEAR's model still signs the reply with its

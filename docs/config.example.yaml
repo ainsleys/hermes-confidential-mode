@@ -119,7 +119,7 @@ confidential:
 
     # What happens to an image or other non-text part of a message. NEAR's encryption covers text only.
     # disclose: every text part is encrypted, each image part (image_url or input_image holding an inline
-    # data:image base64 image) leaves this host in plaintext to NEAR's gateway, and any other part type,
+    # raster data:image base64 image, png, jpeg, gif, webp, bmp or tiff) leaves this host in plaintext to NEAR's gateway, and any other part type,
     # remote image URL or extra field is refused. Each send's ledger row counts the image parts, and the
     # first one per lock adds a notice row and one line to the reply. refuse: any message with a non-text
     # part is refused before it is sent. Any other

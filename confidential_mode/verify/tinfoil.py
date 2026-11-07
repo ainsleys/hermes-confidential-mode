@@ -595,17 +595,28 @@ class TinfoilAdapter:
             raise VerifyError(f"async attestation failed: {type(exc).__name__}: {exc}") from exc
         finally:
             self._counter_bucket.name = None
+        err, winner = None, None
         with self._lock:
-            if self.closed:
-                raise VerifyError("the Tinfoil adapter is closed")
             acc = self._accepted
-            if acc is None or (acc.code_fingerprint, acc.enclave_fingerprint) != build:
-                raise VerifyError("the accepted enclave build changed while the async pool was attested; resend")
-            entry = self._async_pools.get(id(loop))
-            if entry is not None and entry[0] is loop:
-                return entry[1]             # another task on this loop published first; ours is dropped
-            self._async_pools[id(loop)] = (loop, pool)
-            return pool
+            if self.closed:
+                err = VerifyError("the Tinfoil adapter is closed")
+            elif acc is None or (acc.code_fingerprint, acc.enclave_fingerprint) != build:
+                err = VerifyError("the accepted enclave build changed while the async pool was attested; resend")
+            else:
+                entry = self._async_pools.get(id(loop))
+                if entry is None or entry[0] is not loop:
+                    self._async_pools[id(loop)] = (loop, pool)
+                    return pool
+                winner = entry[1]           # another task on this loop published first
+        aclose = getattr(pool, "aclose", None)   # the unpublished pool is closed on its own loop
+        if callable(aclose):
+            try:
+                loop.create_task(aclose())
+            except Exception:
+                pass
+        if err is not None:
+            raise err
+        return winner
 
     def async_http_for_loop(self) -> httpx.AsyncClient:
         """A non-closing view over the running loop's verified async pool. The pool is attested once

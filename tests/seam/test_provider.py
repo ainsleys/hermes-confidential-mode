@@ -731,3 +731,18 @@ def test_tinfoil_background_refresh_swaps_the_pool_only_after_the_pin_check(env,
     assert ad.last_result is result and ad.held_reason is None
     client.chat.completions.create(model="m", messages=MSG)  # still served by the accepted pool
     assert env["pins"].pending().code_fingerprint == "c-other"
+
+
+def test_a_tinfoil_call_refused_by_the_provider_gate_writes_one_send_refused_row(env):
+    rows = []
+    env["sdk"]["fail"] = "network down"
+    profile = env["register"](on_event=rows.append)
+    client = profile.create_client(api_key="tf-key", base_url=BASE_URL)
+    assert isinstance(client, RefusingClient)
+    from confidential_mode import sendctx
+    with sendctx.send_context(session_id="s-aux", purpose="aux:compression", tier="attested"):
+        with pytest.raises(ConfidentialRefused):
+            client.chat.completions.create(model="m", messages=MSG)
+    refused = [r for r in rows if r["kind"] == "send_refused"]
+    assert len(refused) == 1 and refused[0]["detail"]["stage"] == "provider_gate"
+    assert refused[0]["purpose"] == "aux:compression" and refused[0]["provider"] == PROFILE

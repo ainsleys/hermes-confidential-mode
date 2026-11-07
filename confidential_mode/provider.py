@@ -969,19 +969,43 @@ def classify_refusal(error, **_context):
     return None
 
 
-def _refusal_recorder(profile):
-    """The adapter's refusal ledger hook for a provider-gate refusal (NEAR: one send_refused row with stage
-    provider_gate, skipped inside the llm gate, which writes its own), or None."""
-    record = getattr(getattr(profile, "_confidential_adapter", None), "record_refusal", None)
-    if not callable(record):
+def _refusal_recorder(profile, cache: "VerificationCache | None" = None):
+    """The ledger hook for a provider-gate refusal: one send_refused row with stage provider_gate, skipped
+    inside the llm gate (which writes its own). NEAR uses its adapter's record_refusal; Tinfoil writes the
+    same row through the cache entry's ledger sink. None when neither exists."""
+    adapter = getattr(profile, "_confidential_adapter", None)
+    record = getattr(adapter, "record_refusal", None)
+    if callable(record):
+        return lambda exc: record(exc, stage="provider_gate")
+    e = (cache or verification_cache).entry(getattr(profile, "name", ""))
+    if e is None or e.on_event is None:
         return None
-    return lambda exc: record(exc, stage="provider_gate")
+
+    def write(exc: BaseException) -> None:
+        try:
+            if getattr(exc, "ledgered", False) is True:
+                return
+            exc.ledgered = True
+            from . import sendctx
+            ctx = sendctx.current() or {}
+            if ctx.get("refusals_ledgered_by") == "llm_gate":
+                return
+            _emit(e, {"kind": "send_refused", "session_id": str(ctx.get("session_id") or ""),
+                      "purpose": str(ctx.get("purpose") or "unattributed"), "provider": profile.name,
+                      "host": _adapter_host(adapter), "model": str(ctx.get("model") or ""), "tier": ctx.get("tier"),
+                      "verdict": "refused", "decision": "refused",
+                      "detail": {"vendor": getattr(adapter, "vendor", ""), "source": "provider_gate",
+                                 "reason_code": "refused_provider_gate", "stage": "provider_gate",
+                                 "reason": (str(exc) or type(exc).__name__)[:300]}})
+        except Exception:
+            logger.warning("attested: could not ledger a provider-gate refusal", exc_info=True)
+    return write
 
 
 def _create_client(profile, cache: VerificationCache, client_kwargs: dict):
     api_key = client_kwargs.get("api_key") or api_key_for(getattr(profile, "_confidential_env_var", API_KEY_ENV))
     base_url = profile.base_url
-    on_refuse = _refusal_recorder(profile)
+    on_refuse = _refusal_recorder(profile, cache)
     try:
         ok, reason, _ = cache.ensure(profile.name)
         base_url = profile.base_url  # may have just been resolved from the placeholder

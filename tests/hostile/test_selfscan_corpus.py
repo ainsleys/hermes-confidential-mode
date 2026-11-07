@@ -78,12 +78,19 @@ REFUSED_PY = [
     "import runpy, sys; sys.argv=['hermes','confidential','pins','approve']; runpy.run_module('hermes_cli.main')",
     "import sys, hermes_cli.main as m; m.main(['confidential', 'off'])",
     "import plugins.confidential_mode",
+    f"open('{PD}/pins.yaml', 'w').write('x')",
+    f"from pathlib import Path\nPath('{PD}/pins.yaml').write_text('x')",
+    f"import sqlite3\nsqlite3.connect('{PD}/ledger.sqlite').execute('delete from events')",
+    f"import os\nos.remove('{PD}/ledger.sqlite')",
 ]
 
 ALLOWED_PY = [
     "print('import confidential_mode')",
     "# confidential_mode is great\nprint(1)",
     "x = 'from confidential_mode import pins'  # a string, not an import\nprint(x)",
+    f"print(open('{PD}/pins.yaml').read())",
+    f"from pathlib import Path\nprint(Path('{PD}/pins.yaml').read_text())",
+    f"import sqlite3\nsqlite3.connect('file:{PD}/ledger.sqlite?mode=ro', uri=True)",
 ]
 
 

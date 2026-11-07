@@ -520,3 +520,23 @@ def test_bounded_max_tokens_and_scalars_still_pass():
     out, rep = e2.encrypt_request({"model": "m", "messages": [], "reasoning": {"max_tokens": 4096},
                                    "top_k": 5, "parallel_tool_calls": True}, MODEL_PUB)
     assert out["reasoning"] == {"max_tokens": 4096} and "top_k" in rep["plaintext_keys"]
+
+
+@pytest.mark.parametrize("url,ok", [("data:image/svg+xml;base64,PHN2Zz4=", False), ("data:image/png;base64,AA", True),
+                                    ("data:image/jpeg;base64,AA", True), ("data:image/webp;base64,AA", True),
+                                    ("data:image/x-icon;base64,AA", False)])
+def test_only_raster_images_leave_in_plaintext(url, ok):
+    body = {"model": "m", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "x"}, {"type": "image_url", "image_url": {"url": url}}]}]}
+    if ok:
+        e2.encrypt_request(body, MODEL_PUB)
+    else:
+        with pytest.raises(e2.E2EEError, match="raster"):
+            e2.encrypt_request(body, MODEL_PUB)
+
+
+def test_an_image_type_part_names_the_real_reason_under_disclose():
+    body = {"model": "m", "messages": [{"role": "user", "content": [{"type": "image", "source": {}}]}]}
+    with pytest.raises(e2.E2EEError, match="not supported") as ei:
+        e2.encrypt_request(body, MODEL_PUB)
+    assert "is refuse" not in str(ei.value)

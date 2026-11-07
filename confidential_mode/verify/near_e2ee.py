@@ -368,7 +368,7 @@ def _is_text_part(part: Any) -> bool:
     return _ptype(part) in TEXT_PART_TYPES
 
 
-def _flatten(content: list, where: str) -> str:
+def _flatten(content: list, where: str, image_parts: str = "refuse") -> str:
     """A list of text parts (``text`` or ``input_text``, any case) joined into one string. Any other part
     is refused here; ``_mixed`` handles image parts under image_parts=disclose."""
     texts = []
@@ -376,9 +376,12 @@ def _flatten(content: list, where: str) -> str:
         kind = _ptype(part)
         if kind not in TEXT_PART_TYPES:
             shown = kind or type(part).__name__
-            if kind in IMAGE_PART_TYPES:
+            if kind in IMAGE_PART_TYPES and image_parts != "disclose":
                 raise E2EEError(f"{where}: NEAR's encryption does not cover image parts; refused before sending "
                                 "(confidential.near.image_parts is refuse)")
+            if kind in IMAGE_PART_TYPES:
+                raise E2EEError(f"{where}: {shown!r} content parts are not supported; only image_url and "
+                                "input_image parts leave in plaintext; refused before sending")
             raise E2EEError(f"{where}: NEAR's encryption does not cover {shown!r} content parts; refused before "
                             "sending")
         texts.append(_text_part(part, where))
@@ -393,7 +396,8 @@ def _text_part(part: Mapping, where: str) -> str:
     return part["text"]
 
 
-_RE_DATA_IMAGE = re.compile(r"^data:image/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]*$", re.IGNORECASE)
+# Raster media types only: an SVG image is XML and can carry text and script.
+_RE_DATA_IMAGE = re.compile(r"^data:image/(png|jpeg|jpg|gif|webp|bmp|tiff);base64,[A-Za-z0-9+/=\s]*$", re.IGNORECASE)
 
 
 def _image_ref(value: Any, where: str) -> Any:
@@ -411,8 +415,9 @@ def _image_ref(value: Any, where: str) -> Any:
     else:
         raise E2EEError(f"{where}: an image part without an image reference; refused")
     if not isinstance(url, str) or not _RE_DATA_IMAGE.match(url):
-        raise E2EEError(f"{where}: only an inline data:image/...;base64 image leaves in plaintext; a remote URL "
-                        "or another reference is refused before sending")
+        raise E2EEError(f"{where}: only an inline raster image (data:image/png, jpeg, gif, webp, bmp or tiff; "
+                        "base64) leaves in plaintext; a remote URL, an SVG or another reference is refused before "
+                        "sending")
     return value
 
 
@@ -481,7 +486,7 @@ def _message(msg: Any, i: int, model_pub: str, report: _Report, image_parts: str
                 out[key] = _mixed(value, where, model_pub, report)
                 continue
             if isinstance(value, list):
-                value = _flatten(value, where)
+                value = _flatten(value, where, image_parts)
                 report.flattened += 1
             out[key] = _seal_str(model_pub, value, "messages[].content", report)
         elif key in ("name", "refusal"):

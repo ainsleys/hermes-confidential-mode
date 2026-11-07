@@ -76,6 +76,7 @@ class Runtime:
         # and the sessions whose next reply gets the one-line notice.
         self.image_notice_lock: Any = _NO_LOCK
         self.reply_notices: dict = {}
+        self._notice_lock = threading.Lock()
 
     # ── shared collaborators ──────────────────────────────────────────────────────────────────
     def module(self, name: str):
@@ -372,21 +373,21 @@ def _image_notice(rt: Runtime):
             except Exception:  # noqa: BLE001
                 since = None
             sid = str((context or {}).get("session_id") or "")
-            with rt._lock:
+            with rt._notice_lock:        # one notice row per lock, even for images sent concurrently
                 if since is not None and rt.image_notice_lock == since:
                     return
-            d = row.get("detail") or {}
-            line = image_notice_line(d.get("plaintext_parts"))
-            rt.ledger.append({"kind": "notice", "session_id": sid, "purpose": row.get("purpose") or "",
-                              "provider": row.get("provider") or "", "host": row.get("host") or "",
-                              "model": row.get("model") or "", "tier": getattr(tier, "value", None),
-                              "verdict": "disclosed", "decision": "image_plaintext",
-                              "detail": {"notice": line, "note": d.get("plaintext_parts_note"),
-                                         "plaintext_parts": d.get("plaintext_parts"), "chat_id": d.get("chat_id"),
-                                         "locked_since": since, "reply_line": "transform_llm_output"}})
-            with rt._lock:
-                rt.image_notice_lock = since
-                rt.reply_notices[sid] = line
+                d = row.get("detail") or {}
+                line = image_notice_line(d.get("plaintext_parts"))
+                rt.ledger.append({"kind": "notice", "session_id": sid, "purpose": row.get("purpose") or "",
+                                  "provider": row.get("provider") or "", "host": row.get("host") or "",
+                                  "model": row.get("model") or "", "tier": getattr(tier, "value", None),
+                                  "verdict": "disclosed", "decision": "image_plaintext",
+                                  "detail": {"notice": line, "note": d.get("plaintext_parts_note"),
+                                             "plaintext_parts": d.get("plaintext_parts"), "chat_id": d.get("chat_id"),
+                                             "locked_since": since, "reply_line": "transform_llm_output"}})
+                with rt._lock:
+                    rt.image_notice_lock = since
+                    rt.reply_notices[sid] = line
             logger.info("confidential-mode: %s", d.get("plaintext_parts_note"))
         except Exception:  # noqa: BLE001
             logger.warning("confidential-mode: could not record the plaintext image notice", exc_info=True)

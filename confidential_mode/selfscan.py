@@ -45,7 +45,9 @@ Python code (execute_code ``code``, ``python -c``): imports of ``confidential_mo
 literals and comments, ``import_module``/``__import__``/``spec_from_file_location``/``run_path``/
 ``run_module`` naming it, ``hermes_cli`` imported or run (``run_module``) with a literal ``confidential``;
 when the code starts processes, a literal list with ``hermes`` then ``confidential``, or a literal that
-``shell_reason`` refuses; when the code opens or moves files, a state-path literal.
+``shell_reason`` refuses; when the code writes, moves or deletes files (an ``open`` mode with w, a, x or
++, ``write_text``, ``unlink``, ``shutil``, a ``sqlite3`` connection not opened with ``mode=ro``, ...), a
+literal naming a state file or the data directory. Code that only reads a state file passes.
 
 Not detectable: a command assembled at run time (variables, ``eval`` of a computed string, base64, brace
 expansion), a script that imports the package indirectly, a symlink or directory made in an earlier call,
@@ -616,6 +618,24 @@ def _code_only(code: str) -> str:
         return re.sub(r"#[^\n]*", " ", _RE_PY_LITERAL.sub(" ", code))
 
 
+_RE_PY_WRITE_CALLS = re.compile(r"\b(?:write_text|write_bytes|unlink|touch|rmtree|os\.(?:remove|unlink|rename|replace|"
+                                r"truncate|link|symlink|makedirs|mkdir)|shutil\.\w+|sqlite3\.connect|fileinput)\b")
+_RE_PY_OPEN_WRITE = re.compile(r"\bopen\s*\([^)]*,\s*(?:mode\s*=\s*)?['\"][rbt]*[wax+]")
+
+
+def _py_writes(code: str, bare: str) -> bool:
+    """Whether the code writes, moves or deletes files (an open() mode with w, a, x or +, write_text,
+    unlink, shutil, a sqlite3 connection not opened read-only, ...). Reading a state file is allowed."""
+    if _RE_PY_OPEN_WRITE.search(code):
+        return True
+    m = _RE_PY_WRITE_CALLS.findall(bare)
+    if not m:
+        return False
+    if all(x == "sqlite3.connect" for x in m) and re.search(r"mode=ro\b", code):
+        return False
+    return True
+
+
 def python_reason(code: str, depth: int = 0) -> Optional[str]:
     """Why this Python code imports the package, runs the confidential command or names a state file."""
     if not isinstance(code, str) or not code.strip() or depth > _MAX_DEPTH:
@@ -639,10 +659,10 @@ def python_reason(code: str, depth: int = 0) -> Optional[str]:
                 why = shell_reason(lit, depth + 1)
                 if why:
                     return why
-    if _RE_PY_FILES.search(bare):        # the code opens or moves files: a state-file path is a target
+    if _RE_PY_FILES.search(bare) and _py_writes(code, bare):   # writes files: a state-file path is a target
         for lit in lits:
-            if is_state_path(lit):
-                return "names a confidential-mode state file"
+            if is_state_path(lit) or in_plugin_data(lit):
+                return "writes a confidential-mode state file"
     return None
 
 

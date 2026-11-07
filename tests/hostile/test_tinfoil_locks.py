@@ -151,3 +151,25 @@ def test_prepare_publishes_nothing_commit_swaps_and_discard_closes_the_unused_po
     ad.close()
     with pytest.raises(T.VerifyError):
         ad.commit_verification(ad.prepare_verification(), hold=False)
+
+
+def test_an_unpublished_async_pool_is_closed_when_the_build_changed_meanwhile():
+    ad, sc, results = _adapter()
+    _verify_first(ad)
+    built = []
+    real = sc.make_secure_async_http_client
+
+    def build_and_swap():
+        pool = real()
+        built.append(pool)
+        ad._accepted = _result(code="other")          # a commit landed while the pool was attested
+        return pool
+    sc.make_secure_async_http_client = build_and_swap
+
+    async def go():
+        with pytest.raises(T.VerifyError, match="changed"):
+            ad._async_pool_for_running_loop()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    asyncio.run(go())
+    assert built and built[0].is_closed

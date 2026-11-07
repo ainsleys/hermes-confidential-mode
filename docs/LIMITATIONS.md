@@ -502,7 +502,7 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
 - It sends image parts in plaintext beside the encrypted text, by default
   (`confidential.near.image_parts: disclose`). Every text part of such a message (`text` or
   `input_text`, in any letter case) is encrypted. An `image_url` or `input_image` part that holds an
-  inline `data:image/...;base64,` image leaves this host in plaintext to NEAR's gateway. Any other
+  inline raster `data:image/...;base64,` image (png, jpeg, gif, webp, bmp or tiff) leaves this host in plaintext to NEAR's gateway. Any other
   part type, a remote image URL, or an extra field on an image part is refused before sending. The
   live probe of 2026-11-07 showed that NEAR accepts this shape and still returns a `provider_tee`
   signature. Each send's ledger row counts the plaintext parts by type, and the receipt says how many
@@ -557,8 +557,8 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   reason and the request size when the plugin knows the size. The receipt lists the row under Refusals.
   For a main call while locked, the LLM gate writes that row. For any other call, such as an
   auxiliary task, the NEAR transport writes the row. When the provider's own check refuses an
-  auxiliary call before the transport runs, for example because no pin matches, the NEAR client writes
-  the row, with the stage `provider_gate`.
+  auxiliary call before the transport runs, for example because no pin matches, the attested client
+  writes the row, with the stage `provider_gate`. Tinfoil calls refused at that check get the same row.
 - It pins each CVM it saw as an entry of its own: the gateway, and each model instance. An entry pins
   the CVM's measured docker-compose, its app_id, OS image and KMS key as RTMR3 records them, and its
   firmware and kernel measurements. A model entry also pins the compose-manager image the log reports
@@ -663,6 +663,9 @@ The details:
     a pipe. `python -m confidential_mode...` is refused too;
   - Python code that imports or runs `hermes_cli` with a `confidential` string, or that starts a process
     with one of the shell forms above;
+  - Python code that writes, moves or deletes a file and names a state file or the plugin's data
+    directory: an `open` mode with `w`, `a`, `x` or `+`, `write_text`, `unlink`, `shutil`, or a
+    `sqlite3` connection not opened with `mode=ro`. Python that only reads a state file passes;
   - code passed to `perl`, `ruby`, `node` and similar interpreters with `-e`, whose strings name
     `hermes` and then `confidential`;
   - any of the forms above inside `bash -c`, `sh -lc`, `eval`, a shell or `at` reading a pipe or a
