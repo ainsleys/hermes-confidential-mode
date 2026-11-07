@@ -40,6 +40,7 @@ import ipaddress
 import re
 import socket
 import threading
+import time
 from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlsplit
 
@@ -127,9 +128,31 @@ def strict_host(base_url: Any) -> tuple[str, str]:
     host = host.strip().rstrip(".").lower()
     if not host:
         return "", "base_url has no host"
-    if "%" in host and _ip_of(host) is None:
-        return host, "base_url host is percent-encoded"
+    if "%" in host:
+        if _ip_of(host) is None:
+            return host, "base_url host is percent-encoded"
+        if zone_problem(host):
+            return host, f"base_url host {zone_problem(host)}"
     return host, ""
+
+
+_ZONE = re.compile(r"^[a-z0-9_.-]{1,64}$")
+
+
+def zone_problem(host: str) -> str:
+    """"" unless ``host`` carries a zone id (``%``) that is not a plain interface name on an IPv6 link-local
+    address. A zone id exists only for IPv6 link-local addresses; on any other literal the client reads the
+    whole string as a name (``127.0.0.1%25evil.com``), so the tier and the client would disagree."""
+    if "%" not in host:
+        return ""
+    addr, zone = host.split("%", 1)
+    zone = zone[2:] if zone.startswith("25") else zone  # a URL carries the zone id as %25<zone>
+    ip = _ip_of(addr)
+    if not isinstance(ip, ipaddress.IPv6Address) or ip.ipv4_mapped is not None or not ip.is_link_local:
+        return "has a zone id (%) on an address that is not IPv6 link-local"
+    if not _ZONE.match(zone):
+        return "has a zone id that is not a plain interface name"
+    return ""
 
 
 def _ip_of(host: str) -> Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]:
@@ -169,6 +192,15 @@ def extra_host_problem(entry: Any) -> str:
     if not h.isascii() or not h.isprintable() or any(c.isspace() for c in h):
         return "contains whitespace, control or non-ASCII characters"
     if _ip_of(h) is not None and "/" not in h:
+        if zone_problem(h):
+            return zone_problem(h)
+        ip = _unmapped(_ip_of(h))
+        if str(ip) == "169.254.169.254":
+            return "is 169.254.169.254, the cloud metadata address, which is never a model host"
+        if ip.is_unspecified:
+            return "is the unspecified address (0.0.0.0 or ::), which is not one host"
+        if ip.is_multicast or str(ip) == "255.255.255.255":
+            return "is a multicast or broadcast address, which is not one host"
         return ""
     if "/" in h:
         return "is a range or a URL; list one exact host name or IP address"
@@ -227,25 +259,44 @@ def _resolve_all(name: str) -> list[str]:
     return [info[4][0] for info in infos]
 
 
-_OWN_HOSTNAME_CACHE: dict[str, bool] = {}
+#: own host name -> (answer, monotonic time of the answer). A False answer (including a timeout) is kept for
+#: the life of the process. A True answer is rechecked once it is older than the TTL.
+_OWN_HOSTNAME_CACHE: dict[str, tuple[bool, float]] = {}
 _OWN_HOSTNAME_TIMEOUT_SECONDS = 2.0
+_OWN_HOSTNAME_TTL_SECONDS = 60.0
+_OWN_HOSTNAME_LOCK = threading.Lock()
 
 
 def own_hostname_is_loopback(host: str, *, resolver: Callable[[str], list[str]] | None = None,
                              hostname: Callable[[], str] | None = None) -> bool:
     """True when ``host`` is this machine's own host name and every address it resolves to is loopback.
 
-    Only the machine's own name is ever resolved, and only when the destination names it. The answer is
-    cached per process. A resolver error, a timeout, an empty answer or any non-loopback address gives
-    False (fail closed). Never raises.
+    Only the machine's own name is ever resolved, and only when the destination names it. A resolver error,
+    a timeout, an empty answer or any non-loopback address gives False (fail closed), and False is cached
+    for the process. A True answer is rechecked at most once per ``_OWN_HOSTNAME_TTL_SECONDS``. One lookup
+    runs at a time. Never raises.
     """
     try:
         own = (hostname or socket.gethostname)()
         own = own.strip().rstrip(".").lower() if isinstance(own, str) else ""
         if not own or host != own or own in ON_HOST_NAMES:
             return False
-        if resolver is None and own in _OWN_HOSTNAME_CACHE:
-            return _OWN_HOSTNAME_CACHE[own]
+        if resolver is not None:
+            return _lookup_own(own, resolver)
+        with _OWN_HOSTNAME_LOCK:
+            cached = _OWN_HOSTNAME_CACHE.get(own)
+            now = time.monotonic()
+            if cached is not None and (cached[0] is False or now - cached[1] < _OWN_HOSTNAME_TTL_SECONDS):
+                return cached[0]
+            ok = _lookup_own(own, None)
+            _OWN_HOSTNAME_CACHE[own] = (ok, time.monotonic())
+            return ok
+    except Exception:
+        return False
+
+
+def _lookup_own(own: str, resolver: Callable[[str], list[str]] | None) -> bool:
+    try:
         result: list = []
 
         def work():
@@ -258,10 +309,7 @@ def own_hostname_is_loopback(host: str, *, resolver: Callable[[str], list[str]] 
         t.join(_OWN_HOSTNAME_TIMEOUT_SECONDS)
         addrs = result[0] if result else []
         ips = [_ip_of(a) if isinstance(a, str) else None for a in addrs]
-        ok = bool(ips) and all(ip is not None and _unmapped(ip).is_loopback for ip in ips)
-        if resolver is None and result:
-            _OWN_HOSTNAME_CACHE[own] = ok
-        return ok
+        return bool(ips) and all(ip is not None and _unmapped(ip).is_loopback for ip in ips)
     except Exception:
         return False
 
@@ -344,8 +392,10 @@ class OnHostPredicate:
         if problem:
             return Verdict(False, problem, host)
         src = " (provider default)" if via_profile else ""
-        if is_on_host(host, self.extra_hosts):
+        if is_on_host(host):
             return Verdict(True, f"on-host endpoint {host}{src}", host)
+        if _listed(host.lower(), self.extra_hosts):
+            return Verdict(True, f"listed on-host host {host} ({EXTRA_HOSTS_KEY}){src}", host)
         if _ip_of(host) is None:
             try:
                 own = self.own_hostname(host) is True

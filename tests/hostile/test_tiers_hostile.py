@@ -537,9 +537,62 @@ def test_own_hostname_resolver_that_hangs_fails_closed(monkeypatch):
     monkeypatch.setattr(tiers, "_resolve_all", lambda name: (gate.wait(5), ["127.0.0.1"])[1])
     try:
         assert classify(on_host(monkeypatch), dest("http://this-box/v1")).in_tier is False
-        assert "this-box" not in tiers._OWN_HOSTNAME_CACHE   # a timeout is not cached as an answer
+        assert tiers._OWN_HOSTNAME_CACHE["this-box"][0] is False   # the timeout is cached as off-tier
+        calls = []
+        monkeypatch.setattr(tiers, "_resolve_all", lambda name: calls.append(name) or ["127.0.0.1"])
+        assert classify(on_host(monkeypatch), dest("http://this-box/v1")).in_tier is False
+        assert calls == []                                          # no second lookup in this process
     finally:
         gate.set()
+
+
+def test_own_hostname_true_is_rechecked_after_the_ttl(monkeypatch):
+    tiers._OWN_HOSTNAME_CACHE.clear()
+    clock = [1000.0]
+    monkeypatch.setattr(tiers.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(tiers.socket, "gethostname", lambda: "this-box")
+    answers = [["127.0.0.1"], ["192.168.1.9"]]
+    calls = []
+    monkeypatch.setattr(tiers, "_resolve_all", lambda name: calls.append(name) or answers[len(calls) - 1])
+    assert classify(on_host(monkeypatch), dest("http://this-box/v1")).in_tier is True
+    clock[0] += tiers._OWN_HOSTNAME_TTL_SECONDS - 1
+    assert classify(on_host(monkeypatch), dest("http://this-box/v1")).in_tier is True
+    assert len(calls) == 1
+    clock[0] += 2                                                   # past the TTL: rechecked, now off-tier
+    assert classify(on_host(monkeypatch), dest("http://this-box/v1")).in_tier is False
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1%25evil.com/v1", "http://127.0.0.1%25/v1", "http://127.0.0.1%25lo0/v1",
+    "http://[::1%25evil.com]/v1", "http://[::1%25lo0]/v1", "http://[::ffff:127.0.0.1%25lo0]/v1",
+    "http://[fe80::1%25evil.com:80]/v1", "http://[fe80::1%25a/b]/v1", "http://[fd00::1%25en0]/v1",
+])
+def test_zone_id_only_on_ipv6_link_local(monkeypatch, url):
+    v = classify(on_host(monkeypatch, extra_hosts=["fd00::1", "127.0.0.1"]), dest(url))
+    assert v.in_tier is False, (url, v)
+
+
+def test_listed_link_local_with_a_plain_zone_is_in_tier(monkeypatch):
+    v = classify(on_host(monkeypatch, extra_hosts=["fe80::1%en0"]), dest("http://[fe80::1%25en0]:8000/v1"))
+    assert v.in_tier is True and v.reason.startswith("listed on-host host"), v
+
+
+def test_listed_host_reason_differs_from_loopback(monkeypatch):
+    pred = on_host(monkeypatch, extra_hosts=["gpu.lan", "10.0.0.5"])
+    assert classify(pred, dest("http://gpu.lan/v1")).reason.startswith("listed on-host host gpu.lan")
+    assert classify(pred, dest("http://10.0.0.5/v1")).reason.startswith("listed on-host host 10.0.0.5")
+    assert classify(pred, dest("http://127.0.0.1/v1")).reason.startswith("on-host endpoint 127.0.0.1")
+
+
+@pytest.mark.parametrize("entry,word", [
+    ("169.254.169.254", "metadata"), ("::ffff:169.254.169.254", "metadata"), ("0.0.0.0", "unspecified"),
+    ("::", "unspecified"), ("224.0.0.1", "multicast"), ("239.255.255.250", "multicast"), ("ff02::1", "multicast"),
+    ("255.255.255.255", "broadcast"), ("127.0.0.1%lo0", "zone"),
+])
+def test_extra_hosts_refuses_addresses_that_are_not_one_host(monkeypatch, entry, word):
+    assert word in tiers.extra_host_problem(entry)
+    assert not classify(on_host(monkeypatch, extra_hosts=[entry]), dest("http://169.254.169.254/v1")).in_tier
 
 
 @pytest.mark.parametrize("url", [
