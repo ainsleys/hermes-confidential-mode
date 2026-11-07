@@ -57,6 +57,10 @@ class FaultPlan:
         self.insert_times: int | None = None
         self.commit: BaseException | None = None
         self.commit_times: int | None = None
+        self.insert_after: BaseException | None = None    # raised after the real INSERT ran (row pending)
+        self.insert_after_times: int | None = None
+        self.rollback: BaseException | None = None
+        self.rollback_times: int | None = None
         self.raised: list[str] = []
 
     def _take(self, what: str):
@@ -77,7 +81,18 @@ def faulty_sqlite(plan: FaultPlan):
                 exc = plan._take("insert")
                 if exc is not None:
                     raise exc
+                cur = super().execute(sql, *a, **k)
+                exc = plan._take("insert_after")
+                if exc is not None:
+                    raise exc
+                return cur
             return super().execute(sql, *a, **k)
+
+        def rollback(self):
+            exc = plan._take("rollback")
+            if exc is not None:
+                raise exc
+            return super().rollback()
 
         def commit(self):
             exc = plan._take("commit")

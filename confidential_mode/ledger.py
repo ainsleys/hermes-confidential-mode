@@ -512,6 +512,7 @@ class Ledger:
             event.bytes, event.tier, event.verdict, event.decision, event.surface, encoded,
         )
         created: list[str] = []
+        committed = False
         try:
             for blob_id, text in to_write.items():
                 if store.put(blob_id, text):
@@ -523,6 +524,7 @@ class Ledger:
                         "INSERT INTO events (ts, session_id, kind, purpose, provider, host, model, bytes, tier,"
                         " verdict, decision, surface, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
                     db.commit()
+                    committed = True
                 except BaseException:
                     # FI-1: a failed INSERT or COMMIT leaves the row in the open transaction, where the next
                     # append's COMMIT would land it. Roll back, or drop the connection when that fails.
@@ -535,8 +537,9 @@ class Ledger:
                     raise
                 row_id = int(cur.lastrowid)
         except BaseException:
-            for blob_id in created:   # no row lists them: remove what this append wrote
-                store.delete(blob_id)
+            if not committed:   # no row lists them: remove what this append wrote
+                for blob_id in created:
+                    store.delete(blob_id)
             raise
         if to_write and not self._gc_done:
             self._gc_done = True

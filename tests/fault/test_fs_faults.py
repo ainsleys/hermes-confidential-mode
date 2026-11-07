@@ -220,14 +220,32 @@ def test_the_default_ledger_reports_wal_and_a_reader_does_not_fail_its_commit(tm
 
 
 def test_an_insert_that_failed_leaves_nothing_for_the_next_commit(tmp_path):
-    """FI-1: a failed INSERT (a full disk) is rolled back too, so the next append commits only its own row."""
+    """FI-1: an INSERT that ran and then raised (the row pending in the open transaction) is rolled back, so the
+    next append commits only its own row. Fails against the ledger before the fix."""
     plan = FaultPlan()
     led = faulty_ledger(tmp_path / "ledger.sqlite", plan)
     led.append({"kind": "lock", "decision": "locked"})
-    plan.insert, plan.insert_times = disk_full(), 1
+    plan.insert_after, plan.insert_after_times = disk_full(), 1
     with pytest.raises(sqlite3.OperationalError):
         led.append({"kind": "verify_ok", "decision": "lost"})
     led.append({"kind": "unlock", "decision": "unlocked"})
+    assert [r.decision for r in led.tail(0)] == ["locked", "unlocked"]
+
+
+def test_a_failed_commit_whose_rollback_also_fails_drops_the_connection(tmp_path):
+    """FI-1: when the rollback after a failed COMMIT raises too, the connection is closed (which discards the
+    open transaction) and the next append reopens and commits only its own row."""
+    plan = FaultPlan()
+    led = faulty_ledger(tmp_path / "ledger.sqlite", plan)
+    led.append({"kind": "lock", "decision": "locked"})
+    first = led._conn
+    plan.commit, plan.commit_times = db_locked(), 1
+    plan.rollback, plan.rollback_times = sqlite3.OperationalError("disk I/O error"), 1
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        led.append({"kind": "verify_ok", "decision": "lost"})
+    assert plan.raised == ["commit", "rollback"] and led._conn is None
+    led.append({"kind": "unlock", "decision": "unlocked"})
+    assert led._conn is not None and led._conn is not first
     assert [r.decision for r in led.tail(0)] == ["locked", "unlocked"]
 
 
