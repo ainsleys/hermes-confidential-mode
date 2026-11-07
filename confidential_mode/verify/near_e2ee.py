@@ -242,7 +242,8 @@ def _carries_string(value: Any) -> bool:
     if isinstance(value, str):
         return True
     if isinstance(value, Mapping):
-        return any(_carries_string(v) for v in value.values())
+        # A mapping key is text too ({"<anything>": 1} would leave the key in plaintext).
+        return any(isinstance(k, str) or _carries_string(v) for k, v in value.items())
     if isinstance(value, (list, tuple)):
         return any(_carries_string(v) for v in value)
     return False
@@ -428,6 +429,8 @@ def encrypt_request(body: Mapping, model_pub: str, *, plaintext_keys=PLAINTEXT_K
             out[key] = value
         elif key in plaintext_keys:
             out[key] = value
+            if key != "model":
+                report.plaintext_keys.append(key)
         elif _carries_string(value):
             raise E2EEError(f"request key {key!r} carries text that would leave as plaintext (not in NEAR's "
                             "encrypted-field table, not on this plugin's plaintext allowlist); refused before sending")

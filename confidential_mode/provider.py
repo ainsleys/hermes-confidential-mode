@@ -530,6 +530,7 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
         **extra,
     )
     profile._confidential_adapter = adapter
+    profile.classify_api_error = classify_refusal  # Hermes' error classifier consults it for this provider
     profile._confidential_env_var = env_var
     profile._confidential_context_length = int(context_length)
     profile._confidential_pins = pins
@@ -543,6 +544,24 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
     cache.entry(name).auto_approve_platform_only = bool(auto_approve_platform_only)
     cache.entry(name).profile = profile
     return profile
+
+
+def classify_refusal(error, **_context):
+    """``ProviderProfile.classify_api_error`` (agent/error_classifier.py ``_profile_verdict``): a refusal
+    raised by an attested transport (verify.near.NearRefusal) is deterministic for the unchanged request,
+    so Hermes must neither retry it nor fall back to another provider. Anything else: None (Hermes'
+    own pipeline decides). Never raises."""
+    try:
+        seen, exc = set(), error
+        while exc is not None and id(exc) not in seen:
+            seen.add(id(exc))
+            if type(exc).__name__ == "NearRefusal":
+                return {"reason": "provider_policy_blocked", "retryable": False, "should_fallback": False,
+                        "should_compress": False, "should_rotate_credential": False}
+            exc = exc.__cause__ or exc.__context__
+    except Exception:
+        pass
+    return None
 
 
 def _create_client(profile, cache: VerificationCache, client_kwargs: dict):
@@ -673,7 +692,8 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
                           on_event: Callable[[dict], None] | None = None, ledger=None):
     """Wire the 'attested-near' profile into Hermes (same cache, pins file and ledger as Tinfoil's).
     No network at register. Reads confidential.near.{base_url, models, require_provider_tee,
-    require_tls_binding, accepted_tcb_statuses, signature_wait_seconds, streaming, context_length, encrypt}."""
+    require_tls_binding, accepted_tcb_statuses, signature_wait_seconds, streaming, context_length, encrypt,
+    reverify_backoff_seconds}."""
     import providers
     if config is None:
         from hermes_cli.config import load_config_readonly
@@ -692,7 +712,7 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
             require_provider_tee=require_tee, require_tls_binding=near("require_tls_binding", default=True) is not False,
             accepted_tcb_statuses=[t for t in tcb if isinstance(t, str)] if isinstance(tcb, list) else DEFAULT_ACCEPTED_TCB,
             signature_wait_seconds=float(near("signature_wait_seconds", default=DEFAULT_SIGNATURE_WAIT_SECONDS)),
-            encrypt=encrypt)
+            encrypt=encrypt, reverify_backoff_seconds=float(near("reverify_backoff_seconds", default=30.0)))
     if hasattr(adapter, "provider_name"):
         adapter.provider_name = NEAR_PROFILE_NAME
     if pins is None:

@@ -71,9 +71,9 @@ def test_encrypted_response_is_withheld_unless_provider_tee_verifies(tmp_path, m
     ad.verify()
     ad.release()
     client = openai.OpenAI(api_key="sk-x", base_url=BASE, http_client=ad.sync_http_view(), max_retries=0)
-    with pytest.raises(openai.APIConnectionError) as ei:
+    with pytest.raises(VerifyError) as ei:
         client.chat.completions.create(model=MODEL, messages=MSG)
-    assert isinstance(ei.value.__cause__, VerifyError) and "withheld" in str(ei.value.__cause__)
+    assert isinstance(ei.value, openai.OpenAIError) and "withheld" in str(ei.value)
     (row,) = rows
     assert row["verdict"] == "unverified" and row["detail"]["encrypted"] is True
     assert row["detail"]["fully_attested"] is False

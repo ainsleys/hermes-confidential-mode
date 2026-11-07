@@ -372,7 +372,11 @@ NEAR_ENCRYPTION_NOTE = (
     "self-report): the receipt holds digests of the ciphertext, never its bytes. The signature check is "
     "third-party checkable and covers the ciphertext digests. Every instance of a model shares that key, so "
     "this does not establish that only an approved instance could read the request. The gateway still reads "
-    "the model id, the plaintext parameters, sizes and timing."
+    "the model id, the plaintext parameters (listed per send), the request headers (the API key, the "
+    "user agent and SDK headers, the encryption headers), sizes and timing. The reply is sealed to the key "
+    "in the X-Client-Pub-Key header, which the signature does not cover: a gateway that swaps that key can "
+    "read the reply, and is detected only afterwards, when the send is marked unverified and its reply "
+    "withheld."
 )
 
 
@@ -403,7 +407,9 @@ def _near_sends(rows: list[dict], evidence: list[dict]) -> tuple[list[dict], dic
                     "require_provider_tee": d.get("require_provider_tee") is not False,
                     "encrypted": d.get("encrypted") is True,
                     "encrypted_fields": list(d.get("encrypted_fields") or []),
-                    "encryption_version": d.get("encryption_version"), "model_pub": d.get("model_pub")})
+                    "encryption_version": d.get("encryption_version"), "model_pub": d.get("model_pub"),
+                    "plaintext_keys": list(d.get("plaintext_keys") or []),
+                    "reply_released": d.get("reply_released"), "withheld_reason": d.get("withheld_reason")})
     summary = {"sends": len(out), "fully_attested": all(s["fully_attested"] for s in out),
                "not_fully_attested_sends": [s["row"] for s in out if not s["fully_attested"]],
                "replay_failures": [s["row"] for s in out if s["replay_verdict"] not in ("pass",)],
@@ -667,6 +673,10 @@ def verify_chain(receipt_json: str | Mapping) -> bool:
             return False
         if "near_encryption_note" in doc and doc.get("near_encryption_note") != NEAR_ENCRYPTION_NOTE:
             return False
+        encrypted_send = any(r.get("kind") == "send_signed" and isinstance(r.get("detail"), dict)
+                             and r["detail"].get("encrypted") is True for r in rows)
+        if encrypted_send and doc.get("near_encryption_note") != NEAR_ENCRYPTION_NOTE:
+            return False   # the caveat cannot be stripped from a receipt that holds an encrypted send
         return doc.get("closing") == CLOSING_PARAGRAPH
     except Exception:
         return False
@@ -915,6 +925,10 @@ def render_text(doc: Mapping) -> str:
             if c.get("encrypted"):
                 add(f"      request body sent as ciphertext for fields {_p(', '.join(c['encrypted_fields'])) or '(none)'} "
                     f"(plugin self-report); encrypted to model key {_p(c.get('model_pub')) or '?'} (plugin self-report)")
+                if c.get("plaintext_keys"):
+                    add(f"      left in plaintext besides the model id: {_p(', '.join(c['plaintext_keys']))}")
+                if c.get("reply_released") is False:
+                    add(f"      reply withheld: {_p(c.get('withheld_reason')) or '(no reason recorded)'}")
                 if c["replay_verdict"] == "pass" and c["fully_attested"]:
                     add("      signature verified over the ciphertext digests (third-party checkable)")
         if near["fully_attested"]:

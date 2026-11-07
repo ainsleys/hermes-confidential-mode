@@ -109,22 +109,22 @@ def test_live_tool_call_round_trip(adapter):
 
 
 def test_live_image_part_is_refused_before_sending(adapter):
-    import openai
+    from confidential_mode.verify.base import VerifyError
     ad, _, rows = adapter
     before = len(rows)
     img = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf"
                                                      "FcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}
-    with pytest.raises(openai.APIConnectionError) as ei:
+    with pytest.raises(VerifyError) as ei:
         _client(ad).chat.completions.create(model=MODEL, messages=[{"role": "user", "content": [
             {"type": "text", "text": "Describe"}, img]}], max_tokens=8)
-    assert "does not cover image parts" in str(ei.value.__cause__) and len(rows) == before
+    assert "does not cover image parts" in str(ei.value) and len(rows) == before
 
 
 def test_live_streaming_is_refused_while_encrypting(adapter):
-    import openai
+    from confidential_mode.verify.base import VerifyError
     ad, _, rows = adapter
     before = len(rows)
-    with pytest.raises(openai.APIConnectionError) as ei:
+    with pytest.raises(VerifyError) as ei:
         list(_client(ad).chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "hi"}],
                                                  max_tokens=8, stream=True))
-    assert "streaming is refused while encrypting" in str(ei.value.__cause__) and len(rows) == before
+    assert "streaming is refused while encrypting" in str(ei.value) and len(rows) == before

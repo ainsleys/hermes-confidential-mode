@@ -254,3 +254,42 @@ def test_create_client_for_attested_near_never_returns_an_unviewed_client(plugin
     providers_profile = providers.get_provider_profile("attested-near")
     broken = providers_profile.create_client(api_key="sk-near-seam", base_url=BASE, timeout=object())
     assert type(broken).__name__ in ("ConfidentialClient", "RefusingClient")
+
+
+def test_a_withheld_reply_is_not_resent_by_hermes_retry_loop(plugin, near):
+    """Review finding 4: a refusal from the transport is an openai.OpenAIError (the SDK does not retry it)
+    and the profile's classify_api_error marks it non-retryable, so Hermes' own loop sends once."""
+    plugin.slash("on attested")
+    _approve(plugin)
+    assert plugin.slash("on attested").startswith("Locked")
+    near.sig_mode = "404"                       # no signature: the reply is withheld
+    import run_agent
+    agent = run_agent.AIAgent(model=MODEL, provider="attested-near", api_key="sk-near-seam", base_url=BASE,
+                              quiet_mode=True, skip_context_files=True, skip_memory=True, max_iterations=2)
+    try:
+        result = agent.run_conversation("hello")
+    except Exception as exc:                    # either surface is acceptable; the count is the test
+        result = {"error": repr(exc)}
+    assert "NEAR-FAKE-REPLY" not in json.dumps(result, default=str)
+    assert near.chat_posts() == 1, near.chat_posts()
+    rows = [e for e in plugin.rt.ledger.tail(0) if e.kind == "send_signed"]
+    assert len(rows) == 1 and rows[0].detail["reply_released"] is False
+    from agent.error_classifier import classify_api_error
+    from confidential_mode.verify.near import NearRefusal
+    c = classify_api_error(NearRefusal("NEAR response withheld"), provider="attested-near", model=MODEL)
+    assert c.retryable is False and c.should_fallback is False
+
+
+@pytest.mark.parametrize("cfg,key", [
+    (NEAR_CONFIG + "    require_tls_binding: false\n", "confidential.near.require_tls_binding"),
+    (NEAR_CONFIG + "    encrypt: \"no\"\n", "confidential.near.encrypt"),
+    (NEAR_CONFIG.replace("auxiliary:\n", "auxiliary:\n  compression:\n    provider: attested-near\n    model: "
+                         f"{MODEL}\n    fallback_chain:\n      - provider: attested-near\n        model: {MODEL}\n"
+                         "        api_mode: codex_responses\n"),
+     "auxiliary.compression.fallback_chain[0].api_mode"),
+])
+def test_lock_refuses_tls_binding_off_odd_values_and_fallback_chain_api_modes(plugin, near, cfg, key):
+    plugin.cfg.write_text(cfg)
+    out = plugin.slash("on attested")
+    assert out.startswith("Not locked") and key in out, out
+

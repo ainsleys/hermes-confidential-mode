@@ -21,6 +21,8 @@ import threading
 import httpx
 import openai
 import pytest
+
+from confidential_mode.verify.base import VerifyError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -275,9 +277,9 @@ def test_encrypted_send_over_another_certificate_is_withheld(tmp_path):
     world = NearWorld()
     world.chat_tls_der, _ = tls_cert()
     _, client, rows = _sent(world, tmp_path)
-    with pytest.raises(openai.APIConnectionError) as ei:
+    with pytest.raises(VerifyError) as ei:
         client.chat.completions.create(model=MODEL, messages=MSG)
-    assert "withheld" in str(ei.value.__cause__) and rows[0]["detail"]["fully_attested"] is False
+    assert "withheld" in str(ei.value) and rows[0]["detail"]["fully_attested"] is False
 
 
 def test_send_whose_certificate_is_not_observable_is_unverified(tmp_path):

@@ -79,6 +79,7 @@ from urllib.parse import quote as _urlquote
 from urllib.parse import urlsplit
 
 import httpx
+import openai
 
 from .. import sendctx
 from . import near_checks as nc
@@ -92,6 +93,7 @@ EVIDENCE_SCHEMA = "confidential-mode/near-evidence/v1"
 VERIFIER = "confidential-mode near_checks/1 (TDX quote via tinfoil 0.14.2, ITA JWT via cryptography)"
 DEFAULT_ACCEPTED_TCB = ("UpToDate",)
 DEFAULT_SIGNATURE_WAIT_SECONDS = 5.0
+DEFAULT_REVERIFY_BACKOFF_SECONDS = 30.0   # at most one 421- or pin-triggered re-attestation per window
 SIGNABLE_SUFFIXES = ("/chat/completions", "/responses")
 NO_ALIASING_HEADER = "x-no-aliasing"
 MAX_ID_BUFFER = 8 * 1024 * 1024
@@ -409,6 +411,16 @@ def _spki_sha256(der: bytes) -> str:
     return spki_sha256(der)
 
 
+class NearRefusal(VerifyError, openai.OpenAIError):
+    """A refusal raised from the NEAR transport. It is an ``openai.OpenAIError``, which the OpenAI SDK
+    re-raises as is (no retry, no APIConnectionError wrapping), and the attested profile's
+    ``classify_api_error`` hook marks it non-retryable for Hermes' own retry loop (provider.py)."""
+
+
+def _refusal(exc: BaseException) -> NearRefusal:
+    return exc if isinstance(exc, NearRefusal) else NearRefusal(str(exc) or type(exc).__name__)
+
+
 class TLSPinMismatch(VerifyError):
     """The TLS peer of an inference connection is not the certificate the verified gateway quote binds."""
 
@@ -483,7 +495,9 @@ class NearAdapter:
                  async_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
                  send_transport_factory: Callable[[], httpx.BaseTransport] | None = None,
                  quote_verifier: nc.QuoteVerifier | None = None, ita_roots: Mapping[str, str] | None = None,
-                 hold_until_accepted: bool = True, encrypt: bool = True, clock: Callable[[], float] = time.time,
+                 hold_until_accepted: bool = True, encrypt: bool = True,
+                 reverify_backoff_seconds: float = DEFAULT_REVERIFY_BACKOFF_SECONDS,
+                 clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep):
         parts = urlsplit(base_url or "")
         if parts.scheme != "https" or not parts.hostname or parts.query or parts.fragment:
@@ -498,6 +512,8 @@ class NearAdapter:
         self.signature_wait_seconds = max(0.0, float(signature_wait_seconds))
         self.encrypt = bool(encrypt)   # confidential.near.encrypt; the preflight refuses a lock with it off
         self.on_stale: Callable[[], None] | None = None   # set by the verification cache (provider.py)
+        self.reverify_backoff_seconds = max(0.0, float(reverify_backoff_seconds))
+        self._last_stale_mono: float | None = None
         # Attestation GETs use an unpinned pool: their certificate is what the quote is checked against
         # (gateway_tls_binding). Inference sends and signature fetches (both carry the API key) use pools
         # whose every handshake is pinned to the verified gateway's TLS fingerprint. Tests inject one
@@ -660,6 +676,19 @@ class NearAdapter:
                     vendor=VENDOR, router_repo=a.identity or self.identity, enclave_host=self.host,
                     code_fingerprint=a.code_fingerprint or "", enclave_fingerprint=a.enclave_fingerprint or "",
                     release_tag=None, verifier=VERIFIER, verified_at_host_clock=now, evidence=evidence)
+                prev = self._appraisal
+                if prev is not None:
+                    changed = sorted(m for m in self.models
+                                     if prev.model_signers.get(m) and prev.model_signers.get(m) != a.model_signers.get(m))
+                    if changed:
+                        # The key requests are encrypted to is not yet covered by a pin (W12). Until it is, a
+                        # key change inside one process is refused rather than adopted silently.
+                        m = changed[0]
+                        raise VerifyError(
+                            f"NEAR model signing key for {m} changed from {prev.model_signers[m][0][:16]}... to "
+                            f"{(a.model_signers.get(m) or ['?'])[0][:16]}...; refused: requests are encrypted to "
+                            "this key and pins do not cover it yet. Check the new report, then restart Hermes to "
+                            "accept it")
                 old_pin = self.pinned_spki()
                 self._accepted, self._appraisal = result, a
                 if old_pin is not None and old_pin != self.pinned_spki():
@@ -737,9 +766,18 @@ class NearAdapter:
             raise VerifyError(f"no single verified model key for {model!r}; refused before sending")
         return keys[0]
 
-    def mark_stale(self, reason: str) -> None:
-        """The gateway says the model key this verification holds is no longer valid (HTTP 421): hold the
-        transport, drop the adapter's own acceptance and have the cache re-verify on the next call."""
+    def mark_stale(self, reason: str) -> bool:
+        """The gateway says the model key is no longer valid (HTTP 421), or a send met a certificate other
+        than the attested one: hold the transport, drop the adapter's own acceptance and have the cache
+        re-verify on the next call. At most once per ``reverify_backoff_seconds`` (the trigger is not
+        authenticated, so the gateway must not be able to force an attestation per turn). Returns whether
+        a re-verify was requested."""
+        now = time.monotonic()
+        with self._lock:
+            if self._last_stale_mono is not None and now - self._last_stale_mono < self.reverify_backoff_seconds:
+                return False
+            self._last_stale_mono = now
+        self._drop_send_pools()
         self.hold(reason)
         self.verified_mono = None
         cb = self.on_stale
@@ -748,6 +786,7 @@ class NearAdapter:
                 cb()
             except Exception:
                 logger.warning("confidential-mode: could not invalidate the NEAR verification", exc_info=True)
+        return True
 
     def begin_exchange(self, request: httpx.Request) -> "_Exchange | None":
         """Classify one request before it is sent. Returns None for a request that carries no conversation
@@ -871,9 +910,11 @@ class NearAdapter:
             sig = {"status": "missing", "reason": "response carries no completion id"}
         elif ex.completed:
             sig = {"status": "missing", "reason": f"HTTP {ex.status}: no signature for a failed request"}
-        else:
+        elif ex.stream:
             sig = {"status": "missing", "reason": f"interrupted stream ({ex.end_reason or 'closed before its end'}): "
                                                   "NEAR records no signature"}
+        else:
+            sig = {"status": "missing", "reason": f"the response did not complete ({ex.end_reason or 'closed before its end'})"}
         a = self._appraisal
         data = sig.get("json") if sig.get("status") == "fetched" else None
         check = nc.check_signature(data, model=ex.model, request_sha256=ex.request_sha256,
@@ -915,6 +956,8 @@ class NearAdapter:
             "encrypted_fields": list((ex.e2ee_report or {}).get("encrypted_fields") or []),
             "encrypted_field_count": (ex.e2ee_report or {}).get("encrypted_count", 0),
             "dropped_fields": list((ex.e2ee_report or {}).get("dropped_fields") or []),
+            # Top-level keys that left in plaintext (names only), besides model and messages' roles and ids.
+            "plaintext_keys": list((ex.e2ee_report or {}).get("plaintext_keys") or []),
             "encryption_version": (ex.e2ee_report or {}).get("encryption_version") if ex.encrypted else None,
             "client_pub": ex.client_key.public_hex if ex.client_key is not None else None,
             "model_pub": ex.model_pub,
@@ -928,13 +971,22 @@ class NearAdapter:
                "tier": ctx.get("tier"), "verdict": check["verdict"],
                "decision": (check["kind"] or "missing") if data is not None else "missing", "detail": detail}
         ex.detail = detail
+        if ex.encrypted:
+            # The row waits for the release decision (decrypted and handed over, or withheld), so a reply
+            # that fails to decrypt or times out is never recorded as fully attested.
+            ex.pending_row = row
+            ex.settle(None)
+            return detail
+        self._emit_row(row)
+        return detail
+
+    def _emit_row(self, row: dict) -> None:
         sink = self.event_sink
         if sink is not None:
             try:
                 sink(row)
             except Exception:
                 logger.warning("confidential-mode: could not ledger a NEAR signature row", exc_info=True)
-        return detail
 
 
 class _NonClosing(httpx.BaseTransport):
@@ -984,6 +1036,32 @@ class _Exchange:
     detail: dict | None = None          # the send_signed row detail, once finished
     keep_body: bool = False
     body: bytearray = field(default_factory=bytearray)
+    pending_row: dict | None = None
+    outcome: tuple | None = None        # (released: bool, reason: str) for an encrypted exchange
+    emitted: bool = False
+    _settle_lock: Any = field(default_factory=threading.Lock, repr=False)
+
+    def settle(self, outcome: tuple | None) -> None:
+        """Record the release outcome of an encrypted exchange and write its row once both the row (from
+        finish) and the outcome (from the view) exist, whichever comes last."""
+        with self._settle_lock:
+            if outcome is not None and self.outcome is None:
+                self.outcome = outcome
+            if self.emitted or self.pending_row is None or self.outcome is None:
+                return
+            self.emitted = True
+            row = self.pending_row
+        released, reason = self.outcome
+        d = row["detail"]
+        d["reply_released"] = bool(released)
+        d["withheld_reason"] = None if released else str(reason)[:300]
+        if not released:
+            d["fully_attested"] = False
+            if row.get("verdict") == "verified":
+                row["verdict"] = "unverified"
+                d["check"]["verdict"] = "unverified"
+                d["check"]["reason"] = f"reply withheld after the signature check: {reason}"[:300]
+        self.adapter._emit_row(row)
 
     def on_response(self, response: httpx.Response) -> None:
         self.status = response.status_code
@@ -1100,37 +1178,88 @@ def _already_read(response: httpx.Response, ex: "_Exchange") -> bool:
 _DROP_ON_RELEASE = ("content-length", "content-encoding", "transfer-encoding")
 
 
+def _error_type(body: bytes) -> str:
+    try:
+        err = json.loads(body).get("error")
+        t = err.get("type") if isinstance(err, Mapping) else None
+        return f" ({str(t)[:40]})" if isinstance(t, str) and t else ""
+    except Exception:
+        return ""
+
+
 def _release_sealed(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Response) -> httpx.Response:
     """The tail of an encrypted exchange, after the body was buffered, hashed, completed and finished
-    (signature fetched and judged): refuse unless the send is fully attested (a verified provider_tee
-    signature over these ciphertext digests, over the attested TLS connection), then decrypt and hand back
-    a new response without the stale length and encoding headers. Never a synthesised status."""
+    (signature fetched and judged). Only one outcome hands a body to the caller: HTTP 200, a send that
+    is fully attested (a verified provider_tee signature over these ciphertext digests, on the attested
+    TLS connection), and a body that decrypts under this exchange's key. Every other outcome raises
+    NearRefusal (no status is synthesised, nothing is retried by the SDK), and the row records it."""
     from . import near_e2ee as e2
     body = bytes(ex.body)
     ex.body = bytearray()
     try:
         status = response.status_code
         if status == 421:
-            adapter.mark_stale("NEAR reports the model encryption key is no longer valid (HTTP 421); re-verifying")
-            raise VerifyError("NEAR refused this exchange's model key (HTTP 421: the key is no longer valid); "
-                              "the verification was invalidated and the next call re-verifies")
-        headers = [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _DROP_ON_RELEASE]
+            asked = adapter.mark_stale("NEAR reports the model encryption key is no longer valid (HTTP 421); "
+                                       "re-verifying")
+            raise NearRefusal("NEAR refused this exchange's model key (HTTP 421: the key is no longer valid); "
+                              + ("the verification was invalidated and the next call re-verifies" if asked else
+                                 "a re-verification ran less than confidential.near.reverify_backoff_seconds ago"))
         if status != 200:
-            # An error carries no ciphertext and no conversation; the SDK raises on it.
-            return httpx.Response(status, headers=headers, content=body, extensions=response.extensions)
+            # Any status but 200, success-looking 2xx included, carries nothing the plugin can authenticate.
+            raise NearRefusal(f"NEAR reply refused: HTTP {status}{_error_type(body)}; only a signed, encrypted "
+                              "HTTP 200 reply is handed over")
         detail = ex.detail or {}
+        if ex.detail is None:
+            raise NearRefusal("NEAR response withheld: the signature step did not finish in time")
         if detail.get("fully_attested") is not True:
             reason = (detail.get("check") or {}).get("reason") or "no verified provider_tee signature"
-            raise VerifyError(f"NEAR response withheld: decrypted output is released only after a verified "
+            raise NearRefusal(f"NEAR response withheld: decrypted output is released only after a verified "
                               f"provider_tee signature over the ciphertext ({reason})"[:400])
         try:
             plain, _report = e2.decrypt_response(json.loads(body), ex.client_key)
         except ValueError as exc:  # E2EEError and JSONDecodeError
-            raise VerifyError(f"NEAR response refused: {exc}"[:400]) from exc
-        return httpx.Response(200, headers=headers, content=json.dumps(plain, ensure_ascii=False).encode("utf-8"),
-                              extensions=response.extensions)
+            raise NearRefusal(f"NEAR response withheld: the signature verified but the reply does not decrypt "
+                              f"for this client ({exc}); a gateway that replaced X-Client-Pub-Key would look "
+                              "like this"[:400]) from exc
+        headers = [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _DROP_ON_RELEASE]
+        out = httpx.Response(200, headers=headers, content=json.dumps(plain, ensure_ascii=False).encode("utf-8"),
+                             extensions=response.extensions)
+        ex.settle((True, ""))
+        return out
+    except BaseException as exc:
+        ex.settle((False, str(exc) or type(exc).__name__))
+        raise
     finally:
         ex.client_key = None
+
+
+def _send_failed(adapter: "NearAdapter", ex: "_Exchange", exc: BaseException) -> NearRefusal | None:
+    """A send that raised before a response arrived still gets its row. A TLS pin mismatch also drops the
+    pooled connections and asks for a re-verify (bounded by the backoff)."""
+    pin = next((e for e in _chain(exc) if isinstance(e, TLSPinMismatch)), None)
+    reason = ("TLS pin mismatch, nothing sent" if pin is not None else
+              f"transport error ({type(exc).__name__}); the request may have reached NEAR")
+    try:
+        if not ex.finished:
+            ex.finished = True
+            ex.end_reason = reason
+            adapter.finish_exchange(ex)
+        ex.settle((False, reason))
+    except Exception:
+        logger.warning("confidential-mode: could not ledger a failed NEAR send", exc_info=True)
+    ex.client_key = None
+    if pin is not None:
+        adapter.mark_stale("a NEAR connection presented a certificate other than the attested one; re-verifying")
+        return _refusal(pin)
+    return None
+
+
+def _chain(exc: BaseException):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or exc.__context__
 
 
 def _sealed_sync(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Response) -> httpx.Response:
@@ -1145,6 +1274,7 @@ def _sealed_sync(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Respon
         ex.complete()
     except BaseException as exc:
         ex.finish(f"{type(exc).__name__} while reading the body")
+        ex.settle((False, f"{type(exc).__name__} while reading the body"))
         ex.client_key = None
         raise
     finally:
@@ -1168,6 +1298,7 @@ async def _sealed_async(adapter: "NearAdapter", ex: "_Exchange", response: httpx
         ex.complete()
     except BaseException as exc:
         await finish(f"{type(exc).__name__} while reading the body")
+        ex.settle((False, f"{type(exc).__name__} while reading the body"))
         ex.client_key = None
         raise
     finally:
@@ -1176,10 +1307,13 @@ async def _sealed_async(adapter: "NearAdapter", ex: "_Exchange", response: httpx
         except Exception:
             pass
     await finish()
-    if not ex.finished:
-        ex.client_key = None
-        raise VerifyError("NEAR response withheld: the signature step did not finish in time")
     return _release_sealed(adapter, ex, response)
+
+
+def _signature_step_bound(adapter: "NearAdapter") -> float:
+    """The async wait for finish(): the fetch loop's deadline plus one last GET at its own timeout."""
+    w = adapter.signature_wait_seconds
+    return w + 4 * max(1.0, w) + 5.0
 
 
 class _SyncView(httpx.BaseTransport):
@@ -1188,16 +1322,34 @@ class _SyncView(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         a = self._adapter
-        a._check_not_held()
-        a._check_request(request)
-        request.read()
-        ex = a.begin_exchange(request)
-        response = a._pool().handle_request(ex.request if ex is not None else request)
+        try:
+            a._check_not_held()
+            a._check_request(request)
+        except VerifyError as exc:
+            raise _refusal(exc) from exc
+        try:
+            request.read()
+            ex = a.begin_exchange(request)
+        except VerifyError as exc:
+            raise _refusal(exc) from exc
+        try:
+            response = a._pool().handle_request(ex.request if ex is not None else request)
+        except BaseException as exc:
+            refusal = _send_failed(a, ex, exc) if ex is not None else None
+            if refusal is None and any(isinstance(e, TLSPinMismatch) for e in _chain(exc)):
+                a.mark_stale("a NEAR connection presented a certificate other than the attested one; re-verifying")
+                refusal = _refusal(next(e for e in _chain(exc) if isinstance(e, TLSPinMismatch)))
+            if refusal is not None:
+                raise refusal from exc
+            raise
         if ex is None:
             return response
         ex.on_response(response)
         if ex.encrypted:
-            return _sealed_sync(a, ex, response)
+            try:
+                return _sealed_sync(a, ex, response)
+            except VerifyError as exc:
+                raise _refusal(exc) from exc
         if _already_read(response, ex):
             ex.finish()
             return response
@@ -1241,27 +1393,43 @@ class _AsyncView(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         a = self._adapter
-        a._check_not_held()
-        a._check_request(request)
-        await request.aread()
-        ex = a.begin_exchange(request)
-        response = await a._async_pool().handle_async_request(ex.request if ex is not None else request)
+        try:
+            a._check_not_held()
+            a._check_request(request)
+            await request.aread()
+            ex = a.begin_exchange(request)
+        except VerifyError as exc:
+            raise _refusal(exc) from exc
+        try:
+            response = await a._async_pool().handle_async_request(ex.request if ex is not None else request)
+        except BaseException as exc:
+            refusal = _send_failed(a, ex, exc) if ex is not None else None
+            if refusal is None and any(isinstance(e, TLSPinMismatch) for e in _chain(exc)):
+                a.mark_stale("a NEAR connection presented a certificate other than the attested one; re-verifying")
+                refusal = _refusal(next(e for e in _chain(exc) if isinstance(e, TLSPinMismatch)))
+            if refusal is not None:
+                raise refusal from exc
+            raise
         if ex is None:
             return response
         ex.on_response(response)
+        bound = _signature_step_bound(a)
 
         async def finish(reason=None):
             if ex.finished:
                 return
             try:
-                await asyncio.wait_for(asyncio.to_thread(ex.finish, reason), a.signature_wait_seconds + 5.0)
+                await asyncio.wait_for(asyncio.to_thread(ex.finish, reason), bound)
             except Exception:
                 logger.warning("confidential-mode: NEAR signature step timed out", exc_info=True)
 
         if ex.encrypted:
-            return await _sealed_async(a, ex, response, finish)
+            try:
+                return await _sealed_async(a, ex, response, finish)
+            except VerifyError as exc:
+                raise _refusal(exc) from exc
         if _already_read(response, ex):
-            await asyncio.wait_for(asyncio.to_thread(ex.finish), a.signature_wait_seconds + 5.0)
+            await asyncio.wait_for(asyncio.to_thread(ex.finish), bound)
             return response
         inner = response.stream
 

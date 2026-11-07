@@ -201,6 +201,7 @@ class NearWorld:
         self.tool_call_content = None               # content on a tool-call turn: None, "" or "seal"
         self.reply_text = "NEAR-FAKE-REPLY"
         self.reply_reasoning: str | None = None
+        self.gateway_read_replies: list[str] = []   # replies a key-swapping gateway decrypted
 
     # ── attestation ─────────────────────────────────────────────────────────────────────────────
     def _ok(self, payload) -> httpx.Response:
@@ -258,16 +259,17 @@ class NearWorld:
         return cid, body
 
     # ── E2EE, the model's side ──────────────────────────────────────────────────────────────────
+    # The model side uses tests/near_cipher_ref.py, an implementation independent of the plugin's.
     def model_x25519_secret(self) -> bytes:
-        from nacl.bindings import crypto_sign_ed25519_sk_to_curve25519
+        from .near_cipher_ref import ed_seed_to_x_secret
         seed = self.model_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
                                             serialization.NoEncryption())
-        return crypto_sign_ed25519_sk_to_curve25519(seed + bytes.fromhex(pub_hex(self.model_key)))
+        return ed_seed_to_x_secret(seed)
 
     def _e2ee_open_request(self, data: dict, headers) -> dict:
-        from confidential_mode.verify import near_e2ee as e2
+        from .near_cipher_ref import open_
         sec = self.model_x25519_secret()
-        op = lambda v: e2.open(sec, v).decode("utf-8") if isinstance(v, str) and v else v  # noqa: E731
+        op = lambda v: open_(sec, v).decode("utf-8") if isinstance(v, str) and v else v  # noqa: E731
         all_fields = headers.get("x-encrypt-all-fields") == "true"
         out = json.loads(json.dumps(data))
         for m in out.get("messages") or []:
@@ -294,14 +296,19 @@ class NearWorld:
                 tc["function"]["name"] = op(tc["function"]["name"])
         return out
 
-    def _e2ee_completion(self, model: str, client_pub: str) -> tuple[str, bytes]:
-        from confidential_mode.verify import near_e2ee as e2
+    def _e2ee_completion(self, model: str, client_pub: str) -> tuple[str, bytes, bytes]:
+        """(chat id, bytes the model signs, bytes the gateway returns); the two differ only when the gateway
+        re-encrypts a reply it read (``swap_client_reencrypt``)."""
+        from . import near_cipher_ref as ref
         self._n += 1
         cid = f"chatcmpl-{self._n}"
         to = client_pub
+        gw_secret = None
         if self.e2ee_mode == "other_client":
-            to = e2.ClientKey.generate().public_hex
-        seal = lambda text: e2.seal(to, text.encode("utf-8"))  # noqa: E731
+            to, _ = ref.keypair()
+        elif self.e2ee_mode in ("swap_client_reencrypt", "swap_client_forward"):
+            to, gw_secret = ref.keypair()          # the gateway put its own key in X-Client-Pub-Key
+        seal = lambda text: ref.seal(to, text.encode("utf-8"))  # noqa: E731
         msg: dict = {"role": "assistant"}
         if self.reply_tool_call:
             msg["content"] = seal("") if self.tool_call_content == "seal" else self.tool_call_content
@@ -320,13 +327,21 @@ class NearWorld:
         elif self.e2ee_mode == "tamper" and isinstance(c, str) and c:
             msg["content"] = c[:-2] + ("00" if c[-2:] != "00" else "11")
         elif self.e2ee_mode == "swap_ephemeral" and isinstance(c, str) and c:
-            msg["content"] = e2.ClientKey.generate().public_hex + c[64:]
+            msg["content"] = ref.keypair()[0] + c[64:]
         elif self.e2ee_mode == "bad_hex" and isinstance(c, str) and c:
             msg["content"] = "zz" + c[2:]
-        body = json.dumps({"id": cid, "object": "chat.completion", "created": 1, "model": model,
-                           "choices": [{"index": 0, "finish_reason": finish, "message": msg}],
-                           "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
-        return cid, body
+        doc = {"id": cid, "object": "chat.completion", "created": 1, "model": model,
+               "choices": [{"index": 0, "finish_reason": finish, "message": msg}],
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+        signed = json.dumps(doc).encode()
+        if gw_secret is None:
+            return cid, signed, signed
+        read = ref.open_(gw_secret, msg["content"]).decode()
+        self.gateway_read_replies.append(read)
+        if self.e2ee_mode == "swap_client_forward":
+            return cid, signed, signed
+        doc["choices"][0]["message"]["content"] = ref.seal(client_pub, read.encode())
+        return cid, signed, json.dumps(doc).encode()
 
     def _sse(self, model: str) -> tuple[str, bytes]:
         self._n += 1
@@ -396,18 +411,19 @@ class NearWorld:
                     return httpx.Response(400, json={"error": {"message": f"decryption failed: {exc}",
                                                                "type": "invalid_request_error"}})
                 self.decrypted_requests.append(plain)
-                cid, resp = self._e2ee_completion(model, request.headers["x-client-pub-key"])
+                cid, signed_resp, resp = self._e2ee_completion(model, request.headers["x-client-pub-key"])
             else:
                 cid, resp = self._sse(model) if stream else self._completion(model)
+                signed_resp = resp
             if self.stream_chunks is not None and stream:
-                resp = b"".join(self.stream_chunks)
+                resp = signed_resp = b"".join(self.stream_chunks)
             kind = "gateway" if stream else "provider_tee"
             if self.sig_mode in ("gateway", "provider_tee"):
                 kind = self.sig_mode
             if self.sig_mode == "other_chat" and self.signatures:
                 self.signatures[cid] = dict(next(iter(self.signatures.values())))
             else:
-                self.signatures[cid] = self.make_signature(kind, model, body, resp)
+                self.signatures[cid] = self.make_signature(kind, model, body, signed_resp)
             headers = {"content-type": "text/event-stream" if stream else "application/json"}
             content = resp
             if self.gzip:
