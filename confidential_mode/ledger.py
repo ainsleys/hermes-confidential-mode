@@ -347,6 +347,17 @@ def _default_connect() -> sqlite3.Connection:
     return plugin_db(PLUGIN_STORAGE_NAME, LEDGER_FILENAME)
 
 
+def _discard_transaction(conn: sqlite3.Connection) -> bool:
+    """Roll back whatever ``conn`` has open after a failed INSERT or COMMIT (FI-1), so the row can never be
+    committed by a later append. True when the rollback worked; False means the caller must drop the
+    connection (closing it discards the open transaction)."""
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001
+        return False
+    return not conn.in_transaction
+
+
 def default_ledger_path() -> Path:
     from plugins.plugin_storage import plugin_data_dir
     return plugin_data_dir(PLUGIN_STORAGE_NAME) / LEDGER_FILENAME
@@ -440,10 +451,21 @@ class Ledger:
                     created.append(blob_id)
             with self._lock:
                 db = self._db()
-                cur = db.execute(
-                    "INSERT INTO events (ts, session_id, kind, purpose, provider, host, model, bytes, tier,"
-                    " verdict, decision, surface, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
-                db.commit()
+                try:
+                    cur = db.execute(
+                        "INSERT INTO events (ts, session_id, kind, purpose, provider, host, model, bytes, tier,"
+                        " verdict, decision, surface, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+                    db.commit()
+                except BaseException:
+                    # FI-1: a failed INSERT or COMMIT leaves the row in the open transaction, where the next
+                    # append's COMMIT would land it. Roll back, or drop the connection when that fails.
+                    if not _discard_transaction(db):
+                        try:
+                            db.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        self._conn = None
+                    raise
                 row_id = int(cur.lastrowid)
         except BaseException:
             for blob_id in created:   # no row lists them: remove what this append wrote
@@ -504,6 +526,16 @@ class Ledger:
         """Every event for one session, oldest first (receipts)."""
         return self._rows(f"SELECT {', '.join(_COLUMNS)} FROM events WHERE session_id = ? ORDER BY id",
                           (session_id,))
+
+    @property
+    def journal_mode(self) -> str:
+        """SQLite's journal mode for this ledger ("wal", "delete", ...), or "" when it cannot be read."""
+        try:
+            with self._lock:
+                row = self._db().execute("PRAGMA journal_mode").fetchone()
+            return str(row[0]).lower() if row else ""
+        except Exception:  # noqa: BLE001
+            return ""
 
     def close(self) -> None:
         with self._lock:

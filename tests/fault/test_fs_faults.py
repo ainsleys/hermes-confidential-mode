@@ -163,8 +163,6 @@ def _reader_lock(path):
     return other
 
 
-@pytest.mark.xfail(strict=True, reason="FI-1: a ledger append whose COMMIT fails stays in the open transaction "
-                                       "and is committed by the next append (ledger.py Ledger.append)")
 def test_an_append_whose_commit_failed_is_not_committed_later(tmp_path):
     """ledger.append "Raises LedgerError on a rejected event" and returns the id of a row it wrote; a caller
     told the write failed (provider._emit, Amendment 5.2's refusal) must be able to rely on the row not
@@ -182,8 +180,6 @@ def test_an_append_whose_commit_failed_is_not_committed_later(tmp_path):
     assert [r.decision for r in led.tail(0)] == ["locked", "after"]
 
 
-@pytest.mark.xfail(strict=True, reason="FI-1: the failed append's blobs are deleted, then its row is committed by "
-                                       "the next append and references blobs that no longer exist")
 def test_a_failed_evidence_append_never_leaves_a_row_whose_blobs_were_deleted(tmp_path):
     """Amendment 5.2: "when the insert fails, the blobs it created are deleted" and "a blob stays while any
     row lists it"; both hold only if the failed row never lands."""
@@ -202,6 +198,37 @@ def test_a_failed_evidence_append_never_leaves_a_row_whose_blobs_were_deleted(tm
     for row in led.tail(0):
         for ref in (row.detail.get("evidence") or {}).get("blob_refs") or []:
             assert led.blob(ref) is not None, f"row {row.id} lists blob {ref[:12]} that was deleted"
+
+
+def test_the_default_ledger_reports_wal_and_a_reader_does_not_fail_its_commit(tmp_path, monkeypatch):
+    """FI-1: the default ledger opens through Hermes' plugin_db, which applies WAL where SQLite allows it;
+    Ledger.journal_mode reports the mode in force, and in WAL a reader's open transaction does not block the
+    writer's COMMIT."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    led = Ledger()
+    led.append({"kind": "lock", "decision": "locked"})
+    assert led.journal_mode == "wal"
+    from confidential_mode.ledger import default_ledger_path
+    reader = _reader_lock(default_ledger_path())
+    try:
+        led.append({"kind": "unlock", "decision": "unlocked"})
+    finally:
+        reader.rollback()
+        reader.close()
+    assert [r.decision for r in led.tail(0)] == ["locked", "unlocked"]
+    led.close()
+
+
+def test_an_insert_that_failed_leaves_nothing_for_the_next_commit(tmp_path):
+    """FI-1: a failed INSERT (a full disk) is rolled back too, so the next append commits only its own row."""
+    plan = FaultPlan()
+    led = faulty_ledger(tmp_path / "ledger.sqlite", plan)
+    led.append({"kind": "lock", "decision": "locked"})
+    plan.insert, plan.insert_times = disk_full(), 1
+    with pytest.raises(sqlite3.OperationalError):
+        led.append({"kind": "verify_ok", "decision": "lost"})
+    led.append({"kind": "unlock", "decision": "unlocked"})
+    assert [r.decision for r in led.tail(0)] == ["locked", "unlocked"]
 
 
 @pytest.mark.parametrize("damage", ["truncated", "garbage", "directory"])
