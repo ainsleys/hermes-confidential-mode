@@ -120,8 +120,8 @@ confidential:
     # verified provider_tee signature over the encrypted bytes. Needs the pynacl package
     # (docs/RUNNING_TESTS.md). The attested-tier lock is refused unless this is absent or exactly true.
     # Settings whose value is a mapping, such as extra_body entries, leave as plaintext. While this is
-    # true, only three structured settings pass, checked by shape: reasoning (keys effort, summary,
-    # max_tokens, exclude only; effort one of none/minimal/low/medium/high/xhigh/max, summary one of
+    # true, only three structured settings pass, checked by shape: reasoning (keys enabled, effort,
+    # summary, max_tokens, exclude only; effort null or one of none/minimal/low/medium/high/xhigh/max, summary one of
     # auto/concise/detailed/none), stream_options (include_usage only) and reasoning_effort (an effort
     # word). Their keys are fixed and their values are booleans, integers or words from those lists, so
     # they carry no free text. Any other key or word, logit_bias and every other extra_body entry are

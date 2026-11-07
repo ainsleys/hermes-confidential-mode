@@ -228,7 +228,7 @@ Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only.
   headers with `X-Encrypt-All-Fields: true`); `stream: true`, non-text content parts, top-level keys
   outside `near_e2ee.PLAINTEXT_KEYS` that carry text, `logprobs`, and every other POST raise
   `VerifyError` before sending. `near_e2ee.STRUCTURED_KEYS` lets three structured settings leave as
-  plaintext, each checked by shape: `reasoning` (a mapping with only `effort`, one of
+  plaintext, each checked by shape: `reasoning` (a mapping with only `enabled`, a bool; `effort`, null or one of
   `near_e2ee.REASONING_EFFORTS` = none, minimal, low, medium, high, xhigh, max, the widest wire set
   Hermes' `clamp_effort` returns; `summary`, one of auto, concise, detailed, none; `max_tokens`, an
   int; `exclude`, a bool), `stream_options` (only `include_usage`, a bool) and `reasoning_effort` (an

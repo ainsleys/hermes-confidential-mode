@@ -281,6 +281,39 @@ def test_structured_settings_outside_their_shape_are_refused(extra):
         e2.encrypt_request({"model": "m", "messages": [], **extra}, MODEL_PUB)
 
 
+def _hermes_reasoning_shapes() -> list:
+    """Every ``reasoning`` value Hermes' auxiliary chat-completions path can build: generic_nested_reasoning()
+    then clamp_reasoning_config() (agent/auxiliary_client.py), plus each helper on its own."""
+    from agent import reasoning_effort as re_
+    configs = [None, {}, {"enabled": False}, {"enabled": True}, {"enabled": True, "effort": None},
+               {"enabled": False, "effort": "high"}]
+    configs += [{"enabled": True, "effort": e} for e in re_.EFFORT_LADDER] + [{"effort": e} for e in re_.EFFORT_LADDER]
+    shapes = []
+    for cfg in configs:
+        nested = re_.generic_nested_reasoning(cfg).get("reasoning")
+        if nested is not None:
+            shapes.append(re_.clamp_reasoning_config(nested))
+            if (nested.get("effort") or "") != "ultra":      # ultra only ever leaves after the clamp
+                shapes.append(nested)
+        if isinstance(cfg, dict) and cfg:
+            shapes.append(re_.clamp_reasoning_config(cfg))
+    return shapes
+
+
+def test_every_reasoning_shape_hermes_builds_is_accepted():
+    shapes = _hermes_reasoning_shapes()
+    assert {"enabled": False} in shapes and {"enabled": True, "effort": "medium"} in shapes
+    for shape in shapes:
+        out, rep = e2.encrypt_request({"model": "m", "messages": [], "reasoning": shape}, MODEL_PUB)
+        assert out["reasoning"] == shape and rep["plaintext_keys"] == ["reasoning"], shape
+
+
+@pytest.mark.parametrize("shape", [{"enabled": "yes"}, {"enabled": 1}, {"enabled": None}])
+def test_reasoning_enabled_must_be_a_bool(shape):
+    with pytest.raises(e2.E2EEError, match="'reasoning' has a value outside the structured shape"):
+        e2.encrypt_request({"model": "m", "messages": [], "reasoning": shape}, MODEL_PUB)
+
+
 @pytest.mark.parametrize("extra", [{"logit_bias": {"50256": -100}}, {"extra_body": {"reasoning": {"effort": "low"}}}])
 def test_logit_bias_and_free_form_extra_body_stay_refused(extra):
     with pytest.raises(e2.E2EEError, match="carries text"):

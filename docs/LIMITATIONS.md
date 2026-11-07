@@ -521,10 +521,11 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
 - Settings whose value is a mapping, such as `extra_body` entries, leave this host in plaintext. While
   encryption is on, the plugin lets three structured settings pass, each checked by shape, and refuses
   every other such setting before the request is sent:
-  - `reasoning`, a mapping with only these keys: `effort` (one of `none`, `minimal`, `low`, `medium`,
-    `high`, `xhigh`, `max`), `summary` (one of `auto`, `concise`, `detailed`, `none`), `max_tokens` (an
-    integer) and `exclude` (true or false). Hermes sends `reasoning: {"effort": ..., "summary": "auto"}`
-    or `{"effort": "none"}` on auxiliary calls such as title generation.
+  - `reasoning`, a mapping with only these keys: `enabled` (true or false), `effort` (null or one of
+    `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), `summary` (one of `auto`, `concise`,
+    `detailed`, `none`), `max_tokens` (an integer) and `exclude` (true or false). On auxiliary calls
+    such as title generation, Hermes sends `reasoning: {"enabled": true, "effort": ...}` or
+    `{"enabled": false}` on chat completions, and `{"effort": ..., "summary": "auto"}` elsewhere.
   - `stream_options`, a mapping with only `include_usage` (true or false).
   - `reasoning_effort`, one of the same effort words.
 

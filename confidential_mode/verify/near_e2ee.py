@@ -27,8 +27,8 @@ The field table, per that page, with ``X-Encrypt-All-Fields: true`` always on he
 What this module adds to that table, all fail-closed (``E2EEError``, raised before anything is sent):
   * a top-level plaintext allowlist (``PLAINTEXT_KEYS``): any other top-level key that carries a string
     anywhere inside it is refused and named, since NEAR would forward it as plaintext;
-  * structured settings validated by shape (``STRUCTURED_KEYS``): ``reasoning`` (keys ``effort``,
-    ``summary``, ``max_tokens``, ``exclude`` only), ``stream_options`` (``include_usage`` only) and
+  * structured settings validated by shape (``STRUCTURED_KEYS``): ``reasoning`` (keys ``enabled``,
+    ``effort``, ``summary``, ``max_tokens``, ``exclude`` only), ``stream_options`` (``include_usage`` only) and
     ``reasoning_effort``. Each string must be one of a fixed set of words, so these settings carry no
     free text; any other key or value is refused;
   * ``logprobs`` and ``top_logprobs`` are refused (the page does not define the encrypted token format);
@@ -98,8 +98,8 @@ def _is_int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
-def _enum(allowed: frozenset):
-    return lambda v: isinstance(v, str) and v in allowed
+def _enum(allowed: frozenset, *, null: bool = False):
+    return lambda v: (null and v is None) or (isinstance(v, str) and v in allowed)
 
 
 #: Structured top-level settings that may leave as plaintext, each checked by shape: a mapping may hold
@@ -108,7 +108,10 @@ def _enum(allowed: frozenset):
 #: outside the shape, is refused. ``logit_bias`` and free-form ``extra_body`` entries stay refused:
 #: token ids could encode text.
 STRUCTURED_KEYS: dict = {
-    "reasoning": {"effort": _enum(REASONING_EFFORTS), "summary": _enum(REASONING_SUMMARIES),
+    "reasoning": {"enabled": lambda v: isinstance(v, bool),
+                  # effort may be null: Hermes' clamp_reasoning_config passes {"enabled": True, "effort": None}
+                  # through unchanged, and a null carries no text.
+                  "effort": _enum(REASONING_EFFORTS, null=True), "summary": _enum(REASONING_SUMMARIES),
                   "max_tokens": _is_int, "exclude": lambda v: isinstance(v, bool)},
     "stream_options": {"include_usage": lambda v: isinstance(v, bool)},
     "reasoning_effort": _enum(REASONING_EFFORTS),
