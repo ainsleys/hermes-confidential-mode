@@ -24,7 +24,7 @@ signature doesn't cover, a gateway that swaps that key can read the reply; the p
 afterwards.
 
 Finally, each session gets a receipt. You render it whenever you want, for the session you are in or
-any past one. It lists where every call went and attaches the enclave evidence captured at each
+any past one. It lists where every model call went and attaches the enclave evidence captured at each
 verification, which anyone holding the receipt can replay offline.
 
 Two things the plugin cannot do, stated up front: shell and code execution run on your machine and are
