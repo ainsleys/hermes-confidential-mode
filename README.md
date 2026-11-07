@@ -65,6 +65,7 @@ answers.](docs/images/routes-figure-2-with-the-plugin.svg)
 ```
 hermes plugins install https://github.com/ainsleys/hermes-confidential-mode
 hermes plugins enable confidential-mode
+hermes confidential status | grep '^Plugin:'
 ```
 
 - **Enable is required.** Without it, every `hermes confidential` command fails with
@@ -73,7 +74,16 @@ hermes plugins enable confidential-mode
   they need into Hermes' environment, and meanwhile Hermes prints only "Resolving Python
   dependencies" and "Installing Python dependencies". A quiet terminal doesn't mean it has hung. Set
   `HERMES_VERBOSE=1` to watch the installer.
-- **Set your key** in the shell that starts Hermes, or in `<hermes home>/.env`.
+- **Check which commit is installed.** The last command prints a line such as
+  `Plugin: confidential-mode 0.1.0 (commit 3c20cf4a1b2c (git checkout))`, the commit the installed
+  copy's `.git` names. Compare that commit with the commit you meant to install. The check does not
+  detect local edits.
+- **Set your key** in the shell that starts Hermes, or in `<hermes home>/.env`, or give Hermes the key
+  through `model.api_key` or `hermes auth`. The lock and `check` refuse while the key is missing, and
+  show only "set" or "not set", never the key.
+- **Data files.** The plugin keeps the ledger in `<hermes home>/plugin-data/confidential-mode/` and the
+  lock, pins and tool grants in `<hermes home>/plugin-data/agent-plugin-confidential-mode-<hash>/`,
+  each file mode 0600. `hermes confidential status` prints both paths.
 - Leave `plugins.isolation` at its default, `in_process`; under host isolation the lock is refused.
 - Running Hermes from a source checkout with `uv run --no-sync`? The enable step doesn't run there, so
   install `pynacl` yourself ([docs/RUNNING_TESTS.md](docs/RUNNING_TESTS.md)).
@@ -114,14 +124,16 @@ both tiers.
 
 ```
 $ hermes confidential on attested
-Locked. Model: attested-tinfoil/llama3-3-70b at router-0.tinfoil.sh, verified … ago (host clock). Tools that send data off this machine (web, browser, messaging, media and other off-host tools) ask you first, each call; …
+Locked to Tinfoil, llama3-3-70b at router-0.tinfoil.sh; verified 4 s ago.
+Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls are recorded, not refused. Not active in safe-worker mode.
+Details: hermes confidential status --verbose; docs/LIMITATIONS.md
 ```
 
 **4. Have a conversation.** Start `hermes` and ask something that needs the web. The first time each
 tool wants to send data off the machine, Hermes' approval panel shows the plugin's line:
 
 ```
-web_search wants to send ~1 KB of this conversation off the machine
+Confidential mode: web_search wants to send ~1 KB of this conversation off the machine
 ```
 
 Pick Allow once, Allow for this session (that tool then stops asking until the session ends), Add to
@@ -139,8 +151,8 @@ CHAIN HEAD: dae7c49c3089b27463fe369f7b834e9c0d895ea31cc56cebfbf46cabeefe438d
 Locked tier: attested  (from lock row)
 Provider / model: attested-tinfoil / llama3-3-70b
 …
-Sends (purpose, host, bytes; never text)
-  #17 2026-11-06T15:39:50.138Z (host clock)  aux:title_generation  host=router-0.tinfoil.sh  1433 bytes  attested-tinfoil/llama3-3-70b  observed  …
+Sends (purpose, host, request and response bytes; never text)
+  #17 2026-11-06T15:39:50.138Z (host clock)  aux:title_generation  host=router-0.tinfoil.sh  request 1433 bytes  attested-tinfoil/llama3-3-70b  observed  …
 …
 What this receipt proves and what it only records. …
 ```
@@ -187,7 +199,7 @@ except where noted.
 |---|---|
 | `on <on-host-only\|attested>` | Lock this profile (the preflight runs first). |
 | `off` | Unlock, with the lock period's counts. |
-| `status` | Lock state, pins, verification, breaches. |
+| `status [--verbose]` | Lock state, pins, verification, breaches, installed commit; `--verbose` adds the tool list and the preflight. |
 | `check [tier]` | The preflight table (`check --tier <tier>` in a terminal). |
 | `setup` | Terminal only: `hermes confidential setup [--vendor near] --model <id>`. |
 | `allow <tool>` | Let an off-host tool run without asking, for this lock (asks you). |

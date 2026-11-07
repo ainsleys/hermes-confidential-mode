@@ -153,7 +153,8 @@ Python SDK. The plugin is an entry for the Nous Research Hermes Agent Plugin Hac
 ## Install in detail
 
 The [README](../README.md#install) has the short version. Here are all the steps, in order. Hermes
-runs the first two, and the plugin runs steps 3 to 5.
+runs steps 1 and 2. You run steps 3 to 6, and steps 3 and 5 use the plugin's own commands. The terms
+used here (observe mode, tier, preflight, pin) are defined in the [Glossary](#glossary).
 
 ```
 hermes plugins install https://github.com/ainsleys/hermes-confidential-mode
@@ -175,20 +176,25 @@ hermes confidential status | grep '^Plugin:'
    The first Hermes command after the enable step loads the plugin. On a terminal, that first start
    prints one line per phase of the plugin's own start-up work, such as
    `confidential-mode: registering the NEAR provider (loads the OpenAI SDK)... ok`. Later starts of
-   the same commit print nothing. Set `CONFIDENTIAL_MODE_PROGRESS=1` to see the lines on every start,
+   the same commit print nothing. Set `CONFIDENTIAL_MODE_PROGRESS=1` to see the lines on every start, with
+   or without a terminal,
    or `CONFIDENTIAL_MODE_PROGRESS=0` to turn them off. `hermes confidential on` and
    `hermes confidential allow` print `confidential-mode: discovering tools... 78 found` on a terminal.
 3. **Check which commit is installed.** `hermes confidential status | grep '^Plugin:'` prints a line
    such as `Plugin: confidential-mode 0.1.0 (commit 3c20cf4a1b2c (git checkout))`. The commit is
-   the one the installed copy's `.git` names, so the commit changes after `hermes plugins update`. Compare
-   the commit with the one you meant to install. Receipts carry the same value.
+   the commit that the installed copy's `.git` names, so the commit changes after `hermes plugins update`.
+   Compare that commit with the commit you meant to install. Receipts carry the same value. The check
+   does not detect local edits, and anyone who can write the installed copy can change what `.git` says.
 4. **Set the vendor's API key.** The attested tier needs `TINFOIL_API_KEY` for Tinfoil and
    `NEAR_AI_API_KEY` for NEAR AI Cloud. Export the variable in the shell that starts Hermes, or add
    the variable to Hermes' env file, `<hermes home>/.env`. Observe mode and the `on-host-only` tier
    need no key. Verification and pin approval work without a key, because the attestation endpoints
    are public. The attested preflight therefore checks the key of each vendor that a route uses, and
-   the preflight refuses to lock while a key is missing. The preflight shows only "set" or "not set", never the
-   key.
+   the preflight refuses to lock while a key is missing. The key may come from the variable, from
+   `model.api_key`, or from `hermes auth`. The preflight shows only "set", "not set" or "not readable in
+   this scope", never the key. The check runs when you lock and in `check`, not on every turn. If the
+   process that runs a turn cannot read the key later, the plugin refuses that call with the reason
+   "vendor key unreadable" and records the refusal, not a breach.
 5. **Set up and lock.** Run `hermes confidential setup --model <model id>`, or
    `hermes confidential setup --vendor near --model <model id>` for NEAR. Setup prints a config block
    for you to review and merge. Then run `hermes confidential check --tier attested` and
@@ -212,7 +218,8 @@ state. Each of those two Hermes interfaces chooses its own directory name.
   Tinfoil user cache secret.
 
 `hermes confidential status` prints both paths. The plugin creates its files with mode 0600, readable
-by your user only. The plugin also sets that mode again on existing files each time the plugin starts.
+by your user only. The plugin also sets that mode again on existing files once per installed commit, and
+whenever the ledger, `pins.yaml` or `allowlist.yaml` has another mode. The modes are POSIX modes.
 
 ### Upgrading
 
@@ -524,7 +531,11 @@ upgrade, because the list joined the fingerprint, so lock again as well.
 your hardware's availability.
 
 Every auxiliary task needs an on-host route as well. An auxiliary task left at `auto` inherits the
-main route, so the task passes when the main route passes. Vision is the exception: `auxiliary.vision` must
+main route, so the task passes when the main route passes. Hermes' fall-through to OpenRouter or Nous
+runs only when the main provider is unset or `auto` (`agent/auxiliary_client.py:4529-4541`), which the
+lock refuses, so the fallback chain is refused under a lock. `check` names the side calls left on `auto`
+when an OpenRouter or Nous credential is readable, and `hermes confidential setup` pins every side call.
+Vision is the exception: `auxiliary.vision` must
 name its own provider or base URL, because `auto` vision can walk to hosted providers. At 84a0301,
 Hermes' built-in on-host provider profiles (ollama, lmstudio and llama-cpp) report no base URL, so the
 plugin cannot tell where they point. Set `model.base_url` yourself, and give `auxiliary.vision` a
@@ -943,8 +954,12 @@ When you run `/confidential on <tier>`, the plugin does this, in order:
    the `plugins.*` keys that govern how plugin hooks run.
 4. The plugin builds the tool allowlist from the tools registered in Hermes at that moment.
 5. The plugin saves the allowlist to disk, tagged with this lock's identity.
-6. The plugin prints the allowlist. The printout groups the tools into those that run on this host,
-   those that will ask you, and those that are blocked.
+6. The plugin replies in three lines: what is locked, the four limits (off-host tools ask first, shell
+   and code execution are not inspected, auxiliary calls are recorded but not refused, and locked mode
+   is not active in safe-worker mode), and where the details are. The allowlist is in
+   `hermes confidential status --verbose`, which groups the tools into those that run on this host,
+   those that will ask you, and those that are blocked. A lock made from a terminal records no tool
+   that only the gateway connects, such as an MCP tool. Lock from chat to record those tools.
 
 One preflight rule concerns hooks. If `plugins.hook_callback_timeout` is set to more than 0 and less
 than 5 seconds, the preflight fails. A timeout that short would let Hermes skip this plugin's
@@ -1034,7 +1049,7 @@ why the plugin still treats it as on-host.
 approval prompt, with a line like this:
 
 ```
-web_search wants to send ~3 KB of this conversation off the machine
+Confidential mode: web_search wants to send ~3 KB of this conversation off the machine
 ```
 
 The tool runs only if you answer with exactly `once`, `session` or `always`. Any other answer is
