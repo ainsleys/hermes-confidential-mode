@@ -514,9 +514,10 @@ In a terminal, refusals and breaches print in red and off-tier verdicts in yello
    and the `plugins.*` keys that govern how plugin hooks run.
 4. Builds the tool allowlist from the tools registered in Hermes at that moment, and saves it to disk
    tagged with this lock's identity.
-5. Replies in three lines: what is locked; the four limits (off-host tools ask first, shell and code
-   execution aren't inspected, auxiliary calls are recorded not refused, and locked mode isn't active
-   in safe-worker mode); and where the details are. `hermes confidential status --verbose` groups the
+5. Replies in three lines: what is locked; the four limits (off-host tools ask the first time per
+   lock, or each call under `confidential.tools.ask: each_call`; shell and code execution aren't
+   inspected; auxiliary calls are recorded, not refused; and locked mode isn't active in safe-worker
+   mode); and where the details are. `hermes confidential status --verbose` groups the
    allowlist into tools that run on this host, tools that ask, and tools that are blocked.
 
 The preflight fails if `plugins.hook_callback_timeout` is more than 0 and less than 5 seconds, because
@@ -583,12 +584,12 @@ machine.
 Hermes' approval prompt:
 
 ```
-Confidential mode: web_search wants to send ~3 KB of this conversation off the machine; allowing once covers web_search until this profile is unlocked
+Confidential mode: web_search wants to send ~3 KB of this conversation off the machine; allowing once covers web_search in this conversation until this profile is unlocked
 ```
 
 **How often a tool asks is set by `confidential.tools.ask`.** The default, `once_per_lock`, asks on
-the first call of each tool during a lock, and an exact `once` answer covers that tool until you
-unlock. `each_call` asks on every call. An absent key means
+the first call of each tool in each conversation during a lock, and an exact `once` answer covers
+that tool in that conversation until you unlock. `each_call` asks on every call. An absent key means
 `once_per_lock`; any other value counts as `each_call`. The plugin reads the key at each decision, so
 a change takes effect on the next tool call.
 
@@ -596,7 +597,10 @@ The size counts the call's arguments and any local image file it names, in MB ab
 runs only on exactly `once`, `session` or `always`; any other answer is refused and logged as
 `unexpected_choice`, including answers Hermes' own CLI would take as a yes.
 
-- `once` runs the tool and grants that tool for the rest of this lock. The grant is the plugin's own, not
+- `once` runs the tool and grants that tool for the rest of this lock, in this conversation only. The
+  conversation is Hermes' approval session key (one gateway chat, one CLI session) together with the
+  agent's session id, so another chat, another user and a subagent each ask again; the grant is never
+  wider than Hermes' own `session` answer. The grant is the plugin's own, not
   Hermes': Hermes treats `once` as one call, and the plugin keeps the grant beside the lock. The grant
   records the lock and the id of the ledger row that recorded your answer. Each later call to that
   tool runs without a prompt and writes a `tool_allowed` row with decision `lock_grant` and
@@ -604,7 +608,7 @@ runs only on exactly `once`, `session` or `always`; any other answer is refused 
   held in the process that asked: a restart asks again, and a second process on the same lock (a CLI
   next to a gateway) asks on its own. The grant ends at unlock, so the next lock asks again, and
   `/confidential revoke <tool>` ends the grant sooner. `/confidential status` lists the grants under
-  "Tool grants (answered once, this lock, this process)". With `confidential.tools.ask: each_call`,
+  "Tool grants (answered once, this lock, this process, each for its own conversation)". With `confidential.tools.ask: each_call`,
   `once` covers this call only, and every call asks.
 - `session` stops the asking for this tool for the rest of the session. Hermes keeps this grant, in
   either `confidential.tools.ask` mode.
@@ -1251,7 +1255,7 @@ under `confidential:` in `config.yaml`:
 
 | Key | Default | What it does |
 |---|---|---|
-| `confidential.tools.ask` | `once_per_lock` | How often an off-host tool asks while locked: `once_per_lock` asks on the first call of each tool and an exact `once` grants the tool until unlock; `each_call` asks every call. Under yolo, approvals off and unattended runs a tool is blocked in either mode. Any other value counts as `each_call`. |
+| `confidential.tools.ask` | `once_per_lock` | How often an off-host tool asks while locked: `once_per_lock` asks on the first call of each tool in each conversation and an exact `once` grants the tool in that conversation until unlock; `each_call` asks every call. Under yolo, approvals off and unattended runs a tool is blocked in either mode. Any other value counts as `each_call`. |
 | `confidential.tinfoil.enclave` | Unset (router discovery) | One router host to verify and use; stops the AMD/Intel switching after a restart. |
 | `confidential.tinfoil.context_length` | 65536 | The context window reported to Hermes, so Hermes never sends its own probe outside the attested transport. |
 | `confidential.tinfoil.tls_probe` | `true` | After each verification, send one bodiless request over the verified connection and record the TLS certificate seen and whether its key is the attested TLS key. An observation for the evidence that never fails a verification; the per-send TLS pin is separate and always on. Only the exact value `false` turns the probe off. |

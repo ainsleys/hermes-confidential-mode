@@ -674,6 +674,15 @@ socket can approve a pin. Such an approval is recorded with approved_via, and th
 person who runs an agent with terminal access on the same host should treat pins approved during an
 agent session as the agent's work unless they remember answering.
 
+**A tool answer reached this way covers more calls by default.** Under the default
+`confidential.tools.ask: once_per_lock`, one `once` answer to a tool prompt covers that tool in that
+conversation (Hermes' approval session key and the agent's session id) for every later call until
+unlock. An answer the agent gave itself, through a nested chat attached to the same gateway, is
+therefore wider than one call: the agent's later calls of that tool in that conversation run
+without a prompt until unlock. Other conversations, users and subagents still ask. The answer's
+`tool_allowed` row records its surface, and each later call's `lock_grant` row names the answering
+row in `grant_row`. Set `confidential.tools.ask: each_call` to make every answer cover one call.
+
 The details:
 
 - The tool gate reads the arguments of `terminal` calls as shell commands, `execute_code` calls as
@@ -804,10 +813,12 @@ Each item below is a smaller gap. Each one is stated in full.
   `text_to_speech` tool asks before it runs (once per lock by default; set
   `confidential.tools.ask: each_call` to have it ask on every call).
 
-- **A `once` answer covers the tool for the rest of the lock, in that process.** Under the default
-  `confidential.tools.ask: once_per_lock`, the grant lives in the memory of the process that asked:
-  a gateway restart asks again, and a second process holding the same lock (a CLI next to a
-  gateway) asks on its own. Later calls are not shown to you; each has a `tool_allowed` row naming
+- **A `once` answer covers the tool for the rest of the lock, in that conversation and that
+  process.** Under the default `confidential.tools.ask: once_per_lock`, the grant belongs to the
+  conversation that answered (Hermes' approval session key and the agent's session id), so another
+  chat, user or subagent asks again. The grant lives in the memory of the process that asked: a
+  gateway restart asks again, and a second process holding the same lock (a CLI next to a gateway)
+  asks on its own. Later calls are not shown to you; each has a `tool_allowed` row naming
   the answer that granted it.
 
 - **`tts.enabled` is a plugin convention.** Hermes 84a0301 has no such key.

@@ -213,11 +213,11 @@ def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeyp
     out = plugin.slash("on on-host-only")
     # ux-pass-1 item 4: one line; the disclosure, the tool list and the preflight are in status --verbose.
     assert out == ("Locked to this machine (on-host-only), custom/llama3 at 127.0.0.1.\n"
-                   "Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls are "
+                   "Off-host tools ask the first time per lock. Shell and code execution are not inspected. Auxiliary calls are "
                    "recorded, not refused. Not active in safe-worker mode.\n"
                    "Details: hermes confidential status --verbose; docs/LIMITATIONS.md"), out
     status = plugin.slash("status")       # plain status carries the same four disclosures (Amendment 4 F12)
-    assert ("Limits: Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls are "
+    assert ("Limits: Off-host tools ask the first time per lock. Shell and code execution are not inspected. Auxiliary calls are "
             "recorded, not refused. Not active in safe-worker mode.") in status
     # A listed host is not "this machine".
     locking = importlib.import_module(f"{plugin.mod.__name__}.confidential_mode.locking")
@@ -226,6 +226,11 @@ def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeyp
            "confidential": {"on_host": {"extra_hosts": ["gpu-box.lan"]}}}
     assert locking.lock_message(tiers.Tier.ON_HOST, cfg).startswith(
         "Locked to listed host gpu-box.lan (on-host-only), custom/llama3 at gpu-box.lan.")
+    # confidential.tools.ask: each_call changes the lock reply and the locked note (Amendment 13).
+    each = {**cfg, "confidential": {**cfg["confidential"], "tools": {"ask": "each_call"}}}
+    assert locking.lock_message(tiers.Tier.ON_HOST, each).split("\n")[1].startswith("Off-host tools ask each call. ")
+    assert "ask the user first, each call" in locking.locked_note(tiers.Tier.ON_HOST, "each_call")
+    assert "each call" not in locking.locked_note(tiers.Tier.ON_HOST, "once_per_lock")
     verbose = plugin.slash("status --verbose")
     assert "ask you the first time each would send data off the machine during a lock" in verbose and "Memory: on-host. Fallbacks: none." in verbose
     assert "safe-worker" in verbose and "recorded after the fact" in verbose
@@ -236,6 +241,8 @@ def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeyp
     assert result["final_response"] == "provider answered"
     assert len(rec.provider_calls) == 1
     assert "[confidential mode] This profile is locked (on-host-only)" in _sent_text(rec.provider_calls[0])
+    assert "the first time each tool would send data off the machine in this conversation" in \
+        _sent_text(rec.provider_calls[0])
     rows = [(e.kind, e.decision, e.verdict) for e in plugin.rt.ledger.tail(0)]
     assert ("lock", "locked", "in_tier") in rows
     assert ("send_observed", "allowed", "in_tier") in rows
@@ -422,7 +429,7 @@ def test_locked_web_search_asks_and_runs_only_on_exact_once(plugin, monkeypatch)
     assert ran == []
     assert len(plugin.prompts) == 4
     assert plugin.prompts[0][1] == ("Confidential mode: web_search wants to send ~2 KB of this conversation off the "
-                                    "machine; allowing once covers web_search until this profile is unlocked")
+                                    "machine; allowing once covers web_search in this conversation until this profile is unlocked")
     plugin.human("once")
     out = call(9)
     assert ran == [{"query": "q" * 1500}] and json.loads(out) == {"ok": "web_search"}

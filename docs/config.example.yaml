@@ -94,7 +94,8 @@ confidential:
 
   tools:
     # How often an off-host tool asks while locked. once_per_lock (the default): the first call of each tool
-    # asks, and an exact "once" grants that tool until you unlock or revoke it. each_call: every call asks.
+    # in each conversation asks, and an exact "once" grants that tool in that conversation (another chat,
+    # user or subagent asks again) until you unlock or revoke it. each_call: every call asks.
     # Under yolo, approvals off and unattended runs (one-shot, cron) a tool is blocked in either mode. Any
     # other value counts as each_call.
     ask: once_per_lock

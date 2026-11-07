@@ -203,7 +203,8 @@ def _grant_lines(rt: Any, session_key: str) -> list[str]:
     except Exception:  # noqa: BLE001
         pass
     return [f"Tool grants (allowlist): {', '.join(added) if added else 'none'}",
-            f"Tool grants (answered once, this lock, this process): {', '.join(granted) if granted else 'none'}",
+            f"Tool grants (answered once, this lock, this process, each for its own conversation): "
+            f"{', '.join(granted) if granted else 'none'}",
             f"Tool grants (remembered by Hermes): {', '.join(remembered) if remembered else 'none'}"]
 
 
@@ -316,7 +317,11 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
         lines.append(f"Plugin registration problem: {step}: {err}")
     lines.append(plugin_identity())
     lines.append(data_paths_line(rt))
-    lines.append(f"Limits: {_locking.LOCK_DISCLOSURES}")
+    try:
+        mode = rt.tool_ask_mode()
+    except Exception:  # noqa: BLE001
+        mode = "each_call"
+    lines.append(f"Limits: {_locking.lock_disclosures(mode)}")
     if not verbose:
         lines.append(_locking.LOCK_DETAILS)
         return "\n".join(lines)

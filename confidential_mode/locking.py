@@ -61,9 +61,16 @@ STRUCTURE_FAILED_TEXT = (
     "Confidential mode: the locked routing config no longer passes the preflight, so this turn was not "
     "sent to any model. Run /confidential check, fix the listed keys, then /confidential off and "
     "/confidential on <tier>.")
+#: How the locked note describes the tool prompt, by confidential.tools.ask (Amendment 13).
+LOCKED_NOTE_ASK = {
+    "once_per_lock": ("ask the user the first time each tool would send data off the machine in this "
+                      "conversation during the lock; after the user allows a tool once, later calls of that tool "
+                      "in this conversation run without asking until unlock"),
+    "each_call": "ask the user first, each call",
+}
 LOCKED_NOTE = (
-    "[confidential mode] This profile is locked ({tier}). Tools that send data off this machine ask the user "
-    "first, each call (blocked outright under yolo or approvals off); off-tier remote MCP servers, scheduled "
+    "[confidential mode] This profile is locked ({tier}). Tools that send data off this machine {ask} "
+    "(blocked outright under yolo, approvals off or an unattended run); off-tier remote MCP servers, scheduled "
     "jobs and routed delegation are blocked. If a tool is blocked or refused, tell the user what was blocked "
     "and ask them to unlock if they need it; do not retry it or look for a workaround. Disclosure for the "
     "user if asked: auxiliary model calls (titles, compression, vision) are recorded, not prevented, and "
@@ -248,8 +255,31 @@ def _default_verification(provider: str):
 VENDOR_NAMES = {PROFILE_NAME: "Tinfoil", NEAR_PROFILE_NAME: "NEAR AI Cloud"}
 #: The lock reply's second line, and plain status's "Limits:" line: the four disclosures every lock states
 #: (Amendment 4 F12, Amendment 11). The full text, LOCK_TAIL, is in `status --verbose` and docs/LIMITATIONS.md.
-LOCK_DISCLOSURES = ("Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls are "
-                    "recorded, not refused. Not active in safe-worker mode.")
+_DISCLOSURES_TAIL = ("Shell and code execution are not inspected. Auxiliary calls are recorded, not refused. "
+                     "Not active in safe-worker mode.")
+#: By confidential.tools.ask (Amendment 13); LOCK_DISCLOSURES is the default mode's text.
+LOCK_DISCLOSURES_BY_MODE = {
+    "once_per_lock": f"Off-host tools ask the first time per lock. {_DISCLOSURES_TAIL}",
+    "each_call": f"Off-host tools ask each call. {_DISCLOSURES_TAIL}",
+}
+LOCK_DISCLOSURES = LOCK_DISCLOSURES_BY_MODE["once_per_lock"]
+
+
+def tool_ask_mode(config: Any) -> str:
+    """confidential.tools.ask from ``config`` (gate_tools.ask_mode_from); unreadable is each_call."""
+    try:
+        from .gate_tools import ask_mode_from
+        return ask_mode_from(config)
+    except Exception:  # noqa: BLE001
+        return "each_call"
+
+
+def lock_disclosures(mode: str) -> str:
+    return LOCK_DISCLOSURES_BY_MODE.get(mode, LOCK_DISCLOSURES_BY_MODE["each_call"])
+
+
+def locked_note(tier: Tier, mode: str) -> str:
+    return LOCKED_NOTE.format(tier=Tier(tier).value, ask=LOCKED_NOTE_ASK.get(mode, LOCKED_NOTE_ASK["each_call"]))
 LOCK_DETAILS = "Details: hermes confidential status --verbose; docs/LIMITATIONS.md"
 
 
@@ -278,7 +308,7 @@ def lock_message(tier: Tier, config: Mapping, *, verification: Any = None,
         where = f"listed host {host}" if _is_listed_host(config, provider, base_url, model) else "this machine"
         head = (f"Locked to {where} ({tier.value}), {provider or '?'}/{model or '?'} at "
                 f"{host or '(provider default)'}.")
-    return f"{head}\n{LOCK_DISCLOSURES}\n{LOCK_DETAILS}"
+    return f"{head}\n{lock_disclosures(tool_ask_mode(config))}\n{LOCK_DETAILS}"
 
 
 def _is_listed_host(config: Mapping, provider: str, base_url: str, model: str) -> bool:

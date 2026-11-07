@@ -31,8 +31,9 @@ approved; `on-host-only` allows only your machine. While locked:
   model cannot read the text. (On NEAR it still sees images, the model id, settings, headers, sizes
   and timing, and a gateway that swapped the reply key would be caught only afterwards.)
 - The plugin asks you the first time each tool would send data off the machine during a lock; an
-  allow lasts until you unlock (`confidential.tools.ask: each_call` asks on every call instead). When
-  nobody can answer (yolo, approvals off, cron, one-shot runs), the tool is blocked. Tool servers on
+  allow lasts until you unlock, in that conversation only, so another chat, user or subagent is
+  asked again (`confidential.tools.ask: each_call` asks on every call instead). When nobody can
+  answer (yolo, approvals off, cron, one-shot runs), the tool is blocked. Tool servers on
   off-tier remote hosts, scheduled jobs and routed delegation are blocked.
 - Every model call is logged with its host and size, never its text, from the moment the plugin is
   installed. `hermes confidential status` shows where calls have gone; `watch` streams them live.
@@ -130,7 +131,7 @@ the first time that tool would send data off the machine, on both tiers.
 ```
 $ hermes confidential on attested
 Locked to Tinfoil, llama3-3-70b at router-0.tinfoil.sh; verified 4 s ago.
-Off-host tools ask first. Shell and code execution are not inspected. Auxiliary calls are recorded, not refused. Not active in safe-worker mode.
+Off-host tools ask the first time per lock. Shell and code execution are not inspected. Auxiliary calls are recorded, not refused. Not active in safe-worker mode.
 Details: hermes confidential status --verbose; docs/LIMITATIONS.md
 ```
 
@@ -138,13 +139,14 @@ Details: hermes confidential status --verbose; docs/LIMITATIONS.md
 tool wants to send data off the machine, Hermes' approval panel shows the plugin's line:
 
 ```
-Confidential mode: web_search wants to send ~1 KB of this conversation off the machine; allowing once covers web_search until this profile is unlocked
+Confidential mode: web_search wants to send ~1 KB of this conversation off the machine; allowing once covers web_search in this conversation until this profile is unlocked
 ```
 
 Pick one of four answers:
 
-- **Allow once** runs the tool and covers that tool until you unlock, so later `web_search` calls in
-  this lock run without asking. Each later call still gets a ledger row naming the row that recorded
+- **Allow once** runs the tool and covers that tool in this conversation until you unlock, so later
+  `web_search` calls in this conversation run without asking; another chat, user or subagent is
+  asked again. Each later call still gets a ledger row naming the row that recorded
   your answer. Set `confidential.tools.ask: each_call` to be asked on every call instead.
 - **Allow for this session** stops that tool asking until the session ends.
 - **Add to permanent allowlist** stops that tool asking across locks, until `/confidential revoke
@@ -197,8 +199,9 @@ the change that would close each.
   another plugin could edit. Only the attached enclave evidence can be checked by someone else.
   ([section 6](docs/LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process))
 - **Tools ask once per lock, then run without asking.** The plugin asks you the first time each tool
-  would send data off the machine during a lock; after Allow once, later calls to that tool run
-  until you unlock, each with a ledger row. The grant lives in the process that asked, so a restart
+  would send data off the machine during a lock; after Allow once, later calls to that tool in the
+  same conversation run until you unlock, each with a ledger row. An answer an agent gave itself
+  through a nested chat counts the same way. The grant lives in the process that asked, so a restart
   or a second process asks again. `confidential.tools.ask: each_call` asks on every call.
   ([LIMITATIONS](docs/LIMITATIONS.md), [GUIDE](docs/GUIDE.md))
 - **A locked session has no fallback.** If the provider errors, or can't be verified within 20

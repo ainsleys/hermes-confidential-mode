@@ -626,7 +626,8 @@ def build_allowlist(registry: Any, *, mcp_configs: Optional[Mapping[str, Mapping
 
 _ROUTE_TITLES = (
     (Route.ON_HOST, "on-host (runs without asking)"),
-    (Route.ASK, "off-host (asks each call; blocked under yolo/approvals off/unattended)"),
+    (Route.ASK, "off-host (asks the first time per lock in each conversation, each call with "
+                "confidential.tools.ask: each_call; blocked under yolo/approvals off/unattended)"),
     (Route.DELEGATE, "delegation (default backend only, no profile/ACP)"),
     (Route.BLOCK_CRON, "blocked (scheduled jobs)"),
     (Route.BLOCK_MCP_URL, "blocked (MCP server URL off-tier or unreadable)"),
@@ -940,7 +941,7 @@ def ask_message(tool_name: str, nbytes: int, once_per_lock: bool = False) -> str
     says what an allow covers."""
     text = f"Confidential mode: {tool_name} wants to send {size_text(nbytes)} of this conversation off the machine"
     if once_per_lock:
-        text += f"; allowing once covers {tool_name} until this profile is unlocked"
+        text += f"; allowing once covers {tool_name} in this conversation until this profile is unlocked"
     return text
 
 
@@ -984,43 +985,59 @@ def ask_mode_from(config: Any) -> str:
     return value if isinstance(value, str) and value in ASK_MODES else ASK_EACH_CALL
 
 
+def grant_scope(session_id: str = "") -> tuple[str, str]:
+    """The conversation a lock grant belongs to: Hermes' approval session key (the key Hermes' own "session"
+    answer is stored under; a gateway chat, a CLI session) and the agent's session id (a subagent has its own).
+    A grant is never wider than Hermes' session answer. Any error reading the key: an empty key, so the grant
+    still needs the same session id."""
+    try:
+        from tools.approval_context import get_current_session_key
+        key = get_current_session_key("")
+    except Exception:  # noqa: BLE001
+        key = ""
+    return (str(key or ""), str(session_id or ""))
+
+
 class LockGrants:
     """The plugin's own tool grants under ``confidential.tools.ask: once_per_lock`` (Amendment 13): one per
-    (lock id, tool), made when a person answers "once" to the plugin's prompt, holding the id of the ledger
-    row that recorded the answer. A grant counts only for the lock it was made in, so it ends at unlock; a
-    revoke drops it. In memory, per process: a restart asks again. The gate never consults a grant while
-    Hermes' approvals are bypassed (yolo, approvals off) or nobody can be asked (one-shot, cron, unattended
+    (lock id, conversation, tool), where the conversation is ``grant_scope``: Hermes' approval session key and
+    the agent's session id. A grant is made when a person answers "once" to the plugin's prompt and holds the
+    id of the ledger row that recorded the answer. A grant counts only for the lock it was made in and only in
+    the conversation that answered: another chat, user or subagent asks again. A grant ends at unlock; a revoke
+    drops it. In memory, per process: a restart asks again. The gate never consults a grant while Hermes'
+    approvals are bypassed (yolo, approvals off) or nobody can be asked (one-shot, cron, unattended
     platforms): those keep refusing."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._grants: dict[tuple[str, str], Any] = {}
+        self._grants: dict[tuple[str, tuple[str, str], str], Any] = {}
 
-    def grant(self, lock_id: str, tool: str, row_id: Any) -> None:
+    def grant(self, lock_id: str, scope: tuple[str, str], tool: str, row_id: Any) -> None:
         if not lock_id or not isinstance(tool, str) or not tool:
             return
         with self._lock:
             for key in [k for k in self._grants if k[0] != lock_id]:
                 del self._grants[key]          # grants of an earlier lock end with that lock
-            self._grants[(lock_id, tool)] = row_id
+            self._grants[(lock_id, tuple(scope), tool)] = row_id
 
-    def get(self, lock_id: str, tool: str) -> Any:
-        """The answering row id, or _MISSING when there is no grant for this lock."""
+    def get(self, lock_id: str, scope: tuple[str, str], tool: str) -> Any:
+        """The answering row id, or _MISSING when this conversation has no grant for the tool in this lock."""
         if not lock_id:
             return _MISSING
         with self._lock:
-            return self._grants.get((lock_id, tool), _MISSING)
+            return self._grants.get((lock_id, tuple(scope), tool), _MISSING)
 
     def drop(self, tools: Optional[set] = None) -> list[str]:
         with self._lock:
-            gone = sorted({t for (_, t) in self._grants if tools is None or t in tools})
-            for key in [k for k in self._grants if tools is None or k[1] in tools]:
+            gone = sorted({k[2] for k in self._grants if tools is None or k[2] in tools})
+            for key in [k for k in self._grants if tools is None or k[2] in tools]:
                 del self._grants[key]
         return gone
 
     def names(self, lock_id: str) -> list[str]:
+        """Every tool granted in this lock, in any conversation of this process."""
         with self._lock:
-            return sorted(t for (lid, t) in self._grants if lid == lock_id)
+            return sorted({k[2] for k in self._grants if k[0] == lock_id})
 
 
 class LockStateError(RuntimeError):
@@ -1106,7 +1123,7 @@ class _Policy:
         # Extension point for MODE_TOOLS (terminal / execute_code three-mode rule, pending).
         return CallDecision("run", "on-host")
 
-    def decide(self, tool_name: str, args: dict, task_id: str = "") -> CallDecision:
+    def decide(self, tool_name: str, args: dict, task_id: str = "", session_id: str = "") -> CallDecision:
         al = self.allowlist()
         info = al.current(tool_name) if isinstance(tool_name, str) else None
         if info is None:
@@ -1141,7 +1158,7 @@ class _Policy:
         n = max(1, math.ceil(nbytes / 1024))
         once = self.once_per_lock()
         if once:
-            row = self.lock_grants.get(al.lock_id, tool_name)
+            row = self.lock_grants.get(al.lock_id, grant_scope(session_id), tool_name)
             if row is not _MISSING:
                 return CallDecision("run", "lock_grant", kb=n, grant_row=row)
         return CallDecision("ask", "remembered" if self.remembered(tool_name) else "ask",
@@ -1306,7 +1323,7 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
             return None
         try:
             a = args if isinstance(args, dict) else {}
-            d = pol.decide(tool_name, a, str(task_id or ""))
+            d = pol.decide(tool_name, a, str(task_id or ""), str(session_id or ""))
             base = {"tool": str(tool_name), "tool_call_id": str(tool_call_id or "")}
             if d.action == "refuse":
                 ledger.append(_event("tool_refused", tool_name=tool_name, session_id=session_id or "",
@@ -1442,7 +1459,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
             return _refusal_result(_LOCK_UNREADABLE)
         if not locked:
             return run()
-        d = pol.decide(tool_name, args, task_id)
+        d = pol.decide(tool_name, args, task_id, session_id)
         if d.action == "refuse":
             return _refuse(tool_name, args, session_id, d.decision, d.message, {**base, "reason": d.decision})
         if d.action == "run":
@@ -1460,7 +1477,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                     row = dec.pop_row(key)
                 else:                              # the hook's tool_allowed row could not be written
                     row = _allowed_row(tool_name, args, session_id, base, choice)
-                _grant_for_lock(tool_name, choice, row)
+                _grant_for_lock(tool_name, choice, row, session_id)
                 return run()                       # tool_allowed was ledgered by post_approval_response
             return _unexpected(tool_name, args, session_id, base, choice,
                                answered=dec.pop_ledgered(key) and _refusal_ledgered(choice))
@@ -1483,7 +1500,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         if approved and type(choice) is str and choice in _ALLOW_CHOICES:
             if not hook_wrote_row:                 # the hook's tool_allowed row could not be written
                 answer_row = _allowed_row(tool_name, args, session_id, {**base, "approval_id": approval_id}, choice)
-            _grant_for_lock(tool_name, choice, answer_row)
+            _grant_for_lock(tool_name, choice, answer_row, session_id)
             if key is None:
                 return run()                       # the inner hook never asks for an id-less call
             dec.grant(key)
@@ -1506,12 +1523,12 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         return _try_ledger(ledger, "tool_allowed", tool_name, session_id, choice, args, {**base, "choice": choice},
                            "middleware")
 
-    def _grant_for_lock(tool_name, choice, row_id):
-        """An exact "once" under once_per_lock grants the tool for this lock. Never raises: a grant that cannot
-        be made only means the next call asks again."""
+    def _grant_for_lock(tool_name, choice, row_id, session_id):
+        """An exact "once" under once_per_lock grants the tool for this lock, in this conversation only. Never
+        raises: a grant that cannot be made only means the next call asks again."""
         try:
             if choice == "once" and pol.once_per_lock():
-                pol.lock_grants.grant(pol.allowlist().lock_id, tool_name, row_id)
+                pol.lock_grants.grant(pol.allowlist().lock_id, grant_scope(session_id), tool_name, row_id)
         except Exception:  # noqa: BLE001
             pass
 

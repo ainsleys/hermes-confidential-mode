@@ -587,7 +587,11 @@ def _pre_llm_call(rt: Runtime):
                      "was not sent. Run /confidential check.", "recheck_failed")
         if found:
             return {"action": "block", "message": found[0]}
-        return {"context": locking.LOCKED_NOTE.format(tier=tier.value)}
+        try:
+            mode = rt.tool_ask_mode()
+        except Exception:  # noqa: BLE001
+            mode = "each_call"
+        return {"context": locking.locked_note(tier, mode)}
     return pre_llm_call
 
 

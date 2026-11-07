@@ -189,9 +189,11 @@ back to the full import, and its cache rewrite, only when a recorded tool is sti
 
 **Tool grants from a `once` answer are held in memory, not on disk.** Under the default
 `confidential.tools.ask: once_per_lock`, an exact `once` answer to a tool prompt grants that tool for
-the rest of the lock. The plugin keeps each grant in the memory of the process that asked, as the
-lock's identity, the tool name and the id of the ledger row that recorded the answer. No file holds
-the grants: a restart or a second process asks again. A grant for an earlier lock never matches, so
+the rest of the lock, in the conversation that answered only. The plugin keeps each grant in the
+memory of the process that asked, as the lock's identity, the conversation (Hermes' approval session
+key and the agent's session id), the tool name and the id of the ledger row that recorded the answer.
+Another chat, user or subagent has another key or session id and is asked again. No file holds the
+grants: a restart or a second process asks again. A grant for an earlier lock never matches, so
 every grant ends at unlock, and `/confidential revoke <tool>` drops the tool's grant in every running
 process that reads the revoke record. Under yolo, approvals off or an unattended run (one-shot, cron,
 an unattended platform) the plugin refuses the call before looking at a grant. The tool prompt

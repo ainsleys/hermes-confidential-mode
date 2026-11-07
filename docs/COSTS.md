@@ -36,8 +36,9 @@ availability is your hardware's availability.
 
 What the plugin itself adds in this mode:
 
-- One prompt per off-host tool per lock: the first call of each tool asks, and an exact `once`
-  answer covers that tool until you unlock. A new lock, a restart or a second process asks again.
+- One prompt per off-host tool per lock and conversation: the first call of each tool asks, and an
+  exact `once` answer covers that tool in that conversation until you unlock. Another chat, user or
+  subagent, a new lock, a restart or a second process asks again.
   With `confidential.tools.ask: each_call`, every off-host tool call asks until you answer `session`
   or `always` for that tool. `/confidential revoke <tool>` brings the prompt back in either mode.
 - Off-host tool calls refused outright in yolo mode and unattended mode, because nobody is there to

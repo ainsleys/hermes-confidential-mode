@@ -84,9 +84,9 @@ def gate(monkeypatch, tmp_path):
 
     calls = {"n": 0}
 
-    def call(name=OFF):
+    def call(name=OFF, session_id="s"):
         calls["n"] += 1
-        return model_tools.handle_function_call(name, {"q": calls["n"]}, task_id="t", session_id="s",
+        return model_tools.handle_function_call(name, {"q": calls["n"]}, task_id="t", session_id=session_id,
                                                 tool_call_id=f"c{calls['n']}")
 
     def rows(kind=None):
@@ -123,7 +123,7 @@ def test_the_default_mode_and_a_bad_value():
 
 def test_interactive_cli_asks_once_per_tool_per_lock_and_records_the_answering_row(gate):
     _granted_once_on_cli(gate)
-    assert "allowing once covers _cm_probe_ask_scope until this profile is unlocked" in gate.prompts[0]
+    assert "allowing once covers _cm_probe_ask_scope in this conversation until this profile is unlocked" in gate.prompts[0]
     answer = [e for e in gate.rows("tool_allowed") if e.decision == "once"]
     granted = [e for e in gate.rows("tool_allowed") if e.decision == "lock_grant"]
     assert len(answer) == 1 and len(granted) == 1
@@ -136,6 +136,24 @@ def test_gateway_chat_asks_once_per_tool_per_lock(gate):
     gate.call()
     assert len(gate.ran) == 2 and len(gate.prompts) == 1
     assert [e.decision for e in gate.rows("tool_allowed")] == ["once", "lock_grant"]
+
+
+def test_a_grant_covers_only_the_conversation_that_answered(gate):
+    """Another chat or user (another Hermes approval session key) and a subagent (another session id) in the
+    same process and lock each ask again; the conversation that answered does not."""
+    _granted_once_on_cli(gate)
+    other = approval_context.set_current_session_key("cm:ask:scope:other-chat")
+    try:
+        gate.call()
+    finally:
+        approval_context.reset_current_session_key(other)
+    assert len(gate.prompts) == 2, "a grant from one chat covered another chat"
+    gate.call(session_id="s-subagent")
+    assert len(gate.prompts) == 3, "a grant from the parent covered a subagent"
+    gate.call()
+    assert len(gate.prompts) == 3 and len(gate.ran) == 5
+    granted = [e for e in gate.rows("tool_allowed") if e.decision == "lock_grant"]
+    assert len(granted) == 2 and len({e.detail["grant_row"] for e in granted}) == 1
 
 
 def test_the_grant_ends_with_the_lock(gate):
