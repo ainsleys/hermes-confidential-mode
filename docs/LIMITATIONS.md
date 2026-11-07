@@ -320,20 +320,27 @@ and signed responses.
 
 **The gap.** Suppose every road above is closed. The following remain.
 
-- **Where TLS ends, and what is visible anyway.** TLS is the encryption HTTPS uses. After each
-  verification the plugin records the TLS certificate the router presents
-  (`confidential.tinfoil.tls_probe`). When that certificate carries the TLS public key the
-  attestation report commits to, a proxy in front of the enclave could terminate TLS only if it held
-  the matching private key, and that key lives in the attested router. The TLS connection then ends
-  inside the attested enclave. The replay's `tls_cert_binding` check reports this from the captured
-  certificate alone. The tinfoil SDK's transport enforces the attested TLS key on every connection;
-  the recorded certificate is an observation and never fails a verification.
+- **Where TLS ends, and what is visible anyway.** TLS is the encryption HTTPS uses. The plugin
+  drives the tinfoil SDK in its `ehbp` transport mode. In that mode the SDK encrypts each request
+  body to the enclave's attested HPKE key, and the TLS connection under it is ordinary WebPKI TLS: the
+  SDK does not pin the enclave's TLS certificate (tinfoil 0.14.2, `tinfoil/client.py`; only the `tls`
+  mode pins). The plugin does not pin TLS per send on Tinfoil either. A TLS intermediary that the
+  WebPKI accepts can therefore end the connection and read the request headers, the `Authorization`
+  header with the API key included, and the sizes and timing. The body stays encrypted to the HPKE key.
 
-  That settles where the connection ends. It does not hide the metadata of the connection. Any
-  network hop, and the vendor's hosting, still see your IP address, the sizes of requests and
-  responses, and their timing. Your API key header is decrypted inside the router. What the router
-  does with it, such as checking it against your account, is part of the measured router code. EHBP,
-  Tinfoil's transport, additionally encrypts the request body to the enclave's HPKE key.
+  After each verification the plugin's TLS probe (`confidential.tinfoil.tls_probe`) records the
+  certificate the router presented and whether its key is the TLS key the attestation report commits
+  to, and each send records whether its connection's certificate matched. Neither record refuses
+  anything. The replay's `tls_cert_binding` check re-reads the captured certificate. On 2026-11-06,
+  against `router-0.tinfoil.sh` release v0.0.170, the recorded certificate carried exactly the TLS
+  public key the attestation report commits to, so on that connection TLS ended inside the attested
+  router. That is an observation of that connection, not a guarantee for later ones.
+
+  On NEAR the plugin pins TLS itself: every inference and signature connection is checked against the
+  certificate the gateway's quote binds, before any request byte is sent (section 14).
+
+  Whatever ends TLS, any network hop and the vendor's hosting still see your IP address, the sizes of
+  requests and responses, and their timing.
 - **The collateral proxies.** Collateral is the certificates and signed documents a client needs from
   the CPU vendor to check a hardware report. The SDK fetches collateral and release data through three
   proxies that Tinfoil runs: `github-proxy.tinfoil.sh`, `kds-proxy.tinfoil.sh` and
@@ -352,7 +359,9 @@ runs. None of them is a Hermes seam.
 
 **What the plugin does today.** Nothing beyond saying so. Receipts never contain prompt text.
 
-**The change that would close it.** None in Hermes for the network items. For the host operator, the
+**The change that would close it.** None in Hermes for the network items. For TLS on Tinfoil, in the plugin:
+the SDK's `tls` transport mode, which pins the enclave's certificate and requires a direct connection,
+or a per-send refusal when the recorded certificate does not match the report. For the host operator, the
 answer is to run Hermes on a machine you control. Running Hermes itself in an enclave would also work,
 but it is out of scope here.
 
@@ -523,8 +532,8 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   `input_text`, in any letter case) is encrypted. An `image_url` or `input_image` part that holds an
   inline raster `data:image/...;base64,` image (png, jpeg, gif, webp, bmp or tiff) leaves this host
   in plaintext to NEAR's gateway. Any other part type, a remote image URL, or an extra field on an
-  image part is refused before sending. NEAR accepts this shape and still returns a `provider_tee`
-  signature. Each send's ledger row counts the plaintext parts by type, and the receipt says how many
+  image part is refused before sending. On 2026-11-07 NEAR accepted this shape and still returned a
+  `provider_tee` signature. Each send's ledger row counts the plaintext parts by type, and the receipt says how many
   left. The first time per lock, the plugin writes a `notice` row and, once the row is written, appends
   one line naming the part types to that session's next reply through Hermes' `transform_llm_output`
   hook. A send with no session id puts the line on the next reply of any session, and a send made by a
@@ -704,7 +713,7 @@ The details:
   multi-file patch's file, is a state file or lies in the plugin's data directory. Each refusal writes a
   `tool_refused` row with the decision `self_approval`.
 - The gate lets through the calls in its test list that only mention the command, the package or a
-  file. Examples are `grep "confidential off" docs/README.md`, `echo 'mark confidential on purpose'`,
+  file. Examples are `grep "confidential off" README.md`, `echo 'mark confidential on purpose'`,
   `awk '/confidential on/' notes.txt`, `make confidential status`, `git diff confidential_mode/`,
   `git commit -m` with any message, `cat`, `jq` or `cp` of the pins file to elsewhere,
   `print('import confidential_mode')` in Python, and `write_file` or `patch` on this plugin's own
@@ -807,8 +816,10 @@ Each item below is a smaller gap. Each one is stated in full.
   receipt that covers them can still show the answer as typed.
 
 - **Mixed plugin versions disagree about the lock.** The lock records a fingerprint of the routing
-  config, and this version added the terminal backend to it. A lock made by an earlier version still
-  matches. A process that still runs the earlier version, however, reads a lock made by this version
+  config, and this version added the terminal backend and a non-empty
+  `confidential.on_host.extra_hosts` list to it. A lock made by an earlier version still matches,
+  except a lock made with a non-empty `extra_hosts` list, and an on-host lock whose model sits at a
+  private-range address must now list that address; both need a fresh lock. A process that still runs the earlier version, however, reads a lock made by this version
   as a changed config. That process refuses every turn and marks the session breached. Restart every Hermes
   process that loads the plugin after an upgrade (GUIDE.md, "Upgrading").
 
@@ -843,7 +854,7 @@ Each item below is a smaller gap. Each one is stated in full.
   The first is the trust root, which you can replace with `--trusted-root`. The second is the time
   certificates are checked at, which you can replace with `--as-of`. The numeric GitHub repository and
   owner IDs are checked only when you pass `--expected-repo-id` and `--expected-owner-id`; without
-  them the replay identifies the repository by name alone and the `repo_identity` check says `name`.
+  them the replay identifies the repository by name alone and the `repo_identity` check says `name only (ids not supplied)`.
 
   When you call the Python function `replay()` without `expected_fingerprints`, it compares the
   fingerprints only with those recorded in the evidence. Compare the result's fingerprints with your
