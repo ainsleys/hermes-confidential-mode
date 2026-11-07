@@ -11,10 +11,14 @@ What it does, in order:
   3. Writes everything it recorded (evidence and the per-send rows, no API key, no message text) to
      --out, then replays it offline with confidential_mode.verify.replay_near and prints the verdicts.
 
-The API key is read through Hermes' secret scope (agent.secret_scope.get_secret, catalog rule 11), so set
-HERMES_HOME to the Hermes home whose profile holds NEAR_AI_API_KEY (or export the variable, which the
-secret scope also honours outside a multiplexed gateway). The key is only ever sent as the Authorization
-header to the configured base URL. It is not printed, logged or written to --out.
+The API key is read through Hermes (catalog rule 11). The script first loads the env file of the Hermes
+home named by HERMES_HOME (default ~/.hermes) with Hermes' own loader, hermes_cli.env_loader.
+load_hermes_dotenv, as `hermes` does at start-up (external secret sources are not loaded), and then
+reads NEAR_AI_API_KEY with agent.secret_scope.get_secret. In a standalone process no secret scope is
+bound, so get_secret returns the process environment: the key from that env file, or an exported
+NEAR_AI_API_KEY when the env file does not set it. A key held only in Hermes' credential pool
+(`hermes auth`) is not read. The key is only ever sent as the Authorization header to the configured
+base URL. It is not printed, logged or written to --out.
 
 Run it in Hermes' environment (it needs tinfoil 0.14.2 for the TDX quote check), for example:
     cd ~/hermes-agent && HERMES_HOME=~/.hermes UV_PROJECT_ENVIRONMENT=<venv with tinfoil> uv run --no-sync \\
@@ -37,7 +41,13 @@ PROMPT = [{"role": "user", "content": "Reply with the word ok."}]
 
 
 def _near_key() -> str:
-    """NEAR_AI_API_KEY through Hermes' secret scope; "" when Hermes is not importable or the scope refuses."""
+    """NEAR_AI_API_KEY through Hermes: its env-file loader for HERMES_HOME, then its secret scope. "" when
+    Hermes is not importable or the scope refuses."""
+    try:
+        from hermes_cli.env_loader import load_hermes_dotenv
+        load_hermes_dotenv(load_external_secrets=False)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from agent.secret_scope import get_secret
         return (get_secret("NEAR_AI_API_KEY") or "").strip()
