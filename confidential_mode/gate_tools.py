@@ -37,6 +37,7 @@ import inspect
 import json
 import math
 import os
+import re
 import threading
 import time
 import uuid
@@ -52,6 +53,70 @@ ON_HOST_TOOLS: frozenset[str] = frozenset({
 })
 CRON_TOOL = "cronjob_manage"
 DELEGATE_TOOL = "delegate_task"
+
+# Self-approval guard (INTERFACES Amendment 7, step 0). These on-host tools run a command or code on this
+# host. While the profile is locked, a call whose command or code invokes the plugin's own CLI is refused,
+# because under a pseudo-terminal the agent could answer the pin or allow prompt itself.
+SELF_APPROVAL_TOOLS: frozenset[str] = frozenset({"terminal", "process_manage", "execute_code"})
+# Set in this process's environment by the tool hooks before any tool runs, so every tool subprocess
+# inherits it; TerminalAsker refuses to ask when it is set. A command can unset it (docs/LIMITATIONS.md).
+TOOL_PROCESS_ENV = "CONFIDENTIAL_MODE_TOOL_PROCESS"
+
+_QUOTES = str.maketrans("", "", "'\"\\`")
+_RE_CONFIDENTIAL = re.compile(r"(?<![a-z0-9_])confidential(?![a-z0-9_])")
+_RE_CLI_VERB = re.compile(r"(?<![a-z0-9_])confidential\W+(pins|allow|off|on|lock|unlock|setup|approve|retire)"
+                          r"(?![a-z0-9_])")
+_RE_PLUGIN_IMPORT = re.compile(r"confidential_mode\W{1,3}(pins|consent|ledger|state|commands)\b|"
+                               r"(from|import)\s+confidential_mode\b")
+_RE_PLUGIN_FILES = re.compile(r"(?<![a-z0-9_])(pins\.yaml|ledger\.sqlite|allowlist\.yaml)(?![a-z0-9_])")
+
+
+def _strings(value: Any, depth: int = 0) -> Iterable[str]:
+    if depth > 8:
+        return
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for k, v in value.items():
+            yield from _strings(k, depth + 1)
+            yield from _strings(v, depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings(v, depth + 1)
+
+
+def invokes_confidential_cli(args: Any) -> Optional[str]:
+    """Why the call's text reaches the plugin's own CLI or its state files, or None. Every string in the
+    arguments is scanned (``command`` for terminal, ``data`` for process_manage, ``code`` for execute_code,
+    and any other field), lower-cased, with quote characters and backslashes removed. Detected:
+    ``hermes ... confidential`` in any form that names Hermes (``hermes confidential``, ``hermes -p x
+    confidential``, ``python -m hermes_cli.main confidential``, a path to the hermes script); the word
+    ``confidential`` followed by one of its verbs (an alias or symlink of hermes); an import of the
+    plugin's ``confidential_mode`` package; a mention of ``pins.yaml``, ``ledger.sqlite`` or
+    ``allowlist.yaml``. Not detectable: a command assembled at run time (variables, ``eval``, base64, a
+    command split across several process_manage writes) and a script written by another tool and run
+    later. TerminalAsker's own refusal (TOOL_PROCESS_ENV) is the second line for those."""
+    for raw in _strings(args):
+        text = raw.casefold().translate(_QUOTES)
+        if "hermes" in text and _RE_CONFIDENTIAL.search(text):
+            return "names hermes and its confidential command"
+        if _RE_CLI_VERB.search(text):
+            return "invokes the confidential command"
+        if _RE_PLUGIN_IMPORT.search(text):
+            return "imports the confidential_mode package"
+        if _RE_PLUGIN_FILES.search(text):
+            return "names a confidential-mode state file"
+    return None
+
+
+def mark_tool_process() -> None:
+    """Set TOOL_PROCESS_ENV in this process (inherited by every tool subprocess). Never raises."""
+    try:
+        if os.environ.get(TOOL_PROCESS_ENV) != "1":
+            os.environ[TOOL_PROCESS_ENV] = "1"
+    except Exception:
+        pass
+
 
 # Our approve directive's rule_key. Hermes prefixes it with ``plugin_rule:`` (tools/approval.py:1226);
 # the remembered-grant check MUST use the prefixed key (see hermes_remembered_grant).
@@ -779,6 +844,14 @@ class _Policy:
         # environment variable, the profile's terminal scope or a cached task environment can differ from
         # what the lock saw.
         from .preflight import LOCAL_BACKEND, TERMINAL_BACKEND_KEY, TERMINAL_BACKEND_TOOLS
+        if info.name in SELF_APPROVAL_TOOLS:
+            why = invokes_confidential_cli(args)
+            if why:
+                return CallDecision("refuse", "self_approval",
+                                    f"confidential mode: {info.name} was blocked because its command {why}. While "
+                                    "locked, no tool may run the confidential command or touch its files: pins and "
+                                    "tool grants are approved by a person, on a terminal or chat surface the agent "
+                                    "does not drive.")
         if info.name in TERMINAL_BACKEND_TOOLS:
             try:
                 backend = self.terminal_backend(task_id)
@@ -909,6 +982,7 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
 
     def pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
                       tool_call_id: str = "", task_id: str = "", **_kw: Any) -> Optional[dict]:
+        mark_tool_process()
         try:
             locked = _lock_state(is_locked)
         except LockStateError as exc:
@@ -1005,6 +1079,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
     def confidential_mode_tool_execution(tool_name: str = "", args: Any = None, next_call: Any = None,
                                          session_id: str = "", tool_call_id: str = "", turn_id: str = "",
                                          task_id: str = "", **_kw: Any) -> Any:
+        mark_tool_process()
         downstream: dict[str, BaseException] = {}
 
         def run(payload: Any = None) -> Any:

@@ -335,7 +335,15 @@ def _auto_platform_only_ok(pending) -> bool:
                 and getattr(pending, "hardware_measurements_verified", False))
 
 
+AUTO_APPLY_VENDORS = ("tinfoil",)   # replace-only vendors; never a concurrent (approved-set) vendor such as NEAR
+
+
 def _auto_apply(provider: str, e: _Entry, pending) -> bool:
+    """Apply a platform-only pin by policy. Tinfoil only, and only as a replacement (Amendment 7): a vendor
+    whose approved pins form a set (NEAR) is never widened without a person's answer. PinStore.apply
+    refuses approved_by="policy" for such a vendor too."""
+    if getattr(pending, "vendor", None) not in AUTO_APPLY_VENDORS:
+        return False
     try:
         e.pins.apply(pending, approved_via=AUTO_PLATFORM_ONLY, approval_rule_key="confidential-mode:pin:auto-platform-only",
                      approved_by="policy")

@@ -48,6 +48,18 @@ class ConsentContextError(RuntimeError):
     """Raised when consent is requested from a coroutine (see module docstring)."""
 
 
+class SelfApprovalRefused(RuntimeError):
+    """Raised by an asker that will not ask because the agent may be the one answering (Amendment 7)."""
+
+
+SELF_APPROVAL_REPLY = ("Refused: this command runs inside a Hermes tool, so the agent could answer the prompt "
+                       "itself. Run it yourself in a terminal you opened, outside Hermes.")
+
+
+def _self_approval(error: Optional[str]) -> bool:
+    return bool(error) and str(error).startswith(SelfApprovalRefused.__name__ + ":")
+
+
 def _refuse_on_event_loop(what: str) -> None:
     try:
         asyncio.get_running_loop()
@@ -297,8 +309,12 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
     if error:
         detail["error"] = error
     if not _is_exact(raw, "approve"):
+        refused = raw is None and _self_approval(error)
         _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
-                             decision="no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
+                             decision="self_approval" if refused else
+                             "no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
+        if refused:
+            return SELF_APPROVAL_REPLY + " Pin update not applied; current pin kept."
         if raw is None:
             return "No answer (timed out, cancelled, or not one of the options): pin update denied; current pin kept."
         return "Pin update denied; current pin kept."
@@ -365,8 +381,12 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
     if error:
         detail["error"] = error
     if not _is_exact(raw, "approve"):
+        refused = raw is None and _self_approval(error)
         _ledger(ledger, _event("tool_refused", session_id=session_id, platform=platform, purpose=f"tool:{name}",
-                             decision="no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
+                             decision="self_approval" if refused else
+                             "no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
+        if refused:
+            return SELF_APPROVAL_REPLY + f" {name} was not added."
         return f"{name} was not added; it still needs approval each call."
     allowlist.add(name)
     _ledger(ledger, _event("tool_allowed", session_id=session_id, platform=platform, purpose=f"tool:{name}",

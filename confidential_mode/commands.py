@@ -480,13 +480,26 @@ def register_slash(ctx: Any, rt: Any) -> None:
 
 class TerminalAsker:
     """ask_choice for `hermes confidential setup`: numbered prompt on the controlling terminal; anything
-    other than an exact choice value or its number is no answer (None). Non-tty stdin => None."""
+    other than an exact choice value or its number is no answer (None). Non-tty stdin => None.
 
-    def __init__(self, stdin=None, stdout=None):
+    Self-approval guard (Amendment 7): a process whose environment carries gate_tools.TOOL_PROCESS_ENV is
+    a Hermes tool subprocess (the tool hooks set the marker before any tool runs, and children inherit
+    it). Such a process may hold a pseudo-terminal the agent drives, so the asker refuses
+    (SelfApprovalRefused) and never reads an answer. A command can unset the marker; the gate's command
+    check is the first line (docs/LIMITATIONS.md)."""
+
+    def __init__(self, stdin=None, stdout=None, environ=None):
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
+        self.environ = environ if environ is not None else os.environ
 
     def ask_choice(self, question: str, choices: list) -> Optional[str]:
+        from .consent import SelfApprovalRefused
+        from .gate_tools import TOOL_PROCESS_ENV
+        if self.environ.get(TOOL_PROCESS_ENV):
+            raise SelfApprovalRefused(
+                "this process runs under a Hermes tool (its environment carries "
+                f"{TOOL_PROCESS_ENV}), so the agent may be driving this terminal")
         try:
             if not self.stdin.isatty():
                 return None

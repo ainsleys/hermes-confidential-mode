@@ -14,3 +14,16 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 for _p in (str(PLUGIN_ROOT), str(PLUGIN_ROOT.parent)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+import pytest  # noqa: E402
+
+# The tool hooks set this marker in the process environment (gate_tools.mark_tool_process), and
+# TerminalAsker refuses while it is set. Every test starts and ends without it.
+_TOOL_PROCESS_ENV = "CONFIDENTIAL_MODE_TOOL_PROCESS"
+
+
+@pytest.fixture(autouse=True)
+def _no_tool_process_marker():
+    os.environ.pop(_TOOL_PROCESS_ENV, None)
+    yield
+    os.environ.pop(_TOOL_PROCESS_ENV, None)

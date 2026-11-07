@@ -540,6 +540,58 @@ services it deploys. In the plugin: an approved-set pin that accepts any measure
 has approved for this identity, and that also covers the reported services and compose-manager images.
 That change is listed, not built.
 
+## 15. An agent with a terminal can reach the approval prompt
+
+**The gap.** A pin, or a tool on the locked allowlist, takes effect only after a person answers a
+prompt. The command `hermes confidential pins approve` asks that question on the terminal it runs in.
+Hermes' `terminal` tool can run a command under a pseudo-terminal, which is a terminal that a program
+drives, and `process_manage` can type into it. So an agent could run the approve command and answer
+the prompt itself. A pin bundle handed to an agent for review is vendor text, and vendor text can try
+to make the agent do exactly that.
+
+**Why it exists.** Hermes runs `terminal`, `process_manage` and `execute_code` on this host without a
+prompt, also while locked (section 3). The terminal prompt cannot tell a person's keyboard from a
+pseudo-terminal.
+
+**What the plugin does today.** Two checks, and a record.
+
+- While the profile is locked, the tool gate refuses any `terminal`, `process_manage` or
+  `execute_code` call whose text invokes the `confidential` command. It scans every string in the
+  call's arguments, after removing quote characters and backslashes. It refuses a command that names
+  Hermes together with the word `confidential`, as in `hermes confidential`, `hermes -p work
+  confidential` or `python -m hermes_cli.main confidential`. It refuses the word `confidential`
+  followed by one of its verbs (`pins`, `allow`, `off`, `on`, `setup`, `approve`, `retire`), which
+  covers an alias. It refuses an import of the plugin's `confidential_mode` package. It refuses a
+  mention of the plugin's files `pins.yaml`, `ledger.sqlite` and `allowlist.yaml`. Each refusal writes
+  a `tool_refused` ledger row with the decision `self_approval`.
+- The command text check cannot see a command that is built while it runs. Examples are a command
+  assembled from variables, decoded from base64, split across several `process_manage` writes, or put
+  in a script by `write_file` and run later. So there is a second check. Before any tool runs, the
+  plugin's tool hooks set the environment variable `CONFIDENTIAL_MODE_TOOL_PROCESS` in the Hermes
+  process. Every tool subprocess inherits it. The terminal prompt refuses to ask in a process that has
+  it, and the ledger row says `self_approval`. Hermes 84a0301 sets no marker of its own that could do
+  this job: its `HERMES_AGENT` variable is also set in the process of a `hermes` command a person
+  types. A command can unset `CONFIDENTIAL_MODE_TOOL_PROCESS` (`env -u`), so this second check stops
+  an agent that follows the pin bundle's text, not one that sets out to get around it.
+- Every approval writes a `pin_applied` row that names the surface it came from. A pin approved from a
+  terminal records `approved_via: cli`. A receipt shows that row.
+
+Two routes remain.
+
+- An agent in a different profile that is not locked, with terminal access on the same host, can run
+  the approve command for this profile under a pseudo-terminal. The tool gate of this profile does
+  not see that call. If the other profile loads this plugin, its tool hooks set the marker, and the
+  prompt refuses until a command unsets it. If the other profile does not load the plugin, nothing
+  marks its tool subprocesses, and the prompt asks.
+- A tool that writes files can edit `pins.yaml` and the ledger directly. The attested check refuses a
+  pin without a matching `pin_applied` row, but such a tool could also write that row (the same limit
+  as "Pins need a consent record", below).
+
+**The change that would close it.** A consent surface that an agent cannot drive, for example an
+approval that Hermes core asks on a channel it never exposes to tools, plus a marker Hermes sets on
+every tool subprocess and that a plugin can read but a command cannot remove. A typed challenge shown
+only on the approving surface would also work.
+
 ## Smaller gaps, disclosed
 
 Each item below is a smaller gap. Each one is stated in full.
