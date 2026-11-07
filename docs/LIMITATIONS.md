@@ -852,6 +852,13 @@ Each item below is a smaller gap. Each one is stated in full.
   marked pin row never grants consent, and a marked retire still withdraws it. The refusal itself uses the
   full name; only the record is shortened.
 
+- **Lock files keep processes apart, except on Windows.** A lock, an unlock, an allow, a revoke and a pin
+  change each take a lock file next to the file they change. A second lock or unlock that starts while
+  another is in progress waits at most 2 seconds and is then refused. A lock file that cannot be opened or
+  locked, for example in a read-only data directory or on a network filesystem that refuses the lock, also
+  refuses the change, and the reply says why. On Windows, which has no `fcntl` module, only a lock inside
+  one process is taken, so two Hermes processes on Windows are not kept apart.
+
 - **NEAR model entries need GitHub.** A NEAR model entry can be approved only with its service map
   pinned, and that needs the deployed docker-compose files from GitHub (section 14). While GitHub is
   unreachable, or with `CONFIDENTIAL_MODE_NO_FETCH` set, such an entry cannot be approved.
