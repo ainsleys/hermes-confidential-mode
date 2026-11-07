@@ -14,7 +14,8 @@ describes images, runs background reviews, and more. Each side call is a separat
 some of your text, and each goes to whatever provider that task is configured for. A fallback
 provider takes over quietly when the main request fails. Tools such as web fetch and messaging send
 text to whatever site the agent decides to call. Shell and code execution run on this host and can
-reach the network. Memory is written to whatever store is configured. Choosing a verified provider
+reach the network, as long as Hermes' terminal backend is `local`. On another backend, such as `ssh`
+or `modal`, shell, code execution and the file tools run on that other machine. Memory is written to whatever store is configured. Choosing a verified provider
 for the main chat covers the main chat only.
 
 ![Figure 1. With a verified provider alone, the main chat is verified and five other routes carry
@@ -32,8 +33,8 @@ The plugin does four things for a Hermes profile.
    The `on-host-only` tier accepts a host whose network address is loopback or in a private range.
    The `attested` tier accepts a Tinfoil enclave whose build you have approved. Before locking, the
    plugin checks every configured route: the main model, every side call, delegation, text to
-   speech, MCP servers and fallbacks. If any route leads off-tier, the lock is refused and the
-   plugin prints which key to change.
+   speech, MCP servers, fallbacks and the terminal backend. If any route leads off-tier, the lock
+   is refused and the plugin prints which key to change.
 
 3. **While locked, it guards or refuses four of the five remaining routes.** Side calls must
    resolve to the same tier as the main chat and are rechecked every turn. No fallback provider may
@@ -253,7 +254,9 @@ access blocked. It shows whether the stored bytes still check out.
 > - **You editing your own ledger.** The ledger is a file on your machine. A receipt is therefore a
 >   report you make about yourself. It proves only what its attached evidence proves.
 > - **Shell and code-execution tools.** The `terminal` and `execute_code` tools run on this host. The
->   commands they run can open network connections. The plugin does not inspect those commands.
+>   commands they run can open network connections. The plugin does not inspect those commands. These
+>   tools run on this host only on Hermes' `local` terminal backend, so the plugin refuses to lock on
+>   any other backend (see [The terminal backend](#the-terminal-backend)).
 > - **Tinfoil's own infrastructure.** This covers the vendor's control plane, meaning the systems
 >   Tinfoil uses to run and manage its service. It also covers the model backends that sit behind
 >   the router. The attestation covers the router only.
@@ -594,6 +597,22 @@ to the new runtime. The plugin can only record those calls. It cannot stop them.
 **On-host tools run without asking.** These tools run without a prompt: `terminal`,
 `process_manage`, `execute_code`, `read_file`, `write_file`, `patch`, `search_files`, `skills_list`,
 `skill_view`, `skill_manage`, `todo_list`, `memory`, `clarify` and `session_search`.
+
+<a id="the-terminal-backend"></a>**The terminal backend.** Hermes runs `terminal`, `process_manage`,
+`execute_code`, `read_file`, `write_file`, `patch` and `search_files` through its terminal backend.
+The backend is set by the `terminal.backend` key in `config.yaml`. Hermes copies that key into the
+`TERMINAL_ENV` environment variable. When `config.yaml` does not set the key, the variable decides.
+The default backend is `local`, which runs these tools on this host. The other backends are `docker`,
+`ssh`, `modal`, `managed_modal`, `daytona`, `vercel_sandbox` and any backend a plugin registers. On
+those, the seven tools run in a container or on another machine. A file the model writes then lands
+there, and a command the model runs runs there.
+
+The preflight therefore refuses to lock unless both `terminal.backend` and `TERMINAL_ENV` are
+`local` (or unset). Its row names the backend it found and the key to change. The plugin also checks
+the backend on every call to one of the seven tools. Hermes lets code register a different backend
+for one task, as reinforcement-learning rollouts do. Such a call is blocked, and the refusal names
+the backend. `docker` is refused too, although its container runs on this host. A Docker container
+can have its own network, and a Docker host can be remote. The plugin does not inspect either.
 
 A tool counts as on-host only in its built-in form. If a plugin or an MCP server registers a tool under
 one of these names, that tool is not treated as on-host.
@@ -1082,10 +1101,12 @@ tool runs only on an exact `once`, `session` or `always`.
 command will connect to.
 
 **What the plugin does today.** It treats these tools as on-host and lets them run. Every receipt says
-that shell and code tools are not covered.
+that shell and code tools are not covered. It refuses to lock unless the terminal backend is `local`,
+because on any other backend these tools and the file tools run on another machine or in a container.
 
 **The core change that would close it.** A network policy on the terminal backend that plugins can
-read and require. One example is the docker backend with networking switched off.
+read and require. One example is the docker backend with networking switched off. The plugin could
+then accept that backend too.
 
 #### 4. MCP servers launched as a command on this host are not inspected
 

@@ -269,6 +269,27 @@ def test_unreadable_live_runtime_blocks_the_turn_and_the_lock(plugin, monkeypatc
     assert "UNREADABLE" in plugin.slash("status")
 
 
+def test_remote_terminal_backend_refuses_the_lock_with_the_key_to_change(plugin, monkeypatch):
+    """Review finding 2: with terminal.backend: ssh the 'on-host' terminal and file tools run on another
+    machine, so the lock is refused with a preflight row naming the backend and the key; after the fix it
+    locks, and a backend switched in the environment after the lock ends the next turn."""
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+    plugin.cfg.write_text(BASE_CONFIG + "terminal:\n  backend: ssh\n")
+    out = plugin.slash("on on-host-only")
+    assert out.startswith("Not locked"), out
+    row = next(line for line in out.splitlines() if line.startswith("terminal.backend"))
+    assert "ssh" in row and "off_tier" in row and "set terminal.backend: local" in row
+    plugin.cfg.write_text(BASE_CONFIG + "terminal:\n  backend: local\n")
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    rec = Rec()
+    agent = build_agent(monkeypatch, rec, ON_HOST_URL)
+    assert agent.run_conversation("first")["final_response"] == "provider answered"
+    monkeypatch.setenv("TERMINAL_ENV", "modal")
+    result = agent.run_conversation("second")
+    assert "routing config changed after this profile was locked" in (result["final_response"] or "")
+    assert len(rec.provider_calls) == 1
+
+
 def test_config_edit_after_lock_blocks_the_next_turn(plugin, monkeypatch):
     assert plugin.slash("on on-host-only").startswith("Locked")
     rec = Rec()

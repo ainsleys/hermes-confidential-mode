@@ -581,3 +581,40 @@ def test_fingerprint_ignores_non_task_aux_scalars():
     b = copy.deepcopy(a)
     b["auxiliary"]["transient_retries"] = 6
     assert config_fingerprint(a) == config_fingerprint(b)
+
+
+# --- terminal backend (review finding 2) ----------------------------------------------------------
+
+@pytest.mark.parametrize("backend", ["ssh", "modal", "docker", "daytona", "vercel_sandbox", "managed_modal", "x"])
+def test_non_local_terminal_backend_refuses_the_lock_and_names_the_key(backend):
+    r = run_preflight(Tier.ON_HOST, on_host_pred(), base_config(terminal={"backend": backend}), plugin_aux_tasks=[],
+                      isolation="in_process", provider_lookup=lambda n: object(), attested_profile=None,
+                      terminal_env=None)
+    assert not r.ok
+    it = item(r, "terminal.backend")
+    assert it.verdict == "off_tier" and it.value_redacted == backend
+    assert it.fix.startswith("set terminal.backend: local while locked") and f"the {backend} backend" in it.fix
+    for tool in ("terminal", "execute_code", "read_file", "write_file", "patch", "search_files", "process_manage"):
+        assert tool in it.fix
+    assert "terminal.backend" in format_report(r)
+
+
+def test_terminal_env_variable_must_also_be_local():
+    def pf_run(cfg, env):
+        return run_preflight(Tier.ON_HOST, on_host_pred(), cfg, plugin_aux_tasks=[], isolation="in_process",
+                             provider_lookup=lambda n: object(), attested_profile=None, terminal_env=env)
+    ok = pf_run(base_config(terminal={"backend": "local"}), None)
+    assert ok.ok and item(ok, "terminal.backend").verdict == "on_host"
+    assert [i for i in ok.items if i.key == "env TERMINAL_ENV"] == []
+    assert pf_run(base_config(), None).ok and item(pf_run(base_config(), None), "terminal.backend").value_redacted \
+        == "(default local)"
+    assert pf_run(base_config(terminal={"backend": "local"}), "local").ok
+    bad = pf_run(base_config(terminal={"backend": "local"}), "ssh")
+    env_item = item(bad, "env TERMINAL_ENV")
+    assert not bad.ok and env_item.verdict == "off_tier" and "unset the TERMINAL_ENV" in env_item.fix
+    assert not pf_run(base_config(terminal="ssh"), None).ok          # junk section fails closed
+    # An unset variable and "local" fingerprint the same; a backend change does not.
+    fp = lambda cfg, env: config_fingerprint(cfg, terminal_env=env)  # noqa: E731
+    assert fp(base_config(), None) == fp(base_config(), "local") == fp(base_config(terminal={"backend": "local"}), "")
+    assert fp(base_config(), None) != fp(base_config(terminal={"backend": "ssh"}), None)
+    assert fp(base_config(), None) != fp(base_config(), "modal")

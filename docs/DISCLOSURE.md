@@ -313,7 +313,9 @@ whole profile. While locked, the plugin blocks the following.
 - **On-host tools.** These are `terminal`, `process_manage`, `execute_code`, `read_file`, `write_file`,
   `patch`, `search_files`, `skills_list`, `skill_view`, `skill_manage`, `todo_list`, `memory`,
   `clarify` and `session_search`. Shell and code execution can reach the network. The plugin does not
-  inspect their commands.
+  inspect their commands. The first seven of these tools run through Hermes' terminal backend. The
+  plugin refuses to lock unless that backend is `local` (`terminal.backend` and `TERMINAL_ENV`), and
+  it blocks a call to one of the seven tools on any other backend.
 
 - **MCP servers launched as a command on this host.** They are allowed and not inspected. A command can be a
   proxy to a hosted service.

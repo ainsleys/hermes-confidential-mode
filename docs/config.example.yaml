@@ -175,6 +175,13 @@ voice:
 # tts:
 #   provider: piper                # On-host engines pass: piper, kittentts, neutts, or a providers.<name> command.
 
+terminal:
+  # Must be local while locked (and the TERMINAL_ENV environment variable must be unset or local). On
+  # any other backend (docker, ssh, modal, managed_modal, daytona, vercel_sandbox, a plugin backend)
+  # terminal, process_manage, execute_code, read_file, write_file, patch and search_files run in a
+  # container or on another machine, so the preflight refuses to lock.
+  backend: local
+
 # mcp_servers:
 #   # A server configured with a URL must point at an in-tier host, or set enabled: false.
 #   # A server launched with a command passes. The plugin does not inspect what that command does.

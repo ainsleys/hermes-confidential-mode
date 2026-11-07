@@ -151,7 +151,7 @@ class Rig:
     choice (None = no hook fired); ``hermes_approved`` is what Hermes' gate returned."""
 
     def __init__(self, locked=True, bypass=False, delegation=True, remembered=False, answer="once",
-                 hermes_approved=True, al=None, ledger=None, status=None):
+                 hermes_approved=True, al=None, ledger=None, status=None, terminal_backend=None):
         from confidential_mode.gate_tools import ApprovalDecisions, build_tool_execution
         self.ledger = ledger if ledger is not None else FakeLedger()
         self.al = al or allowlist()
@@ -179,9 +179,11 @@ class Rig:
 
         locked_fn = locked if callable(locked) else (lambda: locked)
         self.hook = build_pre_tool_call(locked_fn, self.al, self.ledger, bypass_active, delegation_ok,
-                                        lambda n: remembered, decisions=self.decisions)
+                                        lambda n: remembered, decisions=self.decisions,
+                                        terminal_backend=terminal_backend)
         self.mw = build_tool_execution(locked_fn, self.al, self.ledger, self.decisions, bypass_active=bypass_active,
-                                       delegation_ok=delegation_ok, remembered=lambda n: remembered, ask=ask)
+                                       delegation_ok=delegation_ok, remembered=lambda n: remembered, ask=ask,
+                                       terminal_backend=terminal_backend)
 
     def run(self, name, args=None, **kw):
         args = {} if args is None else args
@@ -214,6 +216,56 @@ def test_locked_on_host_tools_run_silently_even_under_bypass():
         assert r.hook(tool_name=name, args={}, session_id="s") is None
         r.run(name)
     assert len(r.ran()) == len(ON_HOST_TOOLS) + 3 and r.ledger.events == [] and r.calls["bypass"] == []
+
+
+@pytest.mark.parametrize("backend", ["ssh", "modal", "docker", "daytona", "vercel_sandbox", "my_plugin_backend"])
+def test_terminal_backend_tools_are_blocked_on_a_non_local_backend(backend):
+    """Review finding 2: terminal, execute_code and the file tools run on the terminal backend; on any
+    backend but local both lines refuse them, naming the backend and the key. Other on-host tools run."""
+    from confidential_mode.preflight import TERMINAL_BACKEND_TOOLS
+    seen = []
+
+    def where(task_id):
+        seen.append(task_id)
+        return backend
+    r = Rig(terminal_backend=where)
+    for name in sorted(TERMINAL_BACKEND_TOOLS):
+        d = r.hook(tool_name=name, args={}, session_id="s", task_id="t1")
+        assert d["action"] == "block" and f"terminal backend is {backend}" in d["message"]
+        assert "terminal.backend: local" in d["message"]
+        assert refused(r.run(name, task_id="t1"))
+    assert r.ran() == [] and set(seen) == {"t1"}
+    assert {e["decision"] for e in r.ledger.events} == {"terminal_backend"}
+    for name in sorted(ON_HOST_TOOLS - TERMINAL_BACKEND_TOOLS):
+        assert r.hook(tool_name=name, args={}, session_id="s") is None
+        r.run(name)
+    assert len(r.ran()) == len(ON_HOST_TOOLS - TERMINAL_BACKEND_TOOLS)
+
+
+def test_terminal_backend_local_runs_and_unreadable_blocks():
+    r = Rig(terminal_backend=lambda t: "local")
+    assert r.hook(tool_name="write_file", args={}, session_id="s") is None
+    r.run("write_file")
+    assert r.ran() == ["write_file"]
+
+    def broken(task_id):
+        raise ImportError("tools.terminal_scope moved")
+    r = Rig(terminal_backend=broken)
+    d = r.hook(tool_name="terminal", args={}, session_id="s")
+    assert d["action"] == "block" and "cannot read Hermes' terminal backend" in d["message"]
+    assert refused(r.run("terminal")) and r.ran() == []
+
+
+def test_hermes_terminal_backend_reads_the_task_override_then_the_environment(monkeypatch):
+    from confidential_mode.gate_tools import hermes_terminal_backend
+    from tools import terminal_tool
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+    assert hermes_terminal_backend("t-none") == "local"
+    monkeypatch.setenv("TERMINAL_ENV", "SSH ")
+    assert hermes_terminal_backend("t-none") == "ssh"
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setattr(terminal_tool, "resolve_task_overrides", lambda t: {"env_type": "modal"} if t == "rl" else {})
+    assert hermes_terminal_backend("rl") == "modal" and hermes_terminal_backend("other") == "local"
 
 
 @pytest.mark.parametrize("name,decision", [("cronjob_manage", "cron"), ("remote_query", "mcp_url"),

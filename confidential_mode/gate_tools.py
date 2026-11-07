@@ -538,6 +538,18 @@ def hermes_remembered_grant(tool_name: str) -> bool:
         return False
 
 
+def hermes_terminal_backend(task_id: str = "") -> str:
+    """The terminal backend a call for ``task_id`` would run on (review finding 2): a per-task ``env_type``
+    override (tools/terminal_tool.py resolve_task_overrides, registered by RL/benchmark rollouts), else the
+    scope-aware ``TERMINAL_ENV`` (tools/terminal_scope.py terminal_env). Raises when Hermes cannot be read;
+    the caller then blocks."""
+    from tools.terminal_scope import terminal_env
+    from tools.terminal_tool import resolve_task_overrides
+    from .preflight import normalize_backend
+    override = (resolve_task_overrides(task_id or "default") or {}).get("env_type")
+    return normalize_backend(override if override else terminal_env("TERMINAL_ENV", "local"))
+
+
 def _locked_flag(value: Any) -> bool:
     """is_locked() is canonically (bool, Tier | None) (Amendment 2); a bare bool is also accepted."""
     if isinstance(value, bool):
@@ -697,12 +709,13 @@ _LOCK_UNREADABLE = ("confidential mode: the lock state cannot be read, so every 
 class _Policy:
     """The classification both enforcement points share."""
 
-    def __init__(self, allowlist, bypass_active, delegation_ok, remembered):
+    def __init__(self, allowlist, bypass_active, delegation_ok, remembered, terminal_backend=None):
         self._allowlist = allowlist
         self._bypass_fn = bypass_active
         self._takes_name = _accepts_positional(bypass_active)
         self.delegation_ok = delegation_ok
         self.remembered = remembered
+        self.terminal_backend = terminal_backend if terminal_backend is not None else hermes_terminal_backend
 
     def allowlist(self) -> Allowlist:
         return self._allowlist() if callable(self._allowlist) else self._allowlist
@@ -710,12 +723,29 @@ class _Policy:
     def bypass(self, tool_name: str) -> bool:
         return bool(self._bypass_fn(tool_name) if self._takes_name else self._bypass_fn())  # type: ignore[call-arg]
 
-    def on_host_decision(self, info: ToolInfo, args: dict) -> CallDecision:
+    def on_host_decision(self, info: ToolInfo, args: dict, task_id: str = "") -> CallDecision:
+        # Review finding 2 (INTERFACES Amendment 6): a terminal-backend tool is on-host only on the local
+        # backend. The preflight refuses to lock otherwise; this is the second line, per call, because a
+        # per-task override or the environment can change the backend after the lock.
+        from .preflight import LOCAL_BACKEND, TERMINAL_BACKEND_KEY, TERMINAL_BACKEND_TOOLS
+        if info.name in TERMINAL_BACKEND_TOOLS:
+            try:
+                backend = self.terminal_backend(task_id)
+            except Exception as exc:  # noqa: BLE001 - cannot tell where the tool runs: block
+                return CallDecision("refuse", "terminal_backend_unreadable",
+                                    f"confidential mode: {info.name} was blocked because the plugin cannot read "
+                                    f"Hermes' terminal backend ({type(exc).__name__}), so it cannot tell whether "
+                                    "the tool runs on this host.")
+            if backend != LOCAL_BACKEND:
+                return CallDecision("refuse", "terminal_backend",
+                                    f"confidential mode: {info.name} was blocked because Hermes' terminal backend "
+                                    f"is {_printable(backend)}, so the tool would run there, not on this host. "
+                                    f"Set {TERMINAL_BACKEND_KEY}: local (and unset TERMINAL_ENV), then run "
+                                    "/confidential off and lock again.")
         # Extension point for MODE_TOOLS (terminal / execute_code three-mode rule, pending).
-        # mode None -> run. A future mode returns run, refuse, or ask here.
         return CallDecision("run", "on-host")
 
-    def decide(self, tool_name: str, args: dict) -> CallDecision:
+    def decide(self, tool_name: str, args: dict, task_id: str = "") -> CallDecision:
         al = self.allowlist()
         info = al.current(tool_name) if isinstance(tool_name, str) else None
         if info is None:
@@ -724,7 +754,7 @@ class _Policy:
                                 "when this profile was locked (new, renamed, re-registered or swapped), so it is "
                                 "blocked. Run /confidential off and lock again to classify it.")
         if info.route is Route.ON_HOST:
-            return self.on_host_decision(info, args)
+            return self.on_host_decision(info, args, task_id)
         if info.route is Route.BLOCK_CRON:
             return CallDecision("refuse", "cron", "confidential mode: scheduled jobs (cronjob_manage) are blocked "
                                                   "while locked; a job would run later outside this locked session.")
@@ -754,8 +784,8 @@ class _Policy:
                             f"{tool_name} wants to send ~{n} KB of this conversation off the machine", kb=n)
 
 
-def _policy(allowlist, bypass_active, delegation_ok, remembered) -> _Policy:
-    return _Policy(allowlist, bypass_active, delegation_ok, remembered)
+def _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend=None) -> _Policy:
+    return _Policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend)
 
 
 def _call_key(tool_name: Any, tool_call_id: Any) -> str:
@@ -808,7 +838,8 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
                         ledger: Any, bypass_active: Callable[[str], bool] = hermes_bypass_active,
                         delegation_ok: Callable[[dict], bool] = default_delegation_ok,
                         remembered: Callable[[str], bool] = hermes_remembered_grant,
-                        decisions: Optional[ApprovalDecisions] = None) -> Callable[..., Optional[dict]]:
+                        decisions: Optional[ApprovalDecisions] = None,
+                        terminal_backend: Optional[Callable[[str], str]] = None) -> Callable[..., Optional[dict]]:
     """``pre_tool_call`` callback: blocks every refuse decision (ledgered tool_refused) and, for an
     off-host tool, returns the approve directive with the "~N KB" message (ledgered tool_asked).
     The directive only ASKS: Hermes' CLI grants on any answer except the exact string "deny"
@@ -822,11 +853,11 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
     ``bypass_active(tool_name)`` (zero-arg also accepted), ``delegation_ok(args)`` and
     ``remembered(tool_name)`` are injectable. ``is_locked()`` returns ``(bool, Tier | None)`` or a bool;
     anything else, or raising, blocks every tool."""
-    pol = _policy(allowlist, bypass_active, delegation_ok, remembered)
+    pol = _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend)
     dec = decisions if decisions is not None else DEFAULT_DECISIONS
 
     def pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
-                      tool_call_id: str = "", **_kw: Any) -> Optional[dict]:
+                      tool_call_id: str = "", task_id: str = "", **_kw: Any) -> Optional[dict]:
         try:
             locked = _lock_state(is_locked)
         except LockStateError as exc:
@@ -838,7 +869,7 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
             return None
         try:
             a = args if isinstance(args, dict) else {}
-            d = pol.decide(tool_name, a)
+            d = pol.decide(tool_name, a, str(task_id or ""))
             base = {"tool": str(tool_name), "tool_call_id": str(tool_call_id or "")}
             if d.action == "refuse":
                 ledger.append(_event("tool_refused", tool_name=tool_name, session_id=session_id or "",
@@ -900,7 +931,8 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                          bypass_active: Callable[[str], bool] = hermes_bypass_active,
                          delegation_ok: Callable[[dict], bool] = default_delegation_ok,
                          remembered: Callable[[str], bool] = hermes_remembered_grant,
-                         ask: Callable[..., dict] = hermes_request_approval) -> Callable[..., Any]:
+                         ask: Callable[..., dict] = hermes_request_approval,
+                         terminal_backend: Optional[Callable[[str], str]] = None) -> Callable[..., Any]:
     """``tool_execution`` middleware: the ENFORCEMENT line, for ctx.register_middleware("tool_execution", fn).
 
     Off-host tool => ``next_call`` only on an explicit once/session/always recorded by
@@ -916,12 +948,12 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
 
     Never raises: our own errors become a refusal result; an exception from ``next_call`` (the tool
     itself) propagates unchanged, as Hermes expects."""
-    pol = _policy(allowlist, bypass_active, delegation_ok, remembered)
+    pol = _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend)
     dec = decisions if decisions is not None else DEFAULT_DECISIONS
 
     def confidential_mode_tool_execution(tool_name: str = "", args: Any = None, next_call: Any = None,
                                          session_id: str = "", tool_call_id: str = "", turn_id: str = "",
-                                         **_kw: Any) -> Any:
+                                         task_id: str = "", **_kw: Any) -> Any:
         downstream: dict[str, BaseException] = {}
 
         def run(payload: Any = None) -> Any:
@@ -933,7 +965,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
 
         try:
             return _handle(tool_name, args if isinstance(args, dict) else {}, run, session_id or "",
-                           tool_call_id or "", turn_id or "")
+                           tool_call_id or "", turn_id or "", str(task_id or ""))
         except BaseException as exc:
             if exc is downstream.get("exc") or not isinstance(exc, Exception):
                 raise
@@ -948,7 +980,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                              nbytes=args_bytes(args), surface="middleware", detail=detail))
         return _refusal_result(message)
 
-    def _handle(tool_name, args, run, session_id, tool_call_id, turn_id):
+    def _handle(tool_name, args, run, session_id, tool_call_id, turn_id, task_id=""):
         base = {"tool": str(tool_name), "tool_call_id": tool_call_id}
         try:
             locked = _lock_state(is_locked)
@@ -958,7 +990,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
             return _refusal_result(_LOCK_UNREADABLE)
         if not locked:
             return run()
-        d = pol.decide(tool_name, args)
+        d = pol.decide(tool_name, args, task_id)
         if d.action == "refuse":
             return _refuse(tool_name, args, session_id, d.decision, d.message, {**base, "reason": d.decision})
         if d.action == "run":
