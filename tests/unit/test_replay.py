@@ -574,6 +574,26 @@ def test_replay_network_ban_is_thread_scoped(offline):
     assert attempts and seen_other and seen_other[0] != "banned"
 
 
+def test_replay_network_ban_covers_urllib3_and_httpx(offline):
+    """Review finding 21: python-tuf's default fetcher is urllib3, and httpx is on the import path too."""
+    import asyncio
+    import httpx
+    import urllib3
+    attempts = []
+    with _sdkpatch.overrides(replay_mod._network_ban(attempts)):
+        with pytest.raises(replay_mod.ReplayNetworkError):
+            urllib3.PoolManager().request("GET", "https://x.invalid/")
+        with pytest.raises(replay_mod.ReplayNetworkError):
+            httpx.Client().get("https://x.invalid/")
+
+        async def go():
+            async with httpx.AsyncClient() as c:
+                await c.get("https://x.invalid/")
+        with pytest.raises(replay_mod.ReplayNetworkError):
+            asyncio.run(go())
+    assert len(attempts) == 3
+
+
 # ── TDX: collateral rebuilt from stored bytes, freshness under the pinned clock ───────────────
 
 def _pem_chain():

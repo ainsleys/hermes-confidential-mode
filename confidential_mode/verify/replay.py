@@ -165,6 +165,8 @@ class ReplayNetworkError(RuntimeError):
 
 
 def _network_ban(attempts: list) -> dict:
+    """Every HTTP client the replay's dependencies can reach: requests, urllib, urllib3 (python-tuf's default
+    fetcher, tuf/ngclient Urllib3Fetcher) and httpx (review finding 21). Thread-scoped through _sdkpatch."""
     import urllib.request
 
     import requests
@@ -172,7 +174,19 @@ def _network_ban(attempts: list) -> dict:
     def ban(orig, *a, **kw):
         attempts.append(repr(a[:2])[:160])
         raise ReplayNetworkError("network access attempted during offline replay")
-    return {(requests.Session, "request"): ban, (urllib.request, "urlopen"): ban}
+    mapping = {(requests.Session, "request"): ban, (urllib.request, "urlopen"): ban}
+    try:
+        import urllib3.connectionpool
+        mapping[(urllib3.connectionpool.HTTPConnectionPool, "urlopen")] = ban
+    except ImportError:
+        pass
+    try:
+        import httpx
+        mapping[(httpx.HTTPTransport, "handle_request")] = ban
+        mapping[(httpx.AsyncHTTPTransport, "handle_async_request")] = ban
+    except ImportError:
+        pass
+    return mapping
 
 
 # ── OpenSSL store clock for the AMD chain ────────────────────────────────────────────────────
