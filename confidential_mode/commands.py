@@ -115,6 +115,10 @@ def _pin_lines(rt: Any) -> list[str]:
         lines.append(f"Pending pin: {pending.vendor} code {_short(pending.code_fingerprint)} enclave "
                      f"{_short(pending.enclave_fingerprint)} release {pending.release_tag or '(untagged)'} "
                      f"staged {pending.staged_at}; run /confidential pins approve")
+        if pending.components:
+            from .verify.near_checks import render_vendor
+            lines.append("Pending pin components (every line; \"reported\" lines are shown for review, not pinned):")
+            lines.extend(f"  {render_vendor(c)}" for c in pending.components)
     return lines
 
 
@@ -834,6 +838,7 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         return 1
     failed = 0
     near_ne: tuple = ()
+    seen_rows = False
     for item in items:
         ev = item["evidence"]
         if isinstance(item.get("blobs"), dict):   # NEAR v2: large texts travel beside the evidence
@@ -881,7 +886,8 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         failed += 0 if ok else 1
         out.write(f"\nRow #{row_id}: {'OK' if ok else 'FAIL'}\n")
         captured = getattr(result, "captured_at", None) or ev.get("captured_at") or ev.get("captured_at_unix") or ""
-        out.write(f"  repo: {repo or '(none)'}  platform: {platform or '(unknown)'}\n")
+        out.write(f"  repo: {repo or '(none)'}  platform: {platform or '(unknown)'}"
+                  + (f"  schema: {ev.get('schema')}" if ev.get("schema") else "") + "\n")
         out.write(f"  enclave_host: {host or '(none)'} (asserted by capturer)\n")
         out.write(f"  captured_at: {captured or '(none)'} (asserted by capturer)\n")
         out.write(f"  expected fingerprints: {fps_source}\n")
@@ -889,15 +895,18 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
                   f"release: {getattr(result, 'release_tag', None) or '(untagged)'}\n")
         out.write(f"  code {_short(getattr(result, 'code_fingerprint', None), 16)}  "
                   f"enclave {_short(getattr(result, 'enclave_fingerprint', None), 16)}\n")
+        from .verify.near_checks import render_if_needed
         for key, value in (getattr(result, "checks", {}) or {}).items():
-            out.write(f"  {key}: {'pass' if value is True else value}\n")
+            out.write(f"  {key}: {'pass' if value is True else render_if_needed(value)}\n")
         for p in problems:
             out.write(f"  ! {p}\n")
         row_ne = tuple(getattr(result, "not_established", ()) or ())
         if row_ne:
-            not_established = row_ne
+            # a receipt can mix vendors and evidence schemas: every row's caveats are printed (their union)
+            not_established = (not_established if seen_rows else ()) + row_ne
+            seen_rows = True
             if vendor == "near":
-                near_ne = row_ne
+                near_ne = near_ne + row_ne
     signed_failed = 0
     near = None
     if any(isinstance(r, dict) and r.get("kind") == "send_signed" for r in doc.get("rows") or []):

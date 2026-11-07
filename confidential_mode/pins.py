@@ -23,6 +23,7 @@ calls apply(). Writes are atomic (temp file in the same directory, fsync, os.rep
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
@@ -141,7 +142,14 @@ def _prompt_context(result: VerificationResult) -> dict:
     out: dict = {"platform": None, "release_published_at": None, "rekor_log_index": None,
                  "hardware_measurements_verified": False, "components": ()}
     try:
-        comps = (ev.get("claims") or {}).get("components") if isinstance(ev.get("claims"), dict) else None
+        claims = ev.get("claims") if isinstance(ev.get("claims"), dict) else {}
+        comps = claims.get("components")
+        full = claims.get("components_full")
+        if isinstance(full, dict) and isinstance(ev.get("blobs"), dict):   # NEAR v2: the full list is a blob
+            import hashlib
+            text = ev["blobs"].get(full.get("$blob"))
+            if isinstance(text, str) and hashlib.sha256(text.encode("utf-8")).hexdigest() == full.get("$blob"):
+                comps = json.loads(text)
         if isinstance(comps, (list, tuple)):
             out["components"] = tuple(str(c) for c in comps)
         platform = ev.get("platform")
@@ -151,7 +159,6 @@ def _prompt_context(result: VerificationResult) -> dict:
             out["release_published_at"] = rel["published_at"]
         bundle = ev.get("sigstore_bundle")
         if isinstance(bundle, str) and bundle:
-            import json
             entries = (json.loads(bundle).get("verificationMaterial") or {}).get("tlogEntries") or []
             if entries and str(entries[0].get("logIndex", "")).strip().isdigit():
                 out["rekor_log_index"] = int(entries[0]["logIndex"])

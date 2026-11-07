@@ -726,9 +726,15 @@ def ts_text(ts: Any) -> str:
 
 
 def _p(value: Any) -> str:
-    """Printable, single-line: a value in a row can never forge a receipt line."""
+    """Printable, single-line: a value in a row can never forge a receipt line. Nothing is stripped or cut:
+    control characters become visible escapes and the value is tagged; a value with markdown-significant
+    characters (or escapes) is shown as a code span, because chat surfaces render markdown
+    (near_checks.render_vendor). Plain values print as they are."""
     s = "" if value is None else str(value)
-    return "".join(ch if ch.isprintable() else "?" for ch in s)[:200]
+    if not s:
+        return ""
+    from .verify.near_checks import render_if_needed
+    return render_if_needed(s)
 
 
 def _reason(row: Mapping) -> str:

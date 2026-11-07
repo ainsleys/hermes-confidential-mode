@@ -215,32 +215,48 @@ def pin_question(pending: Any, *, observers: Optional[list] = None, now: Optiona
     return "\n".join(lines)
 
 
-# Component lines that start with this prefix are what a model CVM's compose-manager reported after launch
-# (verify/near.py _cvm_lines). They are not measurements, and the prompt says so.
+# Component line prefixes (verify/near.py _cvm_lines). A line without one feeds the pin's fingerprints.
+# "reported: " and "reported-other: " lines are what a model CVM's compose-manager log reported: shown for
+# review, not pinned, not measurements.
 REPORTED_PREFIX = "reported: "
+REPORTED_OTHER_PREFIX = "reported-other: "
+MAX_REPORTED_LINES = 40   # longer service lists fold into a count; `hermes confidential pins` prints them all
+PINNED_HEADING = ("Pinned (a change in any of these asks again): each CVM's docker-compose (MRCONFIGID is "
+                  "SHA-256 of it), its firmware and kernel measurements (MRTD, RTMR0-2: the enclave "
+                  "fingerprint), and, where listed, its app_id, OS image and KMS key as its RTMR3 boot events "
+                  "record them; each checked against its quote:")
 REPORTED_HEADING = ("Reported after launch by each model CVM's compose-manager. This is not a measurement. A TD of "
                     "this instance reported this actions log for this nonce, and the log's hash is bound in a "
                     "hardware quote. The services below are what the operator's own tooling reported, not "
                     "proof of what runs:")
-REPORTED_NOT_PINNED = ("The pin covers the measured configuration only: a change in the reported lines alone "
-                       "does not ask again.")
+REPORTED_NOT_PINNED = ("Shown for review only, not pinned: the instance id, the reported services and the "
+                       "compose-manager image reported by the log. A change in those alone does not ask again.")
+
+
+def _display(value: Any) -> str:
+    """Component lines carry vendor strings: escape and code-span them for the terminal and chat surfaces."""
+    from .verify.near_checks import render_vendor
+    return render_vendor(value)
 
 
 def _near_pin_question(pending: Any, *, observers: Optional[list] = None) -> str:
-    """NEAR has no release tag or Sigstore bundle: the prompt shows the identity (host and model allowlist)
-    and the measured docker-compose of each CVM (Amendment 5)."""
+    """NEAR has no release tag or Sigstore bundle: the prompt shows the identity (host and model allowlist),
+    what the pin covers, and, separately, what the compose-manager logs reported (Amendments 5, 5.2)."""
     comps = [str(c) for c in (_value(pending, "components") or ())]
-    measured = [c for c in comps if not c.startswith(REPORTED_PREFIX)]
-    reported = [c[len(REPORTED_PREFIX):] for c in comps if c.startswith(REPORTED_PREFIX)]
+    pinned = [c for c in comps if not c.startswith((REPORTED_PREFIX, REPORTED_OTHER_PREFIX))]
+    reported = [c for c in comps if c.startswith((REPORTED_PREFIX, REPORTED_OTHER_PREFIX))]
+    if len(reported) > MAX_REPORTED_LINES:
+        reported = [c for c in reported if not c.startswith(REPORTED_OTHER_PREFIX)]
+    reported = [c.split(": ", 1)[1] for c in reported]
     lines = [
         "Approve confidential pin update?",
         _change_line(pending),
         "Vendor: near (NEAR AI Cloud)",
         f"Identity: {_text(_value(pending, 'router_repo'))} (gateway host # attested model allowlist)",
-        "Measured configuration (MRCONFIGID = SHA-256 of each CVM's docker-compose; app_id, instance, OS image "
-        "and KMS key as RTMR3 records them; each checked against its quote):",
-        *([f"  {c}" for c in measured] or ["  unknown"]),
-        *([REPORTED_HEADING, *[f"  {c}" for c in reported], REPORTED_NOT_PINNED] if reported else []),
+        PINNED_HEADING,
+        *([f"  {_display(c)}" for c in pinned] or ["  unknown"]),
+        *([REPORTED_HEADING, *[f"  {_display(c)}" for c in reported]] if reported else []),
+        REPORTED_NOT_PINNED,
         "NEAR runs instances of one model with different measured configurations under one signing key, so a "
         "new instance can show up here as a change.",
         f"Platform: {_text(_value(pending, 'platform'))}",
@@ -249,7 +265,7 @@ def _near_pin_question(pending: Any, *, observers: Optional[list] = None) -> str
         f"Enclave fingerprint old: {_text(_value(pending, 'previous_enclave_fingerprint'))}",
         f"Enclave fingerprint new: {_text(_value(pending, 'enclave_fingerprint'))}",
         *_observations(pending, observers),
-        "Approving means trusting these measured configurations until they change again.",
+        "Approving means trusting the pinned values above until they change again.",
     ]
     return "\n".join(lines)
 

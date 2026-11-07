@@ -90,11 +90,12 @@ def test_lock_needs_a_human_approved_pin_then_a_turn_is_signed_and_ledgered(plug
     asked = []
     with bind_asker(lambda q, labels: asked.append(q) or "Approve"):
         assert plugin.slash("pins approve").startswith("Pinned near build")
-    assert "Identity: cloud-api.near.ai#" in asked[0] and "Measured configuration" in asked[0]
     consent = _sub(plugin, "consent")
+    assert "Identity: cloud-api.near.ai#" in asked[0] and consent.PINNED_HEADING in asked[0]
     head, _, tail = asked[0].partition(consent.REPORTED_HEADING)
-    assert "(recorded in RTMR3)" in head and "compose-manager running" not in head
-    assert "  prod/test.yaml::proxy-test v0.0.2 commit c2c2c2c2c2c2" in tail and "MISMATCH" in tail
+    assert "(recorded in RTMR3; pinned; the instance id is shown only)" in head
+    assert "image reported by the log" not in head
+    assert "  `  prod/test.yaml::proxy-test v0.0.2 commit " + "c2" * 20 in tail and "(the two differ)" in tail
     assert consent.REPORTED_NOT_PINNED in tail and "reported: " not in asked[0]
     out = plugin.slash("on attested")
     assert out.startswith(f"Locked. Model: attested-near/{MODEL} at {HOST}"), out
