@@ -159,7 +159,7 @@ config sends them. The plugin only writes ledger rows that describe them, as des
 Everything the plugin writes is under your Hermes home, scoped to the profile. Apart from the Hermes
 files above, it writes only the files below. The plugin creates each
 file with mode 0600, and sets mode 0600 again on existing files once per installed commit. The modes are POSIX
-modes: on Windows, chmod sets only the read-only flag.
+modes: on Windows, a mode change sets only the read-only flag.
 
 `hermes confidential on` run in a terminal imports every Hermes built-in tool module, so the lock can classify
 each tool. Hermes may then rewrite its tool-discovery cache, `<hermes home>/cache/tool_discovery_cache.json`,

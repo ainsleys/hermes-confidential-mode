@@ -11,7 +11,7 @@ vendor's encrypted transport is not used, and no reply signature is verified. He
 model calls than the one you see, for titles, compression, images and more, and when one of those
 calls to the main provider fails, or the main model cannot take an image, Hermes' default side-call
 chain can send that text to OpenRouter or Nous, if you have keys for them. Tools such as web search
-send parts of the conversation to outside sites.
+pass parts of what you wrote on to outside sites.
 
 **What the plugin does.** You lock a profile to a tier, which is a rule for where text may go.
 `attested` allows only enclaves whose hardware report the plugin has verified and whose build you
