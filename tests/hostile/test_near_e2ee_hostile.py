@@ -542,3 +542,53 @@ def test_receipt_shows_the_withheld_reply_and_keeps_its_encryption_caveat(tmp_pa
     stripped = dict(doc)
     stripped.pop("near_encryption_note")
     assert not verify_chain(stripped)
+
+
+def test_mark_stale_does_not_close_a_pool_under_another_threads_request(tmp_path):
+    """N3: a 421 or a pin mismatch on one thread swaps in a fresh pool for new requests; the old pool is
+    closed only after the other thread's in-flight request on it has finished."""
+    import threading
+
+    class Tracking(httpx.BaseTransport):
+        made: list = []
+
+        def __init__(self, handler):
+            self._mock = httpx.MockTransport(handler)
+            self.closed = False
+            Tracking.made.append(self)
+
+        def handle_request(self, request):
+            if self.closed:
+                raise httpx.ConnectError("pool closed", request=request)
+            return self._mock.handle_request(request)
+
+        def close(self):
+            self.closed = True
+
+    world = NearWorld()
+    entered, go = threading.Event(), threading.Event()
+    orig = world.handler
+
+    def slow(req):
+        if req.url.path == "/v1/chat/completions" and not go.is_set():
+            entered.set()
+            go.wait(5)
+        return orig(req)
+    world.handler = slow
+    ad = world.adapter(tmp_path, send_transport_factory=lambda: Tracking(lambda r: world.handler(r)))
+    ad.verify()
+    ad.release()
+    client = openai.OpenAI(api_key="sk-x", base_url=BASE, http_client=ad.sync_http_view(), max_retries=0)
+    out: list = []
+    t = threading.Thread(target=lambda: out.append(client.chat.completions.create(model=MODEL, messages=MSG)))
+    t.start()
+    assert entered.wait(5)
+    first = Tracking.made[-1]
+    assert ad.mark_stale("test: 421 on another thread") is True
+    assert first.closed is False                         # still serving the other thread
+    ad.release()
+    assert ad._pool() is not first                       # new requests get a fresh pool
+    go.set()
+    t.join(5)
+    assert out and out[0].choices[0].message.content == "NEAR-FAKE-REPLY"
+    assert first.closed is True                          # closed once its last request finished

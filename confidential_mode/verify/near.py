@@ -413,8 +413,17 @@ def _spki_sha256(der: bytes) -> str:
 
 class NearRefusal(VerifyError, openai.OpenAIError):
     """A refusal raised from the NEAR transport. It is an ``openai.OpenAIError``, which the OpenAI SDK
-    re-raises as is (no retry, no APIConnectionError wrapping), and the attested profile's
-    ``classify_api_error`` hook marks it non-retryable for Hermes' own retry loop (provider.py)."""
+    re-raises as is (no retry, no APIConnectionError wrapping); the attested profile's
+    ``classify_api_error`` hook (provider.classify_refusal) tells Hermes' loop what to do with it.
+
+    ``status_code`` and ``body`` are set when the gateway answered with an HTTP error (not 200): they are
+    unauthenticated and only steer local recovery (backoff, compression), never what is released. A retry
+    is a new encrypted exchange; only a 200 that is fully attested and decrypts is ever handed over."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, body: dict | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body or {}
 
 
 def _refusal(exc: BaseException) -> NearRefusal:
@@ -527,6 +536,8 @@ class NearAdapter:
         self._lock = threading.RLock()
         self._sync_transport: httpx.BaseTransport | None = None
         self._attest_transport: httpx.BaseTransport | None = None
+        self._inflight: dict[int, int] = {}            # id(send pool) -> requests in flight on it
+        self._retired: list[httpx.BaseTransport] = []  # dropped pools waiting for their last request
         self._async_transports: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncBaseTransport]] = {}
         self._accepted: VerificationResult | None = None
         self._appraisal: Appraisal | None = None
@@ -584,16 +595,43 @@ class NearAdapter:
                 self._attest_transport = self._transport_factory()
             return self._attest_transport
 
+    def _acquire(self) -> tuple[httpx.BaseTransport, Callable[[], None]]:
+        """The current send pool, counted as in use until the returned release() is called (once)."""
+        with self._lock:
+            t = self._pool()
+            self._inflight[id(t)] = self._inflight.get(id(t), 0) + 1
+        done = [False]
+
+        def release() -> None:
+            if done[0]:
+                return
+            done[0] = True
+            close = False
+            with self._lock:
+                n = self._inflight.get(id(t), 0) - 1
+                if n > 0:
+                    self._inflight[id(t)] = n
+                else:
+                    self._inflight.pop(id(t), None)
+                    if any(r is t for r in self._retired):
+                        self._retired = [r for r in self._retired if r is not t]
+                        close = True
+            if close:
+                _close_quietly(t)
+        return t, release
+
     def _drop_send_pools(self) -> None:
-        """A newly accepted TLS fingerprint: no pooled connection made under the old pin is reused."""
+        """A newly accepted TLS fingerprint, a 421 or a pin mismatch: new requests get a fresh pool; the old
+        one is closed once the requests other threads still have in flight on it have finished."""
         with self._lock:
             t, self._sync_transport = self._sync_transport, None
             self._async_transports.clear()
-        if t is not None:
-            try:
-                t.close()
-            except Exception:
-                pass
+            if t is None:
+                return
+            if self._inflight.get(id(t), 0) > 0:
+                self._retired.append(t)
+                return
+        _close_quietly(t)
 
     def _get(self, client: httpx.Client, path: str, params: dict, headers: dict | None = None):
         url = f"{self._base_url}/{path}"
@@ -871,7 +909,8 @@ class NearAdapter:
         headers = {"accept": "application/json"}
         if authorization:
             headers["authorization"] = authorization
-        client = httpx.Client(transport=_NonClosing(self._pool()), timeout=max(1.0, self.signature_wait_seconds),
+        pool, release_pool = self._acquire()
+        client = httpx.Client(transport=_NonClosing(pool), timeout=max(1.0, self.signature_wait_seconds),
                               follow_redirects=False)
         try:
             while True:
@@ -899,6 +938,7 @@ class NearAdapter:
                         "reason": f"HTTP {r.status_code} from /v1/signature"}
         finally:
             client.close()
+            release_pool()
 
     def finish_exchange(self, ex: "_Exchange") -> dict:
         """Fetch (when the body ended), judge and ledger one exchange. Returns the row detail."""
@@ -987,6 +1027,13 @@ class NearAdapter:
                 sink(row)
             except Exception:
                 logger.warning("confidential-mode: could not ledger a NEAR signature row", exc_info=True)
+
+
+def _close_quietly(t) -> None:
+    try:
+        t.close()
+    except Exception:
+        pass
 
 
 class _NonClosing(httpx.BaseTransport):
@@ -1179,12 +1226,19 @@ _DROP_ON_RELEASE = ("content-length", "content-encoding", "transfer-encoding")
 
 
 def _error_type(body: bytes) -> str:
+    t = _error_body(body).get("error", {}).get("type")
+    return f" ({str(t)[:40]})" if isinstance(t, str) and t else ""
+
+
+def _error_body(body: bytes) -> dict:
+    """{"error": {"type", "code", "message"}} clipped, from a gateway error body (unauthenticated)."""
     try:
         err = json.loads(body).get("error")
-        t = err.get("type") if isinstance(err, Mapping) else None
-        return f" ({str(t)[:40]})" if isinstance(t, str) and t else ""
     except Exception:
-        return ""
+        return {}
+    if not isinstance(err, Mapping):
+        return {}
+    return {"error": {k: str(err.get(k))[:300] for k in ("type", "code", "message") if err.get(k) is not None}}
 
 
 def _release_sealed(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Response) -> httpx.Response:
@@ -1203,11 +1257,13 @@ def _release_sealed(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Res
                                        "re-verifying")
             raise NearRefusal("NEAR refused this exchange's model key (HTTP 421: the key is no longer valid); "
                               + ("the verification was invalidated and the next call re-verifies" if asked else
-                                 "a re-verification ran less than confidential.near.reverify_backoff_seconds ago"))
+                                 "a re-verification ran less than confidential.near.reverify_backoff_seconds ago"),
+                              status_code=421, body=_error_body(body))
         if status != 200:
             # Any status but 200, success-looking 2xx included, carries nothing the plugin can authenticate.
             raise NearRefusal(f"NEAR reply refused: HTTP {status}{_error_type(body)}; only a signed, encrypted "
-                              "HTTP 200 reply is handed over")
+                              "HTTP 200 reply is handed over", status_code=status,
+                              body=_error_body(body) if status >= 400 else {})
         detail = ex.detail or {}
         if ex.detail is None:
             raise NearRefusal("NEAR response withheld: the signature step did not finish in time")
@@ -1316,6 +1372,22 @@ def _signature_step_bound(adapter: "NearAdapter") -> float:
     return w + 4 * max(1.0, w) + 5.0
 
 
+class _Releasing(httpx.SyncByteStream):
+    """A response body that releases its send pool when closed."""
+
+    def __init__(self, inner, release):
+        self._inner, self._release = inner, release
+
+    def __iter__(self):
+        yield from self._inner
+
+    def close(self):
+        try:
+            self._inner.close()
+        finally:
+            self._release()
+
+
 class _SyncView(httpx.BaseTransport):
     def __init__(self, adapter: NearAdapter):
         self._adapter = adapter
@@ -1332,9 +1404,11 @@ class _SyncView(httpx.BaseTransport):
             ex = a.begin_exchange(request)
         except VerifyError as exc:
             raise _refusal(exc) from exc
+        pool, release_pool = a._acquire()
         try:
-            response = a._pool().handle_request(ex.request if ex is not None else request)
+            response = pool.handle_request(ex.request if ex is not None else request)
         except BaseException as exc:
+            release_pool()
             refusal = _send_failed(a, ex, exc) if ex is not None else None
             if refusal is None and any(isinstance(e, TLSPinMismatch) for e in _chain(exc)):
                 a.mark_stale("a NEAR connection presented a certificate other than the attested one; re-verifying")
@@ -1343,6 +1417,7 @@ class _SyncView(httpx.BaseTransport):
                 raise refusal from exc
             raise
         if ex is None:
+            response.stream = _Releasing(response.stream, release_pool)
             return response
         ex.on_response(response)
         if ex.encrypted:
@@ -1350,7 +1425,10 @@ class _SyncView(httpx.BaseTransport):
                 return _sealed_sync(a, ex, response)
             except VerifyError as exc:
                 raise _refusal(exc) from exc
+            finally:
+                release_pool()
         if _already_read(response, ex):
+            release_pool()
             ex.finish()
             return response
         inner = response.stream
@@ -1379,6 +1457,7 @@ class _SyncView(httpx.BaseTransport):
                         _drain_after_done(ex, lambda: next(self_inner._it))
                     inner.close()
                 finally:
+                    release_pool()
                     ex.finish(None if ex.completed else "closed before its end")
         response.stream = _Hashing()
         return response

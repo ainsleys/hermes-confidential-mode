@@ -293,3 +293,44 @@ def test_lock_refuses_tls_binding_off_odd_values_and_fallback_chain_api_modes(pl
     out = plugin.slash("on attested")
     assert out.startswith("Not locked") and key in out, out
 
+
+
+@pytest.mark.parametrize("status,body,reason,retryable,compress", [
+    (429, {"error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}}, "rate_limit", True, False),
+    (503, {"error": {"message": "upstream unavailable", "type": "server_error"}}, "overloaded", True, False),
+    (500, {"error": {"message": "boom", "type": "server_error"}}, "server_error", True, False),
+    (400, {"error": {"message": "This model's maximum context length is 65536 tokens", "type": "invalid_request_error",
+                     "code": "context_length_exceeded"}}, "context_overflow", True, True),
+    (400, {"error": {"message": "bad request", "type": "invalid_request_error"}}, "provider_policy_blocked", False, False),
+    (421, {"error": {"message": "The encryption key is no longer valid.", "type": "provider_error"}},
+     "provider_policy_blocked", False, False),
+    (201, {"choices": []}, "provider_policy_blocked", False, False),
+])
+def test_gateway_errors_keep_hermes_recovery_and_refusals_stay_fatal(plugin, near, status, body, reason, retryable,
+                                                                    compress):
+    """N1: the status rides on NearRefusal and Hermes' classifier (through the profile hook) maps it.
+    Nothing here changes what is released: none of these reaches Hermes as a reply."""
+    import httpx
+    plugin.slash("on attested")
+    _approve(plugin)
+    client = plugin.rt.near_profile.create_client(api_key="sk-near-seam", base_url=BASE)
+    orig = near.handler
+    near.handler = lambda r: httpx.Response(status, json=body) if r.url.path == "/v1/chat/completions" else orig(r)
+    with pytest.raises(Exception) as ei:
+        client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "hi"}])
+    assert type(ei.value).__name__ == "NearRefusal" and ei.value.status_code == status
+    from agent.error_classifier import classify_api_error
+    c = classify_api_error(ei.value, provider="attested-near", model=MODEL)
+    assert (c.reason.value, c.retryable, c.should_compress, c.should_fallback) == (reason, retryable, compress, False)
+
+
+def test_a_withheld_reply_stays_non_retryable_through_the_classifier(plugin, near):
+    plugin.slash("on attested")
+    _approve(plugin)
+    client = plugin.rt.near_profile.create_client(api_key="sk-near-seam", base_url=BASE)
+    near.sig_mode = "gateway"
+    with pytest.raises(Exception) as ei:
+        client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "hi"}])
+    from agent.error_classifier import classify_api_error
+    c = classify_api_error(ei.value, provider="attested-near", model=MODEL)
+    assert ei.value.status_code is None and c.retryable is False and c.should_fallback is False

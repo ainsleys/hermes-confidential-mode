@@ -546,18 +546,48 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
     return profile
 
 
+_OVERFLOW_HINTS = ("context_length_exceeded", "context length", "maximum context", "context window",
+                   "too many tokens", "prompt is too long", "max_tokens_exceeded", "reduce the length")
+
+
+def _is_overflow(body: Any, message: str) -> bool:
+    err = body.get("error") if isinstance(body, dict) else None
+    text = " ".join(str(v) for v in ((err or {}).values() if isinstance(err, dict) else ())) + " " + (message or "")
+    text = text.lower()
+    try:
+        from agent.error_classifier import _CONTEXT_OVERFLOW_PATTERNS
+        hints = tuple(_CONTEXT_OVERFLOW_PATTERNS) + _OVERFLOW_HINTS
+    except Exception:
+        hints = _OVERFLOW_HINTS
+    return any(h in text for h in hints)
+
+
 def classify_refusal(error, **_context):
-    """``ProviderProfile.classify_api_error`` (agent/error_classifier.py ``_profile_verdict``): a refusal
-    raised by an attested transport (verify.near.NearRefusal) is deterministic for the unchanged request,
-    so Hermes must neither retry it nor fall back to another provider. Anything else: None (Hermes'
-    own pipeline decides). Never raises."""
+    """``ProviderProfile.classify_api_error`` (agent/error_classifier.py ``_profile_verdict``) for a refusal
+    raised by an attested transport (verify.near.NearRefusal). Never raises; None for anything else.
+
+    A retry never changes what is released (only a 200 that is fully attested and decrypts reaches
+    Hermes), so ordinary gateway errors keep Hermes' recovery: 429 backs off (rate_limit), 5xx retries
+    (overloaded for 503/529, else server_error), a 400 that says the context is too long compresses
+    (context_overflow). None of them falls back to another provider. A 421 (model key no longer valid:
+    re-verified under the backoff) and every genuine refusal (withheld, undecryptable, unsigned, swapped
+    key, success-shaped non-200, refused before sending) are not retried."""
     try:
         seen, exc = set(), error
         while exc is not None and id(exc) not in seen:
             seen.add(id(exc))
             if type(exc).__name__ == "NearRefusal":
-                return {"reason": "provider_policy_blocked", "retryable": False, "should_fallback": False,
-                        "should_compress": False, "should_rotate_credential": False}
+                status = getattr(exc, "status_code", None)
+                body = getattr(exc, "body", None) or {}
+                stay = {"should_fallback": False, "should_rotate_credential": False}
+                if status == 429:
+                    return {"reason": "rate_limit", "retryable": True, "should_compress": False, **stay}
+                if isinstance(status, int) and 500 <= status < 600:
+                    return {"reason": "overloaded" if status in (503, 529) else "server_error", "retryable": True,
+                            "should_compress": False, **stay}
+                if status in (400, 413) and _is_overflow(body, ""):
+                    return {"reason": "context_overflow", "retryable": True, "should_compress": True, **stay}
+                return {"reason": "provider_policy_blocked", "retryable": False, "should_compress": False, **stay}
             exc = exc.__cause__ or exc.__context__
     except Exception:
         pass
