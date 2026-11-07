@@ -28,10 +28,11 @@ The plugin fixes that in three steps.
    settings, headers, sizes and timing, and could read a reply by swapping its key, which the plugin
    detects only afterwards. The plugin checks that this encryption is on and, on NEAR AI Cloud,
    verifies the enclave's signature on every reply.
-3. **When you want, you render a receipt.** The receipt is a text file built from the plugin's log:
+3. **When you want, you render a receipt.** The receipt is built from the plugin's log:
    every model call in the session, the lock period, the enclave build that was verified, and the raw
-   hardware evidence captured at each verification. The evidence is signed by the enclave's hardware
-   and the vendor, so anyone can re-check it offline with `hermes confidential replay`. The rest of
+   hardware evidence captured at each verification. The receipt comes as readable text, or as JSON that
+   carries the evidence; the evidence is signed by the enclave's hardware and the vendor, so anyone can
+   re-check the JSON form offline with `hermes confidential replay`. The rest of
    the receipt is the plugin's own record on your machine.
 
 Two limits to know before you rely on this. The agent can still run shell commands and code, and the
