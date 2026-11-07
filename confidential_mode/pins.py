@@ -318,8 +318,13 @@ def views_from_cvms(cvms: Any, blobs: Mapping | None = None) -> list[CvmView]:
         observed = {"measurement": c.get("measurement"), "signing_address": c.get("signing_address"),
                     "compose_hash": c.get("compose_hash")}
         if role != "gateway":
+            from .review import repo_of_app_compose
+            text = blobs.get(c.get("compose_hash")) if isinstance(c.get("compose_hash"), str) else None
             observed["services"] = dict(services) if isinstance(services, Mapping) else None
             observed["cm_image_measured"] = c.get("cm_image_measured")
+            # GITHUB_REPO as the measured compose (pinned) names it: where the inner files are fetched from
+            observed["github_repo"] = repo_of_app_compose(text if isinstance(text, str)
+                                                          and _sha(text) == c.get("compose_hash") else None)
         out.append(CvmView(role=role, components=comps, measurement=str(c["measurement"]),
                            instance_id=c.get("instance_id"), observed=observed))
     return out
@@ -840,10 +845,12 @@ class PinStore:
         seen: set = set()
         for pend in batches:
             for ent in pend.entries:
-                for v in ((ent.observed or {}).get("services") or {}).values():
+                obs = ent.observed or {}
+                for v in (obs.get("services") or {}).values():
                     if isinstance(v, Mapping) and v.get("file_sha256") not in seen:
                         seen.add(v.get("file_sha256"))
-                        fetch_compose(cdir, v.get("commit"), v.get("file"), v.get("file_sha256"), fetch=fetch)
+                        fetch_compose(cdir, v.get("commit"), v.get("file"), v.get("file_sha256"),
+                                      repo=obs.get("github_repo"), fetch=fetch)
         return self.refresh_pending()
 
     def apply(self, pending: PendingPin, *, approved_via: str,

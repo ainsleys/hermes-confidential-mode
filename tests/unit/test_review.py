@@ -60,23 +60,31 @@ def test_gpu13_socket_tags_from_the_cached_inner_files(cdir):
 
 
 def test_compose_url_refuses_vendor_strings_that_are_not_a_commit_or_a_path():
-    assert review.compose_url("c1" * 20, "prod/small-models.yaml").startswith(
+    R = "nearai/cvm-compose-files"
+    assert review.compose_url("c1" * 20, "prod/small-models.yaml", R).startswith(
         "https://raw.githubusercontent.com/nearai/cvm-compose-files/" + "c1" * 20 + "/prod/")
+    assert review.compose_url("c1" * 20, "prod/x.yaml", None) is None
+    assert review.github_repo("https://github.com/nearai/cvm-compose-files") == R
+    for bad in ("https://evil.example/nearai/x", "https://github.com/a/../b", "http://github.com/a/b",
+                "https://github.com/a/b/c"):
+        assert review.github_repo(bad) is None
+    assert review.repo_of_app_compose(json.dumps(
+        {"docker_compose_file": "    environment:\n      - GITHUB_REPO=https://github.com/nearai/cvm-compose-files\n"})) == R
     for commit, file in (("main", "prod/x.yaml"), ("c1" * 20, "../x"), ("c1" * 20, "a b"), ("c1" * 20, "/etc/passwd"),
                          ("c1" * 20, "x\n.yaml")):
-        assert review.compose_url(commit, file) is None
+        assert review.compose_url(commit, file, R) is None
 
 
 def test_fetch_checks_the_hash_and_caches(tmp_path):
     sha, data = next(iter(TEXTS.items()))
     calls = []
-    text, err = review.fetch_compose(tmp_path, "c1" * 20, "prod/small-models.yaml", sha,
+    text, err = review.fetch_compose(tmp_path, "c1" * 20, "prod/small-models.yaml", sha, repo="nearai/cvm-compose-files",
                                      fetch=lambda url: calls.append(url) or data)
     assert err is None and text == data.decode() and (tmp_path / f"{sha}.yaml").read_bytes() == data
-    text, err = review.fetch_compose(tmp_path, "c1" * 20, "prod/small-models.yaml", sha,
+    text, err = review.fetch_compose(tmp_path, "c1" * 20, "prod/small-models.yaml", sha, repo="nearai/cvm-compose-files",
                                      fetch=lambda url: (_ for _ in ()).throw(AssertionError("refetched")))
     assert err is None and len(calls) == 1, "the cached copy is used"
-    text, err = review.fetch_compose(tmp_path / "other", "c1" * 20, "prod/x.yaml", sha, fetch=lambda url: data + b"x")
+    text, err = review.fetch_compose(tmp_path / "other", "c1" * 20, "prod/x.yaml", sha, repo="nearai/cvm-compose-files", fetch=lambda url: data + b"x")
     assert text is None and "does not hash" in err and not (tmp_path / "other" / f"{sha}.yaml").exists()
 
 
@@ -149,6 +157,8 @@ def test_review_fetches_tags_then_the_prompt_pins_the_services(tmp_path):
     assert len(served) == 11 and all(f["status"] == "hash-checked" for f in model["inner_composes"])
     assert model["services_pinned"] is True and model["tags_status"] == "shown"
     assert model["inner_composes"][0]["commit_meta"]["author"] == "Op"
+    assert model["repository"]["new"] == "nearai/cvm-compose-files", "from the measured compose's GITHUB_REPO"
+    assert [r for r in ledger.rows if r.kind == "pin_staged"], "the refreshed batch is recorded as staged"
     assert model["compose_manager_image"]["differ"] is True
     assert {f["name"] for f in model["outer_compose"]["fields"]} >= {"allowed_envs", "pre_launch_script",
                                                                     "kms_enabled", "GITHUB_REPO",

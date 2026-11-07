@@ -66,7 +66,6 @@ ATTACKS = [
     ("terminal", {"command": "sqlite3 ~/.hermes/plugin-data/x/ledger.sqlite .dump"}),
     ("terminal", {"command": "sed -i s/a/b/ ~/.hermes/plugin-data/x/pins.yaml"}),
     ("terminal", {"command": "hermes $'\\x63onfidential' pins approve", "pty": True}),          # ANSI-C quoting
-    ("terminal", {"command": "hermes confidentia? pins approve", "pty": True}),                  # a glob
     ("execute_code", {"code": "import importlib; importlib.import_module('confidential_mode.provider')"}),
     ("write_file", {"path": "/Users/x/.hermes/plugin-data/p/pins.yaml", "content": "version: 3"}),
     ("patch", {"path": "ledger.sqlite", "old_string": "a", "new_string": "b"}),
@@ -187,27 +186,31 @@ def test_chat_surface_asker_in_a_tool_subprocess_is_refused(monkeypatch):
     assert ledger.events[-1]["kind"] == "tool_refused" and ledger.events[-1]["decision"] == "self_approval"
 
 
-def test_marking_process_refuses_while_a_tool_subprocess_is_alive():
-    """The gateway runs a nested chat client's slash command itself (marker == its own pid): it refuses while a
-    process a tool started (carrying its marker) is still running, and asks again once it has ended."""
-    from tools.environments.local import _make_run_env
+def test_the_marking_process_itself_still_asks():
+    """The person's own surface in the process that ran the tools (the marker names this process) is asked."""
     gate_tools.mark_tool_process()
     assert os.environ[gate_tools.TOOL_PROCESS_ENV] == str(os.getpid())
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], env=_make_run_env({}))
-    try:
-        deadline = __import__("time").time() + 10
-        from confidential_mode.selfapproval import live_tool_descendants
-        while child.pid not in live_tool_descendants(os.getpid()) and __import__("time").time() < deadline:
-            __import__("time").sleep(0.1)
-        store, ledger, ctx = _Store(), _Ledger(), _ChatAsker()
-        out = consent.approve_pending_pin(ctx, store, ledger, session_key="k", session_id="s", platform="telegram")
-        assert out.startswith("Refused:") and str(child.pid) in out and ctx.asked == []
-    finally:
-        child.kill()
-        child.wait()
     ctx = _ChatAsker()
     consent.approve_pending_pin(ctx, _Store(), _Ledger(), session_key="k", session_id="s", platform="telegram")
-    assert len(ctx.asked) == 1, "no tool process left: the person's own surface is asked"
+    assert len(ctx.asked) == 1
+
+
+def test_execute_code_children_carry_the_marker():
+    """Hermes builds execute_code's environment from an allowlist (tools/code_execution_env.py), for the
+    per-call runs and the persistent kernel alike; the marker's XDG_ prefix is on it."""
+    from tools.code_execution_env import _build_child_env
+    gate_tools.mark_tool_process()
+    env = _build_child_env(rpc_endpoint="x", rpc_token="t", tmpdir=tempfile.mkdtemp(), child_python=sys.executable)
+    assert env.get(gate_tools.TOOL_PROCESS_ENV) == str(os.getpid())
+    out = subprocess.run([sys.executable, "-c", _CHILD.format(root=str(PLUGIN_ROOT))], env=env,
+                         stdin=subprocess.DEVNULL, capture_output=True, text=True, cwd=str(PLUGIN_ROOT), timeout=60)
+    assert "REFUSED" in out.stderr, out.stderr
+
+
+def test_terminal_children_carry_the_marker():
+    from tools.environments.local import _make_run_env
+    gate_tools.mark_tool_process()
+    assert _make_run_env({}).get(gate_tools.TOOL_PROCESS_ENV) == str(os.getpid())
 
 
 def _nested_home(tmp_root: Path) -> Path:

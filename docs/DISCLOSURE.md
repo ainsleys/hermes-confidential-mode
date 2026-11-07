@@ -92,7 +92,7 @@ to turn every such fetch off; NEAR model entries then cannot be approved.
 
 | Host | Who calls it | What for |
 |---|---|---|
-| `raw.githubusercontent.com` | Staging, the approve command, `pins review`. | Each docker-compose file a NEAR model CVM's deployment log names, at `nearai/cvm-compose-files/<commit>/<file>`. Only a 40-digit commit and a plain relative path are ever put in the URL. The text is kept only when its SHA-256 equals the log's. GitHub serves a fork's commit under the same URL, so the fetch does not prove the commit belongs to that repository. |
+| `raw.githubusercontent.com` | Staging, the approve command, `pins review`. | Each docker-compose file a NEAR model CVM's deployment log names, at `<repository>/<commit>/<file>`, where the repository is the one the measured compose names in `GITHUB_REPO` (today `nearai/cvm-compose-files`); nothing is fetched when it names none on github.com. Only a 40-digit commit and a plain relative path are ever put in the URL. The text is kept only when its SHA-256 equals the log's. GitHub serves a fork's commit under the same URL, so the fetch does not prove the commit belongs to that repository. |
 | `api.github.com` | `pins review` only. | The author, date and message of each of those commits, as unsigned metadata for the reviewer. |
 
 ### When it verifies again
@@ -108,11 +108,11 @@ The plugin verifies the router again in three situations:
 
 The plugin itself calls no other host. It sends no telemetry and no usage data anywhere.
 
-The plugin sets one environment variable in the Hermes process, `CONFIDENTIAL_MODE_TOOL_PROCESS`, to that
-process's id, before the first tool runs, so that every tool subprocess inherits it. Every approval
-prompt refuses in a process whose variable names another process. In the process that set it, the
-prompt refuses while a tool subprocess is still running; to find those, the plugin reads the
-environment of its own descendant processes (docs/LIMITATIONS.md, section 15).
+The plugin sets one environment variable in the Hermes process, `XDG_CONFIDENTIAL_MODE_TOOL_PROCESS`, to
+that process's id, before the first tool runs. Terminal, process_manage and execute_code children inherit
+it. Every approval prompt refuses in a process whose variable names another process. An agent that removes
+the variable, builds the command at run time, or attaches a client through the gateway socket can still
+approve a pin; the ledger records every approval with its surface (docs/LIMITATIONS.md, section 15).
 
 ### What those hosts can see even when everything works
 

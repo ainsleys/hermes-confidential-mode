@@ -251,7 +251,8 @@ def tls_cert() -> tuple[bytes, str]:
 GATEWAY_COMPOSE = '{"manifest_version":2,"name":"dstack-gateway-test","docker_compose_file":"services: {}"}'
 MODEL_COMPOSE = json.dumps({"manifest_version": 2, "name": "dstack-nvidia-test", "docker_compose_file": (
     "services:\n  vllm:\n    image: vllm@sha256:" + "0d" * 32 + "\n  compose-manager:\n"
-    "    image: ${COMPOSE_MANAGER_IMAGE:-" + CM_IMAGE + "}\n    pid: host\n")}, separators=(",", ":"))
+    "    image: ${COMPOSE_MANAGER_IMAGE:-" + CM_IMAGE + "}\n    pid: host\n    environment:\n"
+    "      - GITHUB_REPO=https://github.com/nearai/cvm-compose-files\n")}, separators=(",", ":"))
 
 
 class NearWorld:

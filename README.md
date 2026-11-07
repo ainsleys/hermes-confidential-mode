@@ -562,8 +562,9 @@ session that has no access to the locked profile. For each NEAR entry the bundle
   flags, `GITHUB_REPO`, `CM_MIN_TAG_AGE_HOURS`), with a unified diff;
 - the compose-manager image the log reports beside the measured one;
 - the service map old and new;
-- each deployed docker-compose file named in the map. The command fetches each file from GitHub under
-  the URL of `nearai/cvm-compose-files` at the logged commit, checks its SHA-256 against the log, and
+- each deployed docker-compose file named in the map. The command fetches each file from the GitHub
+  repository that the measured compose names in `GITHUB_REPO` (today `nearai/cvm-compose-files`), at the
+  logged commit, checks its SHA-256 against the log, and
   keeps the file under `pins/composes/` in the plugin's data directory. GitHub serves a fork's commit
   under the parent repository's URL too, so the fetch does not prove that the commit belongs to that
   repository. A file the command cannot fetch is marked "text not fetched", with its link;
@@ -586,9 +587,14 @@ pending entry then changes, so approve after the review, not before. `--reviewed
 recorded on the approved entries, from the terminal or from a chat surface; without them the reviewer
 is recorded as none.
 
-The reviewer must never run a `confidential` command. The plugin refuses an approval that a tool could
-be driving. [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 15, describes those checks and the
-routes they leave open.
+The reviewer must never run a `confidential` command. While the profile is locked, the tool gate
+refuses tool calls whose arguments name the plugin's command line, module or state files. Every approval
+prompt refuses when the process carries the tool marker, which terminal, process_manage and execute_code
+children inherit. An agent that unsets the marker, assembles the command at run time, or attaches
+through the gateway socket can still approve a pin; the ledger records each approval with its surface.
+If you run an agent with terminal access on the same host, treat a pin approved during an agent session
+as the agent's work unless you remember answering. [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 15,
+has the details.
 
 ### Setup
 

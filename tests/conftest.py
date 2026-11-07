@@ -19,7 +19,7 @@ import pytest  # noqa: E402
 
 # The tool hooks set this marker in the process environment (gate_tools.mark_tool_process), and
 # TerminalAsker refuses while it is set. Every test starts and ends without it.
-_TOOL_PROCESS_ENV = "CONFIDENTIAL_MODE_TOOL_PROCESS"
+_TOOL_PROCESS_ENV = "XDG_CONFIDENTIAL_MODE_TOOL_PROCESS"
 
 
 @pytest.fixture(autouse=True)

@@ -31,9 +31,11 @@ BRIEF_RULES = (
 
 # ── inner compose files (the docker-compose files compose-manager deploys after launch) ─────────────
 
-COMPOSE_REPO = "nearai/cvm-compose-files"
-COMPOSE_URL = "https://raw.githubusercontent.com/" + COMPOSE_REPO + "/{commit}/{file}"
-COMMIT_API_URL = "https://api.github.com/repos/" + COMPOSE_REPO + "/commits/{commit}"
+# The repository is the one the measured compose names in GITHUB_REPO (pinned with the compose); nothing
+# is fetched for an entry whose measured compose names none, or names one outside github.com.
+COMPOSE_URL = "https://raw.githubusercontent.com/{repo}/{commit}/{file}"
+COMMIT_API_URL = "https://api.github.com/repos/{repo}/commits/{commit}"
+_GITHUB_REPO_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?")
 COMPOSES_SUBDIR = ("pins", "composes")
 MAX_COMPOSE_BYTES = 4 * 1024 * 1024
 _COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -74,14 +76,32 @@ def composes_dir(data_dir: Path | str) -> Path:
     return Path(data_dir).joinpath(*COMPOSES_SUBDIR)
 
 
-def compose_url(commit: str, file: str) -> Optional[str]:
-    """The raw GitHub URL of ``file`` at ``commit``, or None when either is not a plain commit id or repo
-    path (vendor strings never reach a URL unchecked)."""
+def github_repo(url: Any) -> Optional[str]:
+    """"owner/repo" from a GITHUB_REPO value such as https://github.com/nearai/cvm-compose-files, or None."""
+    m = _GITHUB_REPO_URL.fullmatch(str(url or "").strip())
+    return m.group(1) if m and ".." not in m.group(1) else None
+
+
+def repo_of_app_compose(app_compose: Optional[str]) -> Optional[str]:
+    """The one GITHUB_REPO a measured app_compose names, as owner/repo, or None (none, several, or not
+    github.com)."""
+    f = outer_fields(app_compose)
+    vals = (f or {}).get("GITHUB_REPO") or []
+    repos = {github_repo(v) for v in vals}
+    return repos.pop() if len(repos) == 1 and None not in repos else None
+
+
+def compose_url(commit: str, file: str, repo: Optional[str]) -> Optional[str]:
+    """The raw GitHub URL of ``file`` at ``commit`` in ``repo`` (owner/repo from the measured GITHUB_REPO),
+    or None when any of them is not a plain commit id, repo path or repository (vendor strings never reach
+    a URL unchecked)."""
+    if not repo or github_repo(f"https://github.com/{repo}") != repo:
+        return None
     if not (isinstance(commit, str) and _COMMIT.fullmatch(commit)):
         return None
     if not (isinstance(file, str) and _REPO_PATH.fullmatch(file)) or ".." in file.split("/"):
         return None
-    return COMPOSE_URL.format(commit=commit, file=file)
+    return COMPOSE_URL.format(repo=repo, commit=commit, file=file)
 
 
 def cached_compose(cdir: Optional[Path], sha256: str) -> Optional[str]:
@@ -140,14 +160,16 @@ def _http_get(url: str, *, timeout: float = 20.0, accept: str = "*/*") -> bytes:
 Fetcher = Callable[[str], bytes]
 
 
-def fetch_compose(cdir: Path, commit: str, file: str, sha256: str, *,
+def fetch_compose(cdir: Path, commit: str, file: str, sha256: str, *, repo: Optional[str] = None,
                   fetch: Optional[Fetcher] = None) -> tuple[Optional[str], Optional[str]]:
     """(text, error). The cached copy when present; else GET the raw file, check its SHA-256 against the
     log's file_sha256, and cache it. Never raises."""
     text = cached_compose(cdir, sha256)
     if text is not None:
         return text, None
-    url = compose_url(commit, file)
+    if not repo:
+        return None, "the measured compose names no github.com repository in GITHUB_REPO"
+    url = compose_url(commit, file, repo)
     if url is None or not (isinstance(sha256, str) and _SHA256.fullmatch(sha256)):
         return None, "the log names no plain commit, path or SHA-256 for this file"
     try:
@@ -282,10 +304,11 @@ NEAR_QUESTIONS = (
     ("Q1", "For each pinned component whose old and new values differ, what changed? Name the component and "
            "say whether the change is explained by the diffs in this bundle."),
     ("Q2", "Publisher and date: who authored each inner compose commit the per-service map names, and when "
-           "(unsigned GitHub metadata)? Each file was fetched from GitHub under the repository URL GITHUB_REPO names, "
-           "at the logged commit, and its SHA-256 matches the log. That does not establish that the commit belongs to "
-           "that repository: GitHub serves a commit of any fork under the parent repository's URL. Say whether "
-           "anything here suggests a commit outside the repository's own history."),
+           "(unsigned GitHub metadata)? Each file was fetched from raw.githubusercontent.com in the repository that "
+           "the measured compose names in GITHUB_REPO (shown per entry), at the logged commit, and its SHA-256 "
+           "matches the log. That does not establish that the commit belongs to that repository: GitHub serves a "
+           "commit of any fork under the parent repository's URL. Say whether anything here suggests a commit "
+           "outside the repository's own history."),
     ("Q3", "Keys: did the verified signing address, the app_id or the KMS key change?"),
     ("Q4", "Socket holders: which services hold dstack.sock or docker.sock, mount a run directory, run privileged, "
            "add capabilities, map devices, share the host's network, pid or ipc namespace, or run as root (explicitly "
@@ -377,7 +400,8 @@ def _field_changes(old: Optional[dict], new: Optional[dict]) -> list:
 
 # ── commit metadata ────────────────────────────────────────────────────────────────────────────────
 
-def commit_meta(cdir: Path, commit: str, *, fetch: Optional[Fetcher] = None, allow_fetch: bool = True) -> dict:
+def commit_meta(cdir: Path, commit: str, *, repo: Optional[str] = None, fetch: Optional[Fetcher] = None,
+                allow_fetch: bool = True) -> dict:
     """{author, date, committer, message (first line), url} from GitHub's commit API, cached beside the
     compose texts; {"status": "not fetched", ...} when unavailable. Unsigned metadata: a hint, not proof."""
     if not (isinstance(commit, str) and _COMMIT.fullmatch(commit)):
@@ -388,10 +412,10 @@ def commit_meta(cdir: Path, commit: str, *, fetch: Optional[Fetcher] = None, all
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         data = None
-    if data is None and allow_fetch:
+    if data is None and allow_fetch and repo:
         try:
             raw = (fetch or (lambda u: _http_get(u, accept="application/vnd.github+json")))(
-                COMMIT_API_URL.format(commit=commit))
+                COMMIT_API_URL.format(repo=repo, commit=commit))
             data = json.loads(raw.decode("utf-8"))
             if not isinstance(data, dict) or data.get("sha") != commit:
                 raise ValueError("the API answered for another commit")
@@ -432,16 +456,17 @@ def _services_diff(old: Optional[Mapping], new: Optional[Mapping]) -> dict:
 
 
 def _inner_files(services: Optional[Mapping], old_services: Optional[Mapping], cdir: Path, *,
-                 fetch: Optional[Fetcher], allow_fetch: bool) -> list:
+                 fetch: Optional[Fetcher], allow_fetch: bool, repo: Optional[str] = None,
+                 old_repo: Optional[str] = None) -> list:
     files: dict[str, dict] = {}
     for v in (services or {}).values():
         if not isinstance(v, Mapping) or v.get("file_sha256") in files:
             continue
         sha = v.get("file_sha256")
         item = {"file": v.get("file"), "commit": v.get("commit"), "file_sha256": sha,
-                "url": compose_url(v.get("commit"), v.get("file"))}
+                "repository": repo, "url": compose_url(v.get("commit"), v.get("file"), repo)}
         if allow_fetch:
-            text, err = fetch_compose(cdir, v.get("commit"), v.get("file"), sha, fetch=fetch)
+            text, err = fetch_compose(cdir, v.get("commit"), v.get("file"), sha, repo=repo, fetch=fetch)
         else:
             text = cached_compose(cdir, sha)
             err = None if text is not None else "fetching is off and no cached copy exists"
@@ -451,7 +476,7 @@ def _inner_files(services: Optional[Mapping], old_services: Optional[Mapping], c
             item["lines"] = len(text.splitlines())
         else:
             item["reason"] = err
-        item["commit_meta"] = commit_meta(cdir, v.get("commit"), fetch=fetch, allow_fetch=allow_fetch)
+        item["commit_meta"] = commit_meta(cdir, v.get("commit"), repo=repo, fetch=fetch, allow_fetch=allow_fetch)
         # the same file at the approved entry's commit, when that differs: the diff a reviewer reads
         olds = sorted({(o.get("file_sha256"), o.get("commit")) for o in (old_services or {}).values()
                        if isinstance(o, Mapping) and o.get("file") == v.get("file") and o.get("file_sha256") != sha})
@@ -459,7 +484,7 @@ def _inner_files(services: Optional[Mapping], old_services: Optional[Mapping], c
         for osha, ocommit in olds:
             otext = cached_compose(cdir, osha) if osha else None
             if otext is None and allow_fetch and osha:
-                otext, _ = fetch_compose(cdir, ocommit, v.get("file"), osha, fetch=fetch)
+                otext, _ = fetch_compose(cdir, ocommit, v.get("file"), osha, repo=old_repo or repo, fetch=fetch)
             diffs.append({"old_file_sha256": osha, "old_commit": ocommit,
                           "diff": _diff(otext, text, f"{v.get('file')}@{str(ocommit)[:12]}",
                                         f"{v.get('file')}@{str(v.get('commit'))[:12]}")
@@ -554,7 +579,10 @@ def entry_review(entry: Any, approved: list, *, ledger: Any, cdir: Path, fetch: 
                                     "note": "the running image is what the operator's log reports, not a measurement"}
     services, old_services = obs.get("services"), old_obs.get("services")
     out["services"] = _services_diff(old_services, services)
-    out["inner_composes"] = _inner_files(services, old_services, cdir, fetch=fetch, allow_fetch=allow_fetch)
+    out["repository"] = {"new": obs.get("github_repo"), "old": old_obs.get("github_repo"),
+                         "note": "GITHUB_REPO as the measured compose names it; files are fetched from there"}
+    out["inner_composes"] = _inner_files(services, old_services, cdir, fetch=fetch, allow_fetch=allow_fetch,
+                                         repo=obs.get("github_repo"), old_repo=old_obs.get("github_repo"))
     tags, missing = map_tags(services, cdir)
     old_tags, _ = map_tags(old_services, cdir) if old_services else (None, [])
     out["tags"] = tags
@@ -589,12 +617,32 @@ def build_bundle(store: Any, ledger: Any, *, fetch: Optional[Fetcher] = None, al
     first; then the store refreshes its pending entries, so the services join the pinned components when
     every tag can be shown, and the bundle describes the refreshed batches."""
     cdir = Path(store.composes_dir)
+    from .pins import consent_key
+    before = {p.key: consent_key(p) for p in store.pending_all()}
     for pend in store.pending_all():
         for ent in getattr(pend, "entries", ()) or ():
-            for v in ((getattr(ent, "observed", None) or {}).get("services") or {}).values():
+            obs = getattr(ent, "observed", None) or {}
+            for v in (obs.get("services") or {}).values():
                 if allow_fetch and isinstance(v, Mapping):
-                    fetch_compose(cdir, v.get("commit"), v.get("file"), v.get("file_sha256"), fetch=fetch)
+                    fetch_compose(cdir, v.get("commit"), v.get("file"), v.get("file_sha256"),
+                                  repo=obs.get("github_repo"), fetch=fetch)
     batches = store.refresh_pending() if callable(getattr(store, "refresh_pending", None)) else store.pending_all()
+    for b in batches:
+        if b.key in before and consent_key(b) != before[b.key] and callable(getattr(ledger, "append", None)):
+            try:   # the refreshed batch is what the next approval answers: record it as staged
+                ledger.append({"ts": __import__("time").time(), "session_id": "", "kind": "pin_staged",
+                               "purpose": "verify", "provider": b.vendor, "host": b.enclave_host, "model": "",
+                               "bytes": None, "tier": None, "verdict": None, "decision": None,
+                               "surface": "cli",
+                               "detail": {"vendor": b.vendor, "router_repo": b.router_repo,
+                                          "code_fingerprint": b.code_fingerprint,
+                                          "enclave_fingerprint": b.enclave_fingerprint,
+                                          "entries": [{"cvm_role": e.cvm_role, "code_fingerprint": e.code_fingerprint,
+                                                       "enclave_fingerprint": e.enclave_fingerprint,
+                                                       "pinned": list(e.pinned)} for e in b.entries],
+                                          "reason": "pins review fetched the inner compose files"}})
+            except Exception:  # noqa: BLE001
+                pass
     out = []
     for pend in batches:
         approved, unseen = store.approved_set(pend.vendor, pend.router_repo)

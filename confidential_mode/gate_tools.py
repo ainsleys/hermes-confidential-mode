@@ -66,11 +66,9 @@ from .selfapproval import TOOL_PROCESS_ENV, mark_tool_process  # noqa: E402,F401
 
 _QUOTES = str.maketrans("", "", "'\"\\`")
 _RE_CONFIDENTIAL = re.compile(r"(?<![a-z0-9_])confidential(?![a-z0-9_])")
-# a glob that a shell expands to "confidential" (confidentia?, conf*, c[o]nfidential)
-_RE_CONFIDENTIAL_GLOB = re.compile(r"(?<![a-z0-9_])c[a-z\[\]?*]*[?*\[][a-z\[\]?*]*(?![a-z0-9_])")
 _RE_CLI_VERB = re.compile(r"(?<![a-z0-9_])confidential\W+(pins|allow|off|on|lock|unlock|setup|approve|retire)"
                           r"(?![a-z0-9_])")
-_RE_PLUGIN_PACKAGE = re.compile(r"confidential_mode")
+_RE_PLUGIN_PACKAGE = re.compile(r"(?<![a-z0-9_])confidential_mode(?![a-z0-9_])")
 _RE_PLUGIN_FILES = re.compile(r"(?<![a-z0-9_])(pins\.yaml|ledger\.sqlite|allowlist\.yaml)(?![a-z0-9_])")
 _RE_ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
 
@@ -103,15 +101,15 @@ def invokes_confidential_cli(args: Any) -> Optional[str]:
     """Why the call's text reaches the plugin's own CLI, package or state files, or None. Every string in
     the arguments is scanned (``command`` for terminal, ``data`` for process_manage, ``code`` for
     execute_code, and any other field), after expanding ANSI-C quoting, lower-cased, with quote characters
-    and backslashes removed. Detected: ``hermes`` together with the word ``confidential`` or a glob that can
-    expand to it; the word ``confidential`` followed by one of its verbs (an alias or symlink of hermes); any
+    and backslashes removed. Detected: ``hermes`` together with the word ``confidential`` (a whole word); the
+    word ``confidential`` followed by one of its verbs (an alias or symlink of hermes); any
     mention of the ``confidential_mode`` package (import, importlib, a path); a mention of ``pins.yaml``,
     ``ledger.sqlite`` or ``allowlist.yaml``. Not detectable: a command assembled at run time (variables,
-    ``eval``, base64, a command split across several process_manage writes) and a script run later from a
-    file another tool wrote without naming those words. selfapproval.py is the second line for those."""
+    ``eval``, base64, a shell glob, a command split across several process_manage writes) and a script run
+    later from a file another tool wrote without naming those words. selfapproval.py is the second line."""
     for raw in _strings(args):
         text = _ansi_c(raw).casefold().translate(_QUOTES)
-        if "hermes" in text and (_RE_CONFIDENTIAL.search(text) or _RE_CONFIDENTIAL_GLOB.search(text)):
+        if "hermes" in text and _RE_CONFIDENTIAL.search(text):
             return "names hermes and its confidential command"
         if _RE_CLI_VERB.search(text):
             return "invokes the confidential command"

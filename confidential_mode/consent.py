@@ -52,8 +52,8 @@ class SelfApprovalRefused(RuntimeError):
     """Raised by an asker that will not ask because the agent may be the one answering (Amendment 7)."""
 
 
-SELF_APPROVAL_REPLY = ("Refused: the agent could answer this prompt itself. Approve from a terminal you opened "
-                       "outside Hermes, with no process started by a Hermes tool still running")
+SELF_APPROVAL_REPLY = ("Refused: a Hermes tool started this process, so the agent could answer this prompt "
+                       "itself. Approve from a terminal you opened outside Hermes")
 
 
 def _self_approval(error: Optional[str]) -> bool:
