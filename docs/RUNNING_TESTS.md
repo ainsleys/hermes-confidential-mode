@@ -32,6 +32,19 @@ it has the same versions, and then add the SDK to it:
 `UV_PROJECT_ENVIRONMENT` tells uv to create the environment in `<dir>/.venv` instead of in Hermes'
 own `.venv`. The second command installs the SDK into that separate environment only.
 
+## PyNaCl, for NEAR request encryption
+
+The plugin encrypts NEAR requests with PyNaCl. PyNaCl is a Python binding to the libsodium library.
+Hermes' lock file pins PyNaCl to version 1.6 but does not install it. Installing the plugin does not
+install it either, so install it by hand. Install it into the separate test environment described
+above:
+
+    uv pip install --python <dir>/.venv/bin/python pynacl==1.6.*
+
+The suite was last run with PyNaCl 1.6.2. Install the same package into the environment that runs
+Hermes before you lock a profile on `attested-near`. Without it, the lock is refused with a message
+that names the package. The plugin never sends a NEAR request unencrypted instead.
+
 ## Live NEAR AI Cloud tests
 
 `tests/live/test_near_live.py` talks to `cloud-api.near.ai` and spends tokens. It is skipped unless

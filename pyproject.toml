@@ -18,6 +18,9 @@ dependencies = [
     "urllib3>=2.8",
     "pyopenssl>=25",
     "sigstore>=4.5,<4.6",
+    # NEAR request encryption (verify/near_e2ee.py): Ed25519 to X25519 and XChaCha20-Poly1305 (libsodium).
+    # Hermes' uv.lock already pins pynacl >=1.6,<1.7 as an override; installed by hand (docs/RUNNING_TESTS.md).
+    "pynacl==1.6.*",
 ]
 
 [project.optional-dependencies]
