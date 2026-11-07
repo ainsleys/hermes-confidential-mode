@@ -7,6 +7,10 @@ Run from the repository before packaging / catalog submission:
     python3 scripts/stamp_version.py --reset  # back to "unpackaged"
 
 A tree with uncommitted changes (other than _version.py itself) is stamped "<sha>-dirty".
+
+The stamp is for a packaged copy, which has no .git. A git checkout (every `hermes plugins install`)
+reports its own HEAD instead and ignores the stamp, so do not commit a stamped _version.py: reset it
+after packaging.
 """
 from __future__ import annotations
 

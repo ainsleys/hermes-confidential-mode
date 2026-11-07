@@ -1,18 +1,24 @@
-"""Plugin build identity, printed in receipts beside the verifier SDK version.
+"""Plugin build identity, printed by `hermes confidential status` and in receipts.
 
-PLUGIN_COMMIT is filled in by packaging (scripts/stamp_version.py writes the git commit the release was
-built from). A source checkout that was not stamped reports the commit its ``.git`` directory names,
-marked "unstamped checkout", because local edits are not detected. Without a readable ``.git`` it
-reports "unpackaged". The commit is read from files only: no git command, no subprocess.
+A git checkout reports the commit its ``.git`` names (HEAD), marked "git checkout", because local edits are
+not detected. `hermes plugins install` clones the repository, so an installed plugin is a git checkout and
+reports the commit that was installed, also after `hermes plugins update`. The stamp below is written by
+packaging (scripts/stamp_version.py) and is used only when there is no readable ``.git``, as in a packaged
+copy. With neither, the commit reads "unpackaged". The commit is read from files only: no git command, no
+subprocess.
+
+Root cause of the stale commit (first-time user walkthrough, 2026-11-07): the stamp was committed to the
+repository, and the stamp took precedence over ``.git``, so every later checkout reported the stamped commit.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 PLUGIN_VERSION = "0.1.0"
-PLUGIN_COMMIT = "0babb6b"
+PLUGIN_COMMIT = "unpackaged"
 
-UNSTAMPED_SUFFIX = " (unstamped checkout)"
+CHECKOUT_SUFFIX = " (git checkout)"
+UNSTAMPED_SUFFIX = CHECKOUT_SUFFIX   # the older name
 
 
 def checkout_commit(root: Path | None = None) -> str | None:
@@ -50,7 +56,13 @@ def checkout_commit(root: Path | None = None) -> str | None:
     return None
 
 
-if PLUGIN_COMMIT == "unpackaged":
-    _sha = checkout_commit()
-    if _sha:
-        PLUGIN_COMMIT = _sha[:12] + UNSTAMPED_SUFFIX
+def resolve_commit(stamp: str, root: Path | None = None) -> str:
+    """The commit to report: the checkout's HEAD when ``.git`` is readable, else the packaging stamp, else
+    "unpackaged". Never raises."""
+    sha = checkout_commit(root)
+    if sha:
+        return sha[:12] + CHECKOUT_SUFFIX
+    return stamp if stamp and stamp != "unpackaged" else "unpackaged"
+
+
+PLUGIN_COMMIT = resolve_commit(PLUGIN_COMMIT)

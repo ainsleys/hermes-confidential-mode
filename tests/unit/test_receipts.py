@@ -696,6 +696,24 @@ def test_unstamped_checkout_reports_its_git_commit_without_running_git(tmp_path)
     assert checkout_commit(detached) is None
 
 
+def test_a_checkout_reports_its_head_even_when_a_stamp_is_present(tmp_path):
+    """ux-pass-1 item 7: a stamp committed to the repository made every later checkout report the stamped
+    commit. The checkout's HEAD wins; the stamp is used only without a readable .git."""
+    from confidential_mode import _version
+    root = tmp_path / "repo"
+    (root / ".git" / "refs" / "heads").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (root / ".git" / "refs" / "heads" / "main").write_text("12" * 20 + "\n")
+    assert _version.resolve_commit("0babb6b", root) == "121212121212 (git checkout)"
+    assert _version.resolve_commit("0babb6b", tmp_path / "packaged") == "0babb6b"
+    assert _version.resolve_commit("unpackaged", tmp_path / "packaged") == "unpackaged"
+    # This test runs from a git checkout of the plugin, whose HEAD is what status and receipts report.
+    here = _version.checkout_commit()
+    if here:
+        assert _version.PLUGIN_COMMIT == here[:12] + " (git checkout)"
+    assert 'PLUGIN_COMMIT = "unpackaged"' in (Path(_version.__file__).read_text())
+
+
 def test_receipt_reads_only_the_sessions_locked_period(ledger):
     """Review finding 22: a receipt reads the rows from the unlock before the session to the lock or unlock
     after it, not the whole ledger, and the result is the same as the full read."""
