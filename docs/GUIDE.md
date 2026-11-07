@@ -150,7 +150,9 @@ hermes confidential status | grep '^Plugin:'
    and anyone who can write the installed copy can change what `.git` says.
 5. **Set the vendor's API key.** The attested tier needs `TINFOIL_API_KEY` for Tinfoil or
    `NEAR_AI_API_KEY` for NEAR AI Cloud, exported in the shell that starts Hermes, written to
-   `<hermes home>/.env`, or given through `model.api_key` or `hermes auth`. Observe mode and the
+   `<hermes home>/.env`, or given through `model.api_key`. The plugin reads keys only through Hermes'
+   secret scope (`agent.secret_scope.get_secret`), so a key added only with `hermes auth` reads as not
+   set. Observe mode and the
    `on-host-only` tier need no key. Verification and pin approval work without a key, because the
    attestation endpoints are public, so the lock and `check` test the key of each vendor a route uses
    and refuse while one is missing. The test runs when you lock and in `check`, not on every turn. The lock and `check` show "set", "not set" or "not readable in this scope" (a

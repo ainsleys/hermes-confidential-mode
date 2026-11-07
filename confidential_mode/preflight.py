@@ -305,11 +305,12 @@ def _route_api_keys(config: Mapping, profile: str) -> bool:
 
 
 def key_state(profile: str, env_var: str, config: Mapping | None = None) -> str:
-    """Whether the attested profile has an API key from any source Hermes hands the provider: Hermes' secret
-    scope (``agent.secret_scope.get_secret``, as provider.api_key_for reads it), a route's ``api_key`` in
-    config, or Hermes' auth store for the profile (``hermes auth``; read-only, :func:`auth_store_has`). Returns
+    """Whether the attested profile has an API key the plugin may see: Hermes' secret scope
+    (``agent.secret_scope.get_secret``, as provider.api_key_for reads it), or a route's ``api_key`` in config
+    (presence only). Catalog rule 11: the plugin never reads ``.env``, ``auth.json`` or any other credential
+    store itself, so a key held only in Hermes' credential pool (``hermes auth``) reads as not set. Returns
     KEY_SET, KEY_NOT_SET, or KEY_UNSCOPED when the secret scope refuses the read in this process (a
-    multiplexed gateway with no scope) and no other source has a key. Never the value or its length."""
+    multiplexed gateway with no scope) and the config has no key. Never the value or its length."""
     unscoped = False
     try:
         from agent.secret_scope import get_secret
@@ -322,43 +323,20 @@ def key_state(profile: str, env_var: str, config: Mapping | None = None) -> str:
     except Exception:  # noqa: BLE001
         pass
     try:
-        if _route_api_keys(config if isinstance(config, Mapping) else {}, profile):
+        if profile and _route_api_keys(config if isinstance(config, Mapping) else {}, profile):
             return KEY_SET
     except Exception:  # noqa: BLE001
         pass
-    if auth_store_has(profile):
-        return KEY_SET
     return KEY_UNSCOPED if unscoped else KEY_NOT_SET
-
-
-def auth_store_has(provider: str, path: Any = None) -> bool:
-    """Whether Hermes' auth store (``<hermes home>/auth.json``: the credential pool that `hermes auth` fills,
-    and its per-provider auth entries) holds a credential for ``provider``. Read-only: the file is opened for
-    reading and parsed here, never through Hermes' loaders, which can rewrite or copy the store. Only presence
-    is read; no value leaves this function. Any error counts as absent."""
-    try:
-        if path is None:
-            from hermes_constants import get_hermes_home
-            path = get_hermes_home() / "auth.json"
-        with open(path, encoding="utf-8-sig") as fh:
-            data = json.load(fh)
-    except Exception:  # noqa: BLE001
-        return False
-    if not isinstance(data, Mapping):
-        return False
-    pool = data.get("credential_pool")
-    entries = pool.get(provider) if isinstance(pool, Mapping) else None
-    if isinstance(entries, list) and any(isinstance(e, Mapping) and e for e in entries):
-        return True
-    providers = data.get("providers")
-    entry = providers.get(provider) if isinstance(providers, Mapping) else None
-    return isinstance(entry, Mapping) and bool(entry)
 
 
 #: The providers Hermes' built-in discovery chain tries after the main route (agent/auxiliary_client.py
 #: _get_provider_chain: OpenRouter, then Nous), with the variable each reads. OpenRouter is enabled by an
 #: "openrouter" credential-pool entry or OPENROUTER_API_KEY (_try_openrouter); Nous by a "nous" pool entry or
-#: Nous auth from `hermes auth` (_try_nous). At 84a0301 the chain runs for a text task only when the main
+#: Nous auth from `hermes auth` (_try_nous). The plugin checks only the two variables, through the secret
+#: scope (catalog rule 11): Hermes has no public "is signed in" call that neither refreshes a token nor reads
+#: auth.json (hermes_cli.auth.get_nous_auth_status resolves runtime credentials), so a pool entry or a Nous
+#: sign-in is not seen, and AUTO_SIGN_IN_NOTE says so. At 84a0301 the chain runs for a text task only when the main
 #: provider is unset or auto (_discovery_chain_allowed, auxiliary_client.py:4529-4541, called at :4591 and
 #: :4147), which the preflight refuses, and for vision on auto (_vision_auto_route, :5541-5567), also refused. So an
 #: `auto` side call stays in-tier under a lock; its row carries AUTO_NOTE while either credential is readable,
@@ -368,6 +346,8 @@ AUTO_CHAIN_KEYS = (("openrouter", "OPENROUTER_API_KEY"), ("nous", "NOUS_API_KEY"
 
 AUTO_NOTE = ("auto resolves to the main provider; Hermes' fall-through to OpenRouter or Nous runs only when the "
              "main provider is unset or auto, which the lock refuses")
+AUTO_SIGN_IN_NOTE = ("A credential held only in Hermes' credential pool, or a Nous sign-in through hermes auth, is not "
+                     "checked: the plugin reads keys only through Hermes' secret scope.")
 
 
 def auto_chain_readable(key_state: Callable[[str, str], str]) -> list[str]:
@@ -389,11 +369,11 @@ def auto_summary(report: "PreflightReport", readable: list[str]) -> str:
             and i.value_redacted.split(" ", 1)[0] == "auto")
     if not n or not readable:
         return ""
-    names = " and ".join({"openrouter": "OpenRouter (OPENROUTER_API_KEY or hermes auth)",
-                          "nous": "Nous (hermes auth)"}[r] for r in readable)
+    names = " and ".join({"openrouter": "OpenRouter (OPENROUTER_API_KEY)",
+                          "nous": "Nous (NOUS_API_KEY)"}[r] for r in readable)
     return (f"Side calls on auto: {n}. Each resolves to the main provider. A {names} credential is readable; "
             "Hermes would use it only for an unset or auto main provider, which the lock refuses. Pinning each "
-            "auxiliary.<task>.provider removes the dependence on that rule.")
+            "auxiliary.<task>.provider removes the dependence on that rule. " + AUTO_SIGN_IN_NOTE)
 
 
 def api_key_present(env_var: str, profile: str = "", config: Mapping | None = None) -> bool:
@@ -412,7 +392,7 @@ def pin_is_the_cause(reason: Any) -> bool:
 
 def key_fix(env_var: str) -> str:
     return (f"set {env_var} (export the variable or add the variable to Hermes' env file), or give Hermes the "
-            "key through model.api_key or hermes auth")
+            "key through model.api_key; a key added only with hermes auth is not visible to the plugin")
 
 
 def _attested_providers_in_use(config: Mapping, tasks: Sequence[str], plugins: Mapping[str, dict]) -> list[str]:

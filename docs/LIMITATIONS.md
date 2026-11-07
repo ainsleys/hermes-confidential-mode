@@ -105,9 +105,11 @@ a text side call only when the main provider is unset or `auto` (`_discovery_cha
 `:4529-4541`, called at `:4591` and `:4147`), and for vision only on `auto` (`_vision_auto_route`,
 `:5541-5567`). The preflight refuses an unset or `auto` main provider and an `auto` vision route, so under a
 lock the fallback chain is refused by the main-provider rule. A side call on `auto` therefore stays
-in-tier. While an OpenRouter or Nous credential is readable, its preflight row carries a note saying so,
-and `check` prints one summary line with the number of side calls on `auto` and the credential that
-would matter. `hermes confidential setup` pins every side call anyway.
+in-tier. While `OPENROUTER_API_KEY` or `NOUS_API_KEY` is readable through Hermes' secret scope, its
+preflight row carries a note saying so, and `check` prints one summary line with the number of side
+calls on `auto` and the credential that would matter. A credential held only in Hermes' credential pool,
+or a Nous sign-in through `hermes auth`, is not checked: the plugin reads no credential store, and
+Hermes has no public call that reports a sign-in without refreshing it. `hermes confidential setup` pins every side call anyway.
 
 An auxiliary call can still go off-tier in three situations. The first is between turns after a
 `/model` switch on the CLI. The second is in the middle of a turn. The third is when Hermes skips the

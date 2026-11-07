@@ -223,5 +223,5 @@ def test_tinfoil_setup_pins_every_side_call_and_check_summarises_side_calls_on_a
     # The on-host test config leaves side calls on auto: with an OpenRouter key readable they stay in-tier,
     # `check` names them in one summary line, and the lock succeeds.
     text, ok = _sub(plugin, "commands").check_result(plugin.rt, "on-host-only")
-    assert ok and "Side calls on auto: " in text and "OpenRouter (OPENROUTER_API_KEY or hermes auth)" in text
+    assert ok and "Side calls on auto: " in text and "OpenRouter (OPENROUTER_API_KEY)" in text
     assert plugin.slash("on on-host-only").startswith("Locked to this machine")

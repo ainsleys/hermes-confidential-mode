@@ -318,7 +318,7 @@ def test_attested_tier_needs_the_vendor_api_key():
     i = item(r, "TINFOIL_API_KEY")
     assert not r.ok and i.verdict == "off_tier" and i.value_redacted == "not set"
     assert i.fix == ("set TINFOIL_API_KEY (export the variable or add the variable to Hermes' env file), or give "
-                     "Hermes the key through model.api_key or hermes auth")
+                     "Hermes the key through model.api_key; a key added only with hermes auth is not visible to the plugin")
     # A NEAR route anywhere (here one auxiliary task) adds the NEAR row.
     both = AttestedPredicate({"attested-tinfoil", "attested-near"}, lambda _p: Verdict(True, "fresh", ""))
     cfg = attested_config(auxiliary={"vision": {"provider": "attested-tinfoil"},
@@ -330,8 +330,9 @@ def test_attested_tier_needs_the_vendor_api_key():
 
 
 def test_key_state_reads_every_source_and_never_shows_the_value(monkeypatch, tmp_path):
-    """Amendment 11: the secret scope, a route's api_key in config, and Hermes' auth store (read-only) all
-    count; an unscoped read (a multiplexed gateway with no scope) is "not readable in this scope"."""
+    """Amendment 11 and 13: the secret scope and a route's api_key in config count; Hermes' auth store is never
+    opened (catalog rule 11); an unscoped read (a multiplexed gateway with no scope) is "not readable in this
+    scope"."""
     import json as _json
     import os as _os
     from confidential_mode import preflight
@@ -353,17 +354,24 @@ def test_key_state_reads_every_source_and_never_shows_the_value(monkeypatch, tmp
     keyed = attested_config(model={"provider": "attested-tinfoil", "default": "llama", "api_key": "sk-cfg"})
     assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", keyed) == "set"
     assert preflight.key_state("attested-near", "NEAR_AI_API_KEY", keyed) == "not set"   # another profile's
-    # Hermes' auth store (hermes auth), read without any write: the file and its mtime are unchanged.
+    # Hermes' auth store is never opened: a pool entry alone reads as not set, and no open() names auth.json.
     auth = tmp_path / "auth.json"
     auth.write_text(_json.dumps({"credential_pool": {"attested-tinfoil": [{"id": "x", "access_token": "t"}]},
-                                 "providers": {}}))
-    before = (auth.read_bytes(), _os.stat(auth).st_mtime_ns)
-    assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "set"
-    assert (auth.read_bytes(), _os.stat(auth).st_mtime_ns) == before
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["auth.json"]
-    auth.write_text("{not json")
+                                 "providers": {"nous": {"access_token": "t"}}}))
+    import builtins
+    real_open, opened = builtins.open, []
+
+    def spy_open(file, *a, **k):
+        opened.append(str(file))
+        return real_open(file, *a, **k)
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.delenv("TINFOIL_API_KEY", raising=False)
+    monkeypatch.delenv("NOUS_API_KEY", raising=False)
     assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "not set"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["auth.json"]      # no .corrupt copy either
+    assert preflight.key_state("nous", "NOUS_API_KEY", cfg) == "not set"
+    monkeypatch.setattr(builtins, "open", real_open)
+    assert not [f for f in opened if f.endswith("auth.json")]
+    assert not hasattr(preflight, "auth_store_has")
 
     def unscoped(name, default=None):
         raise scope.UnscopedSecretError(name, "no scope")
@@ -812,7 +820,8 @@ def test_auto_side_calls_stay_in_tier_with_a_note_while_an_openrouter_or_nous_cr
                                    "runs only when the main provider is unset or auto, which the lock refuses")
     line = preflight.auto_summary(r, ["openrouter"])
     n = sum(1 for x in r.items if x.key.startswith("auxiliary.") and x.value_redacted.startswith("auto"))
-    assert line.startswith(f"Side calls on auto: {n}. ") and "OpenRouter (OPENROUTER_API_KEY or hermes auth)" in line
+    assert line.startswith(f"Side calls on auto: {n}. ") and "OpenRouter (OPENROUTER_API_KEY)" in line
+    assert line.endswith(preflight.AUTO_SIGN_IN_NOTE)
     r = run(base_config(), keys=())
     i = item(r, "auxiliary.compression.provider")
     assert r.ok and i.value_redacted == "auto -> ollama (no OpenRouter or Nous credential readable)"

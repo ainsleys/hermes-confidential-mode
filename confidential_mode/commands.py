@@ -805,7 +805,7 @@ def cli_setup_near(rt: Any, args: Any, out=None) -> int:
     model = getattr(args, "model", None) or DEFAULT_NEAR_MODEL
     vision = getattr(args, "vision_model", None) or DEFAULT_NEAR_VISION_MODEL
     key_set = bool(_provider_module(rt).api_key_for(_locking.NEAR_API_KEY_ENV))
-    out.write(f"{_locking.NEAR_API_KEY_ENV}: {'set' if key_set else 'NOT set (hermes auth / .env)'}\n")
+    out.write(f"{_locking.NEAR_API_KEY_ENV}: {'set' if key_set else "NOT set (export it or add it to Hermes' env file)"}\n")
     if not getattr(args, "no_verify", False):
         adapter = getattr(rt, "near_adapter", None)
         if adapter is None:
@@ -842,7 +842,7 @@ def cli_setup(rt: Any, args: Any, out=None) -> int:
     if getattr(args, "vendor", None) == "near":
         return cli_setup_near(rt, args, out)
     model = getattr(args, "model", None) or _locking._cfg(rt.load_config(), "confidential", "model") or "<model>"
-    out.write(f"TINFOIL_API_KEY: {'set' if _provider_module(rt).tinfoil_api_key() else 'NOT set (hermes auth / .env)'}\n")
+    out.write(f"TINFOIL_API_KEY: {'set' if _provider_module(rt).tinfoil_api_key() else "NOT set (export it or add it to Hermes' env file)"}\n")
     if not getattr(args, "no_verify", False):
         if rt.adapter is None:
             out.write("The attested provider is not registered; see `hermes confidential status`.\n")
