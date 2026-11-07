@@ -49,7 +49,7 @@ def test_verify_builds_complete_evidence_and_the_pin_identity(world, tmp_path):
     assert ev["schema"] == near.EVIDENCE_SCHEMA and ev["capture_complete"] is True and ev["capture_missing"] == []
     assert r.vendor == "near" and r.router_repo == f"{HOST}#{MODEL}" and r.release_tag is None
     assert r.enclave_host == HOST and r.verified_at_host_clock == NOW
-    assert all(v is True for k, v in ev["checks"].items() if k != "ita_model_tokens"), ev["checks"]
+    assert all(v is True for k, v in ev["checks"].items() if k not in near.INFORMATIONAL_CHECKS), ev["checks"]
     assert ev["claims"]["gateway_signer"] == pub_hex(world.gateway_key)
     assert ev["claims"]["model_signers"] == {MODEL: [pub_hex(world.model_key)]}
     assert ev["claims"]["tcb_status"] == "UpToDate" and ev["policy"]["require_provider_tee"] is True
@@ -275,7 +275,7 @@ def test_replay_recomputes_the_same_result_offline_and_detects_tampering(world, 
     assert res.not_established == replay_near.NOT_ESTABLISHED
     bad = json.loads(json.dumps(ev))
     h = bad["gateway"]["compose_hash"]
-    bad["app_composes"][h] = bad["app_composes"][h] + " "
+    bad["blobs"][h] = bad["blobs"][h] + " "      # no longer hashes to its id: dropped, so the check fails
     assert not replay_near.replay(bad, quote_verifier=fake_quote_verifier, ita_roots=world.ita.roots).ok
     bad = json.loads(json.dumps(ev))
     bad["claims"]["code_fingerprint"] = "0" * 64
@@ -299,7 +299,7 @@ def test_rtmr3_replay_and_report_data_layouts():
     assert nc.expected_report_data(ident, nonce, tls)[:32] == hashlib.sha256(bytes.fromhex(ident + tls)).digest()
     assert nc.mr_config_id_for("x") == b"\x01" + hashlib.sha256(b"x").digest() + bytes(15)
     from ..near_world import events_for
-    ev = events_for("a")
+    ev = events_for("aa" * 20)
     ev[1]["digest"] = "00" * 48
     with pytest.raises(nc.CheckError, match="digest mismatch"):
         nc.replay_rtmr3(ev)

@@ -9,8 +9,11 @@ What one ``verify()`` does (all over plain HTTPS to the configured host, plus on
   4. GET /v1/attestation/ita-token?nonce=N&signing_algo=ed25519[&model=M] (Intel Trust Authority JWTs);
   5. GET the Intel JWKS (one of near_checks.ITA_JWKS_URLS only).
 Attestation requests carry no API key (NEAR documents them as public). The bytes are kept as evidence
-(schema ``confidential-mode/near-evidence/v1``) and appraised by ``appraise()``, the same function the
-offline replay runs (verify/replay_near.py). Any failed required check raises VerifyError.
+(schema ``confidential-mode/near-evidence/v2``; v1 still appraises under v1 rules) and appraised by
+``appraise()``, the same function the offline replay runs (verify/replay_near.py). Any failed required
+check raises VerifyError. Large texts (each app_compose, each compose_manager_attestation) sit in the
+evidence's ``blobs`` by SHA-256; the ledger moves them to ``<data_dir>/evidence/blobs/`` and keeps
+``blob_refs``, and a JSON receipt embeds them again (ledger.py, receipts.py).
 
 What the checks establish, and with which key:
   * gateway: its TDX quote verifies to Intel's SGX root; report data binds the gateway signing key, the
@@ -20,9 +23,19 @@ What the checks establish, and with which key:
     must end at a pinned Intel root) adds Intel's TCB status for the gateway platform and must name the
     same signing key, N, MRCONFIGID, MRTD and RTMR0-2.
   * each model: every candidate report's quote verifies; report data binds the model signing key and N;
-    MRCONFIGID and RTMR3 as above. At least one candidate per allowed model.
+    MRCONFIGID and RTMR3 as above. At least one candidate per allowed model. app_id, instance_id,
+    os_image_hash and the KMS key are read from the RTMR3 events (an ``info`` value that differs fails).
+  * each model candidate's compose_manager_attestation (near_checks.check_compose_manager): its quote
+    verifies and its event log replays; MRTD and RTMR0-3 equal the model quote's; report data is
+    actions_hash || N with nonce_source "client"; the actions log hashes to actions_hash; the log replays
+    into a per-service map, restricted to the model's prompt-path services. This establishes that a TD of
+    this instance reported this actions log for this nonce, that the log's hash is bound in a hardware
+    quote, and that the map is what the operator's own tooling reported. It does not establish that the
+    inner compose is measured or that the reported services are the ones running. The running
+    compose-manager image is compared with the measured one and a mismatch is recorded (cm_image,
+    informational), never a pass. With require_provider_tee a candidate without the block fails.
 Not established here (see replay_near.NOT_ESTABLISHED): the model CVM's TCB status, GPU evidence
-binding, image provenance, and anything about a specific serving instance.
+binding, image provenance, what runs after launch, and anything about a specific serving instance.
 
 Identity mapping for pins (docs/INTERFACES.md Amendment 5):
   vendor              "near"
@@ -89,7 +102,9 @@ logger = logging.getLogger(__name__)
 
 VENDOR = "near"
 DEFAULT_BASE_URL = "https://cloud-api.near.ai/v1"
-EVIDENCE_SCHEMA = "confidential-mode/near-evidence/v1"
+EVIDENCE_SCHEMA_V1 = "confidential-mode/near-evidence/v1"
+EVIDENCE_SCHEMA = "confidential-mode/near-evidence/v2"
+EVIDENCE_SCHEMAS = (EVIDENCE_SCHEMA_V1, EVIDENCE_SCHEMA)
 VERIFIER = "confidential-mode near_checks/1 (TDX quote via tinfoil 0.14.2, ITA JWT via cryptography)"
 DEFAULT_ACCEPTED_TCB = ("UpToDate",)
 DEFAULT_SIGNATURE_WAIT_SECONDS = 5.0
@@ -99,8 +114,12 @@ NO_ALIASING_HEADER = "x-no-aliasing"
 MAX_ID_BUFFER = 8 * 1024 * 1024
 MAX_SEALED_BODY = 32 * 1024 * 1024   # an unstreamed encrypted response is buffered whole before release
 CHECK_KEYS = ("schema", "gateway_quote", "gateway_tls_binding", "ita_jwks", "ita_gateway_token",
-              "model_quotes", "ita_model_tokens", "fingerprints")
-INFORMATIONAL_CHECKS = ("ita_model_tokens",)
+              "model_quotes", *nc.CM_CHECK_KEYS, "ita_model_tokens", "fingerprints")
+# cm_image compares the running compose-manager image with the measured one: a mismatch is recorded and
+# shown in the pin prompt, never a pass and never a verification failure (NEAR's own launcher swaps the
+# image after boot on every instance seen, 2026-11-07).
+INFORMATIONAL_CHECKS = ("ita_model_tokens", "cm_image")
+CM_NOT_RUN_V1 = "n/a: not run (evidence schema v1 carries no compose-manager attestation)"
 
 
 # ── evidence ────────────────────────────────────────────────────────────────────────────────────
@@ -113,14 +132,57 @@ def _tcb_info(report: Mapping) -> Mapping:
     return tcb if isinstance(tcb, Mapping) else {}
 
 
-def trim_report(report: Mapping, composes: dict) -> dict:
-    """The fields of one NEAR report the checks use; app_compose goes into ``composes`` (by hash)."""
+def blob_text(value: Any) -> str:
+    """The canonical text a JSON value is stored as in the evidence blob store (sorted keys, compact)."""
+    return nc.canonical(value)
+
+
+def put_blob(blobs: dict, text: str) -> str:
+    """Add ``text`` to ``blobs`` under its SHA-256 (lower-case hex); returns that id."""
+    h = nc.sha256_hex(text.encode("utf-8"))
+    blobs[h] = text
+    return h
+
+
+BLOB_REF = "$blob"   # {"$blob": <sha256>} stands for a string kept in the evidence's blobs
+
+
+def _ref(blobs: dict, value: Any) -> Any:
+    return {BLOB_REF: put_blob(blobs, value)} if isinstance(value, str) and value else value
+
+
+def _blobify(evidence: dict, blobs: dict) -> None:
+    """Move the remaining large strings (every TDX quote, every Intel Trust Authority token) into ``blobs``,
+    leaving {"$blob": id} in their place, so a ledger row stays small for any allowlist size."""
+    reps = [evidence.get("gateway")] + [c for cs in (evidence.get("model_reports") or {}).values() for c in cs]
+    for rep in reps:
+        if isinstance(rep, dict):
+            rep["intel_quote_b64"] = _ref(blobs, rep.get("intel_quote_b64"))
+    ita = evidence.get("ita") or {}
+    ita["gateway_token"] = _ref(blobs, ita.get("gateway_token"))
+    ita["model_tokens"] = {m: [_ref(blobs, t) for t in toks] for m, toks in (ita.get("model_tokens") or {}).items()}
+
+
+def resolve_blobs(value: Any, blobs: Mapping) -> Any:
+    """``value`` with every {"$blob": id} replaced by that blob's text (None when the blob is missing)."""
+    if isinstance(value, Mapping):
+        if set(value) == {BLOB_REF}:
+            return blobs.get(value[BLOB_REF])
+        return {k: resolve_blobs(v, blobs) for k, v in value.items()}
+    if isinstance(value, list):
+        return [resolve_blobs(v, blobs) for v in value]
+    return value
+
+
+def trim_report(report: Mapping, blobs: dict) -> dict:
+    """The fields of one NEAR report the checks use. Large texts go into ``blobs`` by SHA-256: the
+    app_compose (its id is the compose hash) and, for a model candidate, the whole
+    compose_manager_attestation as canonical JSON (its id is recorded under ``compose_manager.blob``)."""
     info = report.get("info") if isinstance(report.get("info"), Mapping) else {}
     app_compose = _tcb_info(report).get("app_compose")
     compose_hash = None
     if isinstance(app_compose, str):
-        compose_hash = nc.sha256_hex(app_compose.encode("utf-8"))
-        composes[compose_hash] = app_compose
+        compose_hash = put_blob(blobs, app_compose)
     quote_hex = report.get("intel_quote")
     out = {
         "signing_address": report.get("signing_address"), "signing_algo": report.get("signing_algo"),
@@ -128,7 +190,8 @@ def trim_report(report: Mapping, composes: dict) -> dict:
         "intel_quote_b64": base64.b64encode(bytes.fromhex(quote_hex)).decode("ascii") if isinstance(quote_hex, str) else None,
         "event_log_imr3": nc.imr3_events(report.get("event_log") or []),
         "compose_hash": compose_hash, "app_name": info.get("app_name"), "app_id": info.get("app_id"),
-        "instance_id": info.get("instance_id"),
+        "instance_id": info.get("instance_id"), "os_image_hash": info.get("os_image_hash"),
+        "key_provider_info": info.get("key_provider_info"),
     }
     for key in ("tls_cert_fingerprint", "model_name", "signing_public_key"):
         if report.get(key) is not None:
@@ -140,6 +203,10 @@ def trim_report(report: Mapping, composes: dict) -> dict:
     elif report.get("nvidia_payload_sha256"):
         out["nvidia_payload_sha256"] = report["nvidia_payload_sha256"]
         out["nvidia_payload_bytes"] = report.get("nvidia_payload_bytes")
+    cm = report.get("compose_manager_attestation")
+    if isinstance(cm, Mapping):
+        text = blob_text(cm)
+        out["compose_manager"] = {"blob": put_blob(blobs, text), "bytes": len(text.encode("utf-8"))}
     return out
 
 
@@ -150,13 +217,13 @@ def _iso(ts: float) -> str:
 def build_evidence(raw: Mapping, *, base_url: str, models: list[str], nonce: str, captured_at_unix: float,
                    tls_observation: Mapping | None) -> dict:
     """Evidence (JSON-serialisable, every blob a string) from the parsed public responses."""
-    composes: dict[str, str] = {}
+    blobs: dict[str, str] = {}
     errors = list(raw.get("errors") or [])
     gateway = None
     gw_raw = raw.get("gateway_report")
     try:
         if isinstance(gw_raw, Mapping) and isinstance(gw_raw.get("gateway_attestation"), Mapping):
-            gateway = trim_report(gw_raw["gateway_attestation"], composes)
+            gateway = trim_report(gw_raw["gateway_attestation"], blobs)
     except Exception as exc:
         errors.append(f"gateway_report: {type(exc).__name__}: {exc}"[:300])
     model_reports: dict[str, list] = {}
@@ -164,7 +231,7 @@ def build_evidence(raw: Mapping, *, base_url: str, models: list[str], nonce: str
         rep = (raw.get("model_reports") or {}).get(model)
         try:
             cands = rep.get("model_attestations") if isinstance(rep, Mapping) else None
-            model_reports[model] = [trim_report(c, composes) for c in (cands or []) if isinstance(c, Mapping)]
+            model_reports[model] = [trim_report(c, blobs) for c in (cands or []) if isinstance(c, Mapping)]
         except Exception as exc:
             errors.append(f"model_report[{model}]: {type(exc).__name__}: {exc}"[:300])
             model_reports[model] = []
@@ -179,12 +246,13 @@ def build_evidence(raw: Mapping, *, base_url: str, models: list[str], nonce: str
             ita["model_tokens"][key] = [m.get("token") for m in (resp.get("models") or [])
                                         if isinstance(m, Mapping) and isinstance(m.get("token"), str)]
     host = urlsplit(base_url).hostname or ""
+    _blobify({"gateway": gateway, "model_reports": model_reports, "ita": ita}, blobs)
     evidence = {
         "schema": EVIDENCE_SCHEMA, "vendor": VENDOR, "base_url": base_url, "enclave_host": host,
         "platform": "tdx", "sdk_version": VERIFIER, "nonce": nonce, "signing_algo": nc.SIGNING_ALGO,
         "models": list(models),
         "captured_at": _iso(captured_at_unix), "captured_at_unix": captured_at_unix,
-        "gateway": gateway, "model_reports": model_reports, "app_composes": composes, "ita": ita,
+        "gateway": gateway, "model_reports": model_reports, "blobs": blobs, "blob_refs": sorted(blobs), "ita": ita,
         "jwks": raw.get("jwks") if isinstance(raw.get("jwks"), Mapping) else None,
         "jwks_url_fetched": raw.get("jwks_url_fetched"),
         "tls_observation": dict(tls_observation) if tls_observation else None,
@@ -213,7 +281,9 @@ class Appraisal:
     components: tuple = ()
     tcb_status: str | None = None
     first_failure: str | None = None
-    cvms: tuple = ()   # per CVM: {"role", "app_id", "instance_id", "compose_hash", "signing_address"}
+    # per CVM: role, app_id, instance_id, compose_hash, signing_address, os_image_hash, kms_id, services,
+    # services_scope, cm_image_running, cm_image_measured (v2 evidence; the last four are None for the gateway)
+    cvms: tuple = ()
 
 
 def identity_for(host: str, models: list[str]) -> str:
@@ -224,10 +294,18 @@ def _measure(q: Mapping) -> str:
     return ":".join(str(q.get(k) or "") for k in ("mrtd", "rtmr0", "rtmr1", "rtmr2"))
 
 
-def _cvm(role: str, rep: Mapping) -> dict:
-    """What identifies one CVM in the evidence: app_id is recorded per CVM (W12 pins it)."""
-    return {"role": role, "app_id": rep.get("app_id"), "instance_id": rep.get("instance_id"),
-            "compose_hash": rep.get("compose_hash"), "signing_address": str(rep.get("signing_address") or "").lower()}
+def _cvm(role: str, rep: Mapping, ident: Mapping | None = None, cm: Mapping | None = None) -> dict:
+    """What identifies one CVM in the evidence. With v2 evidence, app_id, instance_id, os_image_hash and
+    kms_id come from the RTMR3 events (``ident``), and a model CVM adds what its compose-manager reported
+    (``cm``). W12 pins these."""
+    ident = ident or {}
+    cm = cm or {}
+    return {"role": role, "app_id": ident.get("app_id", rep.get("app_id")),
+            "instance_id": ident.get("instance_id", rep.get("instance_id")),
+            "compose_hash": rep.get("compose_hash"), "signing_address": str(rep.get("signing_address") or "").lower(),
+            "os_image_hash": ident.get("os_image_hash"), "kms_id": ident.get("kms_id"),
+            "services": cm.get("services"), "services_scope": cm.get("services_scope"),
+            "cm_image_running": cm.get("cm_image_running"), "cm_image_measured": cm.get("cm_image_measured")}
 
 
 def _app_name(composes: Mapping, h: str | None) -> str:
@@ -238,11 +316,51 @@ def _app_name(composes: Mapping, h: str | None) -> str:
         return ""
 
 
+def verified_blobs(evidence: Mapping) -> dict:
+    """The evidence's blobs whose SHA-256 is their id (a blob that does not hash to its id is dropped, so
+    every check that needs it fails)."""
+    blobs = evidence.get("blobs") if isinstance(evidence.get("blobs"), Mapping) else {}
+    return {k: v for k, v in blobs.items()
+            if isinstance(k, str) and isinstance(v, str) and nc.sha256_hex(v.encode("utf-8")) == k}
+
+
+def _short_ref(ref: str | None) -> str:
+    if not ref:
+        return "(none recorded)"
+    repo, _, digest = ref.partition("@sha256:")
+    return f"{repo}@sha256:{digest[:16]}..." if digest else ref[:80]
+
+
+def _cvm_lines(c: Mapping) -> list[str]:
+    """Pin-prompt lines for one CVM. Lines that begin "reported: " are what the model CVM's compose-manager
+    reported after launch, not measurements; the prompt shows them under their own heading."""
+    role = c["role"].replace("model:", "model ", 1)
+    iid = str(c.get("instance_id") or "?")[:12]
+    out = [f"{role} instance {iid}: app_id {c.get('app_id')}, os image {str(c.get('os_image_hash'))[:16]}..., "
+           f"KMS key sha256:{str(c.get('kms_id'))[:16]}... (recorded in RTMR3)"]
+    if c.get("services") is None:
+        return out
+    out.append(f"reported: {role} instance {iid}: services ({c.get('services_scope')}):"
+               + ("" if c["services"] else " none"))
+    for key, v in c["services"].items():
+        out.append(f"reported:   {key} {v.get('tag') or '(no tag)'} commit {str(v.get('commit'))[:12]} "
+                   f"file sha256:{str(v.get('file_sha256'))[:16]}...")
+    run, meas = c.get("cm_image_running"), c.get("cm_image_measured")
+    verdict = "same as measured" if run and run == meas else \
+        "MISMATCH: the running compose-manager is not the measured one"
+    out.append(f"reported: {role} instance {iid}: compose-manager running {_short_ref(run)}; measured "
+               f"{_short_ref(meas)} ({verdict})")
+    return out
+
+
 def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: nc.QuoteVerifier | None = None,
              ita_roots: Mapping[str, str] | None = None, accepted_tcb=DEFAULT_ACCEPTED_TCB,
-             require_tls_binding: bool = True) -> Appraisal:
+             require_tls_binding: bool = True, require_compose_manager: bool = True) -> Appraisal:
     """Every check over one evidence blob, offline. Values: True, or "fail: ...", "n/a: ...",
-    "not_run: ..."; informational checks never decide ``ok``."""
+    "not_run: ..."; informational checks never decide ``ok``. Schema v1 evidence is appraised under v1
+    rules: the compose-manager checks are reported as not run, and identity values are not bound to RTMR3.
+    ``require_compose_manager`` (the adapter passes require_provider_tee) makes a model candidate without a
+    compose_manager_attestation fail."""
     checks: dict[str, Any] = {k: "not_run: an earlier check failed" for k in CHECK_KEYS}
     qv = quote_verifier or nc.default_quote_verifier
     roots = ita_roots if ita_roots is not None else nc.ITA_ROOT_SHA256
@@ -253,17 +371,28 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
                  if k not in INFORMATIONAL_CHECKS)
         return Appraisal(ok=ok and fail is None, checks=checks, first_failure=fail, **out)
 
-    if not isinstance(evidence, Mapping) or evidence.get("schema") != EVIDENCE_SCHEMA:
-        checks["schema"] = f"fail: not {EVIDENCE_SCHEMA}"
+    if not isinstance(evidence, Mapping) or evidence.get("schema") not in EVIDENCE_SCHEMAS:
+        checks["schema"] = f"fail: not {' or '.join(EVIDENCE_SCHEMAS)}"
         return done(checks["schema"])
     if evidence.get("signing_algo") != nc.SIGNING_ALGO:
         checks["schema"] = "fail: signing_algo is not ed25519"
         return done(checks["schema"])
     checks["schema"] = True
+    v1 = evidence.get("schema") == EVIDENCE_SCHEMA_V1
     nonce = str(evidence.get("nonce") or "")
-    composes = evidence.get("app_composes") if isinstance(evidence.get("app_composes"), Mapping) else {}
+    if v1:
+        composes = evidence.get("app_composes") if isinstance(evidence.get("app_composes"), Mapping) else {}
+        for k in nc.CM_CHECK_KEYS:
+            checks[k] = CM_NOT_RUN_V1
+    else:
+        composes = verified_blobs(evidence)
+        evidence = {k: (resolve_blobs(v, composes) if k in ("gateway", "model_reports", "ita") else v)
+                    for k, v in evidence.items()}
     at = float(as_of if as_of is not None else evidence.get("captured_at_unix") or 0)
     models = [m for m in (evidence.get("models") or []) if isinstance(m, str)]
+
+    def ident(rep: Mapping) -> dict | None:
+        return None if v1 else nc.rtmr3_identity(rep)
 
     gw = evidence.get("gateway") if isinstance(evidence.get("gateway"), Mapping) else None
     try:
@@ -271,9 +400,9 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
             raise nc.CheckError("no gateway report captured")
         gwq = nc.check_report(gw, nonce=nonce, app_composes=composes, quote_verifier=qv,
                               tls_cert_fingerprint=gw.get("tls_cert_fingerprint"))
+        cvms = [_cvm("gateway", gw, ident(gw))]
         checks["gateway_quote"] = True
         out["gateway_signer"] = str(gw.get("signing_address")).lower()
-        cvms = [_cvm("gateway", gw)]
     except Exception as exc:
         checks["gateway_quote"] = f"fail: {exc}"[:320]
         return done(checks["gateway_quote"])
@@ -322,6 +451,7 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
             checks["ita_gateway_token"] = f"fail: {exc}"[:320]
 
     model_quotes: dict[str, list] = {}
+    idents: dict[tuple, dict | None] = {}
     try:
         for model in models:
             cands = (evidence.get("model_reports") or {}).get(model) or []
@@ -333,6 +463,7 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
                 try:
                     q = nc.check_report(cand, nonce=nonce, app_composes=composes, quote_verifier=qv,
                                         require_signing_public_key=True)
+                    idents[(model, i)] = ident(cand)
                 except nc.CheckError as exc:
                     raise nc.CheckError(f"{model}[{i}]: {exc}") from exc
                 model_quotes.setdefault(model, []).append((cand, q))
@@ -343,10 +474,17 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
                 raise nc.CheckError(f"{model}: its {len(model_quotes[model])} verified reports name {len(signers)} "
                                     "different signing keys; refused rather than picking one")
             out["model_signers"][model] = signers
-            cvms += [_cvm(f"model:{model}", c) for c, _ in model_quotes[model]]
         checks["model_quotes"] = True if models else "n/a: no model allowlisted (gateway only)"
     except Exception as exc:
         checks["model_quotes"] = f"fail: {exc}"[:320]
+
+    cm_results: dict[tuple, dict] = {}
+    if not v1 and checks["model_quotes"] is True:
+        cm_results = _compose_manager_checks(checks, evidence, composes, models, model_quotes, nonce=nonce,
+                                             quote_verifier=qv, required=require_compose_manager)
+    elif not v1 and str(checks["model_quotes"]).startswith("n/a"):
+        for k in nc.CM_CHECK_KEYS:
+            checks[k] = "n/a: no model allowlisted (gateway only)"
 
     if keys is None or not ita.get("model_tokens"):
         checks["ita_model_tokens"] = "n/a: no model-provider token captured"
@@ -364,6 +502,9 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
                                       + "; ".join(notes))[:320]
 
     if all(checks[k] is True or str(checks[k]).startswith("n/a") for k in ("gateway_quote", "model_quotes")):
+        for m in models:
+            for i, (c, _) in enumerate(model_quotes.get(m, [])):
+                cvms.append(_cvm(f"model:{m}", c, idents.get((m, i)), cm_results.get((m, i))))
         code = {"gateway": [gw.get("compose_hash")],
                 "models": {m: sorted({c.get("compose_hash") for c, _ in model_quotes.get(m, [])}) for m in models}}
         enclave = {"gateway": [_measure(gwq)],
@@ -375,6 +516,9 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
         for m in models:
             for h in code["models"][m]:
                 comps.append(f"model {m} compose sha256:{str(h)[:16]}...{_app_name(composes, h)}")
+        if not v1:
+            for c in cvms:
+                comps += _cvm_lines(c)
         out["components"] = tuple(comps)
         out["cvms"] = tuple(cvms)
         claims = evidence.get("claims") if isinstance(evidence.get("claims"), Mapping) else None
@@ -386,6 +530,68 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
     fail = next((v for k, v in checks.items() if k not in INFORMATIONAL_CHECKS
                  and isinstance(v, str) and v.startswith(("fail", "not_run"))), None)
     return done(fail)
+
+
+def _compose_manager_checks(checks: dict, evidence: Mapping, blobs: Mapping, models: list[str],
+                            model_quotes: Mapping, *, nonce: str, quote_verifier, required: bool) -> dict:
+    """Run near_checks.check_compose_manager for every verified model candidate and fold the per-step
+    outcomes into ``checks``. Returns {(model, index): result} for the candidates that passed."""
+    steps = nc.CM_CHECK_KEYS
+    per_step: dict[str, list] = {k: [] for k in steps}   # (outcome, text); outcome pass | fail | not_run | skip
+    results: dict[tuple, dict] = {}
+    for model in models:
+        for i, (cand, q) in enumerate(model_quotes.get(model, [])):
+            where = f"{model}[{i}]"
+            ref = cand.get("compose_manager") if isinstance(cand.get("compose_manager"), Mapping) else None
+            text = blobs.get(ref.get("blob")) if ref else None
+            if text is None:
+                why = ("its report carries no compose_manager_attestation" if ref is None else
+                       "its compose_manager_attestation blob is missing or does not hash to its id")
+                outcome = "fail" if required or ref is not None else "skip"
+                for k in steps:
+                    per_step[k].append((outcome if k == "cm_quote" or outcome == "skip" else "not_run",
+                                        f"{where}: {why}"))
+                continue
+            try:
+                res = nc.check_compose_manager(json.loads(text), nonce=nonce, model_quote=q,
+                                               quote_verifier=quote_verifier, model=model,
+                                               app_compose=blobs.get(cand.get("compose_hash")))
+            except nc.CmCheckError as exc:
+                failed = steps.index(exc.step)
+                for j, k in enumerate(steps):
+                    per_step[k].append(("pass", "") if j < failed else
+                                       ("fail", f"{where}: {exc}") if j == failed else
+                                       ("not_run", f"{where}: an earlier compose-manager check failed"))
+                continue
+            except Exception as exc:
+                for j, k in enumerate(steps):
+                    per_step[k].append(("fail", f"{where}: {type(exc).__name__}: {exc}") if j == 0 else
+                                       ("not_run", f"{where}: an earlier compose-manager check failed"))
+                continue
+            results[(model, i)] = res
+            for k in steps:
+                per_step[k].append(("pass", ""))
+            if not res["cm_image_match"]:
+                per_step["cm_image"][-1] = ("recorded", f"{where}: running {_short_ref(res['cm_image_running'])} is "
+                                            f"not the measured {_short_ref(res['cm_image_measured'])}")
+    for k in steps:
+        items = per_step[k]
+        fails = [t for o, t in items if o == "fail"]
+        if fails:
+            checks[k] = f"fail: {fails[0]}"[:320]
+        elif any(o == "not_run" for o, _ in items):
+            checks[k] = "not_run: " + next(t for o, t in items if o == "not_run")[:300]
+        elif any(o == "recorded" for o, _ in items):
+            checks[k] = ("recorded (not a pass): " + "; ".join(t for o, t in items if o == "recorded"))[:320]
+        elif items and all(o == "skip" for o, _ in items):
+            checks[k] = ("n/a: no compose_manager_attestation captured, and it is not required "
+                         "(require_provider_tee is off)")
+        elif any(o == "skip" for o, _ in items):
+            checks[k] = ("n/a: passed where captured; " + next(t for o, t in items if o == "skip")
+                         + " (not required: require_provider_tee is off)")[:320]
+        else:
+            checks[k] = True
+    return results
 
 
 def evidence_claims(evidence: Mapping, a: Appraisal) -> dict:
@@ -701,7 +907,8 @@ class NearAdapter:
                 evidence = build_evidence(raw, base_url=self._base_url, models=self.models, nonce=nonce,
                                           captured_at_unix=now, tls_observation=tls)
                 a = appraise(evidence, quote_verifier=self._quote_verifier, ita_roots=self._ita_roots,
-                             accepted_tcb=self.accepted_tcb, require_tls_binding=self.require_tls_binding)
+                             accepted_tcb=self.accepted_tcb, require_tls_binding=self.require_tls_binding,
+                             require_compose_manager=self.require_provider_tee)
                 evidence["checks"] = a.checks
                 evidence["policy"] = {"require_tls_binding": self.require_tls_binding,
                                       "require_provider_tee": self.require_provider_tee,

@@ -105,9 +105,28 @@ def fake_quote_verifier(quote: bytes) -> dict:
     return {**q, "verifier": "test"}
 
 
-def events_for(app_id: str) -> list[dict]:
+GW_APP_ID = "9a" * 20
+OS_IMAGE_HASH = "ee" * 32
+KEY_PROVIDER_INFO = '{"name":"kms","id":"' + "30" * 20 + '"}'
+CM_IMAGE = "nearaidev/compose-manager@sha256:" + "6e" * 32       # the image MODEL_COMPOSE measures
+CM_IMAGE_SWAPPED = "nearaidev/compose-manager@sha256:" + "a0" * 32
+
+
+def model_app_id(i: int) -> str:
+    return f"{0xb0 + i:02x}" * 20
+
+
+def instance_for(app_id: str) -> str:
+    return hashlib.sha1(app_id.encode()).hexdigest()
+
+
+def events_for(app_id: str, instance_id: str | None = None) -> list[dict]:
+    """dstack's imr-3 boot events: app-id, compose-hash, instance-id, os-image-hash and key-provider, as
+    NEAR's reports carry them (payloads hex)."""
     out = []
-    for name, payload in (("app-id", app_id.encode().hex()), ("compose-hash", "ab" * 32), ("instance-id", "cd" * 20)):
+    for name, payload in (("app-id", app_id), ("compose-hash", "ab" * 32),
+                          ("instance-id", instance_id or instance_for(app_id)), ("os-image-hash", OS_IMAGE_HASH),
+                          ("key-provider", KEY_PROVIDER_INFO.encode().hex())):
         digest = hashlib.sha384(struct.pack("<I", 134217729) + b":" + name.encode() + b":" + bytes.fromhex(payload)).hexdigest()
         out.append({"imr": 3, "event_type": 134217729, "digest": digest, "event": name, "event_payload": payload})
     out.insert(0, {"imr": 0, "event_type": 2147483659, "digest": "00" * 48, "event": "", "event_payload": ""})
@@ -115,7 +134,7 @@ def events_for(app_id: str) -> list[dict]:
 
 
 def report(signer_hex: str, nonce: str, compose: str, *, tls_fp: str | None = None, model: str | None = None,
-           mrtd: str = "11" * 48, bad_signature: bool = False, debug: bool = False, app_id: str = "app") -> dict:
+           mrtd: str = "11" * 48, bad_signature: bool = False, debug: bool = False, app_id: str = GW_APP_ID) -> dict:
     events = events_for(app_id)
     rtmr3 = nc.replay_rtmr3(events).hex()
     q = {"report_data": nc.expected_report_data(signer_hex, nonce, tls_fp).hex(),
@@ -124,7 +143,8 @@ def report(signer_hex: str, nonce: str, compose: str, *, tls_fp: str | None = No
          "bad_signature": bad_signature}
     rep = {"signing_address": signer_hex, "signing_algo": "ed25519", "request_nonce": nonce,
            "intel_quote": fake_quote(q).hex(), "event_log": json.dumps(events) if model is None else events,
-           "info": {"app_id": app_id, "instance_id": "inst-" + app_id, "app_name": "dstack-test",
+           "info": {"app_id": app_id, "instance_id": instance_for(app_id), "app_name": "dstack-test",
+                    "os_image_hash": OS_IMAGE_HASH, "key_provider_info": KEY_PROVIDER_INFO,
                     "tcb_info": {"app_compose": compose}}}
     if tls_fp is not None:
         rep["tls_cert_fingerprint"] = tls_fp
@@ -132,6 +152,42 @@ def report(signer_hex: str, nonce: str, compose: str, *, tls_fp: str | None = No
     if model is not None:
         rep.update(model_name=model, signing_public_key=signer_hex, nvidia_payload=json.dumps({"nonce": nonce}))
     return rep
+
+
+def default_cm_actions() -> list[dict]:
+    """A small actions log: compose-manager started on the measured image, the model's services brought up,
+    then the launcher's image swap (as every NEAR instance seen on 2026-11-07 shows)."""
+    up = {"action": "compose_up", "tag": "v0.0.1", "commit": "c1" * 20, "file": "prod/test.yaml",
+          "file_sha256": "f1" * 32}
+    return [
+        {"timestamp": "2026-11-01T00:00:00Z", "action": "compose_manager_started", "container": "compose-manager",
+         "image": CM_IMAGE},
+        {**up, "timestamp": "2026-11-01T00:01:00Z", "services": ["proxy-test", "model-test", "nginx-test"]},
+        {"timestamp": "2026-11-01T00:02:00Z", "action": "docker_restart"},
+        {**up, "timestamp": "2026-11-02T00:00:00Z", "action": "compose_stage", "tag": "v0.0.2", "commit": "c2" * 20,
+         "file_sha256": "f2" * 32, "services": ["proxy-test"]},
+        {**up, "timestamp": "2026-11-02T00:01:00Z", "tag": "v0.0.2", "commit": "c2" * 20, "file_sha256": "f2" * 32,
+         "services": ["proxy-test"]},
+        {"timestamp": "2026-11-03T00:00:00Z", "action": "compose_manager_started", "container": "compose-manager",
+         "image": CM_IMAGE_SWAPPED},
+    ]
+
+
+def cm_attestation(model_rep: dict, nonce: str, actions: list, *, quote_overrides: dict | None = None,
+                   events: list | None = None) -> dict:
+    """A compose_manager_attestation from the same (fake) TD as ``model_rep``: same MRTD and RTMR0-3,
+    report data actions_hash || nonce."""
+    mq = fake_quote_verifier(bytes.fromhex(model_rep["intel_quote"]))
+    actions = json.loads(json.dumps(actions))   # every report gets its own copy
+    ah = nc.actions_hash(actions)
+    q = {k: mq[k] for k in ("mr_config_id", "mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3", "td_attributes", "debug")}
+    q["report_data"] = ah + nonce
+    q.update(quote_overrides or {})
+    ev = events if events is not None else (json.loads(model_rep["event_log"]) if isinstance(model_rep["event_log"], str)
+                                            else model_rep["event_log"])
+    return {"actions": actions, "actions_hash": ah, "nonce": nonce, "nonce_source": "client",
+            "quote": fake_quote(q).hex(), "event_log": json.dumps(ev), "report_data": ah + nonce,
+            "vm_config": '{"os_image_hash":"' + OS_IMAGE_HASH + '"}'}
 
 
 class _FakeSSL:
@@ -163,7 +219,9 @@ def tls_cert() -> tuple[bytes, str]:
 
 
 GATEWAY_COMPOSE = '{"manifest_version":2,"name":"dstack-gateway-test","docker_compose_file":"services: {}"}'
-MODEL_COMPOSE = '{"manifest_version":2,"name":"dstack-nvidia-test","docker_compose_file":"services: {vllm: {}}"}'
+MODEL_COMPOSE = json.dumps({"manifest_version": 2, "name": "dstack-nvidia-test", "docker_compose_file": (
+    "services:\n  vllm:\n    image: vllm@sha256:" + "0d" * 32 + "\n  compose-manager:\n"
+    "    image: ${COMPOSE_MANAGER_IMAGE:-" + CM_IMAGE + "}\n    pid: host\n")}, separators=(",", ":"))
 
 
 class NearWorld:
@@ -202,6 +260,11 @@ class NearWorld:
         self.reply_text = "NEAR-FAKE-REPLY"
         self.reply_reasoning: str | None = None
         self.gateway_read_replies: list[str] = []   # replies a key-swapping gateway decrypted
+        # compose-manager attestation on every model candidate
+        self.cm_actions: list[dict] = default_cm_actions()
+        self.cm_omit = False
+        self.cm_overrides: dict = {}            # replaces fields of the block after it is built
+        self.cm_quote_overrides: dict = {}      # replaces fields of the block's (fake) quote
 
     # ── attestation ─────────────────────────────────────────────────────────────────────────────
     def _ok(self, payload) -> httpx.Response:
@@ -214,15 +277,19 @@ class NearWorld:
         return {"network_stream": _FakeStream(self.chat_tls_der or self.tls_der)}
 
     def gateway_report(self, nonce: str) -> dict:
-        rep = report(pub_hex(self.gateway_key), nonce, GATEWAY_COMPOSE, tls_fp=self.tls_fp, app_id="gw")
+        rep = report(pub_hex(self.gateway_key), nonce, GATEWAY_COMPOSE, tls_fp=self.tls_fp, app_id=GW_APP_ID)
         rep.update(self.gateway_overrides)
         return {"gateway_attestation": rep}
 
     def model_report(self, nonce: str, model: str) -> dict:
         keys = [self.model_key] + [self.second_model_key or self.model_key] * max(0, self.model_candidates - 1)
-        cands = [report(pub_hex(keys[i]), nonce, MODEL_COMPOSE, model=model, mrtd="55" * 48, app_id=f"m{i}")
+        cands = [report(pub_hex(keys[i]), nonce, MODEL_COMPOSE, model=model, mrtd="55" * 48, app_id=model_app_id(i))
                  for i in range(self.model_candidates)]
         for c in cands:
+            if not self.cm_omit:
+                c["compose_manager_attestation"] = cm_attestation(c, nonce, self.cm_actions,
+                                                                  quote_overrides=self.cm_quote_overrides)
+                c["compose_manager_attestation"].update(self.cm_overrides)
             c.update(self.model_overrides)
         return {"gateway_attestation": self.gateway_report(nonce)["gateway_attestation"], "model_attestations": cands}
 

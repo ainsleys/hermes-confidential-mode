@@ -833,13 +833,16 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         out.write("No evidence rows in this receipt: nothing can be replayed.\n")
         return 1
     failed = 0
+    near_ne: tuple = ()
     for item in items:
         ev = item["evidence"]
+        if isinstance(item.get("blobs"), dict):   # NEAR v2: large texts travel beside the evidence
+            ev = _near_replay_module().with_blobs(ev, item["blobs"])
         row_id = item.get("row_id")
         claimed = _row_claims(doc, row_id)
         vendor = str(_row_vendor(doc, row_id) or ev.get("vendor") or "tinfoil")
         row_repo, row_replay = expected_repo, replay_fn
-        if ev.get("schema") == _near_replay_module().EVIDENCE_SCHEMA:
+        if ev.get("schema") in _near_replay_module().EVIDENCE_SCHEMAS:
             # NEAR (Amendment 5): the pin identity is "<host>#<models>"; --expected-repo overrides it only
             # when given explicitly.
             vendor, row_replay = "near", _near_replay_module().replay
@@ -893,6 +896,8 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         row_ne = tuple(getattr(result, "not_established", ()) or ())
         if row_ne:
             not_established = row_ne
+            if vendor == "near":
+                near_ne = row_ne
     signed_failed = 0
     near = None
     if any(isinstance(r, dict) and r.get("kind") == "send_signed" for r in doc.get("rows") or []):
@@ -909,7 +914,7 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         out.write("  Session fully attested: " + ("yes" if near["fully_attested"] else
                                                    "NO (not every NEAR send has a provider_tee signature that replays)")
                   + "\n")
-        not_established = tuple(not_established) + tuple(_near_replay_module().NOT_ESTABLISHED)
+        not_established = tuple(not_established) + tuple(near_ne or _near_replay_module().NOT_ESTABLISHED)
     out.write("\nA replay does NOT establish:\n")
     for line in dict.fromkeys(not_established):
         out.write(f"  - {line}\n")

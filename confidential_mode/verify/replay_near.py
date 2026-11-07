@@ -1,5 +1,5 @@
-"""Offline replay of NEAR AI Cloud evidence (schema confidential-mode/near-evidence/v1) and of the signed
-responses a receipt records. No network: the TDX quotes are re-verified with tinfoil 0.14.2's verifier
+"""Offline replay of NEAR AI Cloud evidence (schemas confidential-mode/near-evidence/v1 and v2; v1 under v1
+rules) and of the signed responses a receipt records. No network: the TDX quotes are re-verified with tinfoil 0.14.2's verifier
 against the Intel SGX Root CA it embeds, the Intel Trust Authority JWTs against the captured JWKS whose
 x5c chains must end at a root pinned in near_checks.ITA_ROOT_SHA256, and each response signature against
 the signing key the replayed evidence binds, over the payload rebuilt from the digests in the row.
@@ -9,7 +9,13 @@ prints both vendors the same way. ``replay_signed_send(detail, evidence)`` judge
 row. ``replay_receipt(doc)`` does both for every NEAR row of a receipt (JSON form) and needs nothing
 but the receipt.
 
-What a replay can NOT establish is in ``NOT_ESTABLISHED`` (returned with every result).
+v2 evidence keeps its large texts (each app_compose, each compose_manager_attestation) as blobs by
+SHA-256. A ledger row holds only ``blob_refs``; a JSON receipt carries the texts beside the evidence
+(``blobs``), and ``with_blobs`` joins them for replay. A blob that is missing or does not hash to its id
+fails the check that needs it.
+
+What a replay can NOT establish is in ``NOT_ESTABLISHED`` (returned with every result; v1 evidence gets
+``NOT_ESTABLISHED_V1``).
 """
 from __future__ import annotations
 
@@ -20,6 +26,11 @@ from . import near as _near
 from . import near_checks as nc
 
 EVIDENCE_SCHEMA = _near.EVIDENCE_SCHEMA
+EVIDENCE_SCHEMAS = _near.EVIDENCE_SCHEMAS
+
+_AFTER_LAUNCH_V1 = (
+    "what the model CVM ran after launch: its compose starts a compose-manager that can apply further "
+    "deployment actions; NEAR's compose_manager_attestation is not checked here")
 
 NOT_ESTABLISHED = (
     "that the digests in a send row are digests of the conversation Hermes shows: a receipt holds digests, "
@@ -31,8 +42,17 @@ NOT_ESTABLISHED = (
     "provider_tee signature does not bind the model-signed bytes to the gateway or TLS evidence",
     "which serving instance answered: instances of one model share one signing key, also across different "
     "measured configurations (NEAR's own warning), so a matching key does not name an instance",
-    "what the model CVM ran after launch: its compose starts a compose-manager that can apply further "
-    "deployment actions; NEAR's compose_manager_attestation is not checked here",
+    "what the model CVM runs after launch: what runs after launch is not measured. The compose-manager "
+    "check establishes only that a TD of this instance reported this actions log for this nonce, that the "
+    "log's hash is bound in a hardware quote, and that the per-service deployment map derived from the log "
+    "is what the operator's own tooling reported. It does not establish that the inner compose is measured "
+    "or that the reported services are the ones running",
+    "that the measured compose-manager wrote the actions log: the running compose-manager image is not the "
+    "image the measured docker-compose names (a launcher replaces it after boot; the cm_image check records "
+    "the two digests)",
+    "that the actions log came from the compose-manager at all: the inner services it deploys, the model "
+    "proxies among them, hold the dstack quote socket and run privileged, so any of them can obtain a quote "
+    "of this TD over report data it chooses",
     "the model CVM's TCB status (patch level, advisories, revocation): its quote is checked against Intel's "
     "SGX root offline, but Intel's TCB collateral is not; only the gateway's TCB status comes from Intel "
     "Trust Authority",
@@ -53,6 +73,15 @@ NOT_ESTABLISHED = (
     "revocation or TCB changes after captured_at, and that captured_at is when the capture happened (the "
     "capturer asserts it)",
 )
+# v1 evidence carries no compose-manager attestation: its list keeps the earlier after-launch item.
+NOT_ESTABLISHED_V1 = NOT_ESTABLISHED[:4] + (_AFTER_LAUNCH_V1,) + NOT_ESTABLISHED[7:]
+
+
+def with_blobs(evidence: Mapping, blobs: Mapping | None) -> Mapping:
+    """``evidence`` with ``blobs`` joined in (as a receipt item carries them). Inline blobs win."""
+    if not isinstance(evidence, Mapping) or not isinstance(blobs, Mapping) or not blobs:
+        return evidence
+    return {**evidence, "blobs": {**dict(blobs), **dict(evidence.get("blobs") or {})}}
 
 
 @dataclass(frozen=True)
@@ -75,6 +104,9 @@ class NearReplayResult:
     enclave_host: str | None = None
     captured_at: str | None = None
     vendor: str = "near"
+    schema: str | None = None
+    cvms: tuple = ()
+    components: tuple = ()
 
 
 def replay(evidence: Mapping, *, as_of: str | float | None = None, expected_repo: str | None = None,
@@ -85,7 +117,8 @@ def replay(evidence: Mapping, *, as_of: str | float | None = None, expected_repo
     at = _as_unix(as_of, evidence)
     policy = (evidence.get("policy") if isinstance(evidence, Mapping) else None) or {}
     a = _near.appraise(evidence, as_of=at, quote_verifier=quote_verifier, ita_roots=ita_roots,
-                       accepted_tcb=accepted_tcb, require_tls_binding=policy.get("require_tls_binding") is not False)
+                       accepted_tcb=accepted_tcb, require_tls_binding=policy.get("require_tls_binding") is not False,
+                       require_compose_manager=policy.get("require_provider_tee") is not False)
     checks = dict(a.checks)
     if expected_repo is not None:
         checks["identity_match"] = True if a.identity == expected_repo else \
@@ -100,7 +133,9 @@ def replay(evidence: Mapping, *, as_of: str | float | None = None, expected_repo
         release_tag=None, as_of=nc.utc(at).isoformat(), sdk_version=_near.VERIFIER, repo=a.identity,
         enclave_host_asserted=ev.get("enclave_host"), captured_at_asserted=ev.get("captured_at"),
         enclave_host=ev.get("enclave_host"), captured_at=ev.get("captured_at"),
-        gateway_signer=a.gateway_signer, model_signers=dict(a.model_signers), tcb_status=a.tcb_status)
+        gateway_signer=a.gateway_signer, model_signers=dict(a.model_signers), tcb_status=a.tcb_status,
+        schema=ev.get("schema"), cvms=a.cvms, components=a.components,
+        not_established=NOT_ESTABLISHED_V1 if ev.get("schema") == _near.EVIDENCE_SCHEMA_V1 else NOT_ESTABLISHED)
 
 
 def _as_unix(as_of, evidence) -> float:
@@ -163,8 +198,8 @@ def evidence_by_nonce(doc: Mapping) -> dict:
     out = {}
     for item in (doc.get("evidence") or []) if isinstance(doc, Mapping) else []:
         ev = item.get("evidence") if isinstance(item, Mapping) else None
-        if isinstance(ev, Mapping) and ev.get("schema") == EVIDENCE_SCHEMA and ev.get("nonce"):
-            out.setdefault(ev["nonce"], ev)
+        if isinstance(ev, Mapping) and ev.get("schema") in EVIDENCE_SCHEMAS and ev.get("nonce"):
+            out.setdefault(ev["nonce"], with_blobs(ev, item.get("blobs")))
     return out
 
 

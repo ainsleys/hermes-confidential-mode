@@ -18,7 +18,7 @@ from confidential_mode.receipts import build_receipt, verify_chain
 from confidential_mode.verify import near_checks as nc, replay_near
 from confidential_mode.verify.base import VerifyError
 
-from ..near_world import BASE, MODEL, NearWorld, fake_quote_verifier, pub_hex
+from ..near_world import BASE, GW_APP_ID, MODEL, NearWorld, fake_quote_verifier, model_app_id, pub_hex
 
 MSG = [{"role": "user", "content": "hi"}]
 
@@ -143,11 +143,29 @@ def test_app_id_is_recorded_per_cvm_in_evidence_and_appraisal(tmp_path):
     world = NearWorld()
     _, result, _ = _send(world, tmp_path)
     cvms = result.evidence["claims"]["cvms"]
-    assert [(c["role"], c["app_id"]) for c in cvms] == [("gateway", "gw"), (f"model:{MODEL}", "m0")]
-    assert result.evidence["gateway"]["app_id"] == "gw" and result.evidence["model_reports"][MODEL][0]["app_id"] == "m0"
+    gw, m0 = GW_APP_ID, model_app_id(0)
+    assert [(c["role"], c["app_id"]) for c in cvms] == [("gateway", gw), (f"model:{MODEL}", m0)]
+    assert result.evidence["gateway"]["app_id"] == gw and result.evidence["model_reports"][MODEL][0]["app_id"] == m0
     from confidential_mode.verify import near
     a = near.appraise(result.evidence, quote_verifier=fake_quote_verifier, ita_roots=world.ita.roots)
-    assert a.ok and [c["app_id"] for c in a.cvms] == ["gw", "m0"]
+    assert a.ok and [c["app_id"] for c in a.cvms] == [gw, m0]
+
+
+@pytest.mark.parametrize("field", ["app_id", "instance_id", "os_image_hash", "key_provider_info"])
+def test_an_info_value_other_than_its_rtmr3_event_fails(tmp_path, field):
+    # app_id, instance_id, os_image_hash and the KMS key are read from the RTMR3 boot events; the report's
+    # self-reported info block may not say otherwise.
+    world = NearWorld()
+    orig = world.model_report
+
+    def bent(nonce, model):
+        rep = orig(nonce, model)
+        info = rep["model_attestations"][0]["info"]
+        info[field] = ('{"name":"kms","id":"00"}' if field == "key_provider_info" else "00" * 20)
+        return rep
+    world.model_report = bent
+    with pytest.raises(VerifyError, match=f"info.{field} differs from the RTMR3"):
+        world.adapter(tmp_path).verify()
 
 
 def test_signature_over_another_model_id_is_unverified():
