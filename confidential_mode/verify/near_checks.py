@@ -1,0 +1,368 @@
+"""Offline checks for NEAR AI Cloud evidence and signed responses (no network, no SDK of NEAR's).
+
+Everything here is a pure function over bytes the capture recorded, so the live adapter
+(verify/near.py) and the offline replay (verify/replay_near.py) run the same code on the same
+evidence. The formats come from NEAR's published documentation, read 2026-11-07:
+
+- docs.near.ai/cloud/verification/reference/quote-nonce-signer: report data is 64 bytes, the last 32
+  are the client nonce; the first 32 are the signing identity zero-padded on the right, or
+  SHA-256(identity || raw TLS SPKI fingerprint) when a TLS fingerprint was requested. MRCONFIGID is
+  0x01 || SHA-256(app_compose) || 15 zero bytes. RTMR3 is replayed from the imr-3 events:
+  digest = SHA-384(event_type as 4 little-endian bytes || ":" || event || ":" || event_payload).
+- docs.near.ai/cloud/verification/cloud-api/response-signatures and
+  .../reference/response-signature-verification: provider_tee signs "{model_id}:{request_hash}:
+  {response_hash}", gateway signs "{request_hash}:{response_hash}"; hashes are lower-case hex SHA-256
+  of the exact request and response body bytes; for ed25519 the signing_address IS the 32-byte public
+  key (hex) and the signature (64 bytes, hex) is over the UTF-8 bytes of the text; an absent or
+  unfamiliar signature_kind is never inferred from the shape of the text; a provider_tee signer must
+  match exactly one verified model report.
+- Intel Trust Authority EAT profile (portal.trustauthority.intel.com/eat_profile.html): tokens are
+  JWTs signed PS384 (RS256 on request); v2 tokens nest TDX claims under "tdx".
+
+Only ed25519 is supported: ecdsa signers are Ethereum addresses that need Keccak-256 and public-key
+recovery, which neither Python's standard library nor ``cryptography`` provides, and this plugin does
+not vendor them. The adapter always requests signing_algo=ed25519.
+
+The TDX quote signature is checked with tinfoil 0.14.2's own TDX verifier (already a pinned
+dependency): PCK chain to the Intel SGX Root CA embedded in that SDK, quote signature, QE report
+signature and QE report-data binding. It does NOT evaluate Intel's TCB collateral for that quote.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import re
+import struct
+from datetime import datetime, timezone
+from typing import Any, Callable, Iterable, Mapping
+
+SIGNING_ALGO = "ed25519"
+SIGNATURE_KINDS = ("provider_tee", "gateway")
+
+# Intel Trust Authority token-signing roots, pinned by the SHA-256 of their DER certificate (fetched from
+# https://portal.trustauthority.intel.com/certs and https://portal.eu.trustauthority.intel.com/certs on
+# 2026-11-07; the last x5c entry of every key). A JWKS whose chain ends anywhere else is rejected.
+ITA_ROOT_SHA256 = {
+    "7091e89e9a17b939edc01f0a87b0c3863f2242299bf3c0ffd5ee4a217ff74f5f": "Intel Trust Authority Root CA",
+    "de0457343f28d90bdcf00f46490f78132b23cceb5204cea4a89e07f45dcd4842": "IntelTA EU Production Root CA",
+}
+ITA_JWKS_URLS = ("https://portal.trustauthority.intel.com/certs",
+                 "https://portal.eu.trustauthority.intel.com/certs")
+ITA_ISSUERS = ("https://portal.trustauthority.intel.com", "https://portal.eu.trustauthority.intel.com",
+               "Intel Trust Authority")
+JWT_ALGS = ("PS384", "RS256", "PS256", "RS384")
+JWT_SKEW_SECONDS = 120
+
+
+class CheckError(ValueError):
+    """A check failed; the message says which and why (no secrets, no content)."""
+
+
+# ── small encodings ─────────────────────────────────────────────────────────────────────────────
+
+def hexbytes(value: Any, label: str, length: int | None = None) -> bytes:
+    if not isinstance(value, str):
+        raise CheckError(f"{label} is not hex text")
+    v = value[2:] if value[:2] in ("0x", "0X") else value
+    if not v or len(v) % 2 or not re.fullmatch(r"[0-9a-fA-F]+", v):
+        raise CheckError(f"{label} is not hexadecimal")
+    out = bytes.fromhex(v)
+    if length is not None and len(out) != length:
+        raise CheckError(f"{label} is {len(out)} bytes, expected {length}")
+    return out
+
+
+def b64url(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def canonical(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+# ── NEAR report data, configuration measurement, RTMR3 ──────────────────────────────────────────
+
+def bound_identity(signing_address: str, tls_cert_fingerprint: str | None = None) -> bytes:
+    """The first 32 bytes of NEAR report data for an ed25519 signer (quote-nonce-signer page)."""
+    identity = hexbytes(signing_address, "signing_address", 32)
+    if tls_cert_fingerprint:
+        return hashlib.sha256(identity + hexbytes(tls_cert_fingerprint, "tls_cert_fingerprint", 32)).digest()
+    return identity.ljust(32, b"\0")
+
+
+def expected_report_data(signing_address: str, nonce: str, tls_cert_fingerprint: str | None = None) -> bytes:
+    return bound_identity(signing_address, tls_cert_fingerprint) + hexbytes(nonce, "nonce", 32)
+
+
+def mr_config_id_for(app_compose: str) -> bytes:
+    return b"\x01" + hashlib.sha256(app_compose.encode("utf-8")).digest() + bytes(15)
+
+
+def replay_rtmr3(events: Iterable[Mapping]) -> bytes:
+    rtmr3 = bytes(48)
+    for ev in events:
+        if not isinstance(ev, Mapping) or ev.get("imr") != 3:
+            continue
+        et = ev.get("event_type")
+        if not isinstance(et, int) or isinstance(et, bool) or not 0 <= et < 2 ** 32:
+            raise CheckError("event_log: event_type is not a 32-bit unsigned integer")
+        payload = ev.get("event_payload") or ""
+        digest = hashlib.sha384(struct.pack("<I", et) + b":" + str(ev.get("event") or "").encode("utf-8") + b":"
+                                + (bytes.fromhex(payload) if payload else b"")).digest()
+        if ev.get("digest") and hexbytes(ev["digest"], "event_log digest") != digest:
+            raise CheckError(f"event_log: digest mismatch for event {str(ev.get('event'))[:40]!r}")
+        rtmr3 = hashlib.sha384(rtmr3 + digest).digest()
+    return rtmr3
+
+
+def imr3_events(event_log: Any) -> list[dict]:
+    """The imr-3 events of a report's event_log (a JSON string from the gateway, a list from models)."""
+    if isinstance(event_log, str):
+        event_log = json.loads(event_log)
+    if not isinstance(event_log, list):
+        raise CheckError("event_log is not a list")
+    return [{k: e.get(k) for k in ("imr", "event_type", "digest", "event", "event_payload")}
+            for e in event_log if isinstance(e, Mapping) and e.get("imr") == 3]
+
+
+# ── TDX quote (tinfoil 0.14.2's verifier) ───────────────────────────────────────────────────────
+
+def default_quote_verifier(quote: bytes) -> dict:
+    """Verify a TDX v4 quote's signatures offline and return its measured fields (hex).
+    Raises CheckError on any failure."""
+    try:
+        from tinfoil.attestation.abi_tdx import parse_quote
+        from tinfoil.attestation.verify_tdx import verify_tdx_quote
+    except Exception as exc:  # pragma: no cover - tinfoil is a pinned dependency
+        raise CheckError(f"TDX quote verifier unavailable: {type(exc).__name__}") from exc
+    try:
+        q = parse_quote(quote)
+        chain = verify_tdx_quote(q, quote)
+    except Exception as exc:
+        raise CheckError(f"TDX quote did not verify: {type(exc).__name__}: {exc}"[:300]) from exc
+    b = q.td_quote_body
+    return {"report_data": b.report_data.hex(), "mr_config_id": b.mr_config_id.hex(), "mrtd": b.mr_td.hex(),
+            "rtmr0": b.rtmrs[0].hex(), "rtmr1": b.rtmrs[1].hex(), "rtmr2": b.rtmrs[2].hex(),
+            "rtmr3": b.rtmrs[3].hex(), "td_attributes": b.td_attributes.hex(),
+            "debug": bool(b.td_attributes[0] & 1), "root": chain.root_cert.subject.rfc4514_string(),
+            "verifier": "tinfoil 0.14.2 verify_tdx_quote (PCK chain to the Intel SGX Root CA it embeds)"}
+
+
+QuoteVerifier = Callable[[bytes], dict]
+
+
+def check_report(report: Mapping, *, nonce: str, app_composes: Mapping[str, str], quote_verifier: QuoteVerifier,
+                 tls_cert_fingerprint: str | None = None) -> dict:
+    """One NEAR report (gateway or model candidate), per docs.near.ai quote-nonce-signer. Returns the
+    verified quote fields; raises CheckError naming the first failed check."""
+    if report.get("signing_algo") != SIGNING_ALGO:
+        raise CheckError(f"signing_algo {report.get('signing_algo')!r} is not {SIGNING_ALGO}")
+    if (report.get("request_nonce") or "").lower() != nonce.lower():
+        raise CheckError("request_nonce does not echo the client nonce")
+    try:
+        quote = base64.b64decode(report.get("intel_quote_b64") or "", validate=True)
+    except Exception as exc:
+        raise CheckError("intel_quote is not base64") from exc
+    q = quote_verifier(quote)
+    if q.get("debug") is not False:
+        raise CheckError("TDX debug mode is enabled (or unknown)")
+    want = expected_report_data(report.get("signing_address") or "", nonce, tls_cert_fingerprint)
+    if hexbytes(q.get("report_data"), "quote report_data", 64) != want:
+        raise CheckError("quote report_data does not bind the signing key and the client nonce")
+    if report.get("report_data") not in (None, "") and \
+            hexbytes(report["report_data"], "report_data") != want:
+        raise CheckError("echoed report_data differs from the verified quote")
+    compose_hash = report.get("compose_hash") or ""
+    text = app_composes.get(compose_hash)
+    if not isinstance(text, str) or sha256_hex(text.encode("utf-8")) != compose_hash:
+        raise CheckError("app_compose missing or its SHA-256 differs from compose_hash")
+    if hexbytes(q.get("mr_config_id"), "quote mr_config_id", 48) != mr_config_id_for(text):
+        raise CheckError("MRCONFIGID does not match SHA-256(app_compose)")
+    if replay_rtmr3(report.get("event_log_imr3") or []) != hexbytes(q.get("rtmr3"), "quote rtmr3", 48):
+        raise CheckError("event log does not replay to the quote's RTMR3")
+    return q
+
+
+# ── JWS / JWKS (Intel Trust Authority) ─────────────────────────────────────────────────────────
+
+def _cert_chain_ok(x5c: list, roots: Mapping[str, str], at: datetime):
+    from cryptography import x509
+    if not isinstance(x5c, list) or len(x5c) < 2:
+        raise CheckError("JWKS key has no x5c chain")
+    certs = [x509.load_der_x509_certificate(base64.b64decode(c)) for c in x5c]
+    for i, cert in enumerate(certs):
+        if not (cert.not_valid_before_utc <= at <= cert.not_valid_after_utc):
+            raise CheckError(f"x5c[{i}] not valid at {at.isoformat()}")
+        issuer = certs[i + 1] if i + 1 < len(certs) else cert
+        try:
+            cert.verify_directly_issued_by(issuer)
+        except Exception as exc:
+            raise CheckError(f"x5c[{i}] is not signed by x5c[{min(i + 1, len(certs) - 1)}]") from exc
+    from cryptography.hazmat.primitives import serialization
+    root_fp = sha256_hex(certs[-1].public_bytes(serialization.Encoding.DER))
+    if root_fp not in roots:
+        raise CheckError(f"x5c chain ends at an unpinned root (sha256 {root_fp[:16]}...)")
+    return certs[0], roots[root_fp]
+
+
+def jwks_keys(jwks: Mapping, *, roots: Mapping[str, str] = ITA_ROOT_SHA256, at: datetime) -> dict:
+    """kid+alg -> (public key, root name) for every RSA key whose x5c chain reaches a pinned root and whose
+    leaf certificate carries the JWK's own modulus and exponent."""
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    out = {}
+    keys = jwks.get("keys") if isinstance(jwks, Mapping) else None
+    if not isinstance(keys, list) or not keys:
+        raise CheckError("JWKS has no keys")
+    for k in keys:
+        if not isinstance(k, Mapping) or k.get("kty") != "RSA":
+            continue
+        leaf, root = _cert_chain_ok(k.get("x5c"), roots, at)
+        pub = leaf.public_key()
+        n = int.from_bytes(b64url(k["n"]), "big")
+        e = int.from_bytes(b64url(k["e"]), "big")
+        if not isinstance(pub, rsa.RSAPublicKey) or pub.public_numbers().n != n or pub.public_numbers().e != e:
+            raise CheckError(f"JWK {str(k.get('kid'))[:16]}... does not match its certificate")
+        out[(k.get("kid"), k.get("alg"))] = (pub, root)
+    if not out:
+        raise CheckError("JWKS has no usable RSA key")
+    return out
+
+
+def verify_jwt(token: str, keys: Mapping, *, at: float, issuers: Iterable[str] = ITA_ISSUERS) -> dict:
+    """Verify a compact JWS against ``keys`` (from jwks_keys) and its time claims at ``at`` (unix).
+    Returns the claims."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    if not isinstance(token, str) or token.count(".") != 2:
+        raise CheckError("token is not a compact JWS")
+    h64, p64, s64 = token.split(".")
+    try:
+        header, claims, sig = json.loads(b64url(h64)), json.loads(b64url(p64)), b64url(s64)
+    except Exception as exc:
+        raise CheckError("token is not decodable") from exc
+    alg = header.get("alg")
+    if alg not in JWT_ALGS:
+        raise CheckError(f"token alg {alg!r} not accepted")
+    entry = keys.get((header.get("kid"), alg))
+    if entry is None:
+        raise CheckError("token kid/alg not in the JWKS")
+    pub, _root = entry
+    hash_cls = {"256": hashes.SHA256, "384": hashes.SHA384}[alg[2:]]
+    pad = (padding.PSS(mgf=padding.MGF1(hash_cls()), salt_length=hash_cls.digest_size) if alg.startswith("PS")
+           else padding.PKCS1v15())
+    try:
+        pub.verify(sig, f"{h64}.{p64}".encode("ascii"), pad, hash_cls())
+    except Exception as exc:
+        raise CheckError("token signature does not verify") from exc
+    if claims.get("iss") not in tuple(issuers):
+        raise CheckError(f"token issuer {str(claims.get('iss'))[:60]!r} not accepted")
+    for name in ("iat", "exp"):
+        if not isinstance(claims.get(name), (int, float)):
+            raise CheckError(f"token has no {name}")
+    if not (claims["iat"] - JWT_SKEW_SECONDS <= at <= claims["exp"] + JWT_SKEW_SECONDS):
+        raise CheckError("token was not valid at the capture time")
+    return claims
+
+
+def tdx_claims(claims: Mapping) -> Mapping:
+    """v2 tokens nest TDX claims under "tdx"; v1 tokens are flat."""
+    t = claims.get("tdx")
+    return t if isinstance(t, Mapping) else claims
+
+
+# ── signed responses ────────────────────────────────────────────────────────────────────────────
+
+def expected_signature_text(kind: str, *, model: str | None, request_sha256: str, response_sha256: str) -> str:
+    if kind == "provider_tee":
+        if not isinstance(model, str) or not model:
+            raise CheckError("provider_tee payload needs the request's model id")
+        return f"{model}:{request_sha256}:{response_sha256}"
+    if kind == "gateway":
+        return f"{request_sha256}:{response_sha256}"
+    raise CheckError(f"signature kind {kind!r} is not provider_tee or gateway (not inferred)")
+
+
+def ed25519_ok(public_key_hex: str, signature_hex: str, text: str) -> bool:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    try:
+        key = Ed25519PublicKey.from_public_bytes(hexbytes(public_key_hex, "signing_address", 32))
+        key.verify(hexbytes(signature_hex, "signature", 64), text.encode("utf-8"))
+        return True
+    except Exception:
+        return False
+
+
+def check_signature(sig: Mapping | None, *, model: str | None, request_sha256: str | None,
+                    response_sha256: str | None, gateway_signer: str | None, model_signers: Iterable[str],
+                    require_provider_tee: bool) -> dict:
+    """Judge one fetched signature against the digests the client recorded and the signers the preflight
+    verified. Never raises. ``verdict`` is "verified" only when the text equals the expected payload
+    exactly, the ed25519 signature verifies, the signer matches the right preflight report (exactly one
+    model report for provider_tee, the gateway report for gateway), and, when ``require_provider_tee``,
+    the kind is provider_tee."""
+    out = {"verdict": "unverified", "kind": None, "reason": "", "expected_text": None, "payload_match": False,
+           "signature_valid": False, "signer_match": False, "signer_role": None, "provider_tee_verified": False}
+    if not isinstance(sig, Mapping):
+        out["reason"] = "no signature"
+        return out
+    kind = sig.get("signature_kind")
+    out["kind"] = kind if isinstance(kind, str) else None
+    if not (isinstance(request_sha256, str) and isinstance(response_sha256, str)
+            and re.fullmatch(r"[0-9a-f]{64}", request_sha256) and re.fullmatch(r"[0-9a-f]{64}", response_sha256)):
+        out["reason"] = "the client recorded no request/response digest"
+        return out
+    if kind not in SIGNATURE_KINDS:
+        out["reason"] = f"signature_kind {kind!r} absent or unfamiliar; not inferred from the text"
+        return out
+    if sig.get("signing_algo") != SIGNING_ALGO:
+        out["reason"] = f"signing_algo {sig.get('signing_algo')!r} is not {SIGNING_ALGO}"
+        return out
+    try:
+        expected = expected_signature_text(kind, model=model, request_sha256=request_sha256,
+                                           response_sha256=response_sha256)
+    except CheckError as exc:
+        out["reason"] = str(exc)
+        return out
+    out["expected_text"] = expected
+    text = sig.get("text")
+    out["payload_match"] = isinstance(text, str) and hmac.compare_digest(text.encode("utf-8"), expected.encode("utf-8"))
+    if not out["payload_match"]:
+        out["reason"] = "signed text does not equal the expected payload for this kind and these digests"
+        return out
+    address = sig.get("signing_address")
+    out["signature_valid"] = isinstance(address, str) and ed25519_ok(address, str(sig.get("signature") or ""), text)
+    if not out["signature_valid"]:
+        out["reason"] = "ed25519 signature does not verify under signing_address"
+        return out
+    addr = address.lower().removeprefix("0x")
+    if kind == "provider_tee":
+        matches = [s for s in model_signers if isinstance(s, str) and s.lower().removeprefix("0x") == addr]
+        if len(matches) != 1:
+            out["reason"] = ("signer matches no verified model report" if not matches else
+                             f"signer matches {len(matches)} verified model reports (ambiguous)")
+            return out
+        out["signer_role"] = "model"
+    else:
+        if not (isinstance(gateway_signer, str) and gateway_signer.lower().removeprefix("0x") == addr):
+            out["reason"] = "signer is not the verified gateway signer"
+            return out
+        out["signer_role"] = "gateway"
+    out["signer_match"] = True
+    out["provider_tee_verified"] = kind == "provider_tee"
+    if require_provider_tee and kind != "provider_tee":
+        out["reason"] = "gateway signature only: it does not bind the response to a model TEE"
+        return out
+    out["verdict"] = "verified"
+    out["reason"] = ("provider_tee signature by the verified model key" if kind == "provider_tee"
+                     else "gateway signature by the verified gateway key (no model binding)")
+    return out
+
+
+def utc(ts: float) -> datetime:
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc)
