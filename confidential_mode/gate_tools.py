@@ -185,9 +185,20 @@ class Allowlist:
             tools.append({"name": name, "toolset": toolset, "module": module, "qualname": qualname})
         data = {"version": 2, "lock_id": self.lock_id, "tools": tools, "allowed": added}
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, target)
+        # Mode 0600 like pins.yaml (review finding 18): an "allowed" entry lifts the ask prompt for a tool.
+        import tempfile
+        fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(data, indent=2) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
     @classmethod
     def load_persisted(cls, path: Optional[Path], registry: Any, *, lock_id: str, predicate: Any = None,

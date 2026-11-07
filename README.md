@@ -679,6 +679,13 @@ none.
 
 Tools that are always blocked cannot be added this way.
 
+The additions are stored in `allowlist.yaml` in the plugin's data directory, with file mode 0600.
+That file is a second way in. Anyone who can edit it can add a name to its `allowed` list for the
+current lock, and the tool then runs without asking. No ledger row records such an edit. The file is
+yours, like the ledger, so this is inside the trust boundary the plugin states: the plugin defends
+against what the model and remote hosts do, not against you or other code on your account. A tool
+that is always blocked stays blocked whatever the file says.
+
 ## Pins
 
 Pins apply to the `attested` tier only.

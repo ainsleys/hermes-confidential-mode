@@ -521,6 +521,18 @@ def _load(reg, path, lock_id="S1"):
                                     plugin_tool_names=set())
 
 
+def test_persisted_allowlist_is_mode_0600_and_leaves_no_temp_file(tmp_path):
+    """Review finding 18: allowlist.yaml lifts ask prompts, so it is written 0600 like pins.yaml."""
+    import stat
+    path = tmp_path / "allowlist.yaml"
+    al = _build(MutableRegistry(ENTRIES), path)
+    al.lock_id = "S1"
+    al.persist()
+    al.add("web_search")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["allowlist.yaml"]
+
+
 def test_persist_and_reload_same_lock_keeps_classification_and_additions(tmp_path):
     path = tmp_path / "allowlist.yaml"
     reg = MutableRegistry(ENTRIES)
