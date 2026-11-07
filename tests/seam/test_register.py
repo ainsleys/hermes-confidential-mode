@@ -314,6 +314,23 @@ def test_a_lock_made_before_the_terminal_keys_joined_the_fingerprint_is_not_a_br
     assert ("breach", "config_changed") not in plugin.kinds() and not plugin.rt.state.is_breached(agent.session_id)
 
 
+def test_terminal_tool_call_through_hermes_dispatch_is_blocked_on_a_remote_backend(plugin, monkeypatch):
+    """Second review, minor item 15: a real read_file call through model_tools.handle_function_call (Hermes'
+    own task_id plumbing) is refused while the backend Hermes resolves is ssh, and runs on local."""
+    import model_tools
+    plugin.cfg.write_text(BASE_CONFIG)
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    target = plugin.home / "note.txt"
+    target.write_text("hello from this host")
+    ok = model_tools.handle_function_call("read_file", {"path": str(target)}, task_id="t-local", session_id="s")
+    assert "hello from this host" in ok, ok
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    out = model_tools.handle_function_call("read_file", {"path": str(target)}, task_id="t-ssh", session_id="s")
+    assert "terminal backend is ssh" in out and "hello from this host" not in out, out
+    assert ("tool_refused", "terminal_backend") in plugin.kinds()
+
+
 def test_config_edit_after_lock_blocks_the_next_turn(plugin, monkeypatch):
     assert plugin.slash("on on-host-only").startswith("Locked")
     rec = Rec()
