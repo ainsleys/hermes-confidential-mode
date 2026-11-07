@@ -573,6 +573,9 @@ def _record_send(rec: dict) -> None:
     bucket = _SEND_RECORDS.get()
     if bucket is not None:
         bucket.append(rec)
+    # The llm gate's bucket (sendctx.capture_records): the record reaches the send_observed row.
+    from .. import sendctx
+    sendctx.add_record(rec)
 
 
 def last_send_record() -> dict | None:

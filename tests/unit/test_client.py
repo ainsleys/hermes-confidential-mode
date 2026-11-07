@@ -518,3 +518,49 @@ def test_send_records_hpke_key_and_response_decrypted(tmp_path, monkeypatch, rec
     assert r["response_decrypted"] == {"decrypted": True, "failed": False, "plain": None}[mode]
     assert r["tls_spki_sha256"] == tmod.spki_sha256(der) and r["tls_matches_report"] is False
     assert tmod.last_send_record() is r
+
+
+def test_send_record_reaches_the_ledger_row_and_the_receipt_flags_an_hpke_key_mismatch(tmp_path, monkeypatch, rec):
+    """Review finding 3: the transport's per-send record (HPKE key used, response decrypted) reaches the llm
+    gate's send_observed row, and the receipt's HPKE KEY MISMATCH line fires when that key is not the H of
+    the verify row covering the send."""
+    from confidential_mode import receipts
+    from confidential_mode.gate_llm import build_middleware
+    from confidential_mode.ledger import Ledger
+    from confidential_mode.tiers import Tier, Verdict
+    _stub_sdk(monkeypatch, rec)
+
+    def fake_sync(self):
+        self.verify()
+        return httpx.Client(transport=httpx.MockTransport(_ehbp_like("secure-sync", rec)))
+    monkeypatch.setattr(tinfoil_client.SecureClient, "make_secure_http_client", fake_sync)
+    ad = _adapter(tmp_path, hold_until_accepted=False)
+    result = ad.verify()                                     # the transport encrypts to H = "11" * 32
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    claims = dict(result.evidence.get("claims") or {}, hpke_public_key="48" * 32)
+    ledger.append({"kind": "lock", "session_id": "s1", "tier": "attested"})
+    ledger.append({"kind": "verify_ok", "provider": "attested-tinfoil", "host": "router.example",
+                   "detail": {"vendor": "tinfoil", "enclave_host": "router.example",
+                              "evidence": {**result.evidence, "claims": claims}}})
+
+    class _In:
+        tier = Tier.ATTESTED
+
+        def classify(self, dest):
+            return Verdict(True, "attested", "router.example")
+    mw = build_middleware(ledger=ledger, is_locked=lambda: (True, Tier.ATTESTED), predicate_for=lambda t: _In(),
+                          attested_ok=lambda p: Verdict(True, "verified", "router.example"))
+    view = ad.sync_http_view()
+
+    def next_call(request):
+        resp = view.post("https://router.example/v1/chat/completions", json={"m": 1})
+        resp.read()
+        return resp
+    mw(request={"model": "m"}, next_call=next_call, provider="attested-tinfoil",
+       base_url="https://router.example/v1", model="m", api_mode="chat_completions", session_id="s1")
+    (row,) = [e for e in ledger.session("s1") if e.kind == "send_observed"]
+    assert row.detail["hpke_key_used"] == "11" * 32 and row.detail["response_decrypted"] is True
+    doc = receipts.build_receipt(ledger, "s1")
+    assert doc["header"]["hpke_mismatches"] == [row.id]
+    assert f"HPKE KEY MISMATCH on sends: #{row.id}" in receipts.render(ledger, "s1")
+    ledger.close()

@@ -483,7 +483,8 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
         v = cands[-1] if cands else None
         entry = {"send": r["id"], "verify": None, "ttl_seconds": ttl_seconds, "ttl_source": ttl_source,
                  "window_start": None, "window_end": None, "covered": False, "verify_unverified_entry": None}
-        # W2's per-send observations, when present (plan item 4); absent fields stay absent.
+        # The llm gate copies the Tinfoil transport's per-send records into the row (gate_llm
+        # send_record_detail); absent fields stay absent (on-host providers, NEAR).
         d = r["detail"] if isinstance(r["detail"], Mapping) else {}
         if "hpke_key_used" in d:
             entry["hpke_key_used"] = d.get("hpke_key_used")
@@ -500,8 +501,16 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
         if "hpke_key_used" in entry:
             h = verify_facts(v)["hpke_public_key"] if v is not None else None
             entry["verify_hpke_public_key"] = h
-            entry["hpke_matches"] = None if (h is None or entry["hpke_key_used"] in (None, "")) \
-                else str(entry["hpke_key_used"]).lower() == str(h).lower()
+            # Every exchange of the call counts (an SDK retry may have used another key), not only the last.
+            sends = d.get("sends") if isinstance(d.get("sends"), list) else []
+            used = [s.get("hpke_key_used") for s in sends if isinstance(s, Mapping)] or [entry["hpke_key_used"]]
+            used = [u for u in used if u not in (None, "")]
+            if h is None or not used:
+                entry["hpke_matches"] = None
+            else:
+                entry["hpke_matches"] = all(str(u).lower() == str(h).lower() for u in used)
+                if not entry["hpke_matches"]:
+                    entry["hpke_key_used"] = next(u for u in used if str(u).lower() != str(h).lower())
         out.append(entry)
     return out
 

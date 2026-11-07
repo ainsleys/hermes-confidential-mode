@@ -175,6 +175,26 @@ class _Call:
     next_called: bool = False
 
 
+#: Fields of one per-exchange record (verify/tinfoil.py _observe_send) copied into the send_observed row.
+SEND_RECORD_FIELDS = ("hpke_key_used", "response_decrypted", "encrypted", "tls_spki_sha256", "tls_matches_report")
+
+
+def send_record_detail(records: list) -> dict:
+    """The send_observed detail for the exchanges one model call made. Top-level fields come from the
+    last exchange (the response Hermes received); ``sends`` lists every exchange when there was more than
+    one (an SDK retry). No records (an on-host provider, NEAR) gives {}."""
+    try:
+        clean = [{k: r.get(k) for k in SEND_RECORD_FIELDS if k in r} for r in records if isinstance(r, dict)]
+    except Exception:  # noqa: BLE001
+        return {}
+    if not clean:
+        return {}
+    out = dict(clean[-1])
+    if len(clean) > 1:
+        out["sends"] = clean
+    return out
+
+
 class LlmGate:
     """The middleware body. Collaborators are injected so W2/W3 can be faked:
 
@@ -291,14 +311,35 @@ class LlmGate:
     def same_tier(a: Tier, b: Tier) -> bool:
         return a is b
 
-    def guarded_call(self, request, next_call, dest, context, tier: Tier, verdict: Verdict) -> Any:
-        nbytes = request_bytes(request)
-        self.record("send_observed", dest, context, host=verdict.host or _host(dest.base_url),
-                    nbytes=nbytes, tier=tier.value, verdict="in_tier", decision="allowed")
+    @staticmethod
+    def capture_records(bucket: list):
+        """Per-exchange records a vendor transport adds during ``next_call`` (sendctx.capture_records).
+        Never fails the call: a broken import degrades to no records."""
         try:
-            with self.send_context(dest, context, tier):
-                return next_call(request)
-        except Exception as exc:
+            from .sendctx import capture_records
+            return capture_records(bucket)
+        except Exception:  # noqa: BLE001
+            import contextlib
+            return contextlib.nullcontext()
+
+    def guarded_call(self, request, next_call, dest, context, tier: Tier, verdict: Verdict) -> Any:
+        """Call the provider. The ``send_observed`` row is written after ``next_call`` returns or raises,
+        so it carries the vendor transport's per-send records (review finding 3). The attempt itself is
+        already on the ledger from the ``pre_api_request`` hook."""
+        nbytes = request_bytes(request)
+        records: list = []
+
+        def observed() -> None:
+            self.record("send_observed", dest, context, host=verdict.host or _host(dest.base_url),
+                        nbytes=nbytes, tier=tier.value, verdict="in_tier", decision="allowed",
+                        detail=send_record_detail(records))
+        try:
+            with self.send_context(dest, context, tier), self.capture_records(records):
+                response = next_call(request)
+        except BaseException as exc:
+            observed()
+            if not isinstance(exc, Exception):
+                raise
             original = getattr(exc, "original", exc)
             if isinstance(original, InterruptedError):
                 raise
@@ -309,6 +350,8 @@ class LlmGate:
             return self.refuse(dest, context, tier, verdict, TEXT_PROVIDER_ERROR,
                                reason_code="provider_error", nbytes=nbytes, verdict_label="in_tier",
                                detail=detail)
+        observed()
+        return response
 
     # -- outcomes ------------------------------------------------------------
     def refuse(self, dest: Destination, context, tier: Tier | None, verdict: Verdict | None, text: str, *,
