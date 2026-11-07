@@ -56,7 +56,7 @@ description: >-
   Disclosure, credentials and processes. The plugin uses TINFOIL_API_KEY through the provider
   profile's env_vars, or else through agent.secret_scope.get_secret. It runs no shell command, no
   subprocess and no background process. It starts one short-lived thread per attestation, and a turn
-  waits at most 5 seconds for it.
+  waits at most 20 seconds for it (confidential.verify_wait_seconds).
 
   Disclosure, core imports (catalog rule 9; all lazy). agent.auxiliary_client
   (_RUNTIME_MAIN_CONTEXT, to read the live runtime), agent.secret_scope, hermes_cli.commands

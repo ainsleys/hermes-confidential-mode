@@ -34,8 +34,9 @@ DEFAULT_TTL_SECONDS = 300.0
 DEFAULT_FAILURE_BACKOFF_SECONDS = 10.0
 
 # create_client / attested_ok wait at most this long for an attestation, then refuse while it continues
-# in the background (Amendment 4: bounded, < 10 s).
-DEFAULT_VERIFY_WAIT_SECONDS = 20.0  # a cold live verify() measured ~5.6 s against router-0.tinfoil.sh
+# in the background (Amendment 4 ruling 1, revised 2026-11-07: default 20 s). A cold live verify()
+# measured ~5.6 s against router-0.tinfoil.sh, so a 5 s wait would refuse most first turns.
+DEFAULT_VERIFY_WAIT_SECONDS = 20.0
 # Context window reported to Hermes without probing the endpoint (confidential.tinfoil.context_length).
 DEFAULT_CONTEXT_LENGTH = 65536
 

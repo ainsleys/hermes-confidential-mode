@@ -29,8 +29,8 @@ confidential:
 
   # How many seconds a turn waits for a verification to finish. If the verification is not done in
   # time, the turn is refused with "attestation still in progress; this turn ended; resend". The
-  # verification keeps running in the background, so the next attempt usually succeeds. Default 5.
-  verify_wait_seconds: 5
+  # verification keeps running in the background, so the next attempt usually succeeds. Default 20.
+  verify_wait_seconds: 20
 
   pins:
     # A pin is your recorded approval of one router build. When this is true, the plugin applies a

@@ -190,7 +190,7 @@ It starts one short-lived daemon thread for each attestation. The sequence is th
 
 1. `create_client`, or the attested check on a turn, needs a fresh verification.
 2. The plugin starts the thread, which runs the verification.
-3. The caller waits at most `confidential.verify_wait_seconds`, 5 seconds by default.
+3. The caller waits at most `confidential.verify_wait_seconds`, 20 seconds by default.
 4. If the verification is not done by then, the plugin refuses the turn. The thread keeps running
    and finishes the verification.
 5. The thread exits when the verification ends.
@@ -256,7 +256,7 @@ whole profile. While locked, the plugin blocks the following.
 
 - **Sends to an unverified or unpinned enclave (attested tier only).** The plugin refuses any send
   while the enclave is unverified. It refuses when the last verification is stale and cannot be
-  repeated within 5 seconds. It refuses when the enclave is verified but does not match the pin you
+  repeated within `confidential.verify_wait_seconds` (20 seconds by default). It refuses when the enclave is verified but does not match the pin you
   approved.
 
 - **A pin with no consent record (attested tier only).** The plugin refuses a pin that has no matching
