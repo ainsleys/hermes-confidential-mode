@@ -184,15 +184,18 @@ def test_off_host_tool_prompts_with_our_message_and_runs_only_on_explicit_approv
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     call = getattr(hermes, path)
     args = {"q": "x" * 1500}
-    msg = f"{OFF} wants to send ~2 KB of this conversation off the machine"
+    msg = f"Confidential mode: {OFF} wants to send ~2 KB of this conversation off the machine"
 
     hermes.human("deny")
     out = call(OFF, args)
-    assert hermes.prompts == [(f"<{OFF}> (plugin approval rule)", msg)]
+    # The middleware asks in agent order and names the plugin in Hermes' target line (ux-pass-1 item 6); the
+    # pre_tool_call directive (model order) cannot, so Hermes shows the bare tool name there.
+    target = f"<confidential mode: off-host tool {OFF}> (plugin approval rule)" if path == "agent_order_call" \
+        else f"<{OFF}> (plugin approval rule)"
+    assert hermes.prompts == [(target, msg)]
     assert OFF not in hermes.ran and "BLOCKED" in out
-    # model order: Hermes' own deny ends the call before the middleware; agent order: the middleware refuses too.
-    assert hermes.events() == [("tool_asked", "ask"), ("tool_refused", "deny")] + (
-        [("tool_refused", "denied")] if path == "agent_order_call" else [])
+    # One refusal row per decision on either path (ux-pass-1 item 5): the human's "deny" answer.
+    assert hermes.events() == [("tool_asked", "ask"), ("tool_refused", "deny")]
 
     hermes.human("once")
     out = call(OFF, args)

@@ -983,7 +983,7 @@ def test_kb_message_with_hostile_args_never_raises(hermes, label):
     msg = res["message"]
     assert len(msg) < 2000, "the approval message must not echo the payload"
     if res["action"] == "approve":
-        assert "_t4_net" in msg and re.search(r"\d+(\.\d+)?\s*KB", msg), msg
+        assert "_t4_net" in msg and re.search(r"\d+(\.\d+)?\s*(KB|MB)", msg), msg   # MB above 1 MB (ux-pass-1)
     json.dumps(res)                                       # the directive itself is serialisable
 
 
@@ -991,9 +991,10 @@ def test_kb_message_size_is_not_understated_for_huge_payload(hermes):
     probe(hermes, "_t4_net")
     g = lock(hermes)
     res = direct(g, "_t4_net", {"text": "A" * (3 * 1024 * 1024)})
-    m = re.search(r"~?\s*(\d[\d,]*(?:\.\d+)?)\s*KB", res["message"])
+    m = re.search(r"~?\s*(\d[\d,]*(?:\.\d+)?)\s*(KB|MB)", res["message"])
     assert m, res
-    assert float(m.group(1).replace(",", "")) >= 3000, "3 MiB reported as less than ~3000 KB"
+    kb = float(m.group(1).replace(",", "")) * (1024 if m.group(2) == "MB" else 1)
+    assert kb >= 3000, "3 MiB reported as less than ~3000 KB"
 
 
 def test_hostile_args_through_real_path_never_run_handler_without_human(hermes):

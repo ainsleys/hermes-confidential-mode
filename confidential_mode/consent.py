@@ -352,6 +352,10 @@ def _approved_lines(approved: Optional[tuple]) -> list[str]:
     return lines
 
 
+NEAR_ABLITERATED_NOTE = ("NEAR deploys \"...-abliterated\" variants of a model (refusal training removed) beside "
+                         "the base model, and the plugin lists their services because they share the enclave.")
+
+
 def _near_pin_question(pending: Any, *, observers: Optional[list] = None, approved: Optional[tuple] = None) -> str:
     """NEAR has no release tag or Sigstore bundle: the prompt shows the identity (host and model allowlist),
     every entry to approve with what it pins, the whole approved set, and, separately, what the
@@ -384,6 +388,7 @@ def _near_pin_question(pending: Any, *, observers: Optional[list] = None, approv
         REPORTED_NOT_PINNED,
         "NEAR runs instances of one model with different measured configurations under one signing key, so a "
         "new instance can show up here as a change.",
+        NEAR_ABLITERATED_NOTE,
         f"Platform: {_text(_value(pending, 'platform'))}",
         f"Whole-result code fingerprint: {_text(_value(pending, 'code_fingerprint'))}",
         f"Whole-result enclave fingerprint: {_text(_value(pending, 'enclave_fingerprint'))}",

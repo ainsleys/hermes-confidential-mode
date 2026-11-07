@@ -345,7 +345,7 @@ def test_off_host_tool_asks_with_kb_message_and_runs_on_explicit_answer():
         out = r.run("web_search", args)
         n = -(-len(json.dumps(args)) // 1024)
         assert n == 3 and out == '{"ok": true}' and r.ran() == ["web_search"]
-        assert r.calls["ask"] == [("web_search", f"web_search wants to send ~{n} KB of this conversation off the machine",
+        assert r.calls["ask"] == [("web_search", f"Confidential mode: web_search wants to send ~{n} KB of this conversation off the machine",
                                    rule_key_for("web_search"))]
         assert r.ledger.kinds() == ["tool_asked", "tool_allowed"]
         assert r.ledger.events[0]["bytes"] == len(json.dumps(args)) and r.ledger.events[0]["detail"]["kb"] == 3
@@ -378,12 +378,15 @@ def test_a_secret_typed_at_the_approval_prompt_never_reaches_the_ledger_or_the_m
 def test_denied_and_no_surface_are_refused():
     r = Rig(answer="deny", hermes_approved=False)
     assert refused(r.run("web_search")) and r.ran() == []
-    assert r.ledger.events[-1]["decision"] == "denied"
+    # ux-pass-1 item 5: one refusal row per decision. post_approval_response ledgers the human's "deny";
+    # the middleware's enforcement adds no second row.
+    assert r.ledger.kinds() == ["tool_asked", "tool_refused"] and r.ledger.events[-1]["decision"] == "deny"
     r = Rig(answer=None, hermes_approved=False, status="approval_required")
     assert refused(r.run("web_search")) and r.ledger.events[-1]["decision"] == "no_surface"
     # an explicit answer recorded but Hermes said no (e.g. a race): still refused
     r = Rig(answer="once", hermes_approved=False)
     assert refused(r.run("web_search")) and r.ran() == []
+    assert r.ledger.kinds()[-1] == "tool_refused" and r.ledger.events[-1]["decision"] == "denied"
 
 
 def test_answer_for_another_call_does_not_count():

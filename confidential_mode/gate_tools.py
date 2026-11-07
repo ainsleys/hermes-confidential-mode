@@ -385,14 +385,20 @@ def _read_added(path: Path) -> set[str]:
 # allowlist from the live registry
 # --------------------------------------------------------------------------------------------------
 
-def ensure_builtin_tools() -> None:
+def ensure_builtin_tools(progress: Any = None) -> None:
     """Import Hermes' built-in tool modules so their registry entries exist in this process. Built-in tools
     register themselves on import. A `hermes confidential` CLI process never builds an agent, so it never
     imports them; an allowlist built or rebuilt from that registry would classify no built-in tool (review
-    finding: `hermes confidential allow web_search` refused every tool). Idempotent; never raises."""
+    finding: `hermes confidential allow web_search` refused every tool). Idempotent; never raises.
+    ``progress``: a progress.Progress; the phase line reports how many tools the registry holds."""
     try:
-        from tools.registry import discover_builtin_tools
-        discover_builtin_tools()
+        from tools.registry import discover_builtin_tools, registry
+        if progress is None or not getattr(progress, "enabled", False):
+            discover_builtin_tools()
+            return
+        with progress.phase("discovering tools") as box:
+            discover_builtin_tools()
+            box["result"] = f"{len(registry.get_all_entries())} found"
     except Exception:
         pass
 
@@ -796,6 +802,54 @@ def args_bytes(args: Any) -> int:
     return len(_dumps(args))
 
 
+IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"})
+
+
+def attached_image_bytes(args: Any) -> int:
+    """Bytes of the local image files a call names (vision_analyze takes a path, then reads and sends the
+    file). Each distinct existing regular file with an image suffix counts once, by its size; nothing is read.
+    A data: URL is already counted by args_bytes. Never raises."""
+    total, seen = 0, set()
+    for raw in _strings(args):
+        try:
+            text = raw.strip()
+            if text.startswith("file://"):
+                text = text[len("file://"):]
+            if not text or len(text) > 4096 or "\n" in text or Path(text).suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            path = Path(os.path.expanduser(text))
+            key = str(path)
+            if key in seen or not path.is_file():
+                continue
+            seen.add(key)
+            total += path.stat().st_size
+        except Exception:
+            continue
+    return total
+
+
+def call_bytes(args: Any) -> int:
+    """What a call sends off the machine, as far as the gate can see: the arguments plus attached images."""
+    return args_bytes(args) + attached_image_bytes(args)
+
+
+def size_text(nbytes: int) -> str:
+    """"~N KB" (rounded up, at least 1) up to 1 MB, then "~X.Y MB"."""
+    if nbytes > 1024 * 1024:
+        return f"~{nbytes / (1024 * 1024):.1f} MB"
+    return f"~{max(1, math.ceil(nbytes / 1024))} KB"
+
+
+#: The label the plugin gives Hermes' approval prompt in place of the tool name (Hermes shows
+#: "<label> (plugin approval rule)" under its own fixed "Dangerous Command" title; docs/LIMITATIONS.md).
+APPROVAL_LABEL = "confidential mode: off-host tool"
+
+
+def ask_message(tool_name: str, nbytes: int) -> str:
+    """The plugin's own line in the approval prompt; it leads with what is happening."""
+    return f"Confidential mode: {tool_name} wants to send {size_text(nbytes)} of this conversation off the machine"
+
+
 def _event(kind: str, *, tool_name: str, session_id: str, decision: str, detail: dict,
            nbytes: Optional[int] = None, surface: Optional[str] = None) -> dict:
     return {
@@ -916,14 +970,26 @@ class _Policy:
         if al.is_added(tool_name):
             return CallDecision("run", "allowlist")
         if self.bypass(tool_name):
-            return CallDecision("refuse", "bypass_active",
-                                f"confidential mode: {tool_name} sends data off the machine and needs your "
-                                "approval, but approvals are bypassed here (yolo, approvals.mode off, or an "
-                                "unattended context with no one to ask). Blocked. Turn the bypass off, or add "
-                                "the tool with /confidential allow.")
-        n = args_kb(args)
+            name = _printable(tool_name)
+            return CallDecision("refuse", "bypass_active", bypass_text(name))
+        nbytes = call_bytes(args)
+        n = max(1, math.ceil(nbytes / 1024))
         return CallDecision("ask", "remembered" if self.remembered(tool_name) else "ask",
-                            f"{tool_name} wants to send ~{n} KB of this conversation off the machine", kb=n)
+                            ask_message(tool_name, nbytes), kb=n)
+
+
+def bypass_text(name: str) -> str:
+    """The tool result the model gets for an off-host tool under an approval bypass. It names the remedy, so
+    the model can tell the person the exact command (ux-pass-1 item 4)."""
+    return (f"confidential mode: {name} was blocked by confidential mode in an unattended run; to allow it, "
+            f"run: hermes confidential allow {name}, or run interactively to be asked. (Approvals are bypassed "
+            "here: a one-shot or unattended run, yolo, or approvals.mode off. Nobody can be asked.)")
+
+
+def _refusal_ledgered(choice: Any) -> bool:
+    """Whether post_approval_response already wrote a tool_refused row for this recorded answer: it writes
+    one for every answer that is not exactly once/session/always (an allow answer is a tool_allowed row)."""
+    return choice is not _MISSING and not (type(choice) is str and choice in _ALLOW_CHOICES)
 
 
 def _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend=None) -> _Policy:
@@ -1052,7 +1118,9 @@ def hermes_request_approval(tool_name: str, message: str, *, rule_key: str, appr
     from tools.approval_context import reset_current_observability_context, set_current_observability_context
     tokens = set_current_observability_context(turn_id=turn_id, tool_call_id=approval_id, session_id=session_id)
     try:
-        return request_tool_approval(tool_name, message, rule_key=rule_key)
+        # Hermes shows "<name> (plugin approval rule)" as the prompt's target line; the plugin's label goes
+        # there in place of the bare tool name. The rule key (our grant key) still names the tool.
+        return request_tool_approval(f"{APPROVAL_LABEL} {tool_name}", message, rule_key=rule_key)
     finally:
         reset_current_observability_context(tokens)
 
@@ -1119,9 +1187,12 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
             return _refusal_result(f"confidential mode: tool gate error ({type(exc).__name__}); "
                                    f"{_printable(tool_name)} blocked")
 
-    def _refuse(tool_name, args, session_id, decision, message, detail):
-        ledger.append(_event("tool_refused", tool_name=tool_name, session_id=session_id, decision=decision,
-                             nbytes=args_bytes(args), surface="middleware", detail=detail))
+    def _refuse(tool_name, args, session_id, decision, message, detail, *, answered=False):
+        # ``answered``: post_approval_response already wrote this decision's tool_refused row (it ledgers
+        # every answer to our prompt), so a second row would count one refusal twice (ux-pass-1 item 5).
+        if not answered:
+            ledger.append(_event("tool_refused", tool_name=tool_name, session_id=session_id, decision=decision,
+                                 nbytes=args_bytes(args), surface="middleware", detail=detail))
         return _refusal_result(message)
 
     def _handle(tool_name, args, run, session_id, tool_call_id, turn_id, task_id=""):
@@ -1148,7 +1219,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         if choice is not _MISSING:                 # pre_tool_call asked (model_tools order)
             if type(choice) is str and choice in _ALLOW_CHOICES:
                 return run()                       # tool_allowed was ledgered by post_approval_response
-            return _unexpected(tool_name, args, session_id, base, choice)
+            return _unexpected(tool_name, args, session_id, base, choice, answered=_refusal_ledgered(choice))
         if d.decision == "remembered":
             ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id, decision="remembered",
                                  nbytes=args_bytes(args), surface="middleware", detail={**base, "kb": d.kb}))
@@ -1172,19 +1243,19 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                 dec.drop_grant(key)
         if approved:
             return _unexpected(tool_name, args, session_id, {**base, "approval_id": approval_id},
-                               None if choice is _MISSING else choice)
+                               None if choice is _MISSING else choice, answered=_refusal_ledgered(choice))
         decision = "no_surface" if (choice is _MISSING and isinstance(result, dict)
                                     and result.get("status") == "approval_required") else "denied"
         return _refuse(tool_name, args, session_id, decision,
                        str((result or {}).get("message") or f"confidential mode: {tool_name} was not approved"),
                        {**base, "choice": None if choice is _MISSING else _choice_repr(choice),
-                        "approval_id": approval_id})
+                        "approval_id": approval_id}, answered=_refusal_ledgered(choice))
 
-    def _unexpected(tool_name, args, session_id, base, choice):
+    def _unexpected(tool_name, args, session_id, base, choice, *, answered=False):
         return _refuse(tool_name, args, session_id, "unexpected_choice",
                        f"confidential mode: {_printable(tool_name)} was not run: the answer to the approval prompt "
                        f"was not once/session/always ({_printable(_choice_repr(choice))}).",
-                       {**base, "choice": _choice_repr(choice)})
+                       {**base, "choice": _choice_repr(choice)}, answered=answered)
 
     return confidential_mode_tool_execution
 
