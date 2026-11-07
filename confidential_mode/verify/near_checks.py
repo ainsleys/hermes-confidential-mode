@@ -387,3 +387,252 @@ def check_signature(sig: Mapping | None, *, model: str | None, request_sha256: s
 
 def utc(ts: float) -> datetime:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+
+
+# ── RTMR3-recorded identity (dstack boot events) ───────────────────────────────────────────────
+
+RTMR3_IDENTITY_EVENTS = {"app-id": "app_id", "instance-id": "instance_id", "os-image-hash": "os_image_hash",
+                         "key-provider": "key_provider_info"}
+
+
+def rtmr3_identity(report: Mapping) -> dict:
+    """app_id, instance_id, os_image_hash, key_provider_info and kms_id as the report's imr-3 events record
+    them. Call only after ``check_report``, which replays those events to the quote's RTMR3. dstack extends
+    RTMR3 with each value at boot (event names as on NEAR's reports, 2026-11-07). A value the report's
+    ``info`` block states differently fails; a value without an event is None (never taken from ``info``).
+    ``kms_id`` is SHA-256 of the key provider's ``id`` (hex-decoded when it is hex: the KMS public key
+    as DER), lower-case hex."""
+    events = {}
+    for ev in report.get("event_log_imr3") or []:
+        if isinstance(ev, Mapping) and ev.get("event") in RTMR3_IDENTITY_EVENTS:
+            events[ev["event"]] = str(ev.get("event_payload") or "")
+    out: dict[str, Any] = {}
+    for event, key in RTMR3_IDENTITY_EVENTS.items():
+        payload = events.get(event)
+        if payload is None:
+            out[key] = None
+            continue
+        if key == "key_provider_info":
+            try:
+                value: Any = bytes.fromhex(payload).decode("utf-8")
+            except ValueError as exc:
+                raise CheckError("RTMR3 key-provider event is not UTF-8 hex") from exc
+        else:
+            value = payload.lower()
+        stated = report.get(key)
+        if stated not in (None, "") and (str(stated) if key == "key_provider_info" else str(stated).lower()) != value:
+            raise CheckError(f"info.{key} differs from the RTMR3 {event} event")
+        out[key] = value
+    out["kms_id"] = None
+    if out["key_provider_info"] is not None:
+        try:
+            kid = json.loads(out["key_provider_info"]).get("id")
+        except (ValueError, AttributeError) as exc:
+            raise CheckError("RTMR3 key-provider event is not a JSON object") from exc
+        if isinstance(kid, str) and kid:
+            raw = bytes.fromhex(kid) if re.fullmatch(r"(?:[0-9a-fA-F]{2})+", kid) else kid.encode("utf-8")
+            out["kms_id"] = sha256_hex(raw)
+    return out
+
+
+# ── compose-manager attestation ─────────────────────────────────────────────────────────────────
+# NEAR documents none of this (docs.near.ai verification, model-attestations and image-provenance pages,
+# read 2026-11-07, do not mention compose-manager). The construction is reverse-engineered from captures
+# of 2026-11-07 on two instances: report_data = actions_hash || client nonce, actions_hash = SHA-256 of
+# json.dumps(actions, sort_keys=True, separators=(",", ":")) with Python's default ensure_ascii,
+# nonce_source "client". If NEAR changes any of it, these checks fail closed.
+#
+# What a passing check establishes, and no more: a TD of this instance (same MRTD and RTMR0-3 as the
+# model quote) reported this actions log for this nonce, the log's hash is bound in a hardware quote, and
+# the per-service deployment map derived from the log is what the operator's own tooling reported. It
+# does not establish that the inner compose is measured or that the reported services are the ones
+# running: the model proxies the log deploys hold the dstack quote socket, so any of them can obtain a
+# quote of this TD over report data it chooses.
+
+CM_CHECK_KEYS = ("cm_quote", "cm_same_td", "cm_report_data", "cm_actions_hash", "cm_services", "cm_image")
+CM_ACTION_KINDS = ("compose_up", "compose_down", "compose_stage", "docker_restart", "compose_manager_started")
+WHOLE_FILE = "*"   # a compose_up or compose_down with no services acts on every service of the file
+
+# Services on a model's prompt path, by name pattern (fnmatch). Taken from the inner compose files at the
+# commit each running service was started from (github.com/nearai/cvm-compose-files, read 2026-11-07:
+# prod/small-models.yaml and prod/qwen38-27b-abliterated-cc-1gpu.yaml): services whose served_model or
+# model tag or MODEL_NAME names the model, the engine behind its proxy, the nginx that routes to the proxy,
+# its registrar and its weight downloader. A model without an entry, or an entry that matches no proxy or
+# no engine in the map, gets the whole map (more pin prompts, never fewer).
+PROMPT_PATH_SERVICES: dict[str, dict[str, tuple[str, ...]]] = {
+    "Qwen/Qwen3.8-27B": {"proxy": ("proxy-qwen38-27b",), "engine": ("model-sg-qwen38-27b-*",),
+                         "also": ("nginx-qwen38", "qwen38-registrar", "model-downloader-qwen38")},
+}
+
+
+class CmCheckError(CheckError):
+    """A compose-manager check failed; ``step`` is the CM_CHECK_KEYS entry it belongs to."""
+
+    def __init__(self, step: str, message: str):
+        super().__init__(message)
+        self.step = step
+
+
+def actions_hash(actions: Any) -> str:
+    """SHA-256 (lower-case hex) of the compact, sorted-keys JSON of the actions log, as NEAR computes it."""
+    return sha256_hex(json.dumps(actions, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def _hexfield(a: Mapping, key: str, length: int, where: str) -> str:
+    v = a.get(key)
+    if not isinstance(v, str) or not re.fullmatch(rf"[0-9a-f]{{{length}}}", v):
+        raise CmCheckError("cm_services", f"{where}: {key} is not {length} lower-case hex digits")
+    return v
+
+
+def deployment_map(actions: Any) -> tuple[dict, list]:
+    """Replay the actions log into (per-service state, compose-manager images started, in log order).
+    State keys are "<file>::<service>" (service WHOLE_FILE when an action named no services); values are
+    {file, service, commit, file_sha256, tag}. compose_up sets, compose_down removes, compose_stage and
+    docker_restart change nothing. Any malformed or unknown action fails (cm_services)."""
+    if not isinstance(actions, list) or not actions:
+        raise CmCheckError("cm_services", "the actions log is empty")
+    state: dict[str, dict] = {}
+    images: list[str] = []
+    for i, a in enumerate(actions):
+        where = f"actions[{i}]"
+        if not isinstance(a, Mapping):
+            raise CmCheckError("cm_services", f"{where} is not an object")
+        kind = a.get("action")
+        if kind not in CM_ACTION_KINDS:
+            raise CmCheckError("cm_services", f"{where}: unknown action {str(kind)[:40]!r}")
+        if kind in ("compose_stage", "docker_restart"):
+            continue
+        if kind == "compose_manager_started":
+            image = a.get("image")
+            if not isinstance(image, str) or not image:
+                raise CmCheckError("cm_services", f"{where}: compose_manager_started names no image")
+            images.append(image)
+            continue
+        file = a.get("file")
+        services = a.get("services") if a.get("services") is not None else []
+        if not isinstance(file, str) or not file or not isinstance(services, list) or \
+                not all(isinstance(s, str) and s and s != WHOLE_FILE for s in services):
+            raise CmCheckError("cm_services", f"{where}: {kind} has no file or a malformed services list")
+        if kind == "compose_down":
+            if not services:
+                state = {k: v for k, v in state.items() if v["file"] != file}
+            for s in services:
+                state.pop(f"{file}::{s}", None)
+            continue
+        entry = {"file": file, "commit": _hexfield(a, "commit", 40, where),
+                 "file_sha256": _hexfield(a, "file_sha256", 64, where),
+                 "tag": a.get("tag") if isinstance(a.get("tag"), str) else None}
+        if not services:   # the whole file at this commit replaces every earlier entry of that file
+            state = {k: v for k, v in state.items() if v["file"] != file}
+        for s in services or [WHOLE_FILE]:
+            state[f"{file}::{s}"] = {**entry, "service": s}
+    return state, images
+
+
+def prompt_path(state: Mapping[str, Mapping], model: str | None) -> tuple[dict, str]:
+    """(the map restricted to the model's prompt-path services, a scope label). Whole-file entries are always
+    kept: they may hold any service of the file."""
+    import fnmatch
+    rule = PROMPT_PATH_SERVICES.get(model or "")
+    if rule is None:
+        return dict(state), f"all services: no prompt-path rule for {model}"
+
+    def hits(patterns) -> set:
+        return {k for k, v in state.items() if any(fnmatch.fnmatchcase(v["service"], p) for p in patterns)}
+    proxy, engine = hits(rule["proxy"]), hits(rule["engine"])
+    for role, found in (("proxy", proxy), ("engine", engine)):
+        if not found:
+            return dict(state), f"all services: the prompt-path rule for {model} matched no {role}"
+    keep = proxy | engine | hits(rule.get("also", ())) | {k for k, v in state.items() if v["service"] == WHOLE_FILE}
+    return {k: state[k] for k in sorted(keep)}, f"prompt path of {model}"
+
+
+_IMAGE_REF = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64})\s*")
+_ENV_DEFAULT = re.compile(r"\s*\$\{[A-Za-z_][A-Za-z0-9_]*:?-(.*)\}\s*")
+
+
+def image_ref(text: Any) -> str | None:
+    """"repo@sha256:<64 hex>" from an image string, or from the default of ``${VAR:-default}``; else None."""
+    if not isinstance(text, str):
+        return None
+    d = _ENV_DEFAULT.fullmatch(text)
+    m = _IMAGE_REF.fullmatch(d.group(1) if d else text)
+    return m.group(1) if m else None
+
+
+def measured_cm_image(app_compose: str | None) -> str | None:
+    """The compose-manager image reference the measured docker-compose names (its ``image:`` line under
+    the ``compose-manager:`` service), or None. A line scan, not a YAML parser: Hermes ships no PyYAML."""
+    try:
+        dc = json.loads(app_compose or "").get("docker_compose_file")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(dc, str):
+        return None
+    lines = dc.splitlines()
+    for i, line in enumerate(lines):
+        m = re.fullmatch(r"( +)compose-manager:\s*", line)
+        if not m:
+            continue
+        indent = len(m.group(1))
+        for sub in lines[i + 1:]:
+            if sub.strip() and not sub.strip().startswith("#") and len(sub) - len(sub.lstrip(" ")) <= indent:
+                break
+            im = re.fullmatch(r" +image:\s*(.+?)\s*", sub)
+            if im:
+                return image_ref(im.group(1))
+        return None
+    return None
+
+
+def check_compose_manager(cm: Any, *, nonce: str, model_quote: Mapping, quote_verifier: QuoteVerifier,
+                          model: str | None, app_compose: str | None) -> dict:
+    """Every compose-manager step for one model candidate whose own report already passed check_report
+    (``model_quote`` is that report's verified quote fields). Raises CmCheckError naming the failed step.
+    Returns {"services", "services_scope", "cm_image_running", "cm_image_measured", "cm_image_match",
+    "actions_count", "services_reported"}."""
+    if not isinstance(cm, Mapping):
+        raise CmCheckError("cm_quote", "the compose-manager attestation is not an object")
+    # 1. the quote verifies with the same TDX verifier, and its event log replays to its RTMR3
+    try:
+        q = quote_verifier(hexbytes(cm.get("quote"), "compose-manager quote"))
+        if q.get("debug") is not False:
+            raise CheckError("TDX debug mode is enabled (or unknown)")
+        if replay_rtmr3(imr3_events(cm.get("event_log") or [])) != hexbytes(q.get("rtmr3"), "quote rtmr3", 48):
+            raise CheckError("its event log does not replay to its RTMR3")
+    except CmCheckError:
+        raise
+    except Exception as exc:
+        raise CmCheckError("cm_quote", f"compose-manager quote: {exc}"[:300]) from exc
+    # 2. the same TD as the model quote, quote to quote
+    for k in ("mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"):
+        if str(q.get(k) or "").lower() != str(model_quote.get(k) or "").lower() or not q.get(k):
+            raise CmCheckError("cm_same_td", f"compose-manager quote {k.upper()} differs from the model quote's")
+    # 3. report data = actions_hash || nonce, the nonce is ours and the client chose it
+    try:
+        ah = hexbytes(cm.get("actions_hash"), "actions_hash", 32)
+        cn = hexbytes(cm.get("nonce"), "compose-manager nonce", 32)
+    except CheckError as exc:
+        raise CmCheckError("cm_report_data", str(exc)) from exc
+    if cn != hexbytes(nonce, "nonce", 32):
+        raise CmCheckError("cm_report_data", "compose-manager nonce is not this client's nonce")
+    if cm.get("nonce_source") != "client":
+        raise CmCheckError("cm_report_data", f"nonce_source {str(cm.get('nonce_source'))[:20]!r} is not 'client'")
+    if hexbytes(q.get("report_data"), "quote report_data", 64) != ah + cn:
+        raise CmCheckError("cm_report_data", "compose-manager quote report_data is not actions_hash || nonce")
+    if cm.get("report_data") not in (None, "") and hexbytes(cm["report_data"], "report_data") != ah + cn:
+        raise CmCheckError("cm_report_data", "echoed report_data differs from the verified quote")
+    # 4. the actions log hashes to the bound actions_hash (mandatory; no construction is guessed)
+    actions = cm.get("actions")
+    if actions_hash(actions) != ah.hex():
+        raise CmCheckError("cm_actions_hash", "the actions log does not hash to the bound actions_hash")
+    # 5. replay the log; 6. restrict to the prompt path
+    state, images = deployment_map(actions)
+    services, scope = prompt_path(state, model)
+    # 7. the running compose-manager image against the measured one (recorded, never a pass on mismatch)
+    running = (image_ref(images[-1]) or images[-1][:200]) if images else None
+    measured = measured_cm_image(app_compose)
+    return {"services": services, "services_scope": scope, "cm_image_running": running,
+            "cm_image_measured": measured, "cm_image_match": bool(running and measured and running == measured),
+            "actions_count": len(actions), "services_reported": len(state)}
