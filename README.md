@@ -610,18 +610,29 @@ to the new runtime. The plugin can only record those calls. It cannot stop them.
 <a id="the-terminal-backend"></a>**The terminal backend.** Hermes runs `terminal`, `process_manage`,
 `execute_code`, `read_file`, `write_file`, `patch` and `search_files` through its terminal backend.
 The backend is set by the `terminal.backend` key in `config.yaml`. Hermes copies that key into the
-`TERMINAL_ENV` environment variable. When `config.yaml` does not set the key, the variable decides.
+`TERMINAL_ENV` environment variable. An explicit key in `config.yaml` wins over the variable. When
+`config.yaml` does not set the key, the variable decides. A gateway that serves several profiles
+gives each profile its own terminal settings, so each profile can have its own backend.
 The default backend is `local`, which runs these tools on this host. The other backends are `docker`,
 `ssh`, `modal`, `managed_modal`, `daytona`, `vercel_sandbox` and any backend a plugin registers. On
 those, the seven tools run in a container or on another machine. A file the model writes then lands
 there, and a command the model runs runs there.
 
-The preflight therefore refuses to lock unless both `terminal.backend` and `TERMINAL_ENV` are
-`local` (or unset). Its row names the backend it found and the key to change. The plugin also checks
-the backend on every call to one of the seven tools. Hermes lets code register a different backend
-for one task, as reinforcement-learning rollouts do. Such a call is blocked, and the refusal names
-the backend. `docker` is refused too, although its container runs on this host. A Docker container
-can have its own network, and a Docker host can be remote. The plugin does not inspect either.
+The preflight therefore refuses to lock unless `terminal.backend` is `local` and the backend Hermes
+resolves for this profile is `local` too. The plugin resolves the backend the way Hermes' own tools
+do, so a stale `TERMINAL_ENV` that the config overrides does not refuse the lock. The preflight row
+names the backend it found and the key to change.
+
+Hermes keeps a terminal environment for each task for a few minutes and reuses it without reading
+the backend again. The plugin therefore also refuses to lock while Hermes holds any environment on a
+non-local backend. The refusal tells you to restart Hermes, or to wait for
+`terminal.lifetime_seconds` to pass.
+
+The plugin checks again on every call to one of the seven tools. The call is blocked unless both
+the backend Hermes resolves and the environment Hermes has cached for the task are `local`. The
+refusal names the backend. `docker` is refused too, although its container runs on this host. A
+Docker container can have its own network, and a Docker host can be remote. The plugin does not
+inspect either.
 
 A tool counts as on-host only in its built-in form. If a plugin or an MCP server registers a tool under
 one of these names, that tool is not treated as on-host.
@@ -1269,6 +1280,19 @@ After installing, do the following.
 2. Run `hermes confidential setup --model <model id>`.
 3. Leave `plugins.isolation` at its default value, `in_process`. Under host isolation, Hermes cannot
    see the attested provider, and the preflight refuses to lock.
+
+### Upgrading
+
+Restart every Hermes process that loads the plugin after you upgrade it: the gateway, and any CLI or
+TUI session. Do this before you lock or unlock from any of them. The lock records a fingerprint of
+the routing config. This version adds the terminal backend to that fingerprint. A process still
+running the old version reads a lock made by the new version as a changed config, and the reverse
+is true as well. Each such process then refuses every turn and marks the session breached.
+
+A lock made by an earlier version keeps working after the upgrade. The new version recognises the
+old fingerprint, so the upgrade alone records no breach. The new terminal-backend checks still apply
+to that lock on every turn. To record the new fingerprint, run `/confidential off` and then
+`/confidential on <tier>`.
 
 ## Config
 

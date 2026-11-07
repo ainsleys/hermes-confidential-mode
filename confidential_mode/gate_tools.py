@@ -550,15 +550,48 @@ def hermes_remembered_grant(tool_name: str) -> bool:
 
 
 def hermes_terminal_backend(task_id: str = "") -> str:
-    """The terminal backend a call for ``task_id`` would run on (review finding 2): a per-task ``env_type``
-    override (tools/terminal_tool.py resolve_task_overrides, registered by RL/benchmark rollouts), else the
-    scope-aware ``TERMINAL_ENV`` (tools/terminal_scope.py terminal_env). Raises when Hermes cannot be read;
-    the caller then blocks."""
-    from tools.terminal_scope import terminal_env
-    from tools.terminal_tool import resolve_task_overrides
-    from .preflight import normalize_backend
-    override = (resolve_task_overrides(task_id or "default") or {}).get("env_type")
-    return normalize_backend(override if override else terminal_env("TERMINAL_ENV", "local"))
+    """The terminal backend a call for ``task_id`` would run on (review finding 2). Two readings, both must
+    be local:
+
+    * the backend Hermes' tools resolve, ``tools.terminal_tool._get_env_config()["env_type"]`` (it bridges
+      config.yaml first and reads the profile's terminal scope on multiplexed surfaces);
+    * the environment object Hermes has cached for this task, if any
+      (``tools.terminal_tool_lifecycle.get_active_env``). The terminal, code and file tools reuse a cached
+      environment without re-reading the backend, so an environment created under a remote backend before
+      the lock would otherwise keep serving calls after it. Its backend is the ``env_type`` (or
+      ``_hermes_backend_name``) tag Hermes sets when it creates the environment; an untagged one is
+      reported as unknown, which blocks.
+
+    Raises when Hermes cannot be read; the caller then blocks."""
+    from tools.terminal_tool import _get_env_config
+    from tools.terminal_tool_lifecycle import get_active_env
+    from .preflight import LOCAL_BACKEND, normalize_backend
+    backend = normalize_backend(_get_env_config().get("env_type"))
+    if backend != LOCAL_BACKEND:
+        return backend
+    env = get_active_env(task_id or "default")
+    if env is None:
+        return backend
+    tag = getattr(env, "env_type", None) or getattr(env, "_hermes_backend_name", None)
+    if not isinstance(tag, str) or not tag.strip():
+        return "unknown (a cached environment with no backend tag)"
+    return normalize_backend(tag)
+
+
+def cached_remote_environments() -> list[tuple[str, str]]:
+    """(task key, backend) of every environment Hermes has cached that is not local (or not tagged).
+    The lock is refused while any exists. Raises when Hermes cannot be read."""
+    from tools.terminal_tool import _active_environments, _env_lock
+    from .preflight import LOCAL_BACKEND, normalize_backend
+    with _env_lock:
+        items = list(_active_environments.items())
+    out = []
+    for key, env in items:
+        tag = getattr(env, "env_type", None) or getattr(env, "_hermes_backend_name", None)
+        backend = normalize_backend(tag) if isinstance(tag, str) and tag.strip() else "unknown"
+        if backend != LOCAL_BACKEND:
+            out.append((str(key), backend))
+    return out
 
 
 def _locked_flag(value: Any) -> bool:
@@ -736,8 +769,9 @@ class _Policy:
 
     def on_host_decision(self, info: ToolInfo, args: dict, task_id: str = "") -> CallDecision:
         # Review finding 2 (INTERFACES Amendment 6): a terminal-backend tool is on-host only on the local
-        # backend. The preflight refuses to lock otherwise; this is the second line, per call, because a
-        # per-task override or the environment can change the backend after the lock.
+        # backend. The preflight refuses to lock otherwise; this is the second line, per call, because the
+        # environment variable, the profile's terminal scope or a cached task environment can differ from
+        # what the lock saw.
         from .preflight import LOCAL_BACKEND, TERMINAL_BACKEND_KEY, TERMINAL_BACKEND_TOOLS
         if info.name in TERMINAL_BACKEND_TOOLS:
             try:

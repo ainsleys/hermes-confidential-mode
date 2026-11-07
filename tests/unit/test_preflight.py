@@ -599,22 +599,56 @@ def test_non_local_terminal_backend_refuses_the_lock_and_names_the_key(backend):
     assert "terminal.backend" in format_report(r)
 
 
-def test_terminal_env_variable_must_also_be_local():
+def test_resolved_terminal_backend_must_also_be_local():
     def pf_run(cfg, env):
         return run_preflight(Tier.ON_HOST, on_host_pred(), cfg, plugin_aux_tasks=[], isolation="in_process",
                              provider_lookup=lambda n: object(), attested_profile=None, terminal_env=env)
     ok = pf_run(base_config(terminal={"backend": "local"}), None)
     assert ok.ok and item(ok, "terminal.backend").verdict == "on_host"
-    assert [i for i in ok.items if i.key == "env TERMINAL_ENV"] == []
+    assert [i for i in ok.items if i.key == pf.TERMINAL_RESOLVED_KEY] == []
     assert pf_run(base_config(), None).ok and item(pf_run(base_config(), None), "terminal.backend").value_redacted \
         == "(default local)"
     assert pf_run(base_config(terminal={"backend": "local"}), "local").ok
     bad = pf_run(base_config(terminal={"backend": "local"}), "ssh")
-    env_item = item(bad, "env TERMINAL_ENV")
-    assert not bad.ok and env_item.verdict == "off_tier" and "unset the TERMINAL_ENV" in env_item.fix
+    env_item = item(bad, pf.TERMINAL_RESOLVED_KEY)
+    assert not bad.ok and env_item.verdict == "off_tier" and "with no key, unset the variable" in env_item.fix
     assert not pf_run(base_config(terminal="ssh"), None).ok          # junk section fails closed
     # An unset variable and "local" fingerprint the same; a backend change does not.
     fp = lambda cfg, env: config_fingerprint(cfg, terminal_env=env)  # noqa: E731
     assert fp(base_config(), None) == fp(base_config(), "local") == fp(base_config(terminal={"backend": "local"}), "")
     assert fp(base_config(), None) != fp(base_config(terminal={"backend": "ssh"}), None)
     assert fp(base_config(), None) != fp(base_config(), "modal")
+
+
+
+def test_a_lock_recorded_under_the_version_1_fingerprint_still_matches():
+    """Second review, item 1: the terminal keys joined the fingerprint later. A lock recorded under the
+    old layout must not read as a config change after the upgrade, or every session would be marked breached."""
+    from confidential_mode.locking import fingerprint_matches
+    cfg = base_config()
+    v1 = config_fingerprint(cfg, version=1, terminal_env=None)
+    v2 = config_fingerprint(cfg, terminal_env=None)
+    assert v1 != v2
+    assert fingerprint_matches(v1, cfg, terminal_env=None) and fingerprint_matches(v2, cfg, terminal_env=None)
+    edited = base_config(fallback_providers=[{"provider": "openrouter", "model": "x"}])
+    assert not fingerprint_matches(v1, edited, terminal_env=None)      # a real change still counts
+    assert not fingerprint_matches(v2, cfg, terminal_env="ssh")
+    assert not fingerprint_matches("", cfg, terminal_env=None) and not fingerprint_matches(None, cfg)
+
+
+def test_resolved_terminal_backend_reads_the_profile_scope_not_the_process_environment(monkeypatch):
+    """Second review, item 1: a gateway serving several profiles binds each profile's terminal settings in a
+    scope; the plugin resolves the backend the way Hermes' tools do, through that scope."""
+    from tools.terminal_scope import reset_terminal_scope, set_terminal_scope
+    monkeypatch.setenv("TERMINAL_ENV", "docker")                    # the launch profile's backend
+    token = set_terminal_scope({"TERMINAL_ENV": "local"})
+    try:
+        assert pf.resolved_terminal_backend() == "local"
+    finally:
+        reset_terminal_scope(token)
+    monkeypatch.delenv("TERMINAL_ENV")
+    token = set_terminal_scope({"TERMINAL_ENV": "ssh"})
+    try:
+        assert pf.resolved_terminal_backend() == "ssh"
+    finally:
+        reset_terminal_scope(token)

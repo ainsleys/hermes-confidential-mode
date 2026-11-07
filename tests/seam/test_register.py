@@ -280,7 +280,15 @@ def test_remote_terminal_backend_refuses_the_lock_with_the_key_to_change(plugin,
     assert out.startswith("Not locked"), out
     row = next(line for line in out.splitlines() if line.startswith("terminal.backend"))
     assert "ssh" in row and "off_tier" in row and "set terminal.backend: local" in row
-    plugin.cfg.write_text(BASE_CONFIG + "terminal:\n  backend: local\n")
+    # A terminal environment Hermes still caches from a remote backend also refuses the lock (second review,
+    # item 4): the tools would keep using it.
+    from types import SimpleNamespace
+    from tools import terminal_tool
+    plugin.cfg.write_text(BASE_CONFIG)           # no terminal section: the environment variable decides
+    monkeypatch.setattr(terminal_tool, "_active_environments", {"default": SimpleNamespace(env_type="ssh")})
+    out = plugin.slash("on on-host-only")
+    assert out.startswith("Not locked: Hermes still holds terminal environments on a non-local backend"), out
+    monkeypatch.setattr(terminal_tool, "_active_environments", {})
     assert plugin.slash("on on-host-only").startswith("Locked")
     rec = Rec()
     agent = build_agent(monkeypatch, rec, ON_HOST_URL)
@@ -289,6 +297,21 @@ def test_remote_terminal_backend_refuses_the_lock_with_the_key_to_change(plugin,
     result = agent.run_conversation("second")
     assert "routing config changed after this profile was locked" in (result["final_response"] or "")
     assert len(rec.provider_calls) == 1
+
+
+def test_a_lock_made_before_the_terminal_keys_joined_the_fingerprint_is_not_a_breach(plugin, monkeypatch):
+    """Second review, item 1: a profile locked under the version-1 fingerprint (before this plugin version)
+    keeps working after the upgrade; no session is marked breached by the upgrade itself."""
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    locking = importlib.import_module(plugin.mod.__name__ + ".confidential_mode.locking")
+    pf = importlib.import_module(plugin.mod.__name__ + ".confidential_mode.preflight")
+    v1 = pf.config_fingerprint(plugin.rt.load_config(), plugin_aux_tasks=locking._plugin_aux(None), version=1)
+    plugin.rt.state._store.set("config_fingerprint", v1)          # what main recorded at lock
+    plugin.rt.allowlist_path.unlink()                               # its allowlist named the old lock id
+    rec = Rec()
+    agent = build_agent(monkeypatch, rec, ON_HOST_URL)
+    assert agent.run_conversation("after the upgrade")["final_response"] == "provider answered"
+    assert ("breach", "config_changed") not in plugin.kinds() and not plugin.rt.state.is_breached(agent.session_id)
 
 
 def test_config_edit_after_lock_blocks_the_next_turn(plugin, monkeypatch):

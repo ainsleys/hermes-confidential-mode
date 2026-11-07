@@ -167,8 +167,9 @@ def _rows_from(ledger, start: int, *, stop_after: int | None = None, until=None,
 def collect_rows(ledger, session_id: str, *, include_profile_rows: bool = True) -> list:
     """The ledger rows a receipt for ``session_id`` covers, in id order (see module docstring).
 
-    Only the session's locked period is read (review finding 22): from the unlock before the session's
-    first row to the lock or unlock after its last row, not the whole ledger."""
+    The read is bounded below (review finding 22): it starts at the unlock before the session's first row
+    (or at the start of the ledger when no unlock precedes it) and ends at the lock or unlock after its
+    last row."""
     own = ledger.session(session_id)
     if not include_profile_rows or not own:
         return list(own)

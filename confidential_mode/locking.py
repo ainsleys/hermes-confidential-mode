@@ -161,16 +161,41 @@ def run_tier_preflight(tier: Tier | str, *, config: Mapping | None = None,
                        provider_lookup: Callable[[str], Any] | None = None,
                        attested_ok: Callable[[str], Verdict] | None = None,
                        profile_base_url: Callable[[str], Any] | None = None,
-                       builtin_aux_tasks: Optional[Sequence[str]] = None):
-    """PreflightReport for ``tier`` over Hermes' loaded config (read-only)."""
+                       builtin_aux_tasks: Optional[Sequence[str]] = None,
+                       terminal_env: Any = None):
+    """PreflightReport for ``tier`` over Hermes' loaded config (read-only). ``terminal_env``: the resolved
+    terminal backend; None => ``preflight.resolved_terminal_backend()`` (how Hermes' tools resolve it)."""
     tier = Tier(tier)
     config = _pf.load_core_config() if config is None else config
+    if terminal_env is None:
+        terminal_env = _pf.resolved_terminal_backend()
     predicate = predicate or predicate_for(tier, config=config, attested_ok=attested_ok,
                                            profile_base_url=profile_base_url)
     return _pf.run_preflight(tier, predicate, config, plugin_aux_tasks=_plugin_aux(plugin_aux_tasks),
                              provider_lookup=provider_lookup or _pf.provider_lookup,
                              attested_profile=attested_profile_for(config) if tier is Tier.ATTESTED else None,
-                             builtin_aux_tasks=builtin_aux_tasks)
+                             builtin_aux_tasks=builtin_aux_tasks, terminal_env=terminal_env)
+
+
+def fingerprint_matches(recorded: Any, config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
+                        builtin_aux_tasks: Optional[Sequence[str]] = None, terminal_env: Any = None,
+                        current: Optional[str] = None) -> bool:
+    """Whether the fingerprint recorded at lock still describes ``config``. A lock recorded under the
+    version-1 layout (before the terminal backend joined the fingerprint) matches its version-1
+    fingerprint, so upgrading the plugin is not itself a config change (second review, item 1). The
+    terminal backend of such a lock is still checked every turn by the preflight items."""
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    if current is None:
+        if terminal_env is None:
+            terminal_env = _pf.resolved_terminal_backend()
+        current = _pf.config_fingerprint(config, plugin_aux_tasks=plugin_aux_tasks,
+                                         builtin_aux_tasks=builtin_aux_tasks, terminal_env=terminal_env)
+    if recorded == current:
+        return True
+    return recorded == _pf.config_fingerprint(config, plugin_aux_tasks=plugin_aux_tasks,
+                                              builtin_aux_tasks=builtin_aux_tasks, terminal_env=terminal_env,
+                                              version=1)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────────────────────────
@@ -292,6 +317,7 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
          allowlist_builder: Callable[..., Any] | None = None, allowlist_path: Any = None,
          verification: Callable[[str], Any] | None = None, session_id: str = "", surface: str = "",
          live_runtime: Callable[[], Optional[dict]] | None = None,
+         cached_environments: Callable[[], list] | None = None,
          clock: Callable[[], float] = time.time) -> LockResult:
     """Lock the profile to ``tier`` or refuse with the reason. Never raises for a refusal."""
     try:
@@ -345,6 +371,24 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
             return LockResult(False, f"Not locked: this session's live model runtime ({runtime.get('provider')} at "
                               f"{lv.host or '(no host)'}) is off-tier ({lv.reason}), although the config passes. "
                               "Switch the session to the configured model (/model) first.", tier=tier, report=report)
+
+    # Second review, item 4: Hermes reuses a task's cached terminal environment without re-reading the
+    # backend, so one created under a remote backend before the lock would keep serving the terminal, code
+    # and file tools after it. Refuse to lock while any non-local environment is cached.
+    try:
+        if cached_environments is None:
+            from .gate_tools import cached_remote_environments as cached_environments
+        remote = list(cached_environments())
+    except Exception as exc:  # noqa: BLE001 - cannot tell: refuse (fail closed)
+        remote = [("?", f"unreadable ({type(exc).__name__})")]
+    if remote:
+        shown = ", ".join(f"{k} ({b})" for k, b in remote[:5])
+        _append(ledger, LedgerEvent(kind="preflight_fail", purpose="lock:terminal_environments", verdict="off_tier",
+                                    decision="refused", detail={"environments": [b for _k, b in remote][:20]},
+                                    **base))
+        return LockResult(False, "Not locked: Hermes still holds terminal environments on a non-local backend: "
+                          f"{shown}. The terminal, code and file tools would keep using them. Restart Hermes (or "
+                          "wait for terminal.lifetime_seconds to pass), then lock again.", tier=tier, report=report)
 
     if registry is None:
         from tools.registry import registry as _registry
@@ -475,9 +519,11 @@ def recheck(*, state, ledger, config: Mapping | None = None, session_id: str = "
     report = run_tier_preflight(tier, config=config, predicate=predicate, plugin_aux_tasks=plugin_aux_tasks,
                                 provider_lookup=provider_lookup, builtin_aux_tasks=builtin_aux_tasks)
     recorded = state.config_fingerprint()
-    if report.fingerprint == recorded and report.ok:
+    same = fingerprint_matches(recorded, config, plugin_aux_tasks=_plugin_aux(plugin_aux_tasks),
+                               builtin_aux_tasks=builtin_aux_tasks, current=report.fingerprint)
+    if same and report.ok:
         return None
-    changed = report.fingerprint != recorded
+    changed = not same
     sid = session_id or ""
     try:
         already = state.is_breached(sid)

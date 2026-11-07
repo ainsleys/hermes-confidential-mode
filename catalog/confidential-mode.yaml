@@ -60,8 +60,9 @@ description: >-
   waits at most 20 seconds for it (confidential.verify_wait_seconds).
 
   Disclosure, core imports (catalog rule 9; all lazy). agent.auxiliary_client
-  (_RUNTIME_MAIN_CONTEXT, to read the live runtime), agent.secret_scope, tools.terminal_scope and
-  tools.terminal_tool (terminal_env and resolve_task_overrides, to read the terminal backend), hermes_cli.commands
+  (_RUNTIME_MAIN_CONTEXT, to read the live runtime), agent.secret_scope, tools.terminal_tool,
+  tools.terminal_tool_lifecycle and tools.terminal_scope (_get_env_config, _active_environments,
+  get_active_env and terminal_env, to read the terminal backend and the cached task environments), hermes_cli.commands
   (resolve_command), tools.approval.* (request_tool_approval, is_approved, _yolo_active, _presence,
   _lock, _session_approved, _permanent_set), tools.approval_context, tools.registry,
   tools.mcp_tool, tools.mcp_tool_config and tools.mcp_tool_scope (MCP config readers),
@@ -72,7 +73,7 @@ description: >-
   What locked mode does not block. It does not block auxiliary calls at runtime; it observes them
   and records a breach. It does not block terminal, execute_code, process_manage or the other
   on-host tools on Hermes' local terminal backend, or MCP servers launched as a command on this host.
-  It refuses to lock on any other terminal backend. It does not apply in safe-worker
+  Locked mode is refused on any other terminal backend. It does not apply in safe-worker
   mode, where Hermes loads no plugins. It does not cover the messaging platform, other in-process plugins,
   Hermes' start-up model-list request on a drifted runtime, or the vendor's control plane and the
   model backends behind its router. Isolation: in_process only.
@@ -86,7 +87,7 @@ known_issues:
   - "Hermes does not run auxiliary calls through the llm_execution middleware. Auxiliary calls are the side jobs Hermes runs with a model, such as compression, titles, vision, the approval classifier and MCP helpers. Locked mode therefore cannot stop one at the moment it is sent. Instead, the plugin refuses to lock while any auxiliary task is configured off-tier, and it records a breach if one goes off-tier anyway."
   - "On the CLI, Hermes' approve directive grants a tool call on any answer except the exact string 'deny'. The plugin does not rely on that. Its tool_execution middleware runs the tool only on an exact once, session or always."
   - "terminal, execute_code and process_manage run while locked, and the plugin does not inspect their commands. They can reach the network. MCP servers launched as a command on this host are also allowed and not inspected."
-  - "The lock is refused unless Hermes' terminal backend is local (terminal.backend and TERMINAL_ENV). On any other backend the terminal, code and file tools would run on another machine or in a container. Docker is refused too."
+  - "Locked mode is refused unless Hermes' terminal backend is local (terminal.backend and the backend Hermes resolves for the profile), and while Hermes holds a cached terminal environment on another backend. On any other backend the terminal, code and file tools would run on another machine or in a container. Docker is refused too."
   - "Locked mode does not apply in safe-worker mode, because Hermes loads no plugins there."
   - "Every other plugin in the same Hermes process shares the trust boundary. Under plugins.isolation: host, the attested provider is invisible to Hermes, so the preflight refuses to lock."
   - "Tinfoil's attestation covers its model router, not the model backend behind the router. The attestation report carries no client nonce. Every timestamp the plugin records comes from the host clock."

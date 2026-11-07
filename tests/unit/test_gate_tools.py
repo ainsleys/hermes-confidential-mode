@@ -256,16 +256,25 @@ def test_terminal_backend_local_runs_and_unreadable_blocks():
     assert refused(r.run("terminal")) and r.ran() == []
 
 
-def test_hermes_terminal_backend_reads_the_task_override_then_the_environment(monkeypatch):
-    from confidential_mode.gate_tools import hermes_terminal_backend
+def test_hermes_terminal_backend_reads_hermes_resolution_then_the_cached_environment(monkeypatch):
+    """Second review, items 4 and 5: the check reads the backend the way Hermes' tools do, then the environment
+    Hermes cached for the task, which the tools reuse without re-reading the backend."""
+    from types import SimpleNamespace
+    from confidential_mode.gate_tools import cached_remote_environments, hermes_terminal_backend
     from tools import terminal_tool
     monkeypatch.delenv("TERMINAL_ENV", raising=False)
-    assert hermes_terminal_backend("t-none") == "local"
+    monkeypatch.setattr(terminal_tool, "_active_environments", {})
+    assert hermes_terminal_backend("t-none") == "local" and cached_remote_environments() == []
     monkeypatch.setenv("TERMINAL_ENV", "SSH ")
     assert hermes_terminal_backend("t-none") == "ssh"
     monkeypatch.setenv("TERMINAL_ENV", "local")
-    monkeypatch.setattr(terminal_tool, "resolve_task_overrides", lambda t: {"env_type": "modal"} if t == "rl" else {})
-    assert hermes_terminal_backend("rl") == "modal" and hermes_terminal_backend("other") == "local"
+    # An ssh environment created before the lock, still cached for task t1.
+    monkeypatch.setattr(terminal_tool, "_active_environments", {"t1": SimpleNamespace(env_type="ssh"),
+                                                                 "t2": SimpleNamespace(env_type="local"),
+                                                                 "t3": SimpleNamespace()})
+    assert hermes_terminal_backend("t1") == "ssh" and hermes_terminal_backend("t2") == "local"
+    assert hermes_terminal_backend("t3").startswith("unknown") and hermes_terminal_backend("none") == "local"
+    assert sorted(cached_remote_environments()) == [("t1", "ssh"), ("t3", "unknown")]
 
 
 @pytest.mark.parametrize("name,decision", [("cronjob_manage", "cron"), ("remote_query", "mcp_url"),

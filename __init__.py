@@ -144,10 +144,10 @@ class Runtime:
         """The locked tier's predicate for the llm gate. If the routing config no longer matches the
         fingerprint recorded at lock, every destination is off-tier (second line behind pre_llm_call,
         which Hermes skips for agents with persistence disabled: agent/turn_context.py:860)."""
-        locking, pf = _cm("locking"), _cm("preflight")
+        locking = _cm("locking")
         config = self.load_config()
-        current = pf.config_fingerprint(config, plugin_aux_tasks=locking._plugin_aux(None))
-        if current != self.state.config_fingerprint():
+        if not locking.fingerprint_matches(self.state.config_fingerprint(), config,
+                                           plugin_aux_tasks=locking._plugin_aux(None)):
             return _ChangedConfigPredicate(_cm("tiers").Tier(tier))
         return locking.predicate_for(tier, config=config)
 

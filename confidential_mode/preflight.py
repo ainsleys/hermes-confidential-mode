@@ -23,7 +23,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from .tiers import Destination, Tier, TierPredicate, Verdict, host_of
@@ -68,9 +68,15 @@ _SECRET_WORDS = ("api_key", "apikey", "token", "secret", "password", "authorizat
 TERMINAL_BACKEND_TOOLS = frozenset({"terminal", "process_manage", "execute_code", "read_file", "write_file",
                                     "patch", "search_files"})
 TERMINAL_BACKEND_KEY = "terminal.backend"
-#: Hermes mirrors terminal.backend into this environment variable; when config.yaml does not set the key,
-#: the variable wins (hermes_cli/config.py TERMINAL_CONFIG_ENV_MAP, apply_terminal_config_to_env).
+#: Hermes mirrors terminal.backend into this environment variable. An explicit key in config.yaml wins over
+#: the variable; when config.yaml does not set the key, the variable decides (hermes_cli/config.py
+#: TERMINAL_CONFIG_ENV_MAP, apply_terminal_config_to_env). A gateway serving several profiles reads it from a
+#: per-profile scope instead (tools/terminal_scope.py).
 TERMINAL_BACKEND_ENV = "TERMINAL_ENV"
+TERMINAL_RESOLVED_KEY = "terminal backend (resolved)"
+#: The fingerprint layout. Version 1 (before the terminal items) is still accepted for a lock recorded under
+#: it, so an upgrade does not turn an unchanged lock into a breach (locking.fingerprint_matches).
+FINGERPRINT_VERSION = 2
 LOCAL_BACKEND = "local"
 
 
@@ -286,8 +292,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     ``isolation``: the ``plugins.isolation`` value; omitted => read from ``config``. ``None`` means the
     key is absent (Hermes default in_process, passing); ``""`` or anything but "in_process" fails.
     ``builtin_aux_tasks`` defaults to :func:`builtin_aux_task_names`.
-    ``terminal_env``: the ``TERMINAL_ENV`` environment value; omitted => read from ``os.environ``. ``None``
-    means unset.
+    ``terminal_env``: the terminal backend Hermes resolves for this profile (locking passes
+    ``resolved_terminal_backend()``); omitted => ``os.environ["TERMINAL_ENV"]``. ``None`` means unset.
     """
     config = config if isinstance(config, Mapping) else {}
     if terminal_env is _ABSENT:
@@ -505,7 +511,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                 ctx.pass_verdict if ok else OFF_TIER, t_fix)
 
     # terminal backend (review finding 2): the "on-host" terminal and file tools are on-host only on the
-    # local backend. Both sources Hermes reads must say local: the config key and the environment variable.
+    # local backend. The config key and the backend Hermes resolves (config, environment variable or the
+    # profile's terminal scope) must both say local.
     term = config.get("terminal")
     if term is not None and not isinstance(term, Mapping):
         add("terminal", term, OFF_TIER, "terminal must be a mapping; set terminal.backend: local")
@@ -516,10 +523,11 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
         terminal_backend_fix(f"set {TERMINAL_BACKEND_KEY}: local", cfg_backend))
     if terminal_env is not None:
         env_backend = normalize_backend(terminal_env)
-        add(f"env {TERMINAL_BACKEND_ENV}", str(terminal_env),
+        add(TERMINAL_RESOLVED_KEY, str(terminal_env),
             ctx.pass_verdict if env_backend == LOCAL_BACKEND else OFF_TIER,
-            terminal_backend_fix(f"unset the {TERMINAL_BACKEND_ENV} environment variable or set it to local "
-                                 f"(and set {TERMINAL_BACKEND_KEY}: local)", env_backend))
+            terminal_backend_fix(f"set {TERMINAL_BACKEND_KEY}: local in config.yaml (an explicit key wins over "
+                                 f"the {TERMINAL_BACKEND_ENV} environment variable; with no key, unset the variable)",
+                                 env_backend))
 
     # attested profile presence
     if tier == Tier.ATTESTED:
@@ -551,8 +559,11 @@ def _route_view(cfg: Any) -> Any:
 
 
 def config_fingerprint(config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
-                       builtin_aux_tasks: Sequence[str] | None = None, terminal_env: Any = _ABSENT) -> str:
+                       builtin_aux_tasks: Sequence[str] | None = None, terminal_env: Any = _ABSENT,
+                       version: int = FINGERPRINT_VERSION) -> str:
     """sha256 over exactly the keys run_preflight enumerates (no api keys, no unrelated config).
+
+    ``version`` 1 is the layout before the terminal backend joined (kept to recognise older locks).
 
     Aux tasks covered: the built-ins, ``plugin_aux_tasks``, and any dict-valued key the user wrote under
     ``auxiliary:`` (so a plugin task the user configured is covered even when the caller omits it).
@@ -606,11 +617,13 @@ def config_fingerprint(config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
         if isinstance(plugins_cfg, Mapping) else plugins_cfg,
         # Review finding 2: normalized, so an unset variable and "local" fingerprint the same (a CLI process
         # that never bridged terminal.* into the environment must agree with the gateway that did).
-        "terminal.backend": normalize_backend(config["terminal"].get("backend"))
-        if isinstance(config.get("terminal"), Mapping)
-        else (LOCAL_BACKEND if config.get("terminal") is None else repr(config.get("terminal"))),
-        "env.TERMINAL_ENV": normalize_backend(terminal_env),
     }
+    if version >= 2:
+        view["terminal.backend"] = (normalize_backend(config["terminal"].get("backend"))
+                                    if isinstance(config.get("terminal"), Mapping)
+                                    else (LOCAL_BACKEND if config.get("terminal") is None
+                                          else repr(config.get("terminal"))))
+        view["terminal.resolved"] = normalize_backend(terminal_env)
     blob = json.dumps(view, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -702,3 +715,25 @@ def plugin_isolation(config: Mapping) -> Any:
         return None
     value = plugins_cfg["isolation"]
     return "" if value is None else value  # explicit null is treated like "" (missing), not as absent
+
+
+def resolved_terminal_backend() -> Optional[str]:
+    """The terminal backend Hermes resolves for the current profile, the way its tools do:
+    ``tools.terminal_tool._get_env_config()["env_type"]``, which bridges ``terminal.*`` from config.yaml
+    first and reads the per-profile terminal scope on multiplexed surfaces. Falls back to the scope-aware
+    ``tools.terminal_scope.terminal_env`` and then to ``os.environ`` when those cannot be imported. A failure
+    to read is returned as a non-local marker, so the preflight item fails (closed)."""
+    try:
+        from tools.terminal_tool import _get_env_config
+    except Exception:  # noqa: BLE001
+        try:
+            from tools.terminal_scope import terminal_env
+            return terminal_env(TERMINAL_BACKEND_ENV, "") or None
+        except ImportError:
+            return os.environ.get(TERMINAL_BACKEND_ENV)
+        except Exception as exc:  # noqa: BLE001
+            return f"<unreadable: {type(exc).__name__}>"
+    try:
+        return str(_get_env_config().get("env_type") or "") or None
+    except Exception as exc:  # noqa: BLE001
+        return f"<unreadable: {type(exc).__name__}>"
