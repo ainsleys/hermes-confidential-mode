@@ -170,3 +170,49 @@ def test_receipt_shows_the_revoke(plugin, web):
     plugin.slash("revoke web_search")
     text = plugin.slash("receipts sess-w5")
     assert "grant revoked  tool:web_search  (revoke; removed from command_allowlist; new approval key; via cli)" in text, text
+
+
+def _once_per_lock_grant(plugin, web):
+    """Under the default confidential.tools.ask (once_per_lock), a "once" answer grants the tool for the lock in
+    this conversation: the second call runs without a prompt, on the grant."""
+    plugin.human("once")
+    _call(1)
+    _call(2)
+    assert len(web) == 2 and len(plugin.prompts) == 1
+    grants = [e for e in plugin.rt.ledger.tail(0) if e.kind == "tool_allowed" and e.decision == "lock_grant"]
+    assert len(grants) == 1
+    assert plugin.rt.lock_grants.names(_sub(plugin, "gate_tools").lock_id_for(plugin.rt.state)) == ["web_search"]
+    assert KEY not in plugin.cfg.read_text()          # the grant lives in the plugin, not in Hermes' config
+
+
+def test_cli_revoke_drops_a_once_per_lock_grant_and_the_next_call_asks_again(plugin, web, capsys):
+    import argparse
+    _once_per_lock_grant(plugin, web)
+    parser = argparse.ArgumentParser()
+    plugin.mgr._cli_commands["confidential"]["setup_fn"](parser)
+    handler = plugin.mgr._cli_commands["confidential"]["handler_fn"]
+    assert handler(parser.parse_args(["revoke", "web_search"])) == 0       # `hermes confidential revoke web_search`
+    out = capsys.readouterr().out
+    assert out.startswith("Revoked web_search: removed from this lock's grants in this process"), out
+    assert plugin.rt.lock_grants.names(_sub(plugin, "gate_tools").lock_id_for(plugin.rt.state)) == []
+    plugin.human("deny")
+    _call(3)
+    assert len(plugin.prompts) == 2 and len(web) == 2           # asked again, and the denial held
+    rows = [e for e in plugin.rt.ledger.tail(0) if e.kind == "grant_revoked"]
+    assert len(rows) == 1
+    detail = rows[0].detail if isinstance(rows[0].detail, dict) else json.loads(rows[0].detail)
+    assert detail["removed"]["lock_grants"] == ["web_search"]
+
+
+def test_cli_revoke_in_another_process_drops_a_once_per_lock_grant(plugin, web):
+    """The grant is in this process's memory only; the CLI process finds nothing itself, writes the revocation
+    record, and the running process drops the grant on its next tool call and asks again."""
+    _once_per_lock_grant(plugin, web)
+    proc = _hermes(plugin, "revoke", "web_search")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("Nothing to revoke for web_search in this process"), proc.stdout
+    assert plugin.rt.revocations.path.exists()
+    plugin.human("deny")
+    _call(3)
+    assert len(plugin.prompts) == 2 and len(web) == 2
+    assert plugin.rt.lock_grants.names(_sub(plugin, "gate_tools").lock_id_for(plugin.rt.state)) == []
