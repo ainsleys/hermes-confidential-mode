@@ -522,15 +522,24 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   services that a per-model name list, shipped with the plugin, names for that model. Such a list can
   miss services, so every other service follows. A long list is folded into a count, and the command
   `hermes confidential pins` prints every line.
-- The service map is pinned only together with its socket tags. The verification itself never fetches
-  anything from GitHub. `hermes confidential pins review` fetches each deployed docker-compose file the
-  map names from NEAR's public repository at the logged commit, and keeps it only when its SHA-256
-  equals the log's `file_sha256`. From those files it tags every service that holds `dstack.sock` or
-  `docker.sock`, runs privileged or as root, or is built from `dockerfile_inline` or from an image not
-  pinned by digest. Once every file of an entry is kept, the entry pins its whole service map and the
-  prompt shows the tags. Until then the prompt says the tags are unavailable, names the command, and
-  shows the map for review only. The tags describe the files at the logged commits. They do not show
-  what runs, because what runs after launch is not measured (above).
+- A model entry is approved only with its whole service map pinned, together with its socket tags.
+  When a verification stages a NEAR entry, the plugin fetches, in the background, each deployed
+  docker-compose file the map names, from GitHub under the URL of `nearai/cvm-compose-files` at the
+  logged commit. It keeps a file only when its SHA-256 equals the log's `file_sha256`. The approve
+  command fetches again before it asks, and so does `hermes confidential pins review`. From those files
+  the plugin tags every service that holds `dstack.sock` or `docker.sock`, mounts a run directory, runs
+  privileged, adds capabilities, maps host devices, shares the host's network, pid or ipc namespace,
+  runs as root explicitly or by the image's default user, or is built from `dockerfile_inline` or from
+  an image not pinned by digest. Until every file of an entry is kept, the entry cannot be approved,
+  and the approve command says so and names `pins review`. A file that is kept but does not parse
+  blocks approval of that entry for good, which fails closed. The tags read the compose text only. A
+  missing tag is not evidence, and the tags do not show what runs, because what runs after launch is
+  not measured (above). Setting `CONFIDENTIAL_MODE_NO_FETCH` turns the fetch off; NEAR model entries
+  then cannot be approved.
+- A file that hashes to the log's value was published under the repository's URL at that commit.
+  GitHub also serves a commit that exists only in a fork under the parent repository's URL, so the
+  fetch does not establish that the commit belongs to `nearai/cvm-compose-files` itself. The review
+  bundle says so in its question about the publisher.
 - The commit author and date in the review bundle come from GitHub's API and are not signed. A
   reviewer can use them as a hint about who published a change, not as proof.
 - Vendor strings from the log are shown escaped. A control character or an escape sequence appears as a
@@ -554,53 +563,75 @@ it). The model key is still not part of a pin.
 
 **The gap.** A pin, or a tool on the locked allowlist, takes effect only after a person answers a
 prompt. The command `hermes confidential pins approve` asks that question on the terminal it runs in.
-Hermes' `terminal` tool can run a command under a pseudo-terminal, which is a terminal that a program
-drives, and `process_manage` can type into it. So an agent could run the approve command and answer
-the prompt itself. A pin bundle handed to an agent for review is vendor text, and vendor text can try
-to make the agent do exactly that.
+A chat surface asks it in its own way; in Hermes' interactive CLI that is the clarify panel. Hermes'
+`terminal` tool can run a command under a pseudo-terminal, which is a terminal that a program drives,
+and `process_manage` can type into it. So an agent could run the approve command, or start a nested
+`hermes` chat and type `/confidential pins approve` into it, and answer the prompt itself. A pin bundle
+handed to an agent for review is vendor text, and vendor text can try to make the agent do exactly
+that.
 
 **Why it exists.** Hermes runs `terminal`, `process_manage` and `execute_code` on this host without a
-prompt, also while locked (section 3). The terminal prompt cannot tell a person's keyboard from a
-pseudo-terminal.
+prompt, also while locked (section 3). No prompt can tell a person's keyboard from a pseudo-terminal.
+In Hermes 84a0301 a chat client is attached to one gateway process, which runs every session's tools
+and also runs the slash commands typed into any attached client. A nested chat that a tool started
+attaches to that same gateway, and the gateway cannot tell which client answers a prompt.
 
-**What the plugin does today.** Two checks, and a record.
+**What the plugin does today.** Three checks, and a record.
 
 - While the profile is locked, the tool gate refuses any `terminal`, `process_manage` or
-  `execute_code` call whose text invokes the `confidential` command. It scans every string in the
-  call's arguments, after removing quote characters and backslashes. It refuses a command that names
-  Hermes together with the word `confidential`, as in `hermes confidential`, `hermes -p work
-  confidential` or `python -m hermes_cli.main confidential`. It refuses the word `confidential`
-  followed by one of its verbs (`pins`, `allow`, `off`, `on`, `setup`, `approve`, `retire`), which
-  covers an alias. It refuses an import of the plugin's `confidential_mode` package. It refuses a
-  mention of the plugin's files `pins.yaml`, `ledger.sqlite` and `allowlist.yaml`. Each refusal writes
-  a `tool_refused` ledger row with the decision `self_approval`.
-- The command text check cannot see a command that is built while it runs. Examples are a command
-  assembled from variables, decoded from base64, split across several `process_manage` writes, or put
-  in a script by `write_file` and run later. So there is a second check. Before any tool runs, the
-  plugin's tool hooks set the environment variable `CONFIDENTIAL_MODE_TOOL_PROCESS` in the Hermes
-  process. Every tool subprocess inherits it. The terminal prompt refuses to ask in a process that has
-  it, and the ledger row says `self_approval`. Hermes 84a0301 sets no marker of its own that could do
-  this job: its `HERMES_AGENT` variable is also set in the process of a `hermes` command a person
-  types. A command can unset `CONFIDENTIAL_MODE_TOOL_PROCESS` (`env -u`), so this second check stops
-  an agent that follows the pin bundle's text, not one that sets out to get around it.
+  `execute_code` call whose text reaches the plugin. It scans every string in the call's arguments,
+  after expanding bash's `$'...'` quoting and removing quote characters and backslashes. It refuses:
+  - a command that names Hermes together with the word `confidential`, or with a shell pattern that
+    can expand to that word (`confidentia?`, `conf*`);
+  - the word `confidential` followed by one of its verbs (`pins`, `allow`, `off`, `on`, `lock`,
+    `unlock`, `setup`, `approve`, `retire`), which covers an alias;
+  - any mention of the plugin's `confidential_mode` package, which covers `import` and `importlib`;
+  - a mention of the plugin's files `pins.yaml`, `ledger.sqlite` and `allowlist.yaml`.
+
+  It also refuses a `write_file` or `patch` call that names one of those three files. Each refusal
+  writes a `tool_refused` ledger row with the decision `self_approval`.
+- The command check cannot see a command that is built while it runs. Examples are a command assembled
+  from variables, decoded from base64, split across several `process_manage` writes, or put in a script
+  that a tool runs later. It does not run at all in a profile that is not locked. So there is a second
+  check, on every prompt. Before any tool runs, the plugin's tool hooks set the environment variable
+  `CONFIDENTIAL_MODE_TOOL_PROCESS` to the id of the Hermes process, once. Every tool subprocess
+  inherits it. Every way the plugin asks for an approval checks it first, the terminal prompt and the
+  chat surface alike:
+  - In a process whose variable names another process, the prompt is refused. That covers the approve
+    command and a nested chat that runs its own commands, when a tool started them.
+  - In the process that set the variable (the gateway), the prompt is refused while any process a tool
+    started, and that carries the variable, is still running. That covers a nested chat attached to the
+    gateway. Once those processes have ended, the person's own surfaces are asked again. A process
+    whose environment the operating system does not let the plugin read, such as a macOS system binary,
+    is not counted. The Hermes client under it is a Python process, and it is counted.
+
+  Each refusal writes a `pin_denied` or `tool_refused` row with the decision `self_approval`. Hermes
+  84a0301 sets no marker of its own that could do this job: its `HERMES_AGENT` variable is also set in
+  the process of a `hermes` command a person types.
 - Every approval writes a `pin_applied` row that names the surface it came from. A pin approved from a
   terminal records `approved_via: cli`. A receipt shows that row.
 
-Two routes remain.
+Two routes remain open.
 
+- A tool subprocess can remove the variable (`env -u`) and then start a process that leaves the
+  gateway's process tree, for example through a double fork. A nested chat started that way, attached
+  to the gateway, can answer the prompt. An agent that follows the pin bundle's text would have to be
+  told to do both. The command check refuses both steps while locked when they are typed as text, but
+  not when they are built at run time.
 - An agent in a different profile that is not locked, with terminal access on the same host, can run
   the approve command for this profile under a pseudo-terminal. The tool gate of this profile does
-  not see that call. If the other profile loads this plugin, its tool hooks set the marker, and the
-  prompt refuses until a command unsets it. If the other profile does not load the plugin, nothing
-  marks its tool subprocesses, and the prompt asks.
-- A tool that writes files can edit `pins.yaml` and the ledger directly. The attested check refuses a
-  pin without a matching `pin_applied` row, but such a tool could also write that row (the same limit
-  as "Pins need a consent record", below).
+  not see that call. If the other profile loads this plugin, its tool hooks set the variable, and the
+  prompt refuses unless a command removed the variable. If the other profile does not load the plugin,
+  nothing marks its tool subprocesses, and the prompt asks. A tool that writes files there can also
+  edit `pins.yaml` and the ledger directly. The attested check refuses a pin without a matching
+  `pin_applied` row, but such a tool could write that row too (the same limit as "Pins need a consent
+  record", below).
 
 **The change that would close it.** A consent surface that an agent cannot drive, for example an
 approval that Hermes core asks on a channel it never exposes to tools, plus a marker Hermes sets on
-every tool subprocess and that a plugin can read but a command cannot remove. A typed challenge shown
-only on the approving surface would also work.
+every tool subprocess and that a plugin can read but a command cannot remove. A gateway that tells a
+plugin which client answered, and whether a tool started that client, would close the nested-chat
+route. A typed challenge shown only on the approving surface would also work.
 
 ## Smaller gaps, disclosed
 

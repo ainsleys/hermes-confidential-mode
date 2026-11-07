@@ -519,24 +519,31 @@ A pin for NEAR is keyed by the gateway host and the list of allowed models, for 
 one instance of a model.
 
 An entry pins named **components** of its CVM. For the gateway these are the docker-compose file, the
-app_id, the OS image and the KMS key. For a model they are the same four, plus the compose-manager image
-that the CVM's deployment log reports. Each entry also pins the CVM's firmware and kernel measurements.
-A model entry pins the CVM's whole **service map** (the services the log says were deployed after
-launch) only when the plugin can show which of those services hold the quote socket. Showing that needs
-the deployed docker-compose files, which `hermes confidential pins review` fetches (see below). Until then,
-the map is shown for review only.
+app_id, the OS image and the KMS key. For a model they are the same four, the compose-manager image
+that the CVM's deployment log reports, and the CVM's whole **service map** (the services the log says
+were deployed after launch). Each entry also pins the CVM's firmware and kernel measurements. So a
+change in any component, the service map and the reported compose-manager image included, asks again.
+
+A model entry can be approved only when the plugin can show, for every service in its map, whether the
+service can reach more than its own container (the socket tags). Showing that needs the deployed
+docker-compose files. The plugin fetches them from GitHub in the background when it stages the entry,
+and the approve command fetches again before it asks. Until every file is fetched and hash-checked, the
+approve command does not ask and names `hermes confidential pins review`, which fetches them too.
 
 A verification passes when every CVM it reports matches an approved entry. A CVM that matches none
 becomes a pending entry, and the attested tier refuses until you approve it with `/confidential pins
-approve`. One prompt lists every pending entry, and the whole approved set. Approving adds the pending
-entries to the set; approving never removes an entry. NEAR runs one model on several CVMs with different
+approve`. The approve command goes through every pending batch, oldest first; each prompt lists every
+pending entry of one identity, and the whole approved set. Approving adds the pending entries to the
+set; approving never removes an entry. NEAR runs one model on several CVMs with different
 configurations, so the set grows as you meet them. An entry that no verification has matched for 20
 verifications is flagged in the prompt. To remove such an entry, run `hermes confidential pins retire
-<fingerprint>` with 8 or more hex digits of its code or enclave fingerprint.
+<fingerprint>` with 8 or more hex digits of its code or enclave fingerprint. One gateway entry can be
+approved under several identities; add `--identity <host#models>` to retire only one identity's copy.
 
-The first verification after upgrading to this version asks for NEAR again, once. Version 3 of the pins
-file names each CVM's components, so the earlier NEAR pin no longer describes the same thing. A Tinfoil
-pin keeps working unchanged.
+The first verification after upgrading to this version asks for NEAR again, once. A NEAR pin approved
+before the upgrade matches nothing, because its fingerprints cover fewer values than a per-CVM entry
+does; the prompt marks it as migrated, and approving the new entries removes it. A Tinfoil pin keeps
+working unchanged.
 
 ### Reviewing a pending pin
 
@@ -547,32 +554,41 @@ hermes confidential pins approve --reviewed-by <name> --note "<verdict>"
 ```
 
 `pins review` builds a **review bundle**: everything a reviewer needs to judge each pending entry. You
-run the command yourself, in a terminal you opened. You can hand the bundle to another agent, in a fresh session
-that has no access to the locked profile. For each NEAR entry the bundle holds:
+run the command yourself, in a terminal you opened. You can hand the bundle to another agent, in a fresh
+session that has no access to the locked profile. For each NEAR entry the bundle holds:
 
 - the old and the new value of every component, and the verified signing address old and new;
 - the measured docker-compose fields beyond images (`allowed_envs`, `pre_launch_script`, the manifest
   flags, `GITHUB_REPO`, `CM_MIN_TAG_AGE_HOURS`), with a unified diff;
 - the compose-manager image the log reports beside the measured one;
 - the service map old and new;
-- each deployed docker-compose file named in the map. The command fetches each file from
-  `github.com/nearai/cvm-compose-files` at the logged commit, checks its SHA-256 against the log, and
-  keeps the file under `pins/composes/` in the plugin's data directory. A file the command cannot fetch is marked "text
-  not fetched", with its link;
-- for every service, tags: holds `dstack.sock` or `docker.sock`, privileged, runs as root, built from
-  `dockerfile_inline`, image not pinned by digest;
+- each deployed docker-compose file named in the map. The command fetches each file from GitHub under
+  the URL of `nearai/cvm-compose-files` at the logged commit, checks its SHA-256 against the log, and
+  keeps the file under `pins/composes/` in the plugin's data directory. GitHub serves a fork's commit
+  under the parent repository's URL too, so the fetch does not prove that the commit belongs to that
+  repository. A file the command cannot fetch is marked "text not fetched", with its link;
+- when no approved entry of the same role exists (the first review, and the first after the upgrade),
+  the baseline is "none" and the full texts are included: the measured app_compose, and for each
+  deployed file path one full text with every other commit of that path as a diff against it;
+- for every service, tags: holds `dstack.sock` or `docker.sock`, mounts a run directory, privileged,
+  adds capabilities, maps host devices, shares the host's network, pid or ipc namespace, runs as root
+  (explicitly, or by the image's default user), built from `dockerfile_inline`, image not pinned by
+  digest. A missing tag is not evidence;
 - the commit author and date from GitHub (unsigned metadata);
 - a brief: fixed rules, fixed questions, and a required answer format of one verdict per question with
   cited line numbers.
 
-A Tinfoil entry keeps its release and compare links. Every vendor string is shown escaped.
+A Tinfoil entry keeps its release and compare links. Every value in the text form is shown escaped, so
+no value can start a line of its own.
 
-Once every deployed docker-compose file of an entry is fetched, the entry pins its service map too. The
+Once every deployed docker-compose file of an entry is fetched, the entry pins its service map. The
 pending entry then changes, so approve after the review, not before. `--reviewed-by` and `--note` are
-recorded on the approved entries. An approval from a chat surface records no reviewer.
+recorded on the approved entries, from the terminal or from a chat surface; without them the reviewer
+is recorded as none.
 
-The reviewer must never run a `confidential` command. While you are locked, the plugin enforces part
-of that rule. [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 15, says how and what remains.
+The reviewer must never run a `confidential` command. The plugin refuses an approval that a tool could
+be driving. [docs/LIMITATIONS.md](docs/LIMITATIONS.md), section 15, describes those checks and the
+routes they leave open.
 
 ### Setup
 
