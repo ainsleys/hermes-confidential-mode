@@ -79,8 +79,9 @@ hermes confidential status | grep '^Plugin:'
   copy's `.git` names. Compare that commit with the commit you meant to install. The check does not
   detect local edits.
 - **Set your key** in the shell that starts Hermes, or in `<hermes home>/.env`, or give Hermes the key
-  through `model.api_key` or `hermes auth`. The lock and `check` refuse while the key is missing, and
-  show only "set" or "not set", never the key.
+  through `model.api_key` or `hermes auth`. The lock and `check` refuse while the key is missing. They
+  show one of three states, "set", "not set" or "not readable in this scope" (a multiplexed gateway
+  with no profile scope), never the key.
 - **Data files.** The plugin keeps the ledger in `<hermes home>/plugin-data/confidential-mode/` and the
   lock, pins and tool grants in `<hermes home>/plugin-data/agent-plugin-confidential-mode-<hash>/`,
   each file mode 0600. `hermes confidential status` prints both paths.

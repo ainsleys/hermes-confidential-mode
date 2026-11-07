@@ -432,16 +432,20 @@ def ensure_tools_for_lock(path: Optional[Path], progress: Any = None) -> None:
     import sys
     data = _read_json_or_yaml(Path(path)) if path is not None else None
     tools = data.get("tools") if isinstance(data, dict) else None
-    names = sorted({t["module"] for t in tools if isinstance(t, dict) and isinstance(t.get("module"), str)
-                    and t["module"].startswith("tools.")}) if isinstance(tools, list) else []
+    # MCP tools are gateway-registered: their handlers live in tools.mcp_tool_handlers and only a connected
+    # MCP server registers them, so importing anything for them registers nothing (Amendment 11).
+    tools = [t for t in tools if isinstance(t, dict) and not str(t.get("toolset", "")).startswith("mcp-")] \
+        if isinstance(tools, list) else []
+    names = sorted({t["module"] for t in tools if isinstance(t.get("module"), str)
+                    and t["module"].startswith("tools.")})
     missing = [n for n in names if n not in sys.modules]
     if missing:
         _import_modules(missing, progress)
     # A handler defined outside the module that registers it: fall back to the full import for those tools.
     try:
         from tools.registry import registry
-        wanted = [t["name"] for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str)
-                  and str(t.get("module", "")).startswith("tools.")] if isinstance(tools, list) else []
+        wanted = [t["name"] for t in tools if isinstance(t.get("name"), str)
+                  and str(t.get("module", "")).startswith("tools.")]
         if any(registry.get_entry(n) is None for n in wanted):
             ensure_builtin_tools(progress)
     except Exception:
@@ -1333,7 +1337,8 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         choice = dec.pop(key) if key is not None else _MISSING
         if choice is not _MISSING:                 # pre_tool_call asked (model_tools order)
             if type(choice) is str and choice in _ALLOW_CHOICES:
-                dec.pop_ledgered(key)
+                if not dec.pop_ledgered(key):      # the hook's tool_allowed row could not be written
+                    _allowed_row(tool_name, args, session_id, base, choice)
                 return run()                       # tool_allowed was ledgered by post_approval_response
             return _unexpected(tool_name, args, session_id, base, choice,
                                answered=dec.pop_ledgered(key) and _refusal_ledgered(choice))
@@ -1353,6 +1358,8 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         hook_wrote_row = dec.pop_ledgered(_call_key(tool_name, approval_id))
         approved = isinstance(result, dict) and result.get("approved") is True
         if approved and type(choice) is str and choice in _ALLOW_CHOICES:
+            if not hook_wrote_row:                 # the hook's tool_allowed row could not be written
+                _allowed_row(tool_name, args, session_id, {**base, "approval_id": approval_id}, choice)
             if key is None:
                 return run()                       # the inner hook never asks for an id-less call
             dec.grant(key)
@@ -1370,6 +1377,10 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                        str((result or {}).get("message") or f"confidential mode: {tool_name} was not approved"),
                        {**base, "choice": None if choice is _MISSING else _choice_repr(choice),
                         "approval_id": approval_id}, answered=hook_wrote_row and _refusal_ledgered(choice))
+
+    def _allowed_row(tool_name, args, session_id, base, choice):
+        _try_ledger(ledger, "tool_allowed", tool_name, session_id, choice, args, {**base, "choice": choice},
+                    "middleware")
 
     def _unexpected(tool_name, args, session_id, base, choice, *, answered=False):
         return _refuse(tool_name, args, session_id, "unexpected_choice",

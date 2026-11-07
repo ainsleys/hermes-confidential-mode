@@ -408,6 +408,23 @@ def test_a_refusal_the_hook_could_not_write_is_written_by_the_middleware(caplog)
     assert "could not ledger the answer for web_search" in caplog.text
 
 
+class FlakyAllowLedger(FakeLedger):
+    def append(self, event):
+        if event["kind"] == "tool_allowed" and event.get("surface") == "cli":
+            raise OSError("database is locked")
+        super().append(event)
+
+
+def test_an_allow_the_hook_could_not_write_is_written_by_the_middleware():
+    r = Rig(answer="once", hermes_approved=True, ledger=FlakyAllowLedger())
+    assert r.run("web_search") == '{"ok": true}' and r.ran() == ["web_search"]
+    assert r.ledger.kinds() == ["tool_asked", "tool_allowed"]
+    assert r.ledger.events[-1]["surface"] == "middleware" and r.ledger.events[-1]["decision"] == "once"
+    r = Rig(answer="once", hermes_approved=True)                 # the hook wrote it: no second row
+    r.run("web_search")
+    assert r.ledger.kinds() == ["tool_asked", "tool_allowed"] and r.ledger.events[-1]["surface"] == "cli"
+
+
 def test_an_answer_with_an_empty_id_is_recorded_once():
     """Hermes can fire post_approval_response without the observability context (an empty tool_call_id). The
     answer is keyed on the middleware's ask in progress, so exactly one row is written."""

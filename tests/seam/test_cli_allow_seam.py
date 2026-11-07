@@ -69,18 +69,29 @@ def test_cli_allow_of_a_tool_only_the_gateway_registered_says_so(plugin, monkeyp
     """Through a real CLI process. A tool the lock recorded but only the gateway registered (an MCP tool):
     the CLI refuses and says to allow the tool from chat. A tool the lock never recorded: the CLI says no
     allow can help and that a relock from chat records gateway-only tools."""
+    import importlib
     from tools.registry import registry
     schema = {"name": "mcp_docs_search", "description": "x", "parameters": {"type": "object", "properties": {}}}
-    registry.register(name="mcp_docs_search", toolset="mcp-docs", schema=schema, handler=lambda a, **k: "{}")
+    # A real MCP handler, as tools/mcp_tool_registration.py builds one: its module is tools.mcp_tool_handlers,
+    # which registers nothing on import, so the CLI must not fall back to a full tool discovery for it.
+    handlers = importlib.import_module("tools.mcp_tool_handlers")
+    handler = getattr(handlers, "_make_tool_handler")("docs", "search", 30.0)
+    registry.register(name="mcp_docs_search", toolset="mcp-docs", schema=schema, handler=handler)
+    cache = plugin.home / "cache" / "tool_discovery_cache.json"
     try:
         assert plugin.slash("on on-host-only").startswith("Locked")        # the gateway locks: records the tool
+        persisted = json.loads(plugin.rt.allowlist_path.read_text())["tools"]
+        assert any(t["name"] == "mcp_docs_search" and t["module"] == "tools.mcp_tool_handlers" for t in persisted)
+        before = cache.stat().st_mtime_ns if cache.exists() else None
         proc = _hermes(plugin, "allow", "mcp_docs_search")
     finally:
         registry.deregister("mcp_docs_search")
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert proc.stdout.startswith("mcp_docs_search is an MCP tool that the lock recorded, but this terminal "
-                                  "process has not registered mcp_docs_search"), proc.stdout
+    assert proc.stdout.startswith("mcp_docs_search is an MCP tool that only the gateway connects, so this "
+                                  "terminal process cannot allow mcp_docs_search."), proc.stdout
     assert "In the chat session, run /confidential allow mcp_docs_search." in proc.stdout
+    assert "relock from chat first: /confidential off, then /confidential on <tier>." in proc.stdout
+    assert (cache.stat().st_mtime_ns if cache.exists() else None) == before      # no discovery-cache rewrite
     proc = _hermes(plugin, "allow", "never_registered_tool")
     assert proc.returncode == 1 and proc.stdout.startswith(
         "Unknown tool 'never_registered_tool'; never_registered_tool was not registered when this lock was made."

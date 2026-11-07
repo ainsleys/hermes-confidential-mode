@@ -167,8 +167,9 @@ def test_the_near_pin_prompt_explains_abliterated_services_only_when_present(plu
     consent = _sub(plugin, "consent")
     pending = {"vendor": "near", "router_repo": "cloud-api.near.ai#m", "components": [], "entries": [],
                "platform": "tdx", "code_fingerprint": "c" * 64, "enclave_fingerprint": "e" * 64}
-    note = ('NEAR deploys services named "...-abliterated" in the same enclave as the base model. They share the '
-            "enclave and its quote socket, and the plugin lists them for that reason.")
+    note = ('The compose-manager log reports services named "...-abliterated" in the same enclave as the base '
+            "model. Services in one enclave share the enclave and its quote socket, and the plugin lists these "
+            "services for that reason.")
     assert note not in consent.pin_question(pending)
     pending["components"] = ["model m service proxy-qwen38-27b-abliterated image x"]
     assert note in consent.pin_question(pending)
@@ -186,8 +187,6 @@ def test_a_key_unreadable_mid_lock_refuses_the_call_and_records_no_breach(plugin
     entry.result, entry.verified_mono = _result(plugin), time.monotonic()
     assert plugin.slash("on attested").startswith("Locked to Tinfoil")
     monkeypatch.delenv("TINFOIL_API_KEY")
-    import agent.credential_pool as pool_mod
-    monkeypatch.setattr(pool_mod, "load_pool", lambda name: type("P", (), {"has_credentials": lambda self: False})())
     results = invoke_hook("pre_llm_call", session_id="sess-k")
     assert not any(isinstance(r, dict) and r.get("action") == "block" for r in results), results
     client = provider._create_client(plugin.rt.profile, provider.verification_cache, {})
@@ -200,6 +199,8 @@ def test_a_key_unreadable_mid_lock_refuses_the_call_and_records_no_breach(plugin
        api_request_id="req-k", platform="cli")
     rows = plugin.rt.ledger.session("sess-k")
     assert not [e for e in rows if e.kind == "breach"]
+    # Nothing left the machine, so no send row says "allowed": the refusal is the record.
+    assert not [e for e in rows if e.kind == "send_observed" and e.decision == "allowed"]
     refused = [e for e in rows if e.kind == "send_refused"]
     assert len(refused) == 1 and refused[0].detail["reason_code"] == "vendor_key_unreadable"
     assert refused[0].detail["reason"].startswith("vendor key unreadable")

@@ -352,8 +352,9 @@ def _approved_lines(approved: Optional[tuple]) -> list[str]:
     return lines
 
 
-NEAR_ABLITERATED_NOTE = ("NEAR deploys services named \"...-abliterated\" in the same enclave as the base model. "
-                         "They share the enclave and its quote socket, and the plugin lists them for that reason.")
+NEAR_ABLITERATED_NOTE = ("The compose-manager log reports services named \"...-abliterated\" in the same enclave as "
+                         "the base model. Services in one enclave share the enclave and its quote socket, and the "
+                         "plugin lists these services for that reason.")
 
 
 def _near_pin_question(pending: Any, *, observers: Optional[list] = None, approved: Optional[tuple] = None) -> str:
@@ -604,8 +605,12 @@ def unknown_tool_text(allowlist: Any, name: str) -> str:
     ident = persisted.get(name) if isinstance(persisted, dict) else None
     if ident is not None:
         toolset = str(ident[0]) if isinstance(ident, (tuple, list)) and ident else ""
-        what = "an MCP tool" if toolset.startswith("mcp-") else "a tool"
-        return (f"{name} is {what} that the lock recorded, but this terminal process has not registered "
+        if toolset.startswith("mcp-"):
+            return (f"{name} is an MCP tool that only the gateway connects, so this terminal process cannot "
+                    f"allow {name}. In the chat session, run /confidential allow {name}. If {name} is blocked "
+                    "there as not registered when the lock was made, relock from chat first: /confidential off, "
+                    "then /confidential on <tier>.")
+        return (f"{name} is a tool that the lock recorded, but this terminal process has not registered "
                 f"{name} (only the gateway connected {name}), so {name} cannot be allowed from here. In the chat "
                 f"session, run /confidential allow {name}.")
     return (f"Unknown tool {name!r}; {name} was not registered when this lock was made. A lock made from a "

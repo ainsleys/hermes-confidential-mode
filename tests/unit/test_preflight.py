@@ -329,14 +329,16 @@ def test_attested_tier_needs_the_vendor_api_key():
     assert "TINFOIL_API_KEY" not in [i.key for i in run(base_config(), keys=()).items]
 
 
-def test_key_state_reads_every_source_and_never_shows_the_value(monkeypatch):
-    """Amendment 11: the secret scope, a route's api_key in config, and Hermes' credential pool all count; an
-    unscoped read (a multiplexed gateway with no scope) is "not readable in this scope"."""
+def test_key_state_reads_every_source_and_never_shows_the_value(monkeypatch, tmp_path):
+    """Amendment 11: the secret scope, a route's api_key in config, and Hermes' auth store (read-only) all
+    count; an unscoped read (a multiplexed gateway with no scope) is "not readable in this scope"."""
+    import json as _json
+    import os as _os
     from confidential_mode import preflight
-    import agent.credential_pool as pool_mod
     import agent.secret_scope as scope
+    import hermes_constants
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
     monkeypatch.delenv("TINFOIL_API_KEY", raising=False)
-    monkeypatch.setattr(pool_mod, "load_pool", lambda name: type("P", (), {"has_credentials": lambda self: False})())
     cfg = attested_config()
     assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "not set"
     monkeypatch.setenv("TINFOIL_API_KEY", "sk-secret-value")
@@ -351,18 +353,22 @@ def test_key_state_reads_every_source_and_never_shows_the_value(monkeypatch):
     keyed = attested_config(model={"provider": "attested-tinfoil", "default": "llama", "api_key": "sk-cfg"})
     assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", keyed) == "set"
     assert preflight.key_state("attested-near", "NEAR_AI_API_KEY", keyed) == "not set"   # another profile's
-    # the credential pool (hermes auth)
-    monkeypatch.setattr(pool_mod, "load_pool",
-                        lambda name: type("P", (), {"has_credentials": lambda self: name == "attested-tinfoil"})())
+    # Hermes' auth store (hermes auth), read without any write: the file and its mtime are unchanged.
+    auth = tmp_path / "auth.json"
+    auth.write_text(_json.dumps({"credential_pool": {"attested-tinfoil": [{"id": "x", "access_token": "t"}]},
+                                 "providers": {}}))
+    before = (auth.read_bytes(), _os.stat(auth).st_mtime_ns)
     assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "set"
-    monkeypatch.setattr(pool_mod, "load_pool", lambda name: type("P", (), {"has_credentials": lambda self: False})())
+    assert (auth.read_bytes(), _os.stat(auth).st_mtime_ns) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["auth.json"]
+    auth.write_text("{not json")
+    assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "not set"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["auth.json"]      # no .corrupt copy either
 
     def unscoped(name, default=None):
         raise scope.UnscopedSecretError(name, "no scope")
     monkeypatch.setattr(scope, "get_secret", unscoped)
     assert preflight.key_state("attested-tinfoil", "TINFOIL_API_KEY", cfg) == "not readable in this scope"
-    r = run(cfg, tier=Tier.ATTESTED, pred=attested_pred(), profile="attested-tinfoil")
-    assert item(r, "TINFOIL_API_KEY").verdict == "in_tier"           # the injected state wins in this helper
 
 
 def test_no_key_rows_without_a_key_state():

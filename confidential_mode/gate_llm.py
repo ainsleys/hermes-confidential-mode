@@ -367,10 +367,14 @@ class LlmGate:
             with self.send_context(dest, context, tier, records_refusals=True), self.capture_records(records):
                 response = next_call(request)
         except BaseException as exc:
-            observed()
+            original = getattr(exc, "original", exc)
+            # The attested client's own refusal (client.py ConfidentialRefused: no key, verification or pin
+            # refused) is raised before any byte is sent, so no "allowed" send row is written for it; the
+            # send_refused row below is the record (Amendment 11). Any other failure may have sent bytes.
+            if type(original).__name__ != "ConfidentialRefused":
+                observed()
             if not isinstance(exc, Exception):
                 raise
-            original = getattr(exc, "original", exc)
             if isinstance(original, InterruptedError):
                 raise
             detail = {"reason_code": "provider_error", "error_type": type(original).__name__}

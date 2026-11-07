@@ -11,7 +11,7 @@ Hermes facts this module relies on (pinned at 84a0301):
 - Fallbacks: ``fallback_providers`` and the legacy ``fallback_model`` key are both read
   (hermes_cli/fallback_config.py:126-143) and also consulted by auxiliary calls (:4378-4390).
 - Aux "auto"/"" (and "main") resolve to the main provider; vision "auto" walks
-  openrouter -> nous -> deepinfra when the main route cannot serve vision (auxiliary_client.py:5545-5566).
+  openrouter -> nous -> deepinfra when the main route cannot serve vision (auxiliary_client.py:5541-5567).
 - A bare ``base_url`` on an aux task means a custom endpoint (auxiliary_client.py:5590-5597, 6061).
 - Plugin aux tasks layer their ``defaults`` under the user's block and may ``inherit_from`` another
   task (agent/auxiliary_task_config.py:59-117).
@@ -307,7 +307,7 @@ def _route_api_keys(config: Mapping, profile: str) -> bool:
 def key_state(profile: str, env_var: str, config: Mapping | None = None) -> str:
     """Whether the attested profile has an API key from any source Hermes hands the provider: Hermes' secret
     scope (``agent.secret_scope.get_secret``, as provider.api_key_for reads it), a route's ``api_key`` in
-    config, or Hermes' credential pool for the profile (``hermes auth``; ``agent.credential_pool``). Returns
+    config, or Hermes' auth store for the profile (``hermes auth``; read-only, :func:`auth_store_has`). Returns
     KEY_SET, KEY_NOT_SET, or KEY_UNSCOPED when the secret scope refuses the read in this process (a
     multiplexed gateway with no scope) and no other source has a key. Never the value or its length."""
     unscoped = False
@@ -326,13 +326,33 @@ def key_state(profile: str, env_var: str, config: Mapping | None = None) -> str:
             return KEY_SET
     except Exception:  # noqa: BLE001
         pass
-    try:
-        from agent.credential_pool import load_pool
-        if load_pool(profile).has_credentials():
-            return KEY_SET
-    except Exception:  # noqa: BLE001
-        pass
+    if auth_store_has(profile):
+        return KEY_SET
     return KEY_UNSCOPED if unscoped else KEY_NOT_SET
+
+
+def auth_store_has(provider: str, path: Any = None) -> bool:
+    """Whether Hermes' auth store (``<hermes home>/auth.json``: the credential pool that `hermes auth` fills,
+    and its per-provider auth entries) holds a credential for ``provider``. Read-only: the file is opened for
+    reading and parsed here, never through Hermes' loaders, which can rewrite or copy the store. Only presence
+    is read; no value leaves this function. Any error counts as absent."""
+    try:
+        if path is None:
+            from hermes_constants import get_hermes_home
+            path = get_hermes_home() / "auth.json"
+        with open(path, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except Exception:  # noqa: BLE001
+        return False
+    if not isinstance(data, Mapping):
+        return False
+    pool = data.get("credential_pool")
+    entries = pool.get(provider) if isinstance(pool, Mapping) else None
+    if isinstance(entries, list) and any(isinstance(e, Mapping) and e for e in entries):
+        return True
+    providers = data.get("providers")
+    entry = providers.get(provider) if isinstance(providers, Mapping) else None
+    return isinstance(entry, Mapping) and bool(entry)
 
 
 #: The providers Hermes' built-in discovery chain tries after the main route (agent/auxiliary_client.py
@@ -340,7 +360,7 @@ def key_state(profile: str, env_var: str, config: Mapping | None = None) -> str:
 #: "openrouter" credential-pool entry or OPENROUTER_API_KEY (_try_openrouter); Nous by a "nous" pool entry or
 #: Nous auth from `hermes auth` (_try_nous). At 84a0301 the chain runs for a text task only when the main
 #: provider is unset or auto (_discovery_chain_allowed, auxiliary_client.py:4529-4541, called at :4591 and
-#: :4147), which the preflight refuses, and for vision on auto (_vision_auto_route, :5545), also refused. So an
+#: :4147), which the preflight refuses, and for vision on auto (_vision_auto_route, :5541-5567), also refused. So an
 #: `auto` side call stays in-tier under a lock; its row carries AUTO_NOTE while either credential is readable,
 #: and `check` prints a summary line (Amendment 11).
 AUTO_CHAIN_KEYS = (("openrouter", "OPENROUTER_API_KEY"), ("nous", "NOUS_API_KEY"))

@@ -101,7 +101,7 @@ Hermes' built-in fall-through then tries OpenRouter and then Nous (`_get_provide
 holds Nous authentication from `hermes auth` (`_try_nous`, `:2355`). At 84a0301 Hermes runs that chain for
 a text side call only when the main provider is unset or `auto` (`_discovery_chain_allowed`,
 `:4529-4541`, called at `:4591` and `:4147`), and for vision only on `auto` (`_vision_auto_route`,
-`:5545`). The preflight refuses an unset or `auto` main provider and an `auto` vision route, so under a
+`:5541-5567`). The preflight refuses an unset or `auto` main provider and an `auto` vision route, so under a
 lock the fallback chain is refused by the main-provider rule. A side call on `auto` therefore stays
 in-tier. While an OpenRouter or Nous credential is readable, its preflight row carries a note saying so,
 and `check` prints one summary line with the number of side calls on `auto` and the credential that
