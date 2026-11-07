@@ -401,9 +401,15 @@ def check_result(rt: Any, tier: Optional[str]) -> tuple[str, bool]:
         return f"Unknown tier {chosen!r} (one of: {', '.join(x.value for x in Tier)}).", False
     if t is Tier.ZDR:
         return f"zero-retention: {_locking.ZDR_REASON}.", False
-    report = _locking.run_tier_preflight(t, config=rt.load_config(), attested_ok=interactive_attested_ok(rt),
+    config = rt.load_config()
+    report = _locking.run_tier_preflight(t, config=config, attested_ok=interactive_attested_ok(rt),
                                          check_keys=True)
-    return _pf.format_report(report), report.ok is True
+    text = _pf.format_report(report)
+    try:
+        summary = _pf.auto_summary(report, _pf.auto_chain_readable(lambda p, e: _pf.key_state(p, e, config)))
+    except Exception:  # noqa: BLE001
+        summary = ""
+    return (f"{text}\n{summary}" if summary else text), report.ok is True
 
 
 def receipts_text(rt: Any, session: str, *, fmt: str = "text") -> str:

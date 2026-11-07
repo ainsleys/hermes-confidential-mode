@@ -205,7 +205,7 @@ def test_a_key_unreadable_mid_lock_refuses_the_call_and_records_no_breach(plugin
     assert refused[0].detail["reason"].startswith("vendor key unreadable")
 
 
-def test_tinfoil_setup_pins_every_side_call_and_an_openrouter_key_blocks_auto(plugin, monkeypatch, capsys):
+def test_tinfoil_setup_pins_every_side_call_and_check_summarises_side_calls_on_auto(plugin, monkeypatch, capsys):
     import hermes_yaml
     parser, handler = _cli(plugin)
     assert handler(parser.parse_args(["setup", "--no-verify", "--model", "llama3-3-70b"])) == 0
@@ -219,8 +219,8 @@ def test_tinfoil_setup_pins_every_side_call_and_an_openrouter_key_blocks_auto(pl
     report = locking.run_tier_preflight("attested", config=cfg, check_keys=True,
                                         predicate=locking.structural_predicate("attested", config=cfg))
     assert report.ok, pf.format_report(report)                      # nothing is left on auto
-    # The on-host test config leaves side calls on auto: with an OpenRouter key readable, the lock refuses.
-    out = plugin.slash("on on-host-only")
-    assert out.startswith("Not locked") and "auto can fall through to OpenRouter or Nous on failure" in out
-    monkeypatch.delenv("OPENROUTER_API_KEY")
+    # The on-host test config leaves side calls on auto: with an OpenRouter key readable they stay in-tier,
+    # `check` names them in one summary line, and the lock succeeds.
+    text, ok = _sub(plugin, "commands").check_result(plugin.rt, "on-host-only")
+    assert ok and "Side calls on auto: " in text and "OpenRouter (OPENROUTER_API_KEY or hermes auth)" in text
     assert plugin.slash("on on-host-only").startswith("Locked to this machine")

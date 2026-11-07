@@ -339,10 +339,15 @@ def key_state(profile: str, env_var: str, config: Mapping | None = None) -> str:
 #: _get_provider_chain: OpenRouter, then Nous), with the variable each reads. OpenRouter is enabled by an
 #: "openrouter" credential-pool entry or OPENROUTER_API_KEY (_try_openrouter); Nous by a "nous" pool entry or
 #: Nous auth from `hermes auth` (_try_nous). At 84a0301 the chain runs for a text task only when the main
-#: provider is unset or auto (_discovery_chain_allowed), which the preflight already refuses, and for vision
-#: auto (_vision_auto_route), also refused. The rule below is a second line in case a Hermes update relaxes that
-#: gate: an `auto` side call is off-tier while either credential is readable (Amendment 11).
+#: provider is unset or auto (_discovery_chain_allowed, auxiliary_client.py:4529-4541, called at :4591 and
+#: :4147), which the preflight refuses, and for vision on auto (_vision_auto_route, :5545), also refused. So an
+#: `auto` side call stays in-tier under a lock; its row carries AUTO_NOTE while either credential is readable,
+#: and `check` prints a summary line (Amendment 11).
 AUTO_CHAIN_KEYS = (("openrouter", "OPENROUTER_API_KEY"), ("nous", "NOUS_API_KEY"))
+
+
+AUTO_NOTE = ("auto resolves to the main provider; Hermes' fall-through to OpenRouter or Nous runs only when the "
+             "main provider is unset or auto, which the lock refuses")
 
 
 def auto_chain_readable(key_state: Callable[[str, str], str]) -> list[str]:
@@ -355,6 +360,20 @@ def auto_chain_readable(key_state: Callable[[str, str], str]) -> list[str]:
         except Exception:
             continue
     return found
+
+
+def auto_summary(report: "PreflightReport", readable: list[str]) -> str:
+    """`check`'s one summary line: how many side calls are on auto, and the credential that would matter if
+    Hermes' fall-through could run. '' when no side call is on auto or no such credential is readable."""
+    n = sum(1 for i in report.items if i.key.startswith("auxiliary.") and i.key.endswith(".provider")
+            and i.value_redacted.split(" ", 1)[0] == "auto")
+    if not n or not readable:
+        return ""
+    names = " and ".join({"openrouter": "OpenRouter (OPENROUTER_API_KEY or hermes auth)",
+                          "nous": "Nous (hermes auth)"}[r] for r in readable)
+    return (f"Side calls on auto: {n}. Each resolves to the main provider. A {names} credential is readable; "
+            "Hermes would use it only for an unset or auto main provider, which the lock refuses. Pinning each "
+            "auxiliary.<task>.provider removes the dependence on that rule.")
 
 
 def api_key_present(env_var: str, profile: str = "", config: Mapping | None = None) -> bool:
@@ -471,16 +490,12 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             # "auto"/"" resolve to the main route (text tasks); "main" is the main route for every task.
             shown = f"{cfg.get('provider') or 'auto'} -> {main_provider or 'auto'}"
             if provider in _AUTO and stray:
-                names = " and ".join({"openrouter": "OpenRouter", "nous": "Nous"}[n] for n in stray)
-                add(f"{prefix}.provider", f"{shown} ({names} credential readable)", OFF_TIER,
-                    f"pin {prefix}.provider to {main_provider or 'the main provider'} (auto can fall through to "
-                    "OpenRouter or Nous on failure)")
-            else:
-                if provider in _AUTO and stray == []:
-                    shown += " (no OpenRouter or Nous credential readable, so auto cannot fall through)"
-                add(f"{prefix}.provider", shown, main_verdict,
-                    INHERIT_FIX if pin_is_the_cause(main_reason) else
-                    f"inherits the main route: fix model.provider, or pin {prefix}.provider to an in-tier provider")
+                shown += f" (note: {AUTO_NOTE})"
+            elif provider in _AUTO and stray == []:
+                shown += " (no OpenRouter or Nous credential readable)"
+            add(f"{prefix}.provider", shown, main_verdict,
+                INHERIT_FIX if pin_is_the_cause(main_reason) else
+                f"inherits the main route: fix model.provider, or pin {prefix}.provider to an in-tier provider")
         else:
             if provider == "main":  # "main" + base_url: main provider identity on an explicit endpoint
                 cfg = {**cfg, "provider": main_provider}
