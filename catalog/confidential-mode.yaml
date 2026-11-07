@@ -6,8 +6,10 @@ sha: "<40-char sha at submission>"   # filled in at submission: the entry cannot
 description: >-
   Locks a Hermes profile so that the model runs only on this host or a private-range host, or in a
   Tinfoil enclave or behind NEAR AI Cloud's attested gateway and models, whose builds you approved.
-  For NEAR it checks each response's signature and records whether a model TEE signed it. A locked profile is held to one tier, on-host-only or
-  attested; a destination the tier accepts is in-tier, and anything else is off-tier.
+  For NEAR it encrypts each chat request to the verified model key, checks each response's
+  signature, and records whether a model TEE signed it. A locked profile is held to one tier,
+  on-host-only or attested; a destination the tier accepts is in-tier, and anything else is
+  off-tier.
 
   While locked, the plugin refuses main-loop model calls and fallbacks to any off-tier host before a
   byte is sent. It checks the session's live model runtime on every turn and ends the turn if that
@@ -28,8 +30,8 @@ description: >-
   applies. On-host-only means a loopback or private-range address. Private-range addresses include
   cloud VPC neighbours and carrier-grade NAT, so they are not proof that a host is yours.
 
-  Disclosure, network. The plugin makes no network call at load. All network traffic is on the
-  attested tier only. It contacts atc.tinfoil.sh for router discovery, which is skipped when
+  Disclosure, network. The plugin makes no network call at load. All network traffic serves the
+  attested tier. It contacts atc.tinfoil.sh for router discovery, which is skipped when
   confidential.tinfoil.enclave is set. It contacts the enclave router host for the attestation report
   and for your inference requests, with each request body encrypted to the attested key. It contacts
   github-proxy.tinfoil.sh for the release digest and Sigstore bundles. It contacts
@@ -44,7 +46,12 @@ description: >-
   (the default; needs pynacl==1.6.*), chat message text, tool definitions and tool calls reach NEAR's
   gateway encrypted to the attested model key. The gateway still reads the model id, the plaintext
   parameters, the request headers, sizes and timing, and can read a reply by swapping the client key
-  header; the plugin detects that afterwards and records the send as unverified.
+  header; the plugin detects that afterwards and records the send as unverified. Every instance of a
+  NEAR model shares the key a request is encrypted to. When a verification stages a NEAR model entry,
+  and for the approve and pins review commands, the plugin fetches the deployed docker-compose files
+  from raw.githubusercontent.com, from the repository the measured compose names, and keeps each only
+  when its SHA-256 matches; pins review also reads commit metadata from api.github.com. Setting
+  CONFIDENTIAL_MODE_NO_FETCH turns these fetches off, and NEAR model entries then cannot be approved.
 
   Disclosure, files. Everything is under <HERMES_HOME>/plugin-data/. The plugin writes
   ledger.sqlite, which holds hosts, byte counts, verdicts and verification evidence. It never holds
@@ -55,13 +62,17 @@ description: >-
   caches of the tinfoil SDK and of sigstore-python (~/Library/Caches/tinfoil, ~/.cache/tinfoil and
   the sigstore-python TUF directories) under the plugin data directory. It does this by assigning SDK
   module attributes before the first verification. It reads Hermes' config read-only and never
-  writes it.
+  writes it. NEAR evidence files go under evidence/blobs/ beside the ledger, and fetched compose
+  files under pins/composes/.
 
   Disclosure, credentials and processes. The plugin uses TINFOIL_API_KEY for attested-tinfoil and,
   optionally, NEAR_AI_API_KEY for attested-near (plugin.yaml optional_env), each through its provider
   profile's env_vars, or else through agent.secret_scope.get_secret. It runs no shell command, no
-  subprocess and no background process. It starts one short-lived thread per attestation, and a turn
-  waits at most 20 seconds for it (confidential.verify_wait_seconds).
+  subprocess and no long-running background process. It starts one short-lived thread per
+  attestation, and a turn waits at most 20 seconds for it (confidential.verify_wait_seconds). For
+  NEAR it also starts short-lived threads that fetch compose files and record pin matches. The
+  plugin sets XDG_CONFIDENTIAL_MODE_TOOL_PROCESS in the Hermes process; an approval prompt refuses in a process
+  that carries it with another process's id.
 
   Disclosure, core imports (catalog rule 9; all lazy). agent.auxiliary_client
   (_RUNTIME_MAIN_CONTEXT, to read the live runtime), agent.secret_scope, tools.terminal_tool,
@@ -101,6 +112,8 @@ known_issues:
   - "If Hermes runs on someone else's machine, such as a cloud agent or a VPS, that machine's operator sees every prompt. Locked mode protects the road out of the Hermes process, not the process itself."
   - "hermes confidential replay requires the tinfoilsh/confidential-model-router repository by default, and takes the expected fingerprints from your approved pin. By default it still uses the trust root and the capture time recorded in the evidence; pass --trusted-root and --as-of to supply your own. Pass --expected-repo-id and --expected-owner-id to bind the repository by its numeric GitHub IDs as well as its name. A broken hash chain makes the replay exit 1. The first pin is trust on first use."
   - "There is no mixed 'attested or on-host' tier yet. It is planned. Until then, side jobs cannot run on an on-host model while the main model is attested."
+  - "NEAR AI Cloud: with request encryption on, which the lock requires, images and streaming are refused, so vision cannot run through attested-near. The gateway still reads the model id, plaintext parameters, headers, sizes and timing. Every instance of a model shares its key. The compose-manager check establishes what the operator's tooling reported, not what runs. docs/LIMITATIONS.md section 14 lists every open item."
+  - "An agent with terminal access on the same host can still reach a pin approval prompt by some routes, such as a nested chat attached through the gateway. The ledger records every approval with its surface. docs/LIMITATIONS.md section 15 lists the routes."
 capabilities:
   provides_tools: []
   provides_hooks:
