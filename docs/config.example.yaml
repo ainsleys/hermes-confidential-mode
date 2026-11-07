@@ -92,6 +92,13 @@ confidential:
     # Only the exact value false turns the probe off. Default true.
     tls_probe: true
 
+  tools:
+    # How often an off-host tool asks while locked. once_per_lock (the default): the first call of each tool
+    # asks, and an exact "once" grants that tool until you unlock or revoke it. each_call: every call asks.
+    # Under yolo, approvals off and unattended runs (one-shot, cron) a tool is blocked in either mode. Any
+    # other value counts as each_call.
+    ask: once_per_lock
+
   near:
     # NEAR AI Cloud, the second attested vendor (provider attested-near). These keys matter only when
     # model.provider or an auxiliary task uses attested-near. docs/GUIDE.md: "The attested tier with NEAR AI".

@@ -227,7 +227,7 @@ def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeyp
     assert locking.lock_message(tiers.Tier.ON_HOST, cfg).startswith(
         "Locked to listed host gpu-box.lan (on-host-only), custom/llama3 at gpu-box.lan.")
     verbose = plugin.slash("status --verbose")
-    assert "ask you first, each call" in verbose and "Memory: on-host. Fallbacks: none." in verbose
+    assert "ask you the first time each would send data off the machine during a lock" in verbose and "Memory: on-host. Fallbacks: none." in verbose
     assert "safe-worker" in verbose and "recorded after the fact" in verbose
     assert "on-host (runs without asking)" in verbose and "web_search" in verbose and "Preflight:" in verbose
     rec = Rec()
@@ -421,11 +421,21 @@ def test_locked_web_search_asks_and_runs_only_on_exact_once(plugin, monkeypatch)
         call(i)
     assert ran == []
     assert len(plugin.prompts) == 4
-    assert plugin.prompts[0][1] == "Confidential mode: web_search wants to send ~2 KB of this conversation off the machine"
+    assert plugin.prompts[0][1] == ("Confidential mode: web_search wants to send ~2 KB of this conversation off the "
+                                    "machine; allowing once covers web_search until this profile is unlocked")
     plugin.human("once")
     out = call(9)
     assert ran == [{"query": "q" * 1500}] and json.loads(out) == {"ok": "web_search"}
     assert plugin.kinds()[-2:] == [("tool_asked", "ask"), ("tool_allowed", "once")]
+    # Amendment 13: once_per_lock (the default) grants web_search for the rest of this lock.
+    plugin.human("deny")
+    call(10)
+    assert len(ran) == 2 and len(plugin.prompts) == 5
+    assert plugin.kinds()[-1] == ("tool_allowed", "lock_grant")
+    # A revoke ends the grant; the next call asks again.
+    assert plugin.slash("revoke web_search").startswith("Revoked web_search")
+    call(11)
+    assert len(ran) == 2 and len(plugin.prompts) == 6
 
 
 # ── isolation of registration failures ───────────────────────────────────────────────────────────

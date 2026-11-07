@@ -195,7 +195,15 @@ def _grant_lines(rt: Any, session_key: str) -> list[str]:
     except Exception:  # noqa: BLE001
         pass
     remembered = remembered_grants(session_key, getattr(rt, "rule_key", None))
+    granted: list[str] = []
+    try:
+        from .gate_tools import lock_id_for
+        if getattr(rt, "lock_grants", None) is not None:
+            granted = rt.lock_grants.names(lock_id_for(rt.state))
+    except Exception:  # noqa: BLE001
+        pass
     return [f"Tool grants (allowlist): {', '.join(added) if added else 'none'}",
+            f"Tool grants (answered once, this lock, this process): {', '.join(granted) if granted else 'none'}",
             f"Tool grants (remembered by Hermes): {', '.join(remembered) if remembered else 'none'}"]
 
 

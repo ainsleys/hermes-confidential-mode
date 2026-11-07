@@ -42,8 +42,9 @@ ZDR_REASON = "zero-retention tier not implemented"
 
 # User-facing disclosures (Amendment 4 F1(d), F12; must agree with the tool gate and the README).
 TOOLS_TEXT = ("Tools that send data off this machine (web, browser, messaging, media and other off-host tools) "
-              "ask you first, each call; under yolo, approvals off or an unattended run those asks become "
-              "blocks. Off-tier remote MCP servers, scheduled jobs and routed delegation are blocked.")
+              "ask you the first time each would send data off the machine during a lock (every call with "
+              "confidential.tools.ask: each_call); under yolo, approvals off or an unattended run those asks "
+              "become blocks. Off-tier remote MCP servers, scheduled jobs and routed delegation are blocked.")
 AUX_TEXT = ("Not prevented, only recorded after the fact: Hermes' auxiliary model calls (session titles, "
             "compression, memory prefetch, vision, smart approvals, MCP sampling, background review) cannot be "
             "stopped by a plugin. The plugin checks the configured and live model runtime before each turn and "

@@ -10,8 +10,8 @@ description: >-
   hosts you list). While locked, the plugin refuses off-tier main model calls before they are sent;
   refuses to lock while a side call, fallback, memory, MCP URL or delegation route would leave the tier;
   on the attested tier encrypts request bodies to the verified enclave or model key, with headers, sizes
-  and NEAR images still visible; and asks before each off-host tool call, blocking it when nobody can
-  answer. The plugin logs each model call's host and size, never its text, and renders a receipt whose
+  and NEAR images still visible; and asks you the first time each tool would send data off the machine
+  during a lock, blocking it when nobody can answer. The plugin logs each model call's host and size, never its text, and renders a receipt whose
   attached enclave evidence replays offline; the rest of the receipt is the plugin's own record. The
   attested tier needs TINFOIL_API_KEY or NEAR_AI_API_KEY. Shell and code execution are not inspected for
   network access, and a side call that strays mid-turn is recorded, not stopped. Disclosure: the plugin

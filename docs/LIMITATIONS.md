@@ -801,7 +801,14 @@ Each item below is a smaller gap. Each one is stated in full.
 
 - **Voice paths.** The plugin does not examine the voice-chat and gateway voice-note TTS paths. The preflight's
   "disabled" verdict for `tts.provider` holds only while `voice.auto_tts` is false and the
-  `text_to_speech` tool asks on each call.
+  `text_to_speech` tool asks before it runs (once per lock by default; set
+  `confidential.tools.ask: each_call` to have it ask on every call).
+
+- **A `once` answer covers the tool for the rest of the lock, in that process.** Under the default
+  `confidential.tools.ask: once_per_lock`, the grant lives in the memory of the process that asked:
+  a gateway restart asks again, and a second process holding the same lock (a CLI next to a
+  gateway) asks on its own. Later calls are not shown to you; each has a `tool_allowed` row naming
+  the answer that granted it.
 
 - **`tts.enabled` is a plugin convention.** Hermes 84a0301 has no such key.
 

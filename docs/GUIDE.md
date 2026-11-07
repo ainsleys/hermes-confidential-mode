@@ -69,7 +69,7 @@ The plugin does four things for a Hermes profile.
    [Locking](#locking)).
 3. **While locked, it guards four of the five other roads.** Side calls must resolve to the tier and
    are rechecked every turn. Fallbacks are refused, and a failed request ends the turn. Off-host tools
-   ask you before each call. Memory must be the built-in store. Shell and code execution stay open.
+   ask you the first time each would send data off the machine during a lock. Memory must be the built-in store. Shell and code execution stay open.
 4. **It renders a receipt for any session.** The receipt lists where the text went, attaches the
    enclave evidence captured at each verification, and ends with fixed paragraphs naming what it
    can't prove. Anyone holding the JSON form can replay the evidence offline; for NEAR, the replay
@@ -578,17 +578,22 @@ machine.
   terminal.backend: local (and unset TERMINAL_ENV), then run /confidential off and lock again."
   `docker` is refused too: a container can have its own network, and a Docker host can be remote.
 
-**Every other tool asks you first,** on Hermes' approval prompt:
+**Every other tool asks you the first time it would send data off the machine during a lock,** on
+Hermes' approval prompt:
 
 ```
-Confidential mode: web_search wants to send ~3 KB of this conversation off the machine
+Confidential mode: web_search wants to send ~3 KB of this conversation off the machine; allowing once covers web_search until this profile is unlocked
 ```
 
 The size counts the call's arguments and any local image file it names, in MB above 1 MB. The tool
 runs only on exactly `once`, `session` or `always`; any other answer is refused and logged as
 `unexpected_choice`, including answers Hermes' own CLI would take as a yes.
 
-- `once` runs the tool for this call.
+- `once` runs the tool and grants it for the rest of this lock. The grant is the plugin's own, held in
+  the process that asked (a restart asks again), and the `tool_allowed` row of each later call names
+  the row that recorded your answer (`grant_row`). The grant ends at unlock or with `/confidential
+  revoke <tool>`. With `confidential.tools.ask: each_call`, `once` covers this call only, and every
+  call asks.
 - `session` stops the asking for this tool for the rest of the session.
 - `always` stops the asking across locks. Hermes stores the grant in `command_allowlist` as
   `plugin_rule:confidential-mode:tool:<name>` until you run `/confidential revoke <tool>`.
@@ -596,7 +601,8 @@ runs only on exactly `once`, `session` or `always`; any other answer is refused 
 
 **When nobody can answer, the ask becomes a block.** Under yolo mode, `approvals.mode: off`, cron
 jobs, single-query runs (`-q`) and any context with no person present, Hermes would approve without
-asking, so the plugin blocks the tool instead. A tool you added with `/confidential allow` still runs.
+asking, so the plugin blocks the tool instead, even when an earlier `once` granted it for this lock. A
+tool you added with `/confidential allow` still runs.
 
 **Some tools are always blocked:**
 
@@ -1231,6 +1237,7 @@ under `confidential:` in `config.yaml`:
 
 | Key | Default | What it does |
 |---|---|---|
+| `confidential.tools.ask` | `once_per_lock` | How often an off-host tool asks while locked: `once_per_lock` asks on the first call of each tool and an exact `once` grants the tool until unlock; `each_call` asks every call. Under yolo, approvals off and unattended runs a tool is blocked in either mode. Any other value counts as `each_call`. |
 | `confidential.tinfoil.enclave` | Unset (router discovery) | One router host to verify and use; stops the AMD/Intel switching after a restart. |
 | `confidential.tinfoil.context_length` | 65536 | The context window reported to Hermes, so Hermes never sends its own probe outside the attested transport. |
 | `confidential.tinfoil.tls_probe` | `true` | After each verification, send one bodiless request over the verified connection and record the TLS certificate seen and whether its key is the attested TLS key. An observation for the evidence that never fails a verification; the per-send TLS pin is separate and always on. Only the exact value `false` turns the probe off. |

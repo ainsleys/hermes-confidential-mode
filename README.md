@@ -30,8 +30,8 @@ approved; `on-host-only` allows only your machine. While locked:
   call encrypted to the model's key and every reply signed by it. The gateway between you and the
   model cannot read the text. (On NEAR it still sees images, the model id, settings, headers, sizes
   and timing, and a gateway that swapped the reply key would be caught only afterwards.)
-- A tool that would send part of the conversation off the machine asks you first; an answer can last
-  for the session. Tool servers on off-tier remote hosts, scheduled jobs and routed delegation are
+- The plugin asks you the first time each tool would send data off the machine during a lock; an
+  allow lasts until you unlock (`confidential.tools.ask: each_call` asks on every call instead). Tool servers on off-tier remote hosts, scheduled jobs and routed delegation are
   blocked.
 - Every model call is logged with its host and size, never its text, from the moment the plugin is
   installed. `hermes confidential status` shows where calls have gone; `watch` streams them live.

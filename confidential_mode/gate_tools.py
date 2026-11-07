@@ -935,9 +935,13 @@ def size_text(nbytes: int) -> str:
 APPROVAL_LABEL = "confidential mode: off-host tool"
 
 
-def ask_message(tool_name: str, nbytes: int) -> str:
-    """The plugin's own line in the approval prompt; it leads with what is happening."""
-    return f"Confidential mode: {tool_name} wants to send {size_text(nbytes)} of this conversation off the machine"
+def ask_message(tool_name: str, nbytes: int, once_per_lock: bool = False) -> str:
+    """The plugin's own line in the approval prompt; it leads with what is happening. Under once_per_lock it
+    says what an allow covers."""
+    text = f"Confidential mode: {tool_name} wants to send {size_text(nbytes)} of this conversation off the machine"
+    if once_per_lock:
+        text += f"; allowing once covers {tool_name} until this profile is unlocked"
+    return text
 
 
 def _event(kind: str, *, tool_name: str, session_id: str, decision: str, detail: dict,
@@ -960,6 +964,63 @@ class CallDecision:
     decision: str = ""          # ledger decision code
     message: str = ""           # refusal text, or the ask prompt text
     kb: int = 0
+    grant_row: Any = None       # decision "lock_grant": the id of the ledger row that answered the ask
+
+
+# confidential.tools.ask (Amendment 13): how often an off-host tool asks while locked.
+ASK_EACH_CALL, ASK_ONCE_PER_LOCK = "each_call", "once_per_lock"
+ASK_MODES = (ASK_EACH_CALL, ASK_ONCE_PER_LOCK)
+DEFAULT_ASK_MODE = ASK_ONCE_PER_LOCK
+
+
+def ask_mode_from(config: Any) -> str:
+    """``confidential.tools.ask``: once_per_lock (default, also when absent) or each_call. Any other value is
+    each_call, the stricter mode (fail closed)."""
+    node = config.get("confidential") if isinstance(config, Mapping) else None
+    node = node.get("tools") if isinstance(node, Mapping) else None
+    if not isinstance(node, Mapping) or "ask" not in node:
+        return DEFAULT_ASK_MODE
+    value = node.get("ask")
+    return value if isinstance(value, str) and value in ASK_MODES else ASK_EACH_CALL
+
+
+class LockGrants:
+    """The plugin's own tool grants under ``confidential.tools.ask: once_per_lock`` (Amendment 13): one per
+    (lock id, tool), made when a person answers "once" to the plugin's prompt, holding the id of the ledger
+    row that recorded the answer. A grant counts only for the lock it was made in, so it ends at unlock; a
+    revoke drops it. In memory, per process: a restart asks again. The gate never consults a grant while
+    Hermes' approvals are bypassed (yolo, approvals off) or nobody can be asked (one-shot, cron, unattended
+    platforms): those keep refusing."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._grants: dict[tuple[str, str], Any] = {}
+
+    def grant(self, lock_id: str, tool: str, row_id: Any) -> None:
+        if not lock_id or not isinstance(tool, str) or not tool:
+            return
+        with self._lock:
+            for key in [k for k in self._grants if k[0] != lock_id]:
+                del self._grants[key]          # grants of an earlier lock end with that lock
+            self._grants[(lock_id, tool)] = row_id
+
+    def get(self, lock_id: str, tool: str) -> Any:
+        """The answering row id, or _MISSING when there is no grant for this lock."""
+        if not lock_id:
+            return _MISSING
+        with self._lock:
+            return self._grants.get((lock_id, tool), _MISSING)
+
+    def drop(self, tools: Optional[set] = None) -> list[str]:
+        with self._lock:
+            gone = sorted({t for (_, t) in self._grants if tools is None or t in tools})
+            for key in [k for k in self._grants if tools is None or k[1] in tools]:
+                del self._grants[key]
+        return gone
+
+    def names(self, lock_id: str) -> list[str]:
+        with self._lock:
+            return sorted(t for (lid, t) in self._grants if lid == lock_id)
 
 
 class LockStateError(RuntimeError):
@@ -981,13 +1042,27 @@ _LOCK_UNREADABLE = ("confidential mode: the lock state cannot be read, so every 
 class _Policy:
     """The classification both enforcement points share."""
 
-    def __init__(self, allowlist, bypass_active, delegation_ok, remembered, terminal_backend=None):
+    def __init__(self, allowlist, bypass_active, delegation_ok, remembered, terminal_backend=None,
+                 lock_grants: Optional[LockGrants] = None, ask_mode: Optional[Callable[[], str]] = None):
         self._allowlist = allowlist
         self._bypass_fn = bypass_active
         self._takes_name = _accepts_positional(bypass_active)
         self.delegation_ok = delegation_ok
         self.remembered = remembered
         self.terminal_backend = terminal_backend if terminal_backend is not None else hermes_terminal_backend
+        self.lock_grants = lock_grants
+        self._ask_mode = ask_mode
+
+    def once_per_lock(self) -> bool:
+        """True when lock grants apply: a grant store is wired and confidential.tools.ask is once_per_lock.
+        An unreadable setting is each_call."""
+        if self.lock_grants is None:
+            return False
+        try:
+            mode = self._ask_mode() if self._ask_mode is not None else DEFAULT_ASK_MODE
+        except Exception:  # noqa: BLE001
+            return False
+        return mode == ASK_ONCE_PER_LOCK
 
     def allowlist(self) -> Allowlist:
         return self._allowlist() if callable(self._allowlist) else self._allowlist
@@ -1064,8 +1139,13 @@ class _Policy:
             return CallDecision("refuse", "bypass_active", bypass_text(name, hermes_bypass_is_interactive()))
         nbytes = call_bytes(args)
         n = max(1, math.ceil(nbytes / 1024))
+        once = self.once_per_lock()
+        if once:
+            row = self.lock_grants.get(al.lock_id, tool_name)
+            if row is not _MISSING:
+                return CallDecision("run", "lock_grant", kb=n, grant_row=row)
         return CallDecision("ask", "remembered" if self.remembered(tool_name) else "ask",
-                            ask_message(tool_name, nbytes), kb=n)
+                            ask_message(tool_name, nbytes, once_per_lock=once), kb=n)
 
 
 def hermes_bypass_is_interactive() -> bool:
@@ -1096,8 +1176,9 @@ def _refusal_ledgered(choice: Any) -> bool:
     return choice is not _MISSING and not (type(choice) is str and choice in _ALLOW_CHOICES)
 
 
-def _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend=None) -> _Policy:
-    return _Policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend)
+def _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend=None, lock_grants=None,
+            ask_mode=None) -> _Policy:
+    return _Policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend, lock_grants, ask_mode)
 
 
 def _call_key(tool_name: Any, tool_call_id: Any) -> str:
@@ -1117,17 +1198,26 @@ class ApprovalDecisions:
         self._lock = threading.Lock()
         self._choices: dict[str, Any] = {}
         self._ledgered: set[str] = set()
+        self._rows: dict[str, Any] = {}
         self._grants: set[str] = set()
         self._asking = threading.local()
 
-    def record(self, key: str, choice: Any, *, ledgered: bool = False) -> None:
-        """``ledgered``: post_approval_response wrote this answer's row, so the middleware writes none."""
+    def record(self, key: str, choice: Any, *, ledgered: bool = False, row_id: Any = None) -> None:
+        """``ledgered``: post_approval_response wrote this answer's row (``row_id``), so the middleware writes
+        none."""
         with self._lock:
             self._choices[key] = choice
             if ledgered:
                 self._ledgered.add(key)
+                self._rows[key] = row_id
             else:
                 self._ledgered.discard(key)
+                self._rows.pop(key, None)
+
+    def pop_row(self, key: str) -> Any:
+        """The ledger row id of the answer recorded under ``key`` (once), or None."""
+        with self._lock:
+            return self._rows.pop(key, None)
 
     def pop(self, key: str) -> Any:
         with self._lock:
@@ -1182,7 +1272,9 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
                         remembered: Callable[[str], bool] = hermes_remembered_grant,
                         decisions: Optional[ApprovalDecisions] = None,
                         terminal_backend: Optional[Callable[[str], str]] = None,
-                        rule_key: Callable[[str], str] = rule_key_for) -> Callable[..., Optional[dict]]:
+                        rule_key: Callable[[str], str] = rule_key_for,
+                        lock_grants: Optional[LockGrants] = None,
+                        ask_mode: Optional[Callable[[], str]] = None) -> Callable[..., Optional[dict]]:
     """``pre_tool_call`` callback: blocks every refuse decision (ledgered tool_refused) and, for an
     off-host tool, returns the approve directive with the "~N KB" message (ledgered tool_asked).
     The directive only ASKS: Hermes' CLI grants on any answer except the exact string "deny"
@@ -1195,8 +1287,9 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
 
     ``bypass_active(tool_name)`` (zero-arg also accepted), ``delegation_ok(args)`` and
     ``remembered(tool_name)`` are injectable. ``is_locked()`` returns ``(bool, Tier | None)`` or a bool;
-    anything else, or raising, blocks every tool."""
-    pol = _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend)
+    anything else, or raising, blocks every tool. ``lock_grants`` and ``ask_mode`` (Amendment 13): pass the
+    same LockGrants to both builders; without one every call asks (each_call)."""
+    pol = _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend, lock_grants, ask_mode)
     dec = decisions if decisions is not None else DEFAULT_DECISIONS
 
     def pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
@@ -1264,12 +1357,13 @@ def _refusal_result(message: str) -> str:
     return json.dumps({"error": message})
 
 
-def _try_ledger(ledger, kind, tool_name, session_id, decision, args, detail, surface) -> None:
+def _try_ledger(ledger, kind, tool_name, session_id, decision, args, detail, surface) -> Any:
+    """Append one row; returns its id, or None when the write failed."""
     try:
-        ledger.append(_event(kind, tool_name=tool_name, session_id=session_id or "", decision=decision,
-                             nbytes=args_bytes(args), surface=surface, detail=detail))
+        return ledger.append(_event(kind, tool_name=tool_name, session_id=session_id or "", decision=decision,
+                                    nbytes=args_bytes(args), surface=surface, detail=detail))
     except Exception:
-        pass
+        return None
 
 
 def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Callable[[], Allowlist],
@@ -1279,7 +1373,9 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                          remembered: Callable[[str], bool] = hermes_remembered_grant,
                          ask: Callable[..., dict] = hermes_request_approval,
                          terminal_backend: Optional[Callable[[str], str]] = None,
-                         rule_key: Callable[[str], str] = rule_key_for) -> Callable[..., Any]:
+                         rule_key: Callable[[str], str] = rule_key_for,
+                         lock_grants: Optional[LockGrants] = None,
+                         ask_mode: Optional[Callable[[], str]] = None) -> Callable[..., Any]:
     """``tool_execution`` middleware: the ENFORCEMENT line, for ctx.register_middleware("tool_execution", fn).
 
     Off-host tool => ``next_call`` only on an explicit once/session/always recorded by
@@ -1294,8 +1390,13 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
     ledgered tool_refused "unexpected_choice". Block routes are refused here too (second line).
 
     Never raises: our own errors become a refusal result; an exception from ``next_call`` (the tool
-    itself) propagates unchanged, as Hermes expects."""
-    pol = _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend)
+    itself) propagates unchanged, as Hermes expects.
+
+    Under ``confidential.tools.ask: once_per_lock`` (``lock_grants`` given), an exact "once" answer also makes a
+    lock grant holding the answering row's id; later calls of the tool in the same lock run with a
+    ``tool_allowed`` row (decision ``lock_grant``, detail ``grant_row``), except while approvals are bypassed or
+    nobody can be asked, which refuse as before (catalog rule 12)."""
+    pol = _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend, lock_grants, ask_mode)
     dec = decisions if decisions is not None else DEFAULT_DECISIONS
 
     def confidential_mode_tool_execution(tool_name: str = "", args: Any = None, next_call: Any = None,
@@ -1346,16 +1447,20 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
             return _refuse(tool_name, args, session_id, d.decision, d.message, {**base, "reason": d.decision})
         if d.action == "run":
             if d.decision != "on-host":
+                detail = {**base, "grant_row": d.grant_row} if d.decision == "lock_grant" else base
                 ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id,
-                                     decision=d.decision, nbytes=args_bytes(args), surface="middleware", detail=base))
+                                     decision=d.decision, nbytes=args_bytes(args), surface="middleware", detail=detail))
             return run()
         key = _call_key(tool_name, tool_call_id) if tool_call_id else None
         # Never consume an answer recorded under an empty id (Amendment 4 F3).
         choice = dec.pop(key) if key is not None else _MISSING
         if choice is not _MISSING:                 # pre_tool_call asked (model_tools order)
             if type(choice) is str and choice in _ALLOW_CHOICES:
-                if not dec.pop_ledgered(key):      # the hook's tool_allowed row could not be written
-                    _allowed_row(tool_name, args, session_id, base, choice)
+                if dec.pop_ledgered(key):
+                    row = dec.pop_row(key)
+                else:                              # the hook's tool_allowed row could not be written
+                    row = _allowed_row(tool_name, args, session_id, base, choice)
+                _grant_for_lock(tool_name, choice, row)
                 return run()                       # tool_allowed was ledgered by post_approval_response
             return _unexpected(tool_name, args, session_id, base, choice,
                                answered=dec.pop_ledgered(key) and _refusal_ledgered(choice))
@@ -1373,10 +1478,12 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                          session_id=session_id, turn_id=turn_id)
         choice = dec.pop(_call_key(tool_name, approval_id))
         hook_wrote_row = dec.pop_ledgered(_call_key(tool_name, approval_id))
+        answer_row = dec.pop_row(_call_key(tool_name, approval_id))
         approved = isinstance(result, dict) and result.get("approved") is True
         if approved and type(choice) is str and choice in _ALLOW_CHOICES:
             if not hook_wrote_row:                 # the hook's tool_allowed row could not be written
-                _allowed_row(tool_name, args, session_id, {**base, "approval_id": approval_id}, choice)
+                answer_row = _allowed_row(tool_name, args, session_id, {**base, "approval_id": approval_id}, choice)
+            _grant_for_lock(tool_name, choice, answer_row)
             if key is None:
                 return run()                       # the inner hook never asks for an id-less call
             dec.grant(key)
@@ -1396,8 +1503,17 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
                         "approval_id": approval_id}, answered=hook_wrote_row and _refusal_ledgered(choice))
 
     def _allowed_row(tool_name, args, session_id, base, choice):
-        _try_ledger(ledger, "tool_allowed", tool_name, session_id, choice, args, {**base, "choice": choice},
-                    "middleware")
+        return _try_ledger(ledger, "tool_allowed", tool_name, session_id, choice, args, {**base, "choice": choice},
+                           "middleware")
+
+    def _grant_for_lock(tool_name, choice, row_id):
+        """An exact "once" under once_per_lock grants the tool for this lock. Never raises: a grant that cannot
+        be made only means the next call asks again."""
+        try:
+            if choice == "once" and pol.once_per_lock():
+                pol.lock_grants.grant(pol.allowlist().lock_id, tool_name, row_id)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _unexpected(tool_name, args, session_id, base, choice, *, answered=False):
         return _refuse(tool_name, args, session_id, "unexpected_choice",
@@ -1450,9 +1566,9 @@ def build_post_approval_response(is_locked: Callable[[], Any], ledger: Any,
                       "session_key": session_key or "", "locked": _safe(is_locked)}
             # The row first, then the choice: a row that could not be written leaves the middleware to write
             # the refusal itself, so a denial is always recorded once and always stands.
-            wrote = False
+            wrote, row_id = False, None
             try:
-                ledger.append(_event("tool_allowed" if allowed else "tool_refused", tool_name=tool_name,
+                row_id = ledger.append(_event("tool_allowed" if allowed else "tool_refused", tool_name=tool_name,
                                      session_id=session_id or "",
                                      decision=pick if pick in KNOWN_CHOICES else "unexpected_choice",
                                      surface=surface or None, detail=detail))
@@ -1463,7 +1579,7 @@ def build_post_approval_response(is_locked: Callable[[], Any], ledger: Any,
                     "confidential-mode: could not ledger the answer for %s (%s); the middleware records it",
                     _printable(tool_name), type(exc).__name__)
             if call_id:                          # an id-less answer is never recorded (Amendment 4 F3)
-                dec.record(_call_key(tool_name, call_id), choice, ledgered=wrote)
+                dec.record(_call_key(tool_name, call_id), choice, ledgered=wrote, row_id=row_id)
         except Exception:
             pass
         return None

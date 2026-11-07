@@ -375,8 +375,10 @@ sent:
   whose `verify_ok` row could not be written (attested tier);
 - NEAR requests the encryption cannot cover (attested-near);
 - every turn after the routing config changed, and every turn whose live main runtime is off-tier;
-- off-host tool calls you did not approve, and tool calls that run the plugin's own commands or write
-  its state files;
+- off-host tool calls you did not approve (by default an exact `once` covers the tool for the rest of
+  the lock; `confidential.tools.ask: each_call` asks every call; under yolo, approvals off or an
+  unattended run every off-host call is refused), and tool calls that run the plugin's own commands or
+  write its state files;
 - `cronjob_manage`, tools from off-tier MCP URL servers, tools not registered or changed since the
   lock, and `delegate_task` calls that name a route. The plugin refuses to lock while any auxiliary task, vision, delegation, TTS, the memory provider or an MCP
 URL server would leave the tier, and names the YAML key to change.
