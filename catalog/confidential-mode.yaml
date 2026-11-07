@@ -1,99 +1,17 @@
 # Catalog entry to copy into NousResearch/hermes-agent as plugin-catalog/<name>.yaml.
-# The plugin name appears once, on the next line; keep it equal to plugin.yaml `name:`.
+# The catalog slug appears once, on the next line; it is final and equal to plugin.yaml `name:`.
+# The prose name is Hermes Confidential Mode.
 name: confidential-mode
 repo: https://github.com/ainsleys/hermes-confidential-mode
 sha: "<40-char sha at submission>"   # filled in at submission: the entry cannot name the commit that contains it
 description: >-
-  Locks a Hermes profile so that the model runs only on this host or on a host you list, or in a
-  Tinfoil enclave or behind NEAR AI Cloud's attested gateway and models, whose builds you approved.
-  For NEAR it encrypts each chat request to the verified model key, checks each response's
-  signature, and records whether a model TEE signed it. A locked profile is held to one tier,
-  on-host-only or attested; a destination the tier accepts is in-tier, and anything else is
-  off-tier.
-
-  While locked, the plugin refuses main-loop model calls and fallbacks to any off-tier host before a
-  byte is sent. It checks the session's live model runtime on every turn and ends the turn if that
-  runtime has drifted off-tier. On gateway surfaces it refuses /model and /moa while locked.
-
-  Before each tool call that would send data off the machine, it asks you on Hermes' approval
-  prompt. An always answer lasts until you run /confidential revoke <tool>. Under yolo,
-  approvals off, cron and other unattended runs, nobody can answer, so the ask becomes a block. The
-  plugin always blocks cronjob_manage, tools from off-tier MCP URL servers, and delegate_task calls
-  that name a route.
-
-  It refuses to lock while any auxiliary task, vision, delegation, TTS, the memory provider or an MCP
-  URL server would leave the tier. It pins the enclave fingerprints you approved, and a new build is
-  refused until you approve it with /confidential pins approve. It records every send in a ledger on
-  this host, which you can watch with hermes confidential watch or render with /confidential receipts.
-
-  If Hermes runs on someone else's machine, that operator sees every prompt before any of this
-  applies. On-host-only means a loopback address or an exact host you list in
-  confidential.on_host.extra_hosts. A private-range address is off-tier unless you list the address, because
-  cloud VPC neighbours and carrier-grade NAT hosts have private-range addresses too.
-
-  Disclosure, network. The plugin makes no network call at load. All network traffic serves the
-  attested tier. It contacts atc.tinfoil.sh for router discovery, which is skipped when
-  confidential.tinfoil.enclave is set. It contacts the enclave router host for the attestation report
-  and for your inference requests, with each request body encrypted to the attested key. It contacts
-  github-proxy.tinfoil.sh for the release digest and Sigstore bundles. It contacts
-  kds-proxy.tinfoil.sh for the AMD VCEK certificate and tdx-proxy.tinfoil.sh for Intel's PCS
-  collateral, both of which are hardware collateral. It contacts tuf-repo-cdn.sigstore.dev for the
-  Sigstore TUF trust root. It sends no telemetry. Tinfoil still sees the API key header, request
-  sizes, timing and your IP address where it terminates TLS. Your DNS resolver sees every lookup.
-  With the attested-near provider, the plugin contacts cloud-api.near.ai for attestation reports,
-  Intel Trust Authority tokens, inference and response signatures, sending NEAR_AI_API_KEY only with
-  inference and signature requests over connections pinned to the gateway's attested TLS key, and
-  portal.trustauthority.intel.com for Intel's token-signing keys. With confidential.near.encrypt on
-  (the default; needs pynacl==1.6.*), chat message text, tool definitions and tool calls reach NEAR's
-  gateway encrypted to the attested model key. The gateway still reads the model id, the plaintext
-  parameters, the request headers, sizes and timing, and can read a reply by swapping the client key
-  header; the plugin detects that afterwards and records the send as unverified. Every instance of a
-  NEAR model shares the key a request is encrypted to. When a verification stages a NEAR model entry,
-  and for the approve and pins review commands, the plugin fetches the deployed docker-compose files
-  from raw.githubusercontent.com, from the repository the measured compose names, and keeps each only
-  when its SHA-256 matches; pins review also reads commit metadata from api.github.com. Setting
-  CONFIDENTIAL_MODE_NO_FETCH turns these fetches off, and NEAR model entries then cannot be approved.
-
-  Disclosure, files. Everything is under <HERMES_HOME>/plugin-data/. The plugin writes
-  ledger.sqlite, which holds hosts, byte counts, verdicts and verification evidence. It never holds
-  prompt or response text, but it is a metadata trail if you share a receipt. It writes its state
-  and pins.yaml. It writes allowlist.yaml, which belongs to one lock and is deleted at unlock. It
-  writes a generated Tinfoil user_cache_secret with file mode 0600, in the plugin data directory and
-  never in ~/.tinfoil. It writes the Sigstore trust roots it used. It redirects the platformdirs
-  caches of the tinfoil SDK and of sigstore-python (~/Library/Caches/tinfoil, ~/.cache/tinfoil and
-  the sigstore-python TUF directories) under the plugin data directory. It does this by assigning SDK
-  module attributes before the first verification. It reads Hermes' config read-only and never
-  writes it. NEAR evidence files go under evidence/blobs/ beside the ledger, and fetched compose
-  files under pins/composes/.
-
-  Disclosure, credentials and processes. The plugin uses TINFOIL_API_KEY for attested-tinfoil and,
-  optionally, NEAR_AI_API_KEY for attested-near (plugin.yaml optional_env), each through its provider
-  profile's env_vars, or else through agent.secret_scope.get_secret. It runs no shell command, no
-  subprocess and no long-running background process. It starts one short-lived thread per
-  attestation, and a turn waits at most 20 seconds for it (confidential.verify_wait_seconds). For
-  NEAR it also starts short-lived threads that fetch compose files and record pin matches. The
-  plugin sets XDG_CONFIDENTIAL_MODE_TOOL_PROCESS in the Hermes process; an approval prompt refuses in a process
-  that carries it with another process's id.
-
-  Disclosure, core imports (catalog rule 9; all lazy). agent.auxiliary_client
-  (_RUNTIME_MAIN_CONTEXT, to read the live runtime), agent.error_classifier
-  (_CONTEXT_OVERFLOW_PATTERNS, to classify NEAR context-length errors), agent.secret_scope, tools.terminal_tool,
-  tools.terminal_tool_lifecycle and tools.terminal_scope (_get_env_config, _active_environments,
-  get_active_env and terminal_env, to read the terminal backend and the cached task environments), hermes_cli.commands
-  (resolve_command), tools.approval.* (request_tool_approval, is_approved, _yolo_active, _presence,
-  _lock, _session_approved, _permanent_set), tools.approval_context, tools.registry (registry, discover_builtin_tools),
-  tools.mcp_tool, tools.mcp_tool_config and tools.mcp_tool_scope (MCP config readers),
-  tools.delegate_tool_config, providers and providers.base (the provider profile is registered
-  through providers.register_provider), hermes_cli.config, hermes_cli.config_defaults,
-  hermes_cli.plugins, plugins.plugin_storage and hermes_yaml.
-
-  What locked mode does not block. It does not block auxiliary calls at runtime; it observes them
-  and records a breach. It does not block terminal, execute_code, process_manage or the other
-  on-host tools on Hermes' local terminal backend, or MCP servers launched as a command on this host.
-  Locked mode is refused on any other terminal backend. It does not apply in safe-worker
-  mode, where Hermes loads no plugins. It does not cover the messaging platform, other in-process plugins,
-  Hermes' start-up model-list request on a drifted runtime, or the vendor's control plane and the
-  model backends behind its router. Isolation: in_process only.
+  Hermes Confidential Mode makes a confidential-compute provider checkable. It verifies the Tinfoil or
+  NEAR AI Cloud enclave, pins the build you approve, keeps every model call and fallback inside the tier
+  you lock (attested enclaves, or this machine only), encrypts what leaves, asks before a tool sends the
+  conversation off the machine, and logs every call so you can render a receipt anyone can replay
+  offline. The attested tier needs TINFOIL_API_KEY or NEAR_AI_API_KEY; shell and code execution are not
+  inspected, a stray side call is recorded rather than stopped, and a receipt is a self-report beyond its
+  signed evidence. Disclosure: docs/DISCLOSURE.md.
 maintainer: ainsleys
 tier: community
 category: models
@@ -101,21 +19,21 @@ requires_hermes: ">=0.22.7"
 docs_url: https://github.com/ainsleys/hermes-confidential-mode#readme   # placeholder: confirm at submission
 version: "0.1.0"
 known_issues:
-  - "Hermes does not run auxiliary calls through the llm_execution middleware. Auxiliary calls are the side jobs Hermes runs with a model, such as compression, titles, vision, the approval classifier and MCP helpers. Locked mode therefore cannot stop one at the moment it is sent. Instead, the plugin refuses to lock while any auxiliary task is configured off-tier, and it records a breach if one goes off-tier anyway."
-  - "On the CLI, Hermes' approve directive grants a tool call on any answer except the exact string 'deny'. The plugin does not rely on that. Its tool_execution middleware runs the tool only on an exact once, session or always."
-  - "terminal, execute_code and process_manage run while locked, and the plugin does not inspect their commands. They can reach the network. MCP servers launched as a command on this host are also allowed and not inspected."
-  - "Locked mode is refused unless Hermes' terminal backend is local (terminal.backend and the backend Hermes resolves for the profile), and while Hermes holds a cached terminal environment on another backend. On any other backend the terminal, code and file tools would run on another machine or in a container. Docker is refused too."
-  - "Locked mode does not apply in safe-worker mode, because Hermes loads no plugins there."
-  - "Every other plugin in the same Hermes process shares the trust boundary. Under plugins.isolation: host, the attested provider is invisible to Hermes, so the preflight refuses to lock."
-  - "Tinfoil's attestation covers its model router, not the model backend behind the router. The attestation report carries no client nonce. Every timestamp the plugin records comes from the host clock."
-  - "AMD and Intel routers have different enclave fingerprints for the same release. After a restart, router discovery can pick a router on the other platform, and the plugin then asks you to approve again. Set confidential.tinfoil.enclave to one router host to stop this. Alternatively, confidential.pins.auto_approve_platform_only: true approves a platform-only change without asking, but only when the SDK's signed hardware check passed, which tinfoil 0.14.2 performs for TDX only."
-  - "Remembered 'always' tool grants live in Hermes' command_allowlist as plugin_rule:confidential-mode:tool:<name>. They persist across locks. /confidential revoke <tool> (or hermes confidential revoke <tool>, or revoke --all) removes them, and a running gateway drops the matching session approvals on its next tool call. Revoke reads Hermes' private approval state to do that, so a Hermes release that renames that state leaves a session approval in place until its session ends."
-  - "Suppose the live runtime is switched to a hosted provider, for example with /model on the CLI. Hermes' agent start-up then lists that provider's models with your API key, before any plugin seam runs (agent/model_metadata.py). No conversation text is sent, and the plugin refuses the turn. The request still goes out."
-  - "If Hermes runs on someone else's machine, such as a cloud agent or a VPS, that machine's operator sees every prompt. Locked mode protects the road out of the Hermes process, not the process itself."
-  - "hermes confidential replay requires the tinfoilsh/confidential-model-router repository by default, and takes the expected fingerprints from your approved pin. By default it still uses the trust root and the capture time recorded in the evidence; pass --trusted-root and --as-of to supply your own. Pass --expected-repo-id and --expected-owner-id to bind the repository by its numeric GitHub IDs as well as its name. A broken hash chain makes the replay exit 1. The first pin is trust on first use."
-  - "There is no mixed 'attested or on-host' tier yet. It is planned. Until then, side jobs cannot run on an on-host model while the main model is attested."
-  - "NEAR AI Cloud: with request encryption on, which the lock requires, streaming is refused. Images leave as plaintext to NEAR's gateway beside the encrypted text, and each send records them; confidential.near.image_parts: refuse refuses them instead. The gateway still reads the model id, plaintext parameters, headers, sizes and timing. Every instance of a model shares its key. The compose-manager check establishes what the operator's tooling reported, not what runs. docs/LIMITATIONS.md section 14 lists every open item."
-  - "An agent with terminal access on the same host can still reach a pin approval prompt by some routes, such as a nested chat attached through the gateway. The ledger records every approval with its surface. docs/LIMITATIONS.md section 15 lists the routes."
+  - "Auxiliary calls (compression, titles, vision and other side jobs) bypass the llm_execution middleware, so the plugin refuses to lock while one is routed off-tier and records a breach if one strays; it cannot stop the call."
+  - "Hermes' CLI approve directive grants on any answer except 'deny'; the plugin's tool_execution middleware runs a tool only on an exact once, session or always."
+  - "terminal, execute_code, process_manage and MCP servers launched as a command run on this host while locked, can reach the network, and are not inspected."
+  - "Locked mode is refused unless Hermes' terminal backend is local, and while Hermes holds a cached terminal environment on any other backend, Docker included."
+  - "Locked mode does not apply in safe-worker mode, where Hermes loads no plugins."
+  - "Every plugin in the same process shares the trust boundary; under plugins.isolation: host the attested provider is invisible and the lock is refused."
+  - "Tinfoil attests its router, not the model backend behind it; the report carries no client nonce, and every recorded time is the host clock."
+  - "AMD and Intel routers have different enclave fingerprints, so a restart can ask for a new pin; set confidential.tinfoil.enclave to one router to stop this."
+  - "An 'always' tool grant lives in Hermes' command_allowlist and outlives the lock until /confidential revoke <tool>."
+  - "After a runtime switch to a hosted provider, Hermes' start-up model-list request goes out with your API key (no conversation text) before any plugin seam runs; the plugin then refuses the turn."
+  - "If Hermes runs on someone else's machine, that operator sees every prompt; locked mode protects the road out of the Hermes process, not the process."
+  - "hermes confidential replay uses the evidence's own trust root and capture time unless you pass --trusted-root and --as-of, and the first pin is trust on first use."
+  - "There is no mixed 'attested or on-host' tier yet, so side jobs cannot run on an on-host model while the main model is attested."
+  - "NEAR AI Cloud: streaming is refused, images reach NEAR's gateway in plaintext, the gateway reads model id, parameters, headers, sizes and timing, and instances share one key (docs/LIMITATIONS.md section 14)."
+  - "An agent with terminal access on the same host can reach a pin approval prompt by some routes; the ledger records every approval with its surface (docs/LIMITATIONS.md section 15)."
 capabilities:
   provides_tools: []
   provides_hooks:
