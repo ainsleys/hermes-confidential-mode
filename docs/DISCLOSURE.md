@@ -93,16 +93,13 @@ usage data anywhere.
 
 ### What those hosts can see even when everything works
 
-- **Whoever ends TLS for Tinfoil's router host.** The plugin uses the tinfoil SDK's `ehbp` transport,
-  which encrypts each request body to the enclave's attested HPKE key and does not pin the TLS
-  certificate; the plugin does not pin TLS per send on Tinfoil either. A TLS intermediary the WebPKI
-  accepts can therefore read the request headers, the `Authorization` header with your API key
-  included, and the sizes and timing, though not the body. After each verification the plugin's TLS
-  probe records the certificate the router presented and whether its key is the one the report
-  commits to; on 2026-11-06, against `router-0.tinfoil.sh` release v0.0.170, it was, so on that
-  connection TLS ended inside the attested router. Neither the probe nor the per-send record refuses
-  anything ([LIMITATIONS.md](LIMITATIONS.md), section 9). Tinfoil's network and hosting see the
-  request and response sizes, their timing, and your IP address.
+- **Tinfoil's attested router** is where TLS ends for Tinfoil. The plugin uses the tinfoil SDK's
+  `ehbp` transport, which encrypts each request body to the enclave's attested HPKE key, and pins every
+  connection to the TLS key the verified report binds, before any request byte is written. The router
+  reads your API key header, the request headers, sizes and timing. A TLS intermediary with any other
+  certificate gets no request byte: the connection is refused and recorded
+  ([LIMITATIONS.md](LIMITATIONS.md), section 9). Tinfoil's network and hosting see the request and
+  response sizes, their timing, and your IP address.
 - **NEAR's gateway** is where TLS ends for NEAR; the plugin pins each inference and signature
   connection to the certificate the gateway's quote binds. The gateway reads your API key header, the model
   id, the plaintext parameters, the request headers, sizes and timing, and your IP address. With

@@ -21,10 +21,10 @@ approved; `on-host-only` allows only your machine. While locked:
   not stopped). The plugin checks every configured route before locking and before each turn, and
   refuses main-call fallbacks before any bytes leave.
 - The enclave is re-verified whenever its last verification is more than five minutes old, and a
-  changed enclave build is refused on every turn until you approve the new build. On NEAR the TLS
-  connection is pinned to the enclave's key on every send; on Tinfoil the vendor's transport encrypts
-  the request body to the enclave's key and the plugin checks the TLS certificate after each
-  verification, not on every send.
+  changed enclave build is refused on every turn until you approve the new build. On both vendors
+  every TLS connection is pinned to the TLS key the verified report binds, inside the handshake and
+  before any byte of the request (headers and API key included) leaves; a connection with another
+  certificate is refused, recorded and triggers a re-verification.
 - On the attested tier your text is encrypted to the enclave's key before it leaves your machine:
   Tinfoil through the vendor's encrypted transport, NEAR with every message, tool definition and tool
   call encrypted to the model's key and every reply signed by it. The gateway between you and the

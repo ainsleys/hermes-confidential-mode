@@ -333,22 +333,23 @@ and signed responses.
 
 - **Where TLS ends, and what is visible anyway.** TLS is the encryption HTTPS uses. The plugin
   drives the tinfoil SDK in its `ehbp` transport mode. In that mode the SDK encrypts each request
-  body to the enclave's attested HPKE key, and the TLS connection under it is ordinary WebPKI TLS: the
-  SDK does not pin the enclave's TLS certificate (tinfoil 0.14.2, `tinfoil/client.py`; only the `tls`
-  mode pins). The plugin does not pin TLS per send on Tinfoil either. A TLS intermediary that the
-  WebPKI accepts can therefore end the connection and read the request headers, the `Authorization`
-  header with the API key included, and the sizes and timing. The body stays encrypted to the HPKE key.
+  body to the enclave's attested HPKE key and builds the TLS connection under it as ordinary WebPKI
+  TLS (tinfoil 0.14.2, `tinfoil/client.py:728-736` and `:806`; only the SDK's `tls` mode pins). The
+  plugin pins it instead: every Tinfoil connection, for a send or a request without a body, gets an
+  SSL context that checks the peer certificate's key against the TLS key the verified report binds,
+  inside the handshake and before any request byte (headers and the `Authorization` header included)
+  is written. The same holds for the transports the SDK rebuilds after a key rotation. A certificate
+  with another key closes the connection, fails the request, writes a `verify_fail` row
+  (`reason_code: tls_pin_mismatch`) and asks for a re-verification, at most once per 30 seconds. So a
+  TLS intermediary that the WebPKI accepts can no longer read the headers or the API key; the
+  connection is refused instead.
 
-  After each verification the plugin's TLS probe (`confidential.tinfoil.tls_probe`) records the
-  certificate the router presented and whether its key is the TLS key the attestation report commits
-  to, and each send records whether its connection's certificate matched. Neither record refuses
-  anything. The replay's `tls_cert_binding` check re-reads the captured certificate. On 2026-11-06,
-  against `router-0.tinfoil.sh` release v0.0.170, the recorded certificate carried exactly the TLS
-  public key the attestation report commits to, so on that connection TLS ended inside the attested
-  router. That is an observation of that connection, not a guarantee for later ones.
+  After each verification the plugin's TLS probe (`confidential.tinfoil.tls_probe`) also records the
+  certificate the router presented, for the evidence; the replay's `tls_cert_binding` check re-reads
+  that certificate. The pin is what enforces.
 
-  On NEAR the plugin pins TLS itself: every inference and signature connection is checked against the
-  certificate the gateway's quote binds, before any request byte is sent (section 14).
+  On NEAR the plugin pins TLS the same way: every inference and signature connection is checked against
+  the certificate the gateway's quote binds, before any request byte is sent (section 14).
 
   Whatever ends TLS, any network hop and the vendor's hosting still see your IP address, the sizes of
   requests and responses, and their timing.
@@ -370,9 +371,7 @@ runs. None of them is a Hermes seam.
 
 **What the plugin does today.** Nothing beyond saying so. Receipts never contain prompt text.
 
-**The change that would close it.** None in Hermes for the network items. For TLS on Tinfoil, in the plugin:
-the SDK's `tls` transport mode, which pins the enclave's certificate and requires a direct connection,
-or a per-send refusal when the recorded certificate does not match the report. For the host operator, the
+**The change that would close it.** None in Hermes for the network items. For the host operator, the
 answer is to run Hermes on a machine you control. Running Hermes itself in an enclave would also work,
 but it is out of scope here.
 

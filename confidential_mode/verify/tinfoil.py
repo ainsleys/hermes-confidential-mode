@@ -62,14 +62,23 @@ Sizes measured from a stubbed SEV capture (tests/unit/test_replay.py, real SDK c
   evidence JSON total   6404 chars for that capture (without the trust root)
 TDX sizes were not measured (no format-faithful quote or Intel collateral can be produced offline).
 
-TLS spike (confidential.tinfoil.tls_probe, default on): after each explicit verify the adapter sends
+TLS pin per send (Amendment 13): the SDK's "ehbp" transport encrypts request bodies to the attested HPKE
+key but builds its inner httpx transports with ordinary WebPKI TLS (tinfoil/client.py:728-736, :806), so
+headers (the API key included) would be readable by whoever ends TLS. The adapter gives every EHBP pool,
+sync and async, and every transport the SDK rebuilds after a key rotation, an inner transport whose SSL
+context is near.pinned_ssl_context: inside the handshake, before a request byte is written, the peer's SPKI
+SHA-256 must equal the TLS key fingerprint of the verified report (SecureClient.ground_truth.public_key).
+A mismatch closes the connection and raises TLSPinMismatch; the view ledgers a verify_fail row (purpose
+"tls_pin", reason_code "tls_pin_mismatch") and asks for a re-verify at most once per
+``reverify_backoff_seconds`` (mark_stale). This covers sends and requests without a body alike.
+
+TLS probe (confidential.tinfoil.tls_probe, default on): after each explicit verify the adapter sends
 one bodyless GET of /.well-known/tinfoil-attestation over the VERIFIED EHBP pool and reads the peer
 certificate from response.extensions["network_stream"].get_extra_info("ssl_object") (httpcore exposes it;
 ehbp passes extensions through). tls_observation = {captured, spki_sha256, matches_report_tls_key,
 san_binding (the SDK's verify_certificate: host, HPKE key, report hash in SANs), issuer, subject, serial,
-not_before, not_after, verdict}. verdict "TLS terminates in the attested enclave ..." vs "TLS terminated
-by a non-enclave key" is what a live run against Tinfoil will tell us; it is recorded, never enforced.
-Per request, the views record the peer SPKI too (send records, below).
+not_before, not_after, verdict}. The observation is evidence for the receipt; the pin above is what
+enforces. Per request, the views record the peer SPKI too (send records, below).
 
 SDK on-disk caches: tinfoil 0.14.2 fixes platformdirs paths at import (default macOS
 ~/Library/Caches/tinfoil, Linux ~/.cache/tinfoil: Sigstore bundles, VCEKs, Intel collateral) and
@@ -105,6 +114,7 @@ PLACEHOLDER_BASE_URL = "https://unresolved.attested-tinfoil.invalid/v1"
 _REQUIRED_STEPS = ("fetch_digest", "verify_code", "verify_enclave", "compare_measurements")
 EVIDENCE_SCHEMA = "confidential-mode/tinfoil-evidence/v1"
 TRUST_ROOTS_SUBDIR = "trust-roots"
+DEFAULT_REVERIFY_BACKOFF_SECONDS = 30.0   # at most one pin-triggered re-attestation per window (as NEAR)
 
 
 def _sdk():
@@ -180,7 +190,11 @@ class _SyncView(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self._adapter._check_not_held()
         transport = self._adapter._current_sync_transport()
-        response = transport.handle_request(request)
+        try:
+            response = transport.handle_request(request)
+        except BaseException as exc:
+            self._adapter._pin_failure(exc, request)
+            raise
         return self._adapter._observe_send(request, response, request_key=ehbp_request_key(transport))
 
     def close(self) -> None:
@@ -196,7 +210,11 @@ class _AsyncView(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self._adapter._check_not_held()
         pool = self._adapter._async_pool_for_running_loop()
-        response = await pool._transport.handle_async_request(request)
+        try:
+            response = await pool._transport.handle_async_request(request)
+        except BaseException as exc:
+            self._adapter._pin_failure(exc, request)
+            raise
         return self._adapter._observe_send(request, response, request_key=ehbp_request_key(pool._transport))
 
     async def aclose(self) -> None:
@@ -210,7 +228,9 @@ class TinfoilAdapter:
 
     def __init__(self, *, data_dir: Path | str, enclave: str | None = None, repo: str = ROUTER_REPO,
                  transport: str = "ehbp", router_discovery: Callable[[], str] | None = None,
-                 hold_until_accepted: bool = True, tls_probe: bool = True):
+                 hold_until_accepted: bool = True, tls_probe: bool = True,
+                 reverify_backoff_seconds: float = DEFAULT_REVERIFY_BACKOFF_SECONDS,
+                 tls_base_context: Callable[[], Any] | None = None):
         if not repo:
             raise ValueError("repo is required: pinned-measurement mode is not supported")
         self.data_dir = Path(data_dir)
@@ -254,6 +274,12 @@ class TinfoilAdapter:
         # ConfidentialClient's create() gate (with_options, raw _client use, other resources).
         self._hold_until_accepted = hold_until_accepted
         self.held_reason: str | None = None
+        # TLS pin per send (Amendment 13). ``tls_base_context`` builds the SSL context the pin is added to
+        # (default ssl.create_default_context; tests pass one that trusts a local CA).
+        self.tls_base_context = tls_base_context
+        self.reverify_backoff_seconds = max(0.0, float(reverify_backoff_seconds))
+        self._last_stale_mono: float | None = None
+        self.on_stale: Callable[[], None] | None = None      # set by the verification cache: re-verify next call
 
     # ── enclave + SecureClient ────────────────────────────────────────────────────────────────
     @property
@@ -300,8 +326,117 @@ class TinfoilAdapter:
                 # Instance attribute shadows the class method: every self.verify() inside the SDK
                 # (http-client builds, rotation re-verification) comes through the guard.
                 sc.verify = lambda: self._guarded_verify(sc)
+                if self.transport == "ehbp":
+                    self._pin_ehbp_builders(sc)
                 self._sc = sc
             return self._sc
+
+    # ── TLS pin per send (Amendment 13) ──────────────────────────────────────────────────────────
+    def expected_tls_fp(self, sc=None) -> str | None:
+        """The TLS key fingerprint (SPKI SHA-256, hex) of the latest report the SDK verified, else the accepted
+        result's. None before any verification: the pinned context then refuses every connection."""
+        sc = sc if sc is not None else self._sc
+        fp = getattr(getattr(sc, "ground_truth", None), "public_key", None) if sc is not None else None
+        if fp:
+            return str(fp)
+        acc = self._accepted
+        return ((acc.evidence or {}).get("claims") or {}).get("tls_public_key_fp") if acc else None
+
+    def pinned_context(self, sc=None):
+        from .near import pinned_ssl_context
+        return pinned_ssl_context(lambda: self.expected_tls_fp(sc), base=self.tls_base_context,
+                                  binds="the verified Tinfoil report", source="Tinfoil")
+
+    def pinned_ehbp_sync_transport(self, sc) -> httpx.BaseTransport:
+        """The SDK's _build_ehbp_sync_transport with the pinned inner transport."""
+        from ehbp import EHBPTransport
+        hpke_public_key = sc._require_hpke_public_key()
+        inner = _mark_pinned(httpx.HTTPTransport(verify=self.pinned_context(sc)))
+        return EHBPTransport.from_public_key_hex(hpke_public_key, inner=inner)
+
+    async def pinned_ehbp_async_transport(self, sc) -> httpx.AsyncBaseTransport:
+        from ehbp import AsyncEHBPTransport
+        hpke_public_key = await asyncio.to_thread(sc._require_hpke_public_key)
+        inner = _mark_pinned(httpx.AsyncHTTPTransport(verify=self.pinned_context(sc)))
+        return AsyncEHBPTransport.from_public_key_hex(hpke_public_key, inner=inner)
+
+    def _pin_ehbp_builders(self, sc) -> None:
+        """Instance attributes shadow the SDK's EHBP transport builders on this SecureClient only, so the
+        first sync pool and every rebuild after a key rotation (_EHBPReVerifyingTransport and its async twin
+        call these) get the pinned inner transport. No class or module attribute changes."""
+        sc._build_ehbp_sync_transport = lambda: self.pinned_ehbp_sync_transport(sc)
+        sc._build_ehbp_async_transport = lambda: self.pinned_ehbp_async_transport(sc)
+
+    def _make_async_client(self, sc) -> httpx.AsyncClient:
+        """The SDK's make_secure_async_http_client, then the inner network transport of its EHBP layer swapped
+        for a pinned one (the SDK builds that inner transport inline, tinfoil/client.py:806, so the builder
+        shadow above does not reach it). Nothing has connected yet when the swap happens."""
+        pool = sc.make_secure_async_http_client()
+        if self.transport == "ehbp":
+            self.pin_pool(pool, sc, is_async=True)
+        return pool
+
+    def pin_pool(self, client, sc, *, is_async: bool) -> int:
+        """Give every EHBP layer in ``client``'s transport chain a pinned inner network transport, then refuse
+        (VerifyError) when any network transport in the chain is still unpinned. Returns the layers pinned. A
+        chain with no network transport (a test's MockTransport) is left as it is."""
+        from ehbp import AsyncEHBPTransport, EHBPTransport
+        ehbp_cls = AsyncEHBPTransport if is_async else EHBPTransport
+        net_cls = httpx.AsyncHTTPTransport if is_async else httpx.HTTPTransport
+        pinned = 0
+        for t in _transport_chain(getattr(client, "_transport", None)):
+            if isinstance(t, ehbp_cls):
+                inner = t._inner
+                if not (isinstance(inner, net_cls) and _is_pinned(inner)):
+                    t._inner = _mark_pinned(net_cls(verify=self.pinned_context(sc)))
+                    if not is_async:
+                        _close_quietly(inner)
+                pinned += 1
+        loose = [t for t in _transport_chain(getattr(client, "_transport", None))
+                 if isinstance(t, net_cls) and not _is_pinned(t)]
+        if loose:
+            raise VerifyError("a Tinfoil network transport could not be pinned to the attested TLS key; refusing")
+        return pinned
+
+    def _pin_failure(self, exc: BaseException, request) -> None:
+        """A send that met a certificate other than the attested one: ledger it and ask for a bounded
+        re-verify. Anything else is left to the caller. Never raises."""
+        try:
+            from .near import TLSPinMismatch
+            pin = next((e for e in _chain(exc) if isinstance(e, TLSPinMismatch)), None)
+            if pin is None:
+                return
+            asked = self.mark_stale("a Tinfoil connection presented a certificate other than the attested one; "
+                                    "re-verifying")
+            sink = self.event_sink
+            if sink is not None:
+                sink({"kind": "verify_fail", "purpose": "tls_pin", "host": request.url.host,
+                      "detail": {"vendor": VENDOR, "reason_code": "tls_pin_mismatch", "error": str(pin)[:300],
+                                 "expected_tls_key_fp": self.expected_tls_fp(), "path": request.url.path,
+                                 "reverify_requested": asked, "nothing_sent": True}})
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("confidential-mode: could not record a Tinfoil TLS pin mismatch",
+                                                exc_info=True)
+
+    def mark_stale(self, reason: str) -> bool:
+        """Hold the transport and have the verification cache re-verify on the next call, at most once per
+        ``reverify_backoff_seconds`` (a TLS intermediary must not be able to force an attestation per turn).
+        Returns whether a re-verify was requested."""
+        now = time.monotonic()
+        with self._lock:
+            if self._last_stale_mono is not None and now - self._last_stale_mono < self.reverify_backoff_seconds:
+                return False
+            self._last_stale_mono = now
+        self.hold(reason)
+        self.verified_mono = None
+        cb = self.on_stale
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
+        return True
 
     def _guarded_verify(self, sc):
         self.attestation_count += 1
@@ -478,6 +613,12 @@ class TinfoilAdapter:
                 self._capture_local.sink = None
                 try:
                     http = sc.make_secure_http_client()
+                    if self.transport == "ehbp":
+                        try:
+                            self.pin_pool(http, sc, is_async=False)
+                        except BaseException:
+                            _close_quietly(http)
+                            raise
                 finally:
                     self._explicit.active = False
                     self._counter_bucket.name = None
@@ -588,7 +729,7 @@ class TinfoilAdapter:
         sc = self._secure_client()
         self._counter_bucket.name = "async"
         try:
-            pool = sc.make_secure_async_http_client()
+            pool = self._make_async_client(sc)
         except VerifyError:
             raise
         except Exception as exc:
@@ -645,6 +786,37 @@ class TinfoilAdapter:
 
 ENCAPSULATED_KEY_HEADER = "Ehbp-Encapsulated-Key"  # ehbp.protocol
 RESPONSE_NONCE_HEADER = "Ehbp-Response-Nonce"     # ehbp.protocol
+
+
+_PINNED_MARK = "_confidential_mode_tls_pinned"
+
+
+def _mark_pinned(transport):
+    """Tag a network transport the adapter built with the pinned SSL context (its own object)."""
+    setattr(transport, _PINNED_MARK, True)
+    return transport
+
+
+def _is_pinned(transport) -> bool:
+    return getattr(transport, _PINNED_MARK, False) is True
+
+
+def _transport_chain(transport, limit: int = 12):
+    """Every transport reachable from ``transport`` through the SDK's and ehbp's ``_inner`` links."""
+    seen, out, node = set(), [], transport
+    while node is not None and id(node) not in seen and len(out) < limit:
+        seen.add(id(node))
+        out.append(node)
+        node = getattr(node, "_inner", None)
+    return out
+
+
+def _chain(exc: BaseException):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or exc.__context__
 
 
 def _iso_now() -> str:

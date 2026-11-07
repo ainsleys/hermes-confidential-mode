@@ -42,7 +42,6 @@ known_issues:
   - "Locked mode does not apply in safe-worker mode, where Hermes loads no plugins."
   - "Every plugin in the same process shares the trust boundary; under plugins.isolation: host the attested provider is invisible and the lock is refused."
   - "Tinfoil attests its router, not the model backend behind it, and its report carries no client nonce; the plugin's own timestamps are the host clock."
-  - "Tinfoil TLS is not pinned per send: the SDK's ehbp transport encrypts request bodies to the enclave's key but leaves headers, the API key included, readable by a TLS intermediary; the plugin's TLS probe only records the certificate after each verification. NEAR connections are pinned per send."
   - "The plugin reads keys only through agent.secret_scope.get_secret, so a key held only in Hermes' credential pool (hermes auth) reads as not set and the lock refuses until the variable is set."
   - "AMD and Intel routers have different enclave fingerprints, so a restart can ask for a new pin; set confidential.tinfoil.enclave to one router to stop this."
   - "An 'always' tool grant lives in Hermes' command_allowlist and outlives the lock until /confidential revoke <tool>."

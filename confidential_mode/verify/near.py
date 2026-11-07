@@ -709,7 +709,8 @@ def _default_context() -> ssl.SSLContext:
 
 def pinned_ssl_context(expected_spki: Callable[[], str | None], *,
                        base: Callable[[], ssl.SSLContext] | None = None,
-                       required: Callable[[], bool] = lambda: True) -> ssl.SSLContext:
+                       required: Callable[[], bool] = lambda: True,
+                       binds: str = "the verified gateway quote", source: str = "gateway") -> ssl.SSLContext:
     """An SSL context that keeps the normal chain and host-name checks and adds one: right after the
     handshake, and before httpcore writes a request byte, the peer certificate's SPKI SHA-256 must equal
     ``expected_spki()`` (the fingerprint the verified gateway quote binds). A mismatch, an unreadable peer
@@ -727,11 +728,11 @@ def pinned_ssl_context(expected_spki: Callable[[], str | None], *,
         if not want:
             if not required():
                 return  # confidential.near.require_tls_binding: false and no fingerprint was attested
-            raise TLSPinMismatch("no attested gateway TLS fingerprint to pin this connection to")
+            raise TLSPinMismatch(f"no attested {source} TLS fingerprint to pin this connection to")
         got = _spki_sha256(der) if der else None
         if got != str(want).lower():
-            raise TLSPinMismatch("the TLS certificate of this connection is not the one the verified gateway "
-                                 "quote binds; refused before sending")
+            raise TLSPinMismatch(f"the TLS certificate of this connection is not the one {binds} binds; "
+                                 "refused before sending")
 
     def wrap_socket(*args, **kwargs):
         sock = orig_wrap_socket(*args, **kwargs)

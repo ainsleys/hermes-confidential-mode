@@ -106,7 +106,7 @@ requests are Hermes #4231 (Venice), #5015 (RedPill), #7045 (Tinfoil), #12201 (NE
 | Build pins with a human's consent | No | No | No | Partial | No | Yes: one entry per NEAR virtual machine configuration |
 | Review bundle for a second reviewer | No | No | No | No | No | Yes |
 | Model signing key bound to the report | Yes | No | No | Yes | No | Yes, not pinned |
-| TLS bound to the attested key on every send | No | No | Yes | Partial | Partial | Partial: pinned per send on NEAR; recorded, not pinned, on Tinfoil |
+| TLS bound to the attested key on every send | No | No | Yes | Partial | Partial | Yes: pinned per send on NEAR and Tinfoil |
 | Check of what NEAR deploys after launch | No | No | No | Yes | No | Yes: the operator's reported log, bound in a hardware quote, not a measurement |
 | NVIDIA GPU evidence | No | No | No | Yes | No | No |
 | Request body encryption | Partial | No | No | Partial | Yes | Yes: whole body on Tinfoil; all fields NEAR covers |
@@ -336,11 +336,10 @@ that verification later, offline, from the evidence alone.
 >   router; the attestation covers the router only.
 > - **Connection metadata.** Tinfoil's network and hosting see request and response sizes, timing and
 >   your IP address. The tinfoil SDK's `ehbp` transport, which the plugin uses, encrypts each request
->   body to the enclave's HPKE key but doesn't pin the TLS certificate, and the plugin doesn't pin TLS
->   per send on Tinfoil yet. A TLS intermediary can therefore read the request headers, your API key
->   included, though not the body. The plugin's TLS probe records after each verification whether the
->   router's certificate carried the attested TLS key; on 2026-11-06 (`router-0.tinfoil.sh`, release
->   v0.0.170) it did. On NEAR the plugin pins TLS on every connection.
+>   body to the enclave's HPKE key and doesn't pin the TLS certificate itself, so the plugin pins it:
+>   every Tinfoil connection must present the TLS key the verified report binds, checked inside the
+>   handshake before any request byte leaves, so a TLS intermediary sees no headers and no API key. A
+>   connection with another certificate is refused. On NEAR the plugin pins TLS the same way.
 > - **NEAR's gateway.** With request encryption on, the gateway still reads the model id, plaintext
 >   parameters, headers, sizes, timing and images, and a gateway that swaps the client key header can
 >   read a reply; the plugin detects that only afterwards.
@@ -1176,9 +1175,9 @@ only when every check is `True` or `n/a`.
 - `tls_cert_binding`: the TLS certificate captured on the EHBP connection carries the TLS key the
   report commits to, and its subject alternative names bind the HPKE key and the attestation hash. A
   pass means TLS ended inside the attested router on the connection the probe used. A row captured
-  before certificates were recorded, or a certificate with another key, reads n/a: the check is a
-  record, not an enforcement. EHBP encrypts each body to the attested HPKE key whoever ends TLS, and
-  on the `ehbp` transport nothing pins the TLS certificate per send.
+  before certificates were recorded, or a certificate with another key, reads n/a. The check is
+  evidence for the receipt; what enforces is the plugin's per-send pin, which refuses any Tinfoil
+  connection whose certificate does not carry the report's TLS key.
 - `policy_check`: the plugin's own restated Sigstore policy check over the captured bundle,
   independent of the SDK.
 - `sev_check`: an AMD SEV-SNP report re-verified by the plugin's own standalone checker (signature,
@@ -1234,7 +1233,7 @@ under `confidential:` in `config.yaml`:
 |---|---|---|
 | `confidential.tinfoil.enclave` | Unset (router discovery) | One router host to verify and use; stops the AMD/Intel switching after a restart. |
 | `confidential.tinfoil.context_length` | 65536 | The context window reported to Hermes, so Hermes never sends its own probe outside the attested transport. |
-| `confidential.tinfoil.tls_probe` | `true` | After each verification, send one bodiless request over the verified connection and record the TLS certificate seen and whether its key is the attested TLS key. An observation that never fails a verification and pins nothing per send; only the exact value `false` turns it off. |
+| `confidential.tinfoil.tls_probe` | `true` | After each verification, send one bodiless request over the verified connection and record the TLS certificate seen and whether its key is the attested TLS key. An observation for the evidence that never fails a verification; the per-send TLS pin is separate and always on. Only the exact value `false` turns the probe off. |
 | `confidential.verify_ttl_seconds` | 300 | How long one verification vouches for the enclave, on a monotonic clock. |
 | `confidential.verify_wait_seconds` | 20 | How long a turn waits for a verification before it is refused. |
 | `confidential.verify_refresh_lead_seconds` | 60 | While locked, a background thread verifies again this long before the current verification ends, when a call used it within two lead periods of its end (two minutes at the default). A new verification is used only after the pin check accepts it; a failed one changes nothing, and the next send then verifies inline. 0 turns the thread off. |
