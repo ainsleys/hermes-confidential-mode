@@ -14,7 +14,9 @@
 #
 # The model ids below are Tinfoil's (https://docs.tinfoil.sh/models/chat.md, read 2026-11-06). This
 # example uses kimi-k3-1-pro because that model accepts images. Vision can therefore stay on the same
-# model as everything else.
+# model as everything else. `hermes confidential setup` prints gemma4-31b for vision instead, because
+# gemma4-31b also accepts images and works beside a text-only main model such as llama3-3-70b. Both
+# choices are correct. The tinfoil SDK carries no model table, so Tinfoil's published list is the source.
 
 # ── Plugin keys (every key the code reads) ────────────────────────────────────────────────────
 confidential:

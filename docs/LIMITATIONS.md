@@ -721,6 +721,29 @@ every tool subprocess and that a plugin can read but a command cannot remove. A 
 plugin which client answered, and whether a tool started that client, would close the nested-chat
 route. A typed challenge shown only on the approving surface would also work.
 
+## 16. Hermes titles the plugin's approval prompt "Dangerous Command"
+
+**The gap.** When an off-host tool asks, Hermes shows its own approval panel. The panel's title is
+"Dangerous Command". A web search is not a dangerous command, so the title misleads.
+
+**Why it exists.** A plugin asks through Hermes' approval gate, `tools.approval.request_tool_approval`.
+Hermes draws every request from that gate with the same panel and the same title as a risky shell
+command. The line under the title is `<name> (plugin approval rule)`, built at
+`tools/approval.py:1227`. A plugin rule cannot set the title, and a `pre_tool_call` approve directive
+cannot set the line under the title.
+
+**What the plugin does today.** The plugin's own text leads with what is happening:
+"Confidential mode: web_search wants to send ~1 KB of this conversation off the machine". The size
+counts the call's arguments and any local image file the call names. The size is shown in MB above 1 MB.
+When the plugin asks from its tool-execution middleware, which is the path the interactive CLI and the
+gateway take, it gives Hermes the name "confidential mode: off-host tool web_search". The line under
+the title then reads `<confidential mode: off-host tool web_search> (plugin approval rule)`. When
+Hermes asks for the plugin's `pre_tool_call` directive instead, that line names the tool alone. The
+title itself always reads "Dangerous Command".
+
+**The change that would close it.** A `title` and a `target` field on the approve directive and on
+`request_tool_approval`, shown in place of Hermes' defaults.
+
 ## Smaller gaps, disclosed
 
 Each item below is a smaller gap. Each one is stated in full.

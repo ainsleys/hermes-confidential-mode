@@ -159,7 +159,8 @@ config sends them. The plugin only writes ledger rows that describe them, as des
 
 ### What it writes
 
-Everything the plugin writes is under your Hermes home, scoped to the profile.
+Everything the plugin writes is under your Hermes home, scoped to the profile. The plugin creates each
+file with mode 0600, and sets mode 0600 again on existing files each time the plugin starts.
 
 | Path | Contents |
 |---|---|
@@ -171,6 +172,7 @@ Everything the plugin writes is under your Hermes home, scoped to the profile.
 | The same directory, `allowlist.yaml` | This lock's tool identities: each tool's name, toolset, handler module and handler name. It also holds the tools you allowed with `/confidential allow`, tagged with the lock's identity. After a restart, the plugin rebuilds the allowlist from this file. `/confidential off` deletes it, so additions never outlive the lock. |
 | The same directory, `tinfoil_user_cache_secret` | A random 32-byte secret, stored as hex with file mode 0600. The SDK sends it as `user_cache_secret`, which keeps Tinfoil's prompt cache separate for you. The SDK's own default location is `~/.tinfoil/user_cache_secret`. The plugin never uses that path. |
 | The same directory, `trust-roots/<sha256>.json` | The Sigstore trust root used at verification. Each distinct trust root is stored once, named by the hash of its content. The evidence in the ledger also carries the trust root's bytes, so a receipt replays offline on any machine. The evidence records no local path. |
+| The same directory, `loaded-commit` | The commit that last started here. The plugin prints its start-up progress lines on the first start of a new commit only (README, Install). |
 | The same directory, `sdk-cache/` | The on-disk caches of the tinfoil SDK and of sigstore-python, redirected here. The next section explains how. |
 
 ### SDK cache redirect
