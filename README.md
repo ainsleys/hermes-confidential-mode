@@ -1,35 +1,43 @@
 <!-- PLUGIN_NAME: confidential-mode  (working name; swap it here, in the title, and in the install lines) -->
 # confidential-mode
 
-confidential-mode keeps your Hermes conversations inside verified enclaves, or on your own machine, and
-gives you a receipt that shows it.
+confidential-mode keeps your Hermes conversations inside verified enclaves or on your own machine, and
+gives you a report you can check.
 
-Picking a verified provider for your main chat covers only the main chat. Hermes also sends your text
-out through side calls (titles, compression, vision and more), fallbacks, tools and memory, each along
-whatever route it happens to be configured for. Any one of those is a leak.
+Hermes makes more model calls than the one you see. Besides your main chat, it calls a model to write
+session titles, compress old conversation, describe images and more, and it can fall back to a second
+provider when the first fails. Each of those has its own setting in Hermes' config, and the defaults
+can send several of them to a different company than your main provider. Tools like web search send
+parts of the conversation to outside sites. So a conversation you thought went to one verified
+provider can reach four or five others.
 
-The plugin closes them in three steps. First it shows you the map: every model call, with its host and
-size, never its text. Then you lock the profile to a tier, which is a rule for where text may go:
-`on-host-only` allows only your machine, `attested` allows only enclaves whose hardware report the
-plugin has verified and whose build you approved. A lock checks every configured route first and
-refuses to lock while any route leads elsewhere. While locked, main calls and side calls go only to
-the tier, fallbacks are refused, and every tool that would send data off the machine asks you first,
-on both tiers. (Side calls are checked before every turn; one that strays mid-turn, say after a
-runtime model switch, is recorded, not stopped.) On the attested tier the text itself is encrypted to
-the enclave's key before it leaves: on Tinfoil through the vendor's encrypted transport, on NEAR AI
-Cloud with every message, tool definition and tool call encrypted to the model's key and every reply
-signed by it. The gateway in between cannot read them. It still sees image parts, the model id,
-plaintext parameters, headers, sizes and timing, and because a reply is encrypted to a key the
-signature doesn't cover, a gateway that swaps that key can read the reply; the plugin detects this only
-afterwards.
+The plugin fixes that in three steps.
 
-Finally, each session gets a receipt. You render it whenever you want, for the session you are in or
-any past one. It lists where every model call went and attaches the enclave evidence captured at each
-verification, which anyone holding the receipt can replay offline.
+1. **It logs every model call** from the moment it is installed: which host, how many bytes, never the
+   text. `hermes confidential status` shows where calls have gone; `hermes confidential watch` streams
+   them live.
+2. **You turn on a lock**, which means the plugin now enforces a rule for where text may go.
+   `on-host-only` allows only your machine. `attested` allows only enclaves whose hardware report the
+   plugin has verified and whose build you approved. Before locking, the plugin checks every
+   configured route and refuses if any leads elsewhere, naming the setting to change. While locked,
+   every model call, main or side, goes only to the tier (a side call that strays mid-turn is
+   recorded, not stopped); fallbacks are refused; and the first time a tool wants to send data off
+   the machine, the plugin asks you, with an answer that can last for the session. On the attested
+   tier the vendor's protocol encrypts your text to the enclave's key before it leaves your machine,
+   so the servers in between cannot read it. On NEAR, the gateway still sees images, the model id,
+   settings, headers, sizes and timing, and could read a reply by swapping its key, which the plugin
+   detects only afterwards. The plugin checks that this encryption is on and, on NEAR AI Cloud,
+   verifies the enclave's signature on every reply.
+3. **When you want, you render a receipt.** The receipt is a text file built from the plugin's log:
+   every model call in the session, the lock period, the enclave build that was verified, and the raw
+   hardware evidence captured at each verification. The evidence is signed by the enclave's hardware
+   and the vendor, so anyone can re-check it offline with `hermes confidential replay`. The rest of
+   the receipt is the plugin's own record on your machine.
 
-Two things the plugin cannot do, stated up front: shell and code execution run on your machine and are
-not inspected, and the receipt itself is the plugin's own record, so only the attached evidence is
-proof.
+Two limits to know before you rely on this. The agent can still run shell commands and code, and the
+plugin does not look inside them, so a command such as `curl` could send text anywhere; every receipt
+says so. And because the receipt is written by the plugin on your machine, someone else can trust only
+its signed evidence.
 
 ![Figure 2. With the plugin, shown for Tinfoil: preflight checks every configured route, side calls
 go to the verified enclave, fallback is refused, tools ask, memory stays on the host, shell and code
@@ -109,14 +117,15 @@ confidential-mode: discovering tools... 78 found
 Locked to Tinfoil, llama3-3-70b at router-0.tinfoil.sh; verified … ago. Off-host tools ask first. Details: hermes confidential status, docs/LIMITATIONS.md
 ```
 
-**4. Have a conversation.** Start `hermes` and ask something that needs the web. Before the search
-runs, Hermes' approval panel shows the plugin's line:
+**4. Have a conversation.** Start `hermes` and ask something that needs the web. The first time each
+tool wants to send data off the machine, Hermes' approval panel shows the plugin's line:
 
 ```
 Confidential mode: web_search wants to send ~1 KB of this conversation off the machine
 ```
 
-Pick Allow once, Allow for this session, Add to permanent allowlist, or Deny. Hermes titles this panel
+Pick Allow once, Allow for this session (that tool then stops asking until the session ends), Add to
+permanent allowlist, or Deny. Hermes titles this panel
 "Dangerous Command" for every plugin approval, and the plugin can't change that title.
 
 **5. Read the receipt.** Receipts are rendered on demand, for the current session or any past one. In
@@ -146,7 +155,8 @@ The ones you're most likely to hit. [docs/LIMITATIONS.md](docs/LIMITATIONS.md) h
 the change that would close each.
 
 - **Shell and code execution aren't inspected.** `terminal`, `execute_code` and `process_manage` run
-  on this host while locked and can reach the network; every receipt names them as unproven.
+  on this host while locked, and the plugin does not look inside shell commands or code, so a command
+  such as `curl` could send text anywhere. Every receipt names them as unproven.
   ([section 3](docs/LIMITATIONS.md#3-shell-and-code-execution-tools-are-not-inspected))
 - **NEAR's gateway sees part of each request.** Image parts reach it in plaintext, and it reads the
   model id, plaintext parameters, headers, sizes and timing. Message text, tool definitions and tool
