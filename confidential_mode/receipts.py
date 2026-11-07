@@ -507,14 +507,21 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
             continue
         if r["kind"] != "send_observed" or r.get("tier") != "attested":
             continue
+        # The llm gate copies the Tinfoil transport's per-send records into the row (gate_llm
+        # send_record_detail); absent fields stay absent (on-host providers, NEAR). It also names the latest
+        # verify_ok id and the time when the request began (second review, item 3): coverage is judged at
+        # the start of the call, so a re-verify during a long call is not credited with it.
+        d = r["detail"] if isinstance(r["detail"], Mapping) else {}
+        bound = d.get("verify_before")
+        bound = bound if isinstance(bound, int) and not isinstance(bound, bool) else None
+        started = d.get("started_ts")
+        sent_ts = float(started) if isinstance(started, (int, float)) and not isinstance(started, bool) else r["ts"]
         cands = [v for v in verifies
-                 if not (r["host"] and verify_facts(v)["enclave_host"]) or verify_facts(v)["enclave_host"] == r["host"]]
+                 if (bound is None or v["id"] <= bound)
+                 and (not (r["host"] and verify_facts(v)["enclave_host"]) or verify_facts(v)["enclave_host"] == r["host"])]
         v = cands[-1] if cands else None
         entry = {"send": r["id"], "verify": None, "ttl_seconds": ttl_seconds, "ttl_source": ttl_source,
                  "window_start": None, "window_end": None, "covered": False, "verify_unverified_entry": None}
-        # The llm gate copies the Tinfoil transport's per-send records into the row (gate_llm
-        # send_record_detail); absent fields stay absent (on-host providers, NEAR).
-        d = r["detail"] if isinstance(r["detail"], Mapping) else {}
         if "hpke_key_used" in d:
             entry["hpke_key_used"] = d.get("hpke_key_used")
         if "response_decrypted" in d:
@@ -525,7 +532,7 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
             ttl = float(row_ttl) if from_row else ttl_seconds
             entry.update(verify=v["id"], ttl_seconds=ttl, ttl_source="verify row" if from_row else ttl_source,
                          window_start=v["ts"], window_end=v["ts"] + ttl,
-                         covered=bool(v["ts"] <= r["ts"] <= v["ts"] + ttl),
+                         covered=bool(v["ts"] <= sent_ts <= v["ts"] + ttl),
                          verify_unverified_entry=is_unverified_entry(v))
         if "hpke_key_used" in entry:
             h = verify_facts(v)["hpke_public_key"] if v is not None else None

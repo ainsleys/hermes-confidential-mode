@@ -176,7 +176,8 @@ class _Call:
 
 
 #: Fields of one per-exchange record (verify/tinfoil.py _observe_send) copied into the send_observed row.
-SEND_RECORD_FIELDS = ("hpke_key_used", "response_decrypted", "encrypted", "tls_spki_sha256", "tls_matches_report")
+SEND_RECORD_FIELDS = ("hpke_key_used", "hpke_key_source", "response_decrypted", "stream_closed_before_eof",
+                      "encrypted", "tls_spki_sha256", "tls_matches_report")
 
 
 def send_record_detail(records: list) -> dict:
@@ -328,11 +329,21 @@ class LlmGate:
         already on the ledger from the ``pre_api_request`` hook."""
         nbytes = request_bytes(request)
         records: list = []
+        # Second review, item 3: the row is written after the call, so it names the verification in effect
+        # when the request BEGAN (the latest verify_ok id then, and the start time); receipts judge coverage
+        # and the HPKE key against that, not against a re-verify that landed during a long call.
+        started = {"started_ts": time.time()}
+        try:
+            last_verify = self.ledger.last_id_before("verify_ok", 2 ** 62)
+            if isinstance(last_verify, int):
+                started["verify_before"] = last_verify
+        except Exception:  # noqa: BLE001 - a ledger without the query: receipts fall back to the row's own id
+            pass
 
         def observed() -> None:
             self.record("send_observed", dest, context, host=verdict.host or _host(dest.base_url),
                         nbytes=nbytes, tier=tier.value, verdict="in_tier", decision="allowed",
-                        detail=send_record_detail(records))
+                        detail={**send_record_detail(records), **started})
         try:
             with self.send_context(dest, context, tier), self.capture_records(records):
                 response = next_call(request)

@@ -564,3 +564,120 @@ def test_send_record_reaches_the_ledger_row_and_the_receipt_flags_an_hpke_key_mi
     assert doc["header"]["hpke_mismatches"] == [row.id]
     assert f"HPKE KEY MISMATCH on sends: #{row.id}" in receipts.render(ledger, "s1")
     ledger.close()
+
+
+def _sse_chunk(text):
+    return ("data: " + json.dumps({"id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m",
+                                   "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]})
+            + "\n\n").encode()
+
+
+def _ehbp_sse(rec, *, fail_after_done=False, stop_before_done=False):
+    def handle(request):
+        rec.requests.append(("secure-sync", request.url.path))
+
+        class Body(httpx.SyncByteStream):
+            def __iter__(self):
+                yield _sse_chunk("Hel")
+                yield _sse_chunk("lo")
+                if stop_before_done:
+                    yield _sse_chunk(" and more")
+                    return
+                yield b"data: [DONE]\n\n"
+                if fail_after_done:
+                    raise ValueError("AEAD tag mismatch on the last frame")
+                yield b"\n"                                     # trailing bytes after [DONE]
+        return httpx.Response(200, headers={"Ehbp-Response-Nonce": "00" * 32,
+                                            "content-type": "text/event-stream"}, stream=Body())
+    return handle
+
+
+@pytest.mark.parametrize("mode,expected", [("ok", True), ("fail_after_done", False)])
+def test_streamed_send_through_the_openai_sdk_records_response_decrypted(tmp_path, monkeypatch, rec, mode, expected):
+    """Second review, item 2: the openai SDK stops at [DONE] and closes the response; the view then drains the
+    rest of the body, so a streamed send (Hermes' default for Tinfoil) records whether it decrypted."""
+    from confidential_mode.verify import tinfoil as tmod
+    _stub_sdk(monkeypatch, rec)
+
+    def fake_sync(self):
+        self.verify()
+        return httpx.Client(transport=httpx.MockTransport(_ehbp_sse(rec, fail_after_done=mode == "fail_after_done")))
+    monkeypatch.setattr(tinfoil_client.SecureClient, "make_secure_http_client", fake_sync)
+    ad = _adapter(tmp_path, hold_until_accepted=False)
+    ad.verify()
+    client = openai.OpenAI(api_key="k", base_url="https://router.example/v1", http_client=ad.sync_http_view())
+    with tmod.capture_sends() as records:
+        text = "".join(c.choices[0].delta.content or "" for c in
+                       client.chat.completions.create(model="m", messages=MSG, stream=True))
+    assert text == "Hello"
+    (r,) = records
+    assert r["response_decrypted"] is expected and "stream_closed_before_eof" not in r
+
+
+def test_stream_closed_before_done_is_marked_not_guessed(tmp_path, monkeypatch, rec):
+    from confidential_mode.verify import tinfoil as tmod
+    _stub_sdk(monkeypatch, rec)
+
+    def fake_sync(self):
+        self.verify()
+        return httpx.Client(transport=httpx.MockTransport(_ehbp_sse(rec, stop_before_done=True)))
+    monkeypatch.setattr(tinfoil_client.SecureClient, "make_secure_http_client", fake_sync)
+    ad = _adapter(tmp_path, hold_until_accepted=False)
+    ad.verify()
+    view = ad.sync_http_view()
+    with tmod.capture_sends() as records:
+        with view.stream("POST", "https://router.example/v1/chat/completions", json={"m": 1}) as resp:
+            next(resp.iter_bytes())                             # the caller gives up after one chunk
+    (r,) = records
+    assert r["response_decrypted"] is None and r["stream_closed_before_eof"] is True
+
+
+def test_hpke_key_used_is_the_key_the_ehbp_transport_encrypts_to():
+    """Second review, minor item: the key is read from the SDK's EHBP transport, not from SDK state."""
+    from ehbp.transport import EHBPTransport
+    from confidential_mode.verify.tinfoil import ehbp_request_key
+    from types import SimpleNamespace as NS
+    ehbp = EHBPTransport.from_public_key_hex("22" * 32, inner=httpx.MockTransport(lambda r: httpx.Response(200)))
+    chain = NS(_inner=NS(_inner=NS(_inner=ehbp, _client=object()), _client=object()))   # host-bound -> ... -> EHBP
+    assert ehbp_request_key(chain) == "22" * 32
+    assert ehbp_request_key(httpx.MockTransport(lambda r: httpx.Response(200))) is None
+    assert ehbp_request_key(None) is None
+
+
+def test_the_covering_verify_row_is_the_one_in_effect_when_the_request_began(tmp_path):
+    """Second review, item 3: a re-verify with another HPKE key that lands during a long call must not be
+    credited with the send, nor produce a mismatch."""
+    from confidential_mode import receipts, sendctx
+    from confidential_mode.gate_llm import build_middleware
+    from confidential_mode.ledger import Ledger
+    from confidential_mode.tiers import Tier, Verdict
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+
+    def verify_row(h):
+        return ledger.append({"kind": "verify_ok", "provider": "attested-tinfoil", "host": "router.example",
+                              "detail": {"vendor": "tinfoil", "enclave_host": "router.example",
+                                         "evidence": {"claims": {"hpke_public_key": h}}}})
+    ledger.append({"kind": "lock", "session_id": "s1", "tier": "attested"})
+    v1 = verify_row("48" * 32)
+
+    class _In:
+        tier = Tier.ATTESTED
+
+        def classify(self, dest):
+            return Verdict(True, "attested", "router.example")
+    mw = build_middleware(ledger=ledger, is_locked=lambda: (True, Tier.ATTESTED), predicate_for=lambda t: _In(),
+                          attested_ok=lambda p: Verdict(True, "verified", "router.example"))
+
+    def next_call(request):
+        sendctx.add_record({"hpke_key_used": "48" * 32, "response_decrypted": True})
+        verify_row("99" * 32)                                  # another session re-verifies mid-call
+        return "ok"
+    mw(request={"model": "m"}, next_call=next_call, provider="attested-tinfoil", base_url="https://router.example/v1",
+       model="m", api_mode="chat_completions", session_id="s1")
+    (row,) = [e for e in ledger.session("s1") if e.kind == "send_observed"]
+    assert row.detail["verify_before"] == v1 and isinstance(row.detail["started_ts"], float)
+    doc = receipts.build_receipt(ledger, "s1")
+    (c,) = [c for c in doc["sections"]["send_coverage"] if c["send"] == row.id]
+    assert c["verify"] == v1 and c["hpke_matches"] is True and c["covered"] is True
+    assert doc["header"]["hpke_mismatches"] == []
+    ledger.close()

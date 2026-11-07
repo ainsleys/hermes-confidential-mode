@@ -142,6 +142,35 @@ def load_or_create_user_cache_secret(data_dir: Path) -> str:
     return value
 
 
+_WRAPPER_ATTRS = ("_inner", "_transport", "transport", "inner")
+
+
+def ehbp_request_key(transport) -> str | None:
+    """Hex HPKE public key of the EHBP transport inside the SDK's transport chain (tinfoil 0.14.2:
+    _HostBoundTransport -> [_EnclaveURLHeaderTransport] -> [_UserCacheSecretTransport] ->
+    _EHBPReVerifyingTransport -> EHBPTransport, whose ServerIdentity holds the key). Read after the
+    response arrives: the re-verifying layer swaps its inner transport before a retry, so the key found then
+    is the one the returned response's request was encrypted to. None when no such transport is found."""
+    try:
+        layer, seen = [transport], set()
+        for _ in range(8):
+            nxt = []
+            for t in layer:
+                if t is None or id(t) in seen:
+                    continue
+                seen.add(id(t))
+                key = getattr(getattr(t, "_identity", None), "_public_key_bytes", None)
+                if isinstance(key, (bytes, bytearray)) and len(key) == 32:
+                    return bytes(key).hex()
+                nxt.extend(getattr(t, a, None) for a in _WRAPPER_ATTRS)
+            if not nxt:
+                break
+            layer = nxt
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 class _SyncView(httpx.BaseTransport):
     """Forwards to the adapter's CURRENT verified sync pool; close() is a no-op for the pool."""
 
@@ -150,8 +179,9 @@ class _SyncView(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self._adapter._check_not_held()
-        response = self._adapter._current_sync_transport().handle_request(request)
-        return self._adapter._observe_send(request, response)
+        transport = self._adapter._current_sync_transport()
+        response = transport.handle_request(request)
+        return self._adapter._observe_send(request, response, request_key=ehbp_request_key(transport))
 
     def close(self) -> None:
         pass
@@ -167,7 +197,7 @@ class _AsyncView(httpx.AsyncBaseTransport):
         self._adapter._check_not_held()
         pool = self._adapter._async_pool_for_running_loop()
         response = await pool._transport.handle_async_request(request)
-        return self._adapter._observe_send(request, response)
+        return self._adapter._observe_send(request, response, request_key=ehbp_request_key(pool._transport))
 
     async def aclose(self) -> None:
         pass
@@ -358,11 +388,15 @@ class TinfoilAdapter:
         acc = self._accepted
         return ((acc.evidence or {}).get("claims") or {}).get("hpke_public_key") if acc else None
 
-    def _observe_send(self, request, response):
-        """Per-request send record (hpke_key_used, response_decrypted, TLS peer SPKI); see capture_sends."""
+    def _observe_send(self, request, response, request_key: str | None = None):
+        """Per-request send record (hpke_key_used, response_decrypted, TLS peer SPKI); see capture_sends.
+        ``hpke_key_used`` is the key the EHBP transport encrypted the request to when it can be read
+        (``hpke_key_source`` "ehbp_transport"), else the key the SDK held when the response arrived
+        ("sdk_state")."""
         try:
             rec: dict = {"host": request.url.host, "path": request.url.path,
-                         "hpke_key_used": self.current_hpke_key(),
+                         "hpke_key_used": request_key or self.current_hpke_key(),
+                         "hpke_key_source": "ehbp_transport" if request_key else "sdk_state",
                          "encrypted": ENCAPSULATED_KEY_HEADER in request.headers or _has_body(request),
                          "response_decrypted": None, "tls_spki_sha256": None, "tls_matches_report": None}
             der = peer_certificate_der(response)
@@ -600,14 +634,34 @@ class capture_sends:
         _SEND_RECORDS.reset(self._token)
 
 
+#: After an SSE stream's ``[DONE]``, at most this many further bytes are read to reach the end of the
+#: body (and so the last AEAD frame check) when the client closes early, as the openai SDK does.
+DRAIN_AFTER_DONE_BYTES = 64 * 1024
+_SSE_DONE = b"[DONE]"
+
+
 def _wrap_stream_for_decryption_flag(response, rec: dict) -> None:
+    """Set ``rec["response_decrypted"]``: True once the EHBP body was read to the end and every frame
+    verified, False if decryption failed. The openai SDK stops reading a stream at ``data: [DONE]`` and
+    closes the response, so on close after ``[DONE]`` the rest of the body is drained (bounded), the way the
+    NEAR view does, and the flag is then set (second review, item 2). A stream closed before ``[DONE]`` keeps
+    None and is marked ``stream_closed_before_eof``."""
     inner = response.stream
 
     if isinstance(inner, httpx.AsyncByteStream):
         class _A(httpx.AsyncByteStream):
+            def __init__(self):
+                self._it = inner.__aiter__()
+                self._tail = b""
+
             async def __aiter__(self):
                 try:
-                    async for chunk in inner:
+                    while True:
+                        try:
+                            chunk = await self._it.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        self._tail = (self._tail + chunk)[-64:]
                         yield chunk
                 except Exception:
                     rec["response_decrypted"] = False
@@ -615,13 +669,34 @@ def _wrap_stream_for_decryption_flag(response, rec: dict) -> None:
                 rec["response_decrypted"] = True
 
             async def aclose(self):
-                await inner.aclose()
+                try:
+                    if rec.get("response_decrypted") is None:
+                        if _SSE_DONE in self._tail:
+                            drained = 0
+                            try:
+                                while drained <= DRAIN_AFTER_DONE_BYTES:
+                                    try:
+                                        drained += len(await self._it.__anext__())
+                                    except StopAsyncIteration:
+                                        rec["response_decrypted"] = True
+                                        break
+                            except Exception:
+                                rec["response_decrypted"] = False
+                        if rec.get("response_decrypted") is None:
+                            rec["stream_closed_before_eof"] = True
+                finally:
+                    await inner.aclose()
         response.stream = _A()
     else:
         class _S(httpx.SyncByteStream):
+            def __init__(self):
+                self._it = iter(inner)
+                self._tail = b""
+
             def __iter__(self):
                 try:
-                    for chunk in inner:
+                    for chunk in self._it:
+                        self._tail = (self._tail + chunk)[-64:]
                         yield chunk
                 except Exception:
                     rec["response_decrypted"] = False
@@ -629,7 +704,23 @@ def _wrap_stream_for_decryption_flag(response, rec: dict) -> None:
                 rec["response_decrypted"] = True
 
             def close(self):
-                inner.close()
+                try:
+                    if rec.get("response_decrypted") is None:
+                        if _SSE_DONE in self._tail:
+                            drained = 0
+                            try:
+                                for chunk in self._it:
+                                    drained += len(chunk)
+                                    if drained > DRAIN_AFTER_DONE_BYTES:
+                                        break
+                                else:
+                                    rec["response_decrypted"] = True
+                            except Exception:
+                                rec["response_decrypted"] = False
+                        if rec.get("response_decrypted") is None:
+                            rec["stream_closed_before_eof"] = True
+                finally:
+                    inner.close()
         response.stream = _S()
 
 
