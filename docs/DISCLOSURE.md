@@ -286,6 +286,10 @@ The plugin reads these environment variables:
 
 - `TINFOIL_API_KEY` and `NEAR_AI_API_KEY`, through Hermes (provider `env_vars`, or
   `agent.secret_scope.get_secret`), never from `os.environ` directly;
+- `OPENROUTER_API_KEY` and `NOUS_API_KEY`, whether each is set and nothing else, through
+  `agent.secret_scope.get_secret`, when you lock or run `check`: the preflight reports whether Hermes'
+  side-call fall-through to OpenRouter or Nous would have a credential. The plugin sends neither key
+  anywhere. Both are declared under `optional_env` in `plugin.yaml` and the catalog entry;
 - `TERMINAL_ENV`, to resolve the terminal backend as Hermes does;
 - `HERMES_HOME`, to tell whether a path a tool call names lies in the Hermes home;
 - `TERMINAL_CWD`, to find a script file a locked tool call runs;

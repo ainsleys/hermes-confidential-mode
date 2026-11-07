@@ -70,3 +70,10 @@ capabilities:
     - tool_execution
   requires_env:
     - TINFOIL_API_KEY
+  # The same list as plugin.yaml's optional_env. NEAR_AI_API_KEY is for the attested-near provider only;
+  # OPENROUTER_API_KEY and NOUS_API_KEY are presence checks only (through agent.secret_scope.get_secret), to
+  # report whether Hermes' side-call fall-through to OpenRouter or Nous would have a credential.
+  optional_env:
+    - NEAR_AI_API_KEY
+    - OPENROUTER_API_KEY
+    - NOUS_API_KEY

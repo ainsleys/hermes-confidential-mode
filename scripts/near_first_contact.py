@@ -11,18 +11,19 @@ What it does, in order:
   3. Writes everything it recorded (evidence and the per-send rows, no API key, no message text) to
      --out, then replays it offline with confidential_mode.verify.replay_near and prints the verdicts.
 
-The API key is read from the environment and only ever sent as the Authorization header to the
-configured base URL. It is not printed, logged or written to --out.
+The API key is read through Hermes' secret scope (agent.secret_scope.get_secret, catalog rule 11), so set
+HERMES_HOME to the Hermes home whose profile holds NEAR_AI_API_KEY (or export the variable, which the
+secret scope also honours outside a multiplexed gateway). The key is only ever sent as the Authorization
+header to the configured base URL. It is not printed, logged or written to --out.
 
 Run it in Hermes' environment (it needs tinfoil 0.14.2 for the TDX quote check), for example:
-    cd ~/hermes-agent && NEAR_AI_API_KEY=... UV_PROJECT_ENVIRONMENT=<venv with tinfoil> uv run --no-sync \\
+    cd ~/hermes-agent && HERMES_HOME=~/.hermes UV_PROJECT_ENVIRONMENT=<venv with tinfoil> uv run --no-sync \\
       python ~/hermes-confidential-mode/scripts/near_first_contact.py --model Qwen/Qwen3.8-27B
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -35,6 +36,15 @@ from confidential_mode.verify import near, replay_near  # noqa: E402
 PROMPT = [{"role": "user", "content": "Reply with the word ok."}]
 
 
+def _near_key() -> str:
+    """NEAR_AI_API_KEY through Hermes' secret scope; "" when Hermes is not importable or the scope refuses."""
+    try:
+        from agent.secret_scope import get_secret
+        return (get_secret("NEAR_AI_API_KEY") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", action="append", default=None, help="model id (repeatable); default Qwen/Qwen3.8-27B")
@@ -43,8 +53,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-send", action="store_true", help="attest only, even when NEAR_AI_API_KEY is set")
     args = ap.parse_args(argv)
     models = args.model or ["Qwen/Qwen3.8-27B"]
-    key = os.environ.get("NEAR_AI_API_KEY", "").strip()
-    print(f"NEAR_AI_API_KEY: {'set' if key else 'not set (attestation only)'}")
+    key = _near_key()
+    print(f"NEAR_AI_API_KEY: {'set' if key else 'not set or not readable through Hermes (attestation only)'}")
 
     rows: list[dict] = []
     with tempfile.TemporaryDirectory() as tmp:

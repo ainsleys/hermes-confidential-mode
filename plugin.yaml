@@ -7,10 +7,17 @@ kind: standalone
 requires_hermes: ">=0.22.7"
 requires_env:
   - TINFOIL_API_KEY
-# Needed only for the attested-near provider; most installs use one vendor (docs/DISCLOSURE.md, Credentials).
+# NEAR_AI_API_KEY is needed only for the attested-near provider; most installs use one vendor. The other two
+# are never used to send anything: the lock and `check` look only at whether each is set (through
+# agent.secret_scope.get_secret), to report whether Hermes' side-call fall-through to OpenRouter or Nous
+# would have a credential (docs/DISCLOSURE.md, Environment variables).
 optional_env:
   - name: NEAR_AI_API_KEY
     description: "NEAR AI Cloud API key, for the attested-near provider only"
+  - name: OPENROUTER_API_KEY
+    description: "Presence check only: whether Hermes' side-call fall-through to OpenRouter would have a key"
+  - name: NOUS_API_KEY
+    description: "Presence check only: whether Hermes' side-call fall-through to Nous would have a key"
 provides_tools: []
 provides_hooks:
   - pre_tool_call
