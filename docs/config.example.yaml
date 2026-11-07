@@ -1,4 +1,5 @@
-# PLUGIN_NAME: confidential-mode  (working name; the config section below is `confidential:` either way)
+# PLUGIN_NAME: confidential-mode  (final catalog slug; the prose name is Hermes Confidential Mode;
+# the config section below is `confidential:`)
 #
 # This is an example fragment of ~/.hermes/config.yaml for the attested tier. The attested tier
 # allows the model to run only in Tinfoil's verified enclave, or behind NEAR AI Cloud's verified
