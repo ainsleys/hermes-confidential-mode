@@ -56,6 +56,9 @@ _ON_HOST_NETWORKS = tuple(ipaddress.ip_network(n) for n in ("127.0.0.0/8", "::1/
 # Deliberately absent: 169.254.0.0/16 (cloud metadata), 0.0.0.0/::, and any non-dotted-quad IPv4
 # spelling (0x7f000001, 2130706433, 127.1): ipaddress rejects those, so they are unknown hostnames.
 
+#: Cloud metadata endpoints (AWS, GCP, Azure: 169.254.169.254; AWS IPv6: fd00:ec2::254). Never listable.
+_METADATA_ADDRESSES = frozenset(ipaddress.ip_address(a) for a in ("169.254.169.254", "fd00:ec2::254"))
+
 #: The config key that lists extra on-host hosts. Named in off-tier reasons.
 EXTRA_HOSTS_KEY = "confidential.on_host.extra_hosts"
 
@@ -136,7 +139,7 @@ def strict_host(base_url: Any) -> tuple[str, str]:
     return host, ""
 
 
-_ZONE = re.compile(r"^[a-z0-9_.-]{1,64}$")
+_ZONE = re.compile(r"^[a-z0-9_-]{1,64}$")   # no dot: a zone must not look like a domain
 
 
 def zone_problem(host: str) -> str:
@@ -195,8 +198,8 @@ def extra_host_problem(entry: Any) -> str:
         if zone_problem(h):
             return zone_problem(h)
         ip = _unmapped(_ip_of(h))
-        if str(ip) == "169.254.169.254":
-            return "is 169.254.169.254, the cloud metadata address, which is never a model host"
+        if ip in _METADATA_ADDRESSES:
+            return f"is {ip}, the cloud metadata address, which is never a model host"
         if ip.is_unspecified:
             return "is the unspecified address (0.0.0.0 or ::), which is not one host"
         if ip.is_multicast or str(ip) == "255.255.255.255":

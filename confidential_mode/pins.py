@@ -585,23 +585,15 @@ class PinStore:
 
     @contextlib.contextmanager
     def _mutating(self):
-        """Thread lock plus an advisory lock file, so a CLI and a gateway never interleave a read-modify-write."""
-        with self._lock:
-            fh = None
-            try:
-                import fcntl
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                fh = open(self.path.with_name(self.path.name + ".lock"), "a")
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            except (ImportError, OSError):
-                if fh is not None:
-                    fh.close()
-                fh = None
-            try:
+        """Thread lock plus an advisory lock file, so a CLI and a gateway never interleave a read-modify-write.
+        Bounded (filelock.exclusive, Amendment 9 review N1): a lock held elsewhere raises PinStoreError naming
+        pins.yaml.lock instead of hanging; every caller already fails closed on PinStoreError."""
+        from .filelock import LockBusy, exclusive
+        try:
+            with exclusive(self.path.with_name(self.path.name + ".lock"), thread_lock=self._lock):
                 yield
-            finally:
-                if fh is not None:
-                    fh.close()
+        except LockBusy as exc:
+            raise PinStoreError(str(exc)) from None
 
     # ── persistence ──────────────────────────────────────────────────────────────────────────
     def load_file(self) -> PinFile:

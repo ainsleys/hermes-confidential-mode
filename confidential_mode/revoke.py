@@ -68,33 +68,13 @@ def _is_ours(entry: Any, tools: Optional[set[str]]) -> bool:
     return tools is None or entry[len(_prefix()):] in tools
 
 
-_THREAD_LOCKS: dict[str, threading.Lock] = {}
-_THREAD_LOCKS_GUARD = threading.Lock()
-
-
 @contextlib.contextmanager
 def file_lock(path: Any):
-    """Thread lock plus an advisory lock file ``<path>.lock`` (pins.PinStore._mutating), so two processes
-    never interleave a read-modify-write of one of the plugin's JSON files. Not reentrant."""
-    path = Path(path)
-    with _THREAD_LOCKS_GUARD:
-        tlock = _THREAD_LOCKS.setdefault(str(path), threading.Lock())
-    with tlock:
-        fh = None
-        try:
-            import fcntl
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fh = open(path.with_name(path.name + ".lock"), "a")
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            if fh is not None:
-                fh.close()
-            fh = None
-        try:
-            yield
-        finally:
-            if fh is not None:
-                fh.close()
+    """Bounded advisory lock on ``<path>.lock`` (filelock.exclusive), so two processes never interleave a
+    read-modify-write of one of the plugin's JSON files. Raises filelock.LockBusy when the lock stays held."""
+    from .filelock import exclusive, lock_path_for
+    with exclusive(lock_path_for(path)):
+        yield
 
 
 def allowed_on_disk(path: Any, lock_id: str) -> Optional[set[str]]:
@@ -333,8 +313,12 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
         locked = False
     lock_id = lock_id_for(rt.state) if locked is True else ""
     errors: list[str] = []
+    from .filelock import LockBusy
     try:
         from_allowlist = remove_allowlist_grants(getattr(rt, "allowlist_path", None), lock_id, tools)
+    except LockBusy as exc:
+        from_allowlist = []
+        errors.append(f"allowlist.yaml was not changed: {exc}")
     except Exception as exc:  # noqa: BLE001
         from_allowlist = []
         errors.append(f"allowlist.yaml could not be written ({type(exc).__name__})")
@@ -359,6 +343,9 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
             watcher.mark(rec_id)
         if not rec_id:
             errors.append("the plugin's data directory is unknown, so no running process was told")
+    except LockBusy as exc:
+        errors.append(f"the revocation record was not written: {exc}; a running gateway keeps any session grant "
+                      "until its session ends")
     except Exception as exc:  # noqa: BLE001
         errors.append(f"the revocation record could not be written ({type(exc).__name__}), so a running gateway "
                       "keeps any session grant until its session ends")

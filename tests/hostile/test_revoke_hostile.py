@@ -139,3 +139,46 @@ def test_a_forged_record_only_narrows(plugin, monkeypatch):
     plugin.human("deny")
     model_tools.handle_function_call("web_search", {"q": 2}, task_id="t", session_id="s", tool_call_id="c2")
     assert ran == [{"q": 1}] and len(plugin.prompts) == 2
+
+
+@pytest.mark.parametrize("held", ["allowlist.yaml.lock", "grants_revoked.json.lock"])
+def test_a_held_lock_file_fails_the_revoke_instead_of_hanging(plugin, monkeypatch, held):
+    """Review N1: a process holding a lock file (an agent could, from a terminal) must not hang revoke or let
+    it pass silently. The revoke fails within the bound, names the lock file, and ledgers that."""
+    import fcntl
+    import time as _time
+    fl = _sub(plugin, "filelock")
+    monkeypatch.setattr(fl, "INTERVAL_SECONDS", 0.01)
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    _with_allowlist(plugin, [OURS])
+    data = json.loads(plugin.rt.allowlist_path.read_text())
+    data["allowed"] = ["web_search"]
+    plugin.rt.allowlist_path.write_text(json.dumps(data))
+    fh = open(plugin.rt.allowlist_path.parent / held, "a")
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)           # another open file description: conflicts like a process
+    try:
+        t0 = _time.monotonic()
+        out = plugin.slash("revoke web_search")
+        assert _time.monotonic() - t0 < 5
+    finally:
+        fh.close()
+    assert out.startswith("Revoke failed for web_search:") and held in out, out
+    row = _grant_rows(plugin)[-1]
+    detail = row.detail if isinstance(row.detail, dict) else json.loads(row.detail)
+    assert row.decision == "revoke_failed" and any(held in e for e in detail["errors"])
+
+
+def test_a_held_pins_lock_raises_instead_of_hanging(plugin, monkeypatch):
+    import fcntl
+    fl = _sub(plugin, "filelock")
+    monkeypatch.setattr(fl, "INTERVAL_SECONDS", 0.01)
+    pins = plugin.rt.pins
+    pins.path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(pins.path.with_name(pins.path.name + ".lock"), "a")
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    try:
+        with pytest.raises(_sub(plugin, "pins").PinStoreError, match="pins.yaml.lock"):
+            pins.clear_pending()
+    finally:
+        fh.close()
+    pins.clear_pending()                                # free again: works

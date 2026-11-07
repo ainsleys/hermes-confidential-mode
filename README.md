@@ -405,7 +405,7 @@ its range and the `confidential.on_host.extra_hosts` key.
 **What listing a host means.** Each entry in `extra_hosts` is one exact host name or one IP address.
 A range, a wildcard, a URL or a port is refused, and the lock fails until you fix the entry. The
 unspecified addresses `0.0.0.0` and `::`, multicast and broadcast addresses, and the cloud metadata
-address `169.254.169.254` are refused too. A zone id such as `%en0` is accepted only on an IPv6
+addresses `169.254.169.254` and `fd00:ec2::254` are refused too. A zone id such as `%en0` is accepted only on an IPv6
 link-local address. Listing `10.0.0.5` admits that one address and no other address in `10.0.0.0/8`.
 
 A listed host name matches only that exact name. The plugin does not look the name up. The HTTP
@@ -1046,7 +1046,8 @@ rule key a caller chooses, and does not reserve the prefix for this plugin. A re
 under the prefix, which only narrows.
 
 Writes to `allowlist.yaml` and `grants_revoked.json` take a lock file next to each file, so a command
-line revoke and a gateway never interleave a change. An approval prompt already open in the gateway can
+line revoke and a gateway never interleave a change. The plugin waits at most two seconds for a lock.
+When another process holds the lock longer, the revoke fails, names the lock file, and exits non-zero. An approval prompt already open in the gateway can
 still be answered after a revoke, and that answer grants the tool again. A tool call already past the
 gate finishes.
 

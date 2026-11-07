@@ -567,6 +567,7 @@ def test_own_hostname_true_is_rechecked_after_the_ttl(monkeypatch):
     "http://127.0.0.1%25evil.com/v1", "http://127.0.0.1%25/v1", "http://127.0.0.1%25lo0/v1",
     "http://[::1%25evil.com]/v1", "http://[::1%25lo0]/v1", "http://[::ffff:127.0.0.1%25lo0]/v1",
     "http://[fe80::1%25evil.com:80]/v1", "http://[fe80::1%25a/b]/v1", "http://[fd00::1%25en0]/v1",
+    "http://[fe80::1%25en0.evil.com]/v1",
 ])
 def test_zone_id_only_on_ipv6_link_local(monkeypatch, url):
     v = classify(on_host(monkeypatch, extra_hosts=["fd00::1", "127.0.0.1"]), dest(url))
@@ -588,7 +589,9 @@ def test_listed_host_reason_differs_from_loopback(monkeypatch):
 @pytest.mark.parametrize("entry,word", [
     ("169.254.169.254", "metadata"), ("::ffff:169.254.169.254", "metadata"), ("0.0.0.0", "unspecified"),
     ("::", "unspecified"), ("224.0.0.1", "multicast"), ("239.255.255.250", "multicast"), ("ff02::1", "multicast"),
-    ("255.255.255.255", "broadcast"), ("127.0.0.1%lo0", "zone"),
+    ("255.255.255.255", "broadcast"), ("127.0.0.1%lo0", "zone"), ("fe80::1%en0.evil", "zone"),
+    ("fd00:ec2::254", "fd00:ec2::254, the cloud metadata address"),
+    ("[FD00:EC2:0::254]", "fd00:ec2::254, the cloud metadata address"),
 ])
 def test_extra_hosts_refuses_addresses_that_are_not_one_host(monkeypatch, entry, word):
     assert word in tiers.extra_host_problem(entry)
