@@ -251,7 +251,8 @@ def test_the_config_changing_mid_turn_refuses_the_main_call(plugin):
     plugin.cfg.write_text(BASE_CONFIG + "fallback_providers:\n  - provider: openrouter\n    model: x/y\n")
     calls = []
     out = _chain(lambda req: calls.append(req) or "sent")
-    assert calls == [] and "routing config changed since lock" in out.choices[0].message.content
+    # The gate's own per-turn recheck (Amendment 13) refuses first; the predicate is the line behind it.
+    assert calls == [] and "routing config changed" in out.choices[0].message.content
 
 
 # ── ask_choice misbehaving ───────────────────────────────────────────────────────────────────────

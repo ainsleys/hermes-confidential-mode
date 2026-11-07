@@ -224,8 +224,13 @@ class LlmGate:
                  predicate_for: Callable[[Tier], TierPredicate],
                  attested_ok: Callable[[str], Verdict],
                  pin_pending: Callable[[], bool] | None = None,
-                 builders: Mapping[str, Callable[[str], Any]] | None = None):
+                 builders: Mapping[str, Callable[[str], Any]] | None = None,
+                 turn_check: Callable[[Mapping[str, Any], Tier], Any] | None = None):
         self.ledger = ledger
+        # The full per-turn recheck (Amendment 13, S17): ``turn_check(context, tier)`` returns None or
+        # (refusal text, reason code). Hermes can skip pre_llm_call (timeout, persistence disabled, safe-worker),
+        # never this middleware, so the recheck runs here too; the result is cached per turn.
+        self.turn_check = turn_check
         self.is_locked = is_locked
         self.predicate_for = predicate_for
         self.attested_ok = attested_ok
@@ -276,6 +281,13 @@ class LlmGate:
                         nbytes=request_bytes(request), decision="observed")
             with self.send_context(dest, context, None):
                 return next_call(request)
+
+        if self.turn_check is not None:
+            found = self.turn_check(context, tier)
+            if found is not None:
+                text, code = found
+                return self.refuse(dest, context, tier, Verdict(False, str(code), _host(dest.base_url)), str(text),
+                                   reason_code=str(code), nbytes=request_bytes(request))
 
         predicate = self.predicate_for(tier)
         if not self.same_tier(Tier(predicate.tier), tier):
@@ -456,7 +468,8 @@ class LlmGate:
 
 
 def build_middleware(*, ledger, is_locked, predicate_for, attested_ok, pin_pending=None,
-                     builders=None, gate_cls: type[LlmGate] = LlmGate) -> Callable[..., Any]:
+                     builders=None, gate_cls: type[LlmGate] = LlmGate, turn_check=None) -> Callable[..., Any]:
     """Return the callable for ``ctx.register_middleware("llm_execution", fn)``."""
     return gate_cls(ledger=ledger, is_locked=is_locked, predicate_for=predicate_for,
-                    attested_ok=attested_ok, pin_pending=pin_pending, builders=builders).as_middleware()
+                    attested_ok=attested_ok, pin_pending=pin_pending, builders=builders,
+                    turn_check=turn_check).as_middleware()

@@ -122,11 +122,20 @@ error instead of sending. The max-iterations summary call needs the same treatme
 
 ### A related case: the per-turn check can be skipped
 
-`pre_llm_call` is the hook the plugin uses for its per-turn check. It is a timeout-bounded hook. If it
-runs longer than `plugins.hook_callback_timeout`, Hermes skips it and runs the turn anyway
-(`hermes_cli/plugins_dispatch.py:42-52` and `:301-312`).
+`pre_llm_call` is a timeout-bounded hook. If it runs longer than `plugins.hook_callback_timeout` (30
+seconds by default, `hermes_cli/plugins_dispatch.py:183`), Hermes abandons it, suppresses it for 60
+seconds and runs the turn anyway (`:42-52` and `:301-312`). Hermes also skips the hook for agents with
+persistence disabled (`agent/turn_context.py:858`). The `llm_execution` gate is never skipped, so the
+plugin runs the whole per-turn check there too: the structural preflight recheck, its breach rows and
+the live-runtime check, once per turn, sharing one result with the hook. A turn whose hook was skipped
+still has every main call refused when that check fails.
 
-The plugin handles this in three steps.
+What a skipped hook still loses: the veto over the side calls Hermes makes before the first main call
+of a turn (turn-start compaction, memory prefetch, title generation), which run and are only recorded,
+and the locked note in the model's context. The hook does no network I/O and only the per-turn check,
+so on a normal config it ends far inside the timeout.
+
+The plugin also guards the timeout itself, in three steps.
 
 1. The preflight includes every `plugins.*` key that governs hooks in the config fingerprint
    (`_PLUGIN_EXECUTION_KEYS` in `confidential_mode/preflight.py`).
@@ -134,8 +143,8 @@ The plugin handles this in three steps.
 3. If someone edits the timeout after locking, the fingerprint changes. The `llm_execution` gate
    then refuses the main call.
 
-One case remains. A title-generation call can run before the main call in a turn. Such a call is
-only recorded in the ledger, not refused.
+One case remains. A title-generation call can run before the main call in a turn whose hook was
+skipped. Such a call is only recorded in the ledger, not refused.
 
 ## 2. The CLI approve directive grants on any answer except "deny"
 
@@ -775,9 +784,9 @@ Each item below is a smaller gap. Each one is stated in full.
 
 - **Persistence-disabled agents skip `pre_llm_call`.** Hermes skips `pre_llm_call` for agents with
   persistence disabled (`agent/turn_context.py:858`), such as the background review agent. The
-  plugin's middleware still checks each main call's destination and the config fingerprint. The
-  live-runtime check runs only in `pre_llm_call`, so it does not run for these agents. An auxiliary
-  call such an agent makes on a drifted runtime is recorded, not refused.
+  plugin's middleware runs the same per-turn check for their main calls (the preflight recheck, the
+  breach rows and the live-runtime check). An auxiliary call such an agent makes before its first main
+  call on a drifted runtime is recorded, not refused, and the agent gets no locked note.
 
 - **A timing window around yolo.** If yolo mode is switched on or off between the hook's thread and the
   agent's thread, there is a short window in which the two disagree.

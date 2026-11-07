@@ -23,7 +23,7 @@ import importlib
 import logging
 import os
 import threading
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ RUNTIME_SWITCH_COMMANDS = frozenset({"model", "moa"})
 # them switches the model runtime. Matched on the exact typed word, so an alias is refused.
 UNRESOLVED_SAFE_COMMANDS = frozenset({"confidential", "stop", "pause", "approve", "deny", "new", "help", "status"})
 MIDDLEWARE = ("llm_execution", "tool_execution")
+TURN_CACHE_MAX = 256   # per-turn recheck results kept (Runtime.turn_check)
 NO_SESSION = "(no session)"
 
 _RUNTIME: Optional["Runtime"] = None   # the last registered runtime (commands, tests)
@@ -79,6 +80,10 @@ class Runtime:
         self.reply_notices: dict = {}
         self._notice_lock = threading.Lock()
         self.progress: Any = None   # progress.Progress while a terminal command runs (cli_verb); else quiet
+        # Amendment 13 (S17): the per-turn recheck's result, keyed by (session id, turn id), shared by the
+        # pre_llm_call hook and the llm gate so the work runs once per turn whichever of the two runs first.
+        self._turn_checks: "OrderedDict[tuple[str, str], Any]" = OrderedDict()
+        self._turn_lock = threading.Lock()
 
     # ── shared collaborators ──────────────────────────────────────────────────────────────────
     def module(self, name: str):
@@ -156,10 +161,57 @@ class Runtime:
                      "detail": {"tools": len(allowlist.tools)}})
         return allowlist
 
+    def turn_check(self, session_id: str, turn_id: str, tier: Any) -> Optional[tuple[str, str]]:
+        """The full per-turn recheck (Amendment 13, S17): the structural preflight recheck
+        (``locking.recheck``, which writes the ``config_changed`` / ``preflight_failed`` breach rows) and the
+        live-runtime check (``live_runtime_off_tier`` / ``live_runtime_unreadable`` rows, mark_breached). Returns
+        None, or (block text, reason code). Read-only apart from those rows; no network. Cached per
+        (session id, turn id): the pre_llm_call hook and the llm gate share one result per turn, and a turn
+        whose hook Hermes skipped still gets the whole check from the gate. A turn with no id is never cached.
+        Never raises."""
+        key = (str(session_id or ""), str(turn_id or ""))
+        if key[1]:
+            with self._turn_lock:
+                if key in self._turn_checks:
+                    return self._turn_checks[key]
+        result = self._turn_check_uncached(key[0], tier)
+        if key[1]:
+            with self._turn_lock:
+                self._turn_checks[key] = result
+                while len(self._turn_checks) > TURN_CACHE_MAX:
+                    self._turn_checks.popitem(last=False)
+        return result
+
+    def _turn_check_uncached(self, session_id: str, tier: Any) -> Optional[tuple[str, str]]:
+        try:
+            locking = _cm("locking")
+        except Exception:  # noqa: BLE001
+            return ("Confidential mode: the plugin failed to load; turn not sent.", "plugin_unloadable")
+        try:
+            message = locking.recheck(state=self.state, ledger=self.ledger, config=self.load_config(),
+                                      session_id=session_id)
+        except Exception as exc:  # noqa: BLE001
+            return ((f"Confidential mode: the locked-config recheck failed ({type(exc).__name__}), so this turn "
+                     "was not sent. Run /confidential check."), "recheck_failed")
+        if message:
+            code = "config_changed" if message == getattr(locking, "CONFIG_CHANGED_TEXT", None) else "preflight_failed"
+            return (message, code)
+        try:
+            message = _live_runtime_check(self, locking, tier, session_id)
+        except Exception as exc:  # noqa: BLE001
+            return ((f"Confidential mode: the live-runtime check failed ({type(exc).__name__}), so this turn "
+                     "was not sent. Run /confidential status."), "live_runtime_check_failed")
+        if message:
+            last = self.last_live or {}
+            code = "live_runtime_unreadable" if str(last.get("reason", "")).startswith("live runtime unreadable") \
+                else "live_runtime_off_tier"
+            return (message, code)
+        return None
+
     def predicate_for(self, tier):
         """The locked tier's predicate for the llm gate. If the routing config no longer matches the
         fingerprint recorded at lock, every destination is off-tier (second line behind pre_llm_call,
-        which Hermes skips for agents with persistence disabled: agent/turn_context.py:860)."""
+        which Hermes skips for agents with persistence disabled: agent/turn_context.py:858)."""
         locking = _cm("locking")
         config = self.load_config()
         if not locking.fingerprint_matches(self.state.config_fingerprint(), config,
@@ -375,9 +427,11 @@ def _register(rt: Runtime) -> None:
     # -- llm gate -----------------------------------------------------------------------------
     def llm():
         provider = _cm("provider")
+        def turn_check(context, tier):
+            return rt.turn_check(str(context.get("session_id") or ""), str(context.get("turn_id") or ""), tier)
         mw = _cm("gate_llm").build_middleware(ledger=rt.ledger, is_locked=rt.is_locked,
                                                predicate_for=rt.predicate_for, attested_ok=provider.attested_ok,
-                                               pin_pending=rt.pin_pending)
+                                               pin_pending=rt.pin_pending, turn_check=turn_check)
         _middleware(rt, "llm_execution", mw)
     _step(rt, "llm_execution", llm)
 
@@ -500,7 +554,12 @@ def _transform_llm_output(rt: Runtime):
 
 
 def _pre_llm_call(rt: Runtime):
-    def pre_llm_call(session_id: str = "", **_kw: Any):
+    """The pre-main veto and the locked note. Hermes bounds this hook (30 s, hermes_cli/plugins_dispatch.py:183),
+    skips it when the agent's persistence is disabled (agent/turn_context.py:858) and in safe-worker mode, and
+    then runs the turn with no veto; the llm gate runs the same per-turn check (Runtime.turn_check), so a
+    skipped hook loses only the veto over the side calls before the main call (turn-start compaction, memory
+    prefetch, titling) and the note. The hook does no network I/O and no work beyond that check."""
+    def pre_llm_call(session_id: str = "", turn_id: str = "", **_kw: Any):
         try:
             gate_llm, locking = _cm("gate_llm"), _cm("locking")
         except Exception:  # noqa: BLE001
@@ -512,20 +571,12 @@ def _pre_llm_call(rt: Runtime):
         if locked is not True:
             return None
         try:
-            message = locking.recheck(state=rt.state, ledger=rt.ledger, config=rt.load_config(),
-                                      session_id=session_id or "")
+            found = rt.turn_check(session_id or "", turn_id or "", tier)
         except Exception as exc:  # noqa: BLE001
-            message = (f"Confidential mode: the locked-config recheck failed ({type(exc).__name__}), so this turn "
-                       "was not sent. Run /confidential check.")
-        if message:
-            return {"action": "block", "message": message}
-        try:
-            message = _live_runtime_check(rt, locking, tier, session_id or "")
-        except Exception as exc:  # noqa: BLE001
-            message = (f"Confidential mode: the live-runtime check failed ({type(exc).__name__}), so this turn "
-                       "was not sent. Run /confidential status.")
-        if message:
-            return {"action": "block", "message": message}
+            found = (f"Confidential mode: the locked-config recheck failed ({type(exc).__name__}), so this turn "
+                     "was not sent. Run /confidential check.", "recheck_failed")
+        if found:
+            return {"action": "block", "message": found[0]}
         return {"context": locking.LOCKED_NOTE.format(tier=tier.value)}
     return pre_llm_call
 

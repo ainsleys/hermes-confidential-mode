@@ -547,8 +547,9 @@ first.
 fingerprint recorded at lock time, every turn is blocked until you unlock and lock again.
 
 **The live model runtime is checked every turn.** `/model` and the `--provider` flag can switch one
-session's model without changing your config. The `pre_llm_call` hook checks the live runtime at the
-start of every locked turn and ends the turn if it's off-tier. On gateway surfaces, `/model` and
+session's model without changing your config. The plugin checks the live runtime at the start of every
+locked turn and ends the turn if it's off-tier. The check runs in the `pre_llm_call` hook and again in
+the model-call gate, so a turn whose hook Hermes skipped is still checked before its first model call. On gateway surfaces, `/model` and
 `/moa` are refused outright while locked. On the CLI and the TUI, the plugin can't intercept `/model`:
 the next turn's check catches the switch, but side calls Hermes makes in between are only recorded.
 
