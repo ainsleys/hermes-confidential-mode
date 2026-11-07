@@ -146,21 +146,49 @@ def _all_rows(ledger, since_id: int = 0, page: int = 1000) -> list:
             return out
 
 
+def _rows_from(ledger, start: int, *, stop_after: int | None = None, until=None, page: int = 1000) -> list:
+    """Rows with id >= start, oldest first, read a page at a time; stops past ``stop_after`` or at the first
+    row for which ``until(row)`` is true (that row included)."""
+    out, cursor = [], max(0, start - 1)
+    while True:
+        limit = page if stop_after is None else max(1, min(page, stop_after - cursor))
+        batch = ledger.tail(cursor, limit=limit)
+        for r in batch:
+            if stop_after is not None and r.id > stop_after:
+                return out
+            out.append(r)
+            if until is not None and until(r):
+                return out
+        if len(batch) < limit:
+            return out
+        cursor = batch[-1].id
+
+
 def collect_rows(ledger, session_id: str, *, include_profile_rows: bool = True) -> list:
-    """The ledger rows a receipt for ``session_id`` covers, in id order (see module docstring)."""
+    """The ledger rows a receipt for ``session_id`` covers, in id order (see module docstring).
+
+    Only the session's locked period is read (review finding 22): from the unlock before the session's
+    first row to the lock or unlock after its last row, not the whole ledger."""
     own = ledger.session(session_id)
     if not include_profile_rows or not own:
         return list(own)
-    rows = _all_rows(ledger)
     first, last = own[0].id, own[-1].id
     # Profile-wide rows count from the end of the previous locked period: the lock in force, and the
     # preflight failures and verifications that led up to it, are part of this session's story.
-    unlock_before = [r for r in rows if r.kind == "unlock" and r.id < first]
-    start = unlock_before[-1].id + 1 if unlock_before else 0
+    if hasattr(ledger, "last_id_before"):
+        unlock_id = ledger.last_id_before("unlock", first)
+        start = unlock_id + 1 if unlock_id is not None else 0
+        rows = _rows_from(ledger, start, stop_after=last)
+        after = _rows_from(ledger, last + 1, until=lambda r: r.kind == "unlock" or _is_lock(r), page=64)
+    else:   # a ledger without the bounded query (tests' fakes): read everything, as before
+        rows = _all_rows(ledger)
+        unlock_before = [r for r in rows if r.kind == "unlock" and r.id < first]
+        start = unlock_before[-1].id + 1 if unlock_before else 0
+        after = [r for r in rows if r.id > last]
     picked = [r for r in rows if start <= r.id <= last
               and (r.session_id == session_id or (r.kind in PROFILE_KINDS and not is_session_marker(r)))]
     # The unlock that closes the period, if it came after the session's last row.
-    after = [r for r in rows if r.id > last and (r.kind == "unlock" or _is_lock(r))]
+    after = [r for r in after if r.kind == "unlock" or _is_lock(r)]
     if after and after[0].kind == "unlock":
         picked.append(after[0])
     return picked

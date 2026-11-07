@@ -209,6 +209,13 @@ class Ledger:
         return self._rows(f"SELECT {', '.join(_COLUMNS)} FROM events WHERE id > ? ORDER BY id LIMIT ?",
                           (int(since_id), int(limit)))
 
+    def last_id_before(self, kind: str, before_id: int) -> int | None:
+        """The id of the latest event of ``kind`` with id < ``before_id``, or None (receipts bound their read)."""
+        with self._lock:
+            row = self._db().execute("SELECT MAX(id) FROM events WHERE kind = ? AND id < ?",
+                                     (kind, int(before_id))).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
     def session(self, session_id: str) -> list[LedgerEvent]:
         """Every event for one session, oldest first (receipts)."""
         return self._rows(f"SELECT {', '.join(_COLUMNS)} FROM events WHERE session_id = ? ORDER BY id",

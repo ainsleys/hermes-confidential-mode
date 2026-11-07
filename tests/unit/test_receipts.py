@@ -686,3 +686,34 @@ def test_unstamped_checkout_reports_its_git_commit_without_running_git(tmp_path)
     assert checkout_commit(tmp_path / "nothing") is None
     (detached / ".git" / "HEAD").write_text("not a sha\n")
     assert checkout_commit(detached) is None
+
+
+def test_receipt_reads_only_the_sessions_locked_period(ledger):
+    """Review finding 22: a receipt reads the rows from the unlock before the session to the lock or unlock
+    after it, not the whole ledger, and the result is the same as the full read."""
+    for i in range(50):                                        # an older locked period, long finished
+        ledger.append(_ev("send_observed", session_id=f"old-{i}", purpose="main", host="127.0.0.1"))
+    ledger.append(_ev("unlock", session_id=""))
+    lock = ledger.append(_ev("lock", session_id="", tier="on-host-only"))
+    ledger.append(_ev("send_observed", purpose="main", host="127.0.0.1"))
+    ledger.append(_ev("unlock", session_id=""))
+    for i in range(30):                                        # later periods
+        ledger.append(_ev("send_observed", session_id=f"new-{i}", purpose="main", host="127.0.0.1"))
+    seen = []
+    real_tail = ledger.tail
+
+    def tail(since_id=0, limit=1000):
+        out = real_tail(since_id, limit)
+        seen.extend(r.id for r in out)
+        return out
+    ledger.tail = tail
+    bounded = [r.id for r in receipts.collect_rows(ledger, SID)]
+    assert min(seen) > 50 and len(seen) < 70, seen          # rows 1-50 (the older period) are never read
+    del ledger.tail
+
+    class Unbounded:                                           # the old full read, for comparison
+        def __getattr__(self, name):
+            if name == "last_id_before":
+                raise AttributeError(name)
+            return getattr(ledger, name)
+    assert [r.id for r in receipts.collect_rows(Unbounded(), SID)] == bounded and lock in bounded
