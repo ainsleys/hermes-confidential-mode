@@ -694,32 +694,22 @@ def test_cli_verbs_parse(plugin):
     assert parser.parse_args(["off"]).confidential_action == "off"
 
 
-def test_near_setup_block_routes_no_vision_through_near(plugin, capsys):
-    """With encryption on, the NEAR transport refuses every image part, so `setup --vendor near` leaves
-    auxiliary.vision unset and prints a note naming the in-tier choices; every other task is on NEAR."""
+def test_near_setup_block_routes_vision_through_near_with_the_plaintext_note(plugin, capsys):
+    """Amendment 9: image parts leave as plaintext to NEAR's gateway beside the encrypted text, so `setup
+    --vendor near` routes auxiliary.vision through attested-near again, with a NEAR vision model and a note."""
     out, cfg = _setup_block(plugin, capsys, "--vendor", "near", "--model", "Qwen/Qwen3.8-27B")
     aux = cfg["auxiliary"]
     assert cfg["model"] == {"provider": "attested-near", "default": "Qwen/Qwen3.8-27B"}
-    assert "vision" not in aux
-    assert aux and all(v == {"provider": "attested-near", "model": "Qwen/Qwen3.8-27B"} for v in aux.values())
-    assert cfg["confidential"]["near"]["models"] == ["Qwen/Qwen3.8-27B"]
-    assert out.index("auxiliary.vision is left unset") < out.index("# Add to config.yaml")
-    assert "# vision: not set here, and not routed through attested-near." in out
+    assert aux["vision"] == {"provider": "attested-near", "model": "Qwen/Qwen3-VL-30B-A3B-Instruct"}
+    assert all(v == {"provider": "attested-near", "model": "Qwen/Qwen3.8-27B"} for k, v in aux.items() if k != "vision")
+    assert cfg["confidential"]["near"]["models"] == ["Qwen/Qwen3-VL-30B-A3B-Instruct", "Qwen/Qwen3.8-27B"]
+    assert cfg["confidential"]["near"]["image_parts"] == "disclose"
+    assert out.index("auxiliary.vision goes through attested-near") < out.index("# Add to config.yaml")
+    assert "each image leaves" in out and "in plaintext to NEAR's gateway" in out
     assert "#   vision: {provider: attested-tinfoil, model: gemma4-31b}" in out
     locking = _sub(plugin, "locking")
-
-    def preflight(c):
-        return locking.run_tier_preflight("attested", config=c,
-                                          predicate=locking.structural_predicate("attested", config=c))
-    # As printed, the attested preflight refuses on vision alone, which is what the note says.
-    report = preflight(cfg)
-    failing = [i.key for i in report.items if i.verdict not in ("in_tier", "on_host", "disabled")]
-    assert failing == ["auxiliary.vision.provider"], failing
-    # Either in-tier choice the note names then passes the preflight structurally.
-    for vision in ({"provider": "attested-tinfoil", "model": "gemma4-31b"},
-                   {"provider": "attested-near", "model": "Qwen/Qwen3.8-27B"}):
-        fixed = {**cfg, "auxiliary": {**aux, "vision": vision}}
-        report = preflight(fixed)
-        assert report.ok, _sub(plugin, "preflight").format_report(report)
-    out, _ = _setup_block(plugin, capsys, "--vendor", "near", "--model", "m", "--vision-model", "v")
-    assert "#   vision: {provider: attested-tinfoil, model: v}" in out
+    report = locking.run_tier_preflight("attested", config=cfg,
+                                        predicate=locking.structural_predicate("attested", config=cfg))
+    assert report.ok, _sub(plugin, "preflight").format_report(report)
+    out, cfg = _setup_block(plugin, capsys, "--vendor", "near", "--model", "m", "--vision-model", "v")
+    assert cfg["auxiliary"]["vision"]["model"] == "v" and cfg["confidential"]["near"]["models"] == ["m", "v"]

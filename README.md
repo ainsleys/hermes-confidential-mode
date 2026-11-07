@@ -86,7 +86,7 @@ refuses and what it cannot.
 ## What the lock costs you
 
 Locking changes which models you can use, removes fallbacks and prompts on tools that leave the
-machine. On NEAR it also turns streaming off and refuses images. [docs/COSTS.md](docs/COSTS.md)
+machine. On NEAR it also turns streaming off, and images leave in plaintext to NEAR's gateway. [docs/COSTS.md](docs/COSTS.md)
 states the expected effect on latency, response quality and task success for each mode, compared
 with running Hermes without the plugin, and says which of those figures the ledger can measure.
 
@@ -562,14 +562,26 @@ What this establishes, and what it does not:
 
 The plugin refuses some requests before they are sent.
 
-- The plugin refuses images and other non-text parts in a message, because NEAR's encryption covers
-  only text.
 - The plugin refuses streaming, because NEAR signs streamed replies with the gateway's key only.
 - The plugin refuses every NEAR API other than chat completions.
 - The plugin refuses a setting whose value is a mapping, such as a reasoning effort under
   `extra_body`, unless the plugin knows the key. Such a mapping would leave this host in plaintext.
 
-So an image task, such as `auxiliary.vision`, cannot use `attested-near` while encryption is on.
+Images are not refused by default. NEAR's encryption covers only text. In a message that holds an
+image, the plugin encrypts every text part and sends every image part, and every other non-text part,
+in plaintext. So NEAR's gateway reads each image you send. The text around the image stays encrypted.
+NEAR's model still signs the reply with its `provider_tee` key, and the release rules are unchanged.
+
+- Each send's `send_signed` ledger row records the parts in `plaintext_parts`, with their count and
+  types. The receipt's line for that send says "N image part(s) left this host in plaintext to NEAR's
+  gateway".
+- The first time per lock that an image leaves to NEAR, the plugin writes a `notice` ledger row. It
+  also appends one line to that turn's reply: "Confidential mode: an image in this turn went to NEAR's
+  gateway in plaintext; the text around it was encrypted." The plugin adds that line through Hermes'
+  `transform_llm_output` hook.
+- `confidential.near.image_parts: refuse` refuses every message with a non-text part before it is
+  sent, as earlier versions did. The default is `disclose`. The preflight accepts both values and
+  shows the one in force.
 
 An HTTP 421 from the gateway means the model key it accepts has changed. A send over a TLS
 certificate other than the attested one is treated the same way. The plugin then verifies again, at
@@ -704,16 +716,13 @@ This command checks the gateway and the model, asks you to approve the first pin
 block. The command never writes your config. Approving a model entry needs the deployed
 docker-compose files from GitHub, as [Pins for NEAR](#pins-for-near) explains.
 
-The block routes the main model and every auxiliary task except vision through `attested-near`. The
-block leaves `auxiliary.vision` unset, because NEAR refuses images while encryption is on. The preflight
-refuses the attested lock until `auxiliary.vision` names an in-tier route. A note in the block names
-the two in-tier choices:
-
-- a vision model on `attested-tinfoil`, which needs `TINFOIL_API_KEY` and a Tinfoil pin;
-- `attested-near`, which passes the preflight but refuses every image before it is sent, so images
-  go undescribed.
-
-An on-host vision route is off-tier on the attested tier.
+The block routes the main model and every auxiliary task through `attested-near`. Vision goes to a
+NEAR vision model, `Qwen/Qwen3-VL-30B-A3B-Instruct` by default (`--vision-model` names another), and
+the block adds that model to `confidential.near.models`. A note above the vision entry says that each
+image leaves this host in plaintext to NEAR's gateway, while the text around it is encrypted. The note
+also names the two ways to keep images off NEAR: `confidential.near.image_parts: refuse`, or a vision
+model on `attested-tinfoil`, which needs `TINFOIL_API_KEY` and a Tinfoil pin. An on-host vision route
+is off-tier on the attested tier.
 
 Set `NEAR_AI_API_KEY` for inference, and install `pynacl` as described above. The script
 `scripts/near_first_contact.py` runs the same checks and one signed send, and prints no secrets.
@@ -1396,7 +1405,7 @@ vendor or to the SDK.
 | [11](docs/LIMITATIONS.md#11-context-length-probes-bypassed-the-attested-transport-mitigated-in-plugin) | Hermes probes the context window outside the attested transport. | Fixed in the plugin: both attested profiles answer the question themselves. |
 | [12](docs/LIMITATIONS.md#12-sdk-caches-outside-the-plugins-data-mitigated-in-plugin) | The tinfoil SDK and sigstore-python cache outside the plugin's data. | Fixed in the plugin: the caches are redirected. |
 | [13](docs/LIMITATIONS.md#13-no-mixed-attested-or-on-host-tier-planned) | A lock is one tier, so side jobs cannot run on-host while the main model is attested. | Nothing yet. A mixed tier is planned. |
-| [14](docs/LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open) | NEAR's signatures and evidence leave ten things open, such as the shared model key and what runs after launch. | Checks, encrypts, pins and records what this README's NEAR section describes. |
+| [14](docs/LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open) | NEAR's signatures and evidence leave eleven things open, such as plaintext images, the shared model key and what runs after launch. | Checks, encrypts, pins and records what this README's NEAR section describes. |
 | [15](docs/LIMITATIONS.md#15-an-agent-with-a-terminal-can-reach-the-approval-prompt) | An agent with a terminal can reach the approval prompt by some routes. | Refuses the plain routes and records every approval with its surface. |
 
 What the plugin touches on your machine and on the network is listed in

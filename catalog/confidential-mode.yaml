@@ -113,7 +113,7 @@ known_issues:
   - "If Hermes runs on someone else's machine, such as a cloud agent or a VPS, that machine's operator sees every prompt. Locked mode protects the road out of the Hermes process, not the process itself."
   - "hermes confidential replay requires the tinfoilsh/confidential-model-router repository by default, and takes the expected fingerprints from your approved pin. By default it still uses the trust root and the capture time recorded in the evidence; pass --trusted-root and --as-of to supply your own. Pass --expected-repo-id and --expected-owner-id to bind the repository by its numeric GitHub IDs as well as its name. A broken hash chain makes the replay exit 1. The first pin is trust on first use."
   - "There is no mixed 'attested or on-host' tier yet. It is planned. Until then, side jobs cannot run on an on-host model while the main model is attested."
-  - "NEAR AI Cloud: with request encryption on, which the lock requires, images and streaming are refused, so vision cannot run through attested-near. The gateway still reads the model id, plaintext parameters, headers, sizes and timing. Every instance of a model shares its key. The compose-manager check establishes what the operator's tooling reported, not what runs. docs/LIMITATIONS.md section 14 lists every open item."
+  - "NEAR AI Cloud: with request encryption on, which the lock requires, streaming is refused. Images leave as plaintext to NEAR's gateway beside the encrypted text, and each send records them; confidential.near.image_parts: refuse refuses them instead. The gateway still reads the model id, plaintext parameters, headers, sizes and timing. Every instance of a model shares its key. The compose-manager check establishes what the operator's tooling reported, not what runs. docs/LIMITATIONS.md section 14 lists every open item."
   - "An agent with terminal access on the same host can still reach a pin approval prompt by some routes, such as a nested chat attached through the gateway. The ledger records every approval with its surface. docs/LIMITATIONS.md section 15 lists the routes."
 capabilities:
   provides_tools: []
@@ -128,6 +128,7 @@ capabilities:
     - on_session_end
     - post_compaction
     - pre_gateway_dispatch
+    - transform_llm_output
   provides_middleware:
     - llm_execution
     - tool_execution

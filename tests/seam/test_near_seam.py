@@ -410,3 +410,66 @@ def test_an_aux_title_call_with_free_text_in_reasoning_is_refused_and_ledgered(p
     refusals = text.split("\nRefusals\n", 1)[1].split("\n\n", 1)[0]
     assert "send_refused  aux:title_generation" in refusals and f"host={HOST}" in refusals, refusals
     assert "near_refused_before_send" in refusals
+
+
+IMAGE_PART = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+
+
+def test_an_image_to_near_while_locked_is_disclosed_once_per_lock_and_the_reply_gets_one_line(plugin, near):
+    """Amendment 9: image_parts disclose. The first plaintext image part of a lock writes one notice row and
+    transform_llm_output appends one line to that session's reply; later images and other replies do not."""
+    import providers
+    from hermes_cli.plugins import invoke_hook
+    assert plugin.slash("on attested").startswith("Not locked")
+    _approve(plugin)
+    assert plugin.slash("on attested").startswith("Locked.")
+    client = providers.get_provider_profile("attested-near").create_client(api_key="sk-near-seam", base_url=BASE)
+    sendctx = _sub(plugin, "sendctx")
+    msg = [{"role": "user", "content": [{"type": "text", "text": "Describe this"}, IMAGE_PART]}]
+    for _ in range(2):
+        with sendctx.send_context(session_id="sess-img", purpose="aux:vision", tier="attested"):
+            assert client.chat.completions.create(model=MODEL, messages=msg).choices[0].message.content
+    rows = plugin.rt.ledger.tail(0)
+    notices = [e for e in rows if e.kind == "notice"]
+    assert len(notices) == 1 and notices[0].decision == "image_plaintext" and notices[0].session_id == "sess-img"
+    assert notices[0].detail["note"] == "1 image part(s) left this host in plaintext to NEAR's gateway"
+    signed = [e for e in rows if e.kind == "send_signed"][-2:]
+    assert all(e.detail["plaintext_parts"]["count"] == 1 and e.verdict == "verified" for e in signed)
+    line = plugin.mod.IMAGE_NOTICE_LINE
+    other = invoke_hook("transform_llm_output", response_text="hi", session_id="another", model=MODEL, platform="cli")
+    assert not [r for r in other if r]
+    out = [r for r in invoke_hook("transform_llm_output", response_text="A cat.", session_id="sess-img",
+                                  model=MODEL, platform="cli") if r]
+    assert out == [f"A cat.\n\n{line}"]
+    again = invoke_hook("transform_llm_output", response_text="A dog.", session_id="sess-img", model=MODEL,
+                        platform="cli")
+    assert not [r for r in again if r], "one line per lock"
+    # The receipt's per-send line says it too.
+    text = plugin.slash("receipts sess-img")
+    assert "1 image part(s) left this host in plaintext to NEAR's gateway" in text
+    # A new lock notices again.
+    plugin.slash("off")
+    assert plugin.slash("on attested").startswith("Locked.")
+    with sendctx.send_context(session_id="sess-img", purpose="aux:vision", tier="attested"):
+        client = providers.get_provider_profile("attested-near").create_client(api_key="sk-near-seam", base_url=BASE)
+        client.chat.completions.create(model=MODEL, messages=msg)
+    assert len([e for e in plugin.rt.ledger.tail(0) if e.kind == "notice"]) == 2
+
+
+def test_image_parts_refuse_is_in_tier_and_shown_and_refuses_images(plugin, near):
+    import providers
+    plugin.cfg.write_text(plugin.cfg.read_text() + "    image_parts: refuse\n")
+    plugin.rt.near_adapter.image_parts = "refuse"
+    preflight, locking = _sub(plugin, "preflight"), _sub(plugin, "locking")
+    cfg = preflight.load_core_config()
+    report = locking.run_tier_preflight("attested", config=cfg, predicate=locking.structural_predicate("attested", config=cfg),
+                                        provider_lookup=providers.get_provider_profile)
+    item = next(i for i in report.items if i.key == "confidential.near.image_parts")
+    assert item.verdict == "in_tier" and item.value_redacted == "refuse"
+    assert plugin.slash("on attested").startswith("Not locked")
+    _approve(plugin)
+    assert plugin.slash("on attested").startswith("Locked.")
+    client = providers.get_provider_profile("attested-near").create_client(api_key="sk-near-seam", base_url=BASE)
+    with pytest.raises(Exception):
+        client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": [IMAGE_PART]}])
+    assert near.chat_posts() == 0 and not [e for e in plugin.rt.ledger.tail(0) if e.kind == "notice"]

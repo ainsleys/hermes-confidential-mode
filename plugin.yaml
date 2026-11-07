@@ -23,6 +23,7 @@ provides_hooks:
   - on_session_end
   - post_compaction
   - pre_gateway_dispatch
+  - transform_llm_output
 provides_middleware:
   - llm_execution
   - tool_execution

@@ -608,6 +608,17 @@ def _near_encryption_items(config: Mapping, tasks: Sequence[str], plugins: Mappi
                       "Hermes: without it no NEAR connection is pinned to the attested gateway certificate")
     else:
         add("confidential.near.require_tls_binding", tls, IN_TIER)
+    # Amendment 9: both values are in tier; the item shows which one is in force. Images leave as plaintext
+    # to NEAR's gateway under "disclose" (recorded per send); "refuse" refuses them before sending.
+    parts = near_cfg.get("image_parts", "disclose")
+    running_parts = getattr(adapter, "image_parts", None)
+    if parts in ("disclose", "refuse"):
+        shown = parts if running_parts in (None, parts) else f"{parts} (running adapter: {running_parts})"
+        add("confidential.near.image_parts", shown, IN_TIER)
+    else:
+        add("confidential.near.image_parts", parts, OFF_TIER,
+            "set confidential.near.image_parts to disclose (images leave as plaintext to NEAR's gateway, "
+            "recorded per send) or refuse (images are refused before sending), or remove it (default disclose)")
     try:
         ready = adapter.encryption_ready() if callable(getattr(adapter, "encryption_ready", None)) else None
         if ready is None:

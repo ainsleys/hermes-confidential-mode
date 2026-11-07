@@ -32,9 +32,11 @@ What this module adds to that table, all fail-closed (``E2EEError``, raised befo
     ``reasoning_effort``. Each string must be one of a fixed set of words, so these settings carry no
     free text; any other key or value is refused;
   * ``logprobs`` and ``top_logprobs`` are refused (the page does not define the encrypted token format);
-  * message content that is a list is flattened to one string when every part is text; a message with any
-    other part (an image, audio, a file) is refused: NEAR's encryption does not cover image parts, and the
-    text beside an image would leave as plaintext too;
+  * message content that is a list is flattened to one string when every part is text. A list with any
+    other part (an image, audio, a file) keeps its structure (Amendment 9): every text part is sealed in
+    place and every other part leaves as plaintext, because NEAR's encryption does not cover it. The report
+    counts those parts by type (``plaintext_parts``). With ``image_parts="refuse"``
+    (config ``confidential.near.image_parts``) such a message is refused instead, as before;
   * reasoning that Hermes may echo back on assistant messages (``reasoning_content``, ``reasoning``,
     ``reasoning_details``) is dropped from the request rather than sent as plaintext (NEAR's table has no
     request field for it); every drop is listed in the report;
@@ -48,7 +50,8 @@ Live probe (scratchpad live/near_e2ee_probe.py, 2026-11-07, Qwen/Qwen3.8-27B and
 the provider_tee signature covers the SHA-256 of the ciphertext request and response bytes; tool_calls
 name and arguments and reasoning_content come back encrypted; a wrong X-Model-Pub-Key gets HTTP 421 ("The
 encryption key is no longer valid"); the gateway accepts a list with an encrypted text part and a
-plaintext image part, so refusing image parts is this plugin's policy, not NEAR's.
+plaintext image part and still returns a provider_tee signature, so image parts are sent beside sealed
+text by default and disclosed (``image_parts="disclose"``).
 
 Decryption authenticates nothing by itself: anyone can encrypt to the client's public key, which travels
 in a request header. The transport (verify/near.py) therefore decrypts only after a verified provider_tee
@@ -138,6 +141,23 @@ MESSAGE_DROPPED_KEYS = frozenset({"reasoning_content", "reasoning", "reasoning_d
 TOOL_CALL_PLAINTEXT_KEYS = frozenset({"id", "type", "index"})
 RESPONSE_MESSAGE_FIELDS = ("content", "reasoning_content", "reasoning", "refusal")
 TEXT_PART_KEYS = frozenset({"type", "text", "cache_control"})
+# confidential.near.image_parts: "disclose" (default) sends non-text parts as plaintext beside the sealed
+# text and records them; "refuse" refuses any message that has one.
+IMAGE_PARTS_MODES = ("disclose", "refuse")
+DEFAULT_IMAGE_PARTS = "disclose"
+IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
+
+
+def plaintext_parts_note(parts: Mapping | None) -> str | None:
+    """The sentence the ledger row and the receipt show, or None when no part left in plaintext."""
+    if not isinstance(parts, Mapping) or not parts.get("count"):
+        return None
+    types = parts.get("types") if isinstance(parts.get("types"), Mapping) else {}
+    n = int(parts["count"])
+    if set(types) <= IMAGE_PART_TYPES:
+        return f"{n} image part(s) left this host in plaintext to NEAR's gateway"
+    names = ", ".join(f"{k} x{v}" for k, v in sorted(types.items()))
+    return f"{n} non-text part(s) ({names}) left this host in plaintext to NEAR's gateway"
 _HEX = re.compile(r"[0-9a-fA-F]*")
 _PUB = re.compile(r"[0-9a-f]{64}")
 
@@ -303,6 +323,7 @@ class _Report:
         self.dropped: dict[str, int] = {}
         self.flattened = 0
         self.plaintext_keys: list[str] = []
+        self.plaintext_parts: dict[str, int] = {}
 
     def add(self, path: str) -> None:
         self.encrypted[path] = self.encrypted.get(path, 0) + 1
@@ -314,6 +335,8 @@ class _Report:
         return {"encrypted_fields": sorted(self.encrypted), "encrypted_count": sum(self.encrypted.values()),
                 "dropped_fields": sorted(self.dropped), "flattened_messages": self.flattened,
                 "plaintext_keys": sorted(self.plaintext_keys), "encryption_version": ENCRYPTION_VERSION,
+                "plaintext_parts": {"count": sum(self.plaintext_parts.values()),
+                                    "types": dict(sorted(self.plaintext_parts.items()))},
                 "all_fields": True}
 
 
@@ -334,7 +357,7 @@ def _flatten(content: list, where: str) -> str:
             kind = ptype if isinstance(ptype, str) else type(part).__name__
             if kind in ("image_url", "input_image", "image"):
                 raise E2EEError(f"{where}: NEAR's encryption does not cover image parts; refused before sending "
-                                "(the text beside an image would leave as plaintext too)")
+                                "(confidential.near.image_parts is refuse)")
             raise E2EEError(f"{where}: NEAR's encryption does not cover {kind!r} content parts; refused before "
                             "sending")
         extra = sorted(k for k in part if k not in TEXT_PART_KEYS and _carries_string(part[k]))
@@ -345,7 +368,34 @@ def _flatten(content: list, where: str) -> str:
     return "\n".join(texts)
 
 
-def _message(msg: Any, i: int, model_pub: str, report: _Report) -> dict:
+def _text_part(part: Mapping, where: str) -> str:
+    extra = sorted(k for k in part if k not in TEXT_PART_KEYS and _carries_string(part[k]))
+    if extra or not isinstance(part.get("text"), str):
+        raise E2EEError(f"{where}: a text part carries fields this plugin does not encrypt "
+                        f"({', '.join(extra) or 'text is not a string'}); refused")
+    return part["text"]
+
+
+def _mixed(content: list, where: str, model_pub: str, report: _Report) -> list:
+    """A list with a non-text part, under image_parts=disclose: text parts sealed in place, every other part
+    unchanged (plaintext) and counted. A part without a string type is refused."""
+    out = []
+    for part in content:
+        ptype = part.get("type") if isinstance(part, Mapping) else None
+        if not isinstance(ptype, str) or not ptype:
+            raise E2EEError(f"{where}: a content part has no type; refused before sending")
+        if ptype == "text":
+            text = _text_part(part, where)
+            if "cache_control" in part:
+                report.drop("messages[].content[].cache_control")
+            out.append({"type": "text", "text": _seal_str(model_pub, text, "messages[].content[].text", report)})
+        else:
+            report.plaintext_parts[ptype] = report.plaintext_parts.get(ptype, 0) + 1
+            out.append(dict(part))
+    return out
+
+
+def _message(msg: Any, i: int, model_pub: str, report: _Report, image_parts: str = DEFAULT_IMAGE_PARTS) -> dict:
     where = f"messages[{i}]"
     if not isinstance(msg, Mapping):
         raise E2EEError(f"{where} is not an object; refused")
@@ -359,6 +409,10 @@ def _message(msg: Any, i: int, model_pub: str, report: _Report) -> dict:
         elif key in MESSAGE_DROPPED_KEYS:
             report.drop(f"messages[].{key}")
         elif key == "content":
+            if isinstance(value, list) and image_parts == "disclose" and any(
+                    not (isinstance(p, Mapping) and p.get("type") == "text") for p in value):
+                out[key] = _mixed(value, where, model_pub, report)
+                continue
             if isinstance(value, list):
                 value = _flatten(value, where)
                 report.flattened += 1
@@ -452,11 +506,15 @@ def _tool_choice(choice: Any, model_pub: str, report: _Report) -> Any:
     raise E2EEError("tool_choice has a shape NEAR's table does not cover; refused")
 
 
-def encrypt_request(body: Mapping, model_pub: str, *, plaintext_keys=PLAINTEXT_KEYS) -> tuple[dict, dict]:
+def encrypt_request(body: Mapping, model_pub: str, *, plaintext_keys=PLAINTEXT_KEYS,
+                    image_parts: str = DEFAULT_IMAGE_PARTS) -> tuple[dict, dict]:
     """A chat completion request body with every field of NEAR's table sealed to ``model_pub``.
     Returns (new body, report). Raises E2EEError, naming the field, for anything that would leave as
-    plaintext; nothing partial is ever returned."""
+    plaintext; nothing partial is ever returned. The one exception is a non-text content part under
+    ``image_parts="disclose"``: it leaves as plaintext and the report's ``plaintext_parts`` counts it."""
     parse_public_key(model_pub)
+    if image_parts not in IMAGE_PARTS_MODES:
+        image_parts = "refuse"           # an unknown setting fails closed
     if not isinstance(body, Mapping):
         raise E2EEError("the request body is not a JSON object; refused")
     report = _Report()
@@ -465,7 +523,7 @@ def encrypt_request(body: Mapping, model_pub: str, *, plaintext_keys=PLAINTEXT_K
         if key == "messages":
             if not isinstance(value, list):
                 raise E2EEError("messages is not a list; refused")
-            out[key] = [_message(m, i, model_pub, report) for i, m in enumerate(value)]
+            out[key] = [_message(m, i, model_pub, report, image_parts) for i, m in enumerate(value)]
         elif key == "tools":
             out[key] = None if value is None else _tools(value, model_pub, report)
         elif key == "tool_choice":

@@ -80,3 +80,13 @@ def test_attested_near_only_in_an_aux_fallback_chain_is_still_checked():
 def test_no_near_route_adds_no_near_items():
     cfg = {"model": {"provider": "attested-tinfoil", "default": "t"}}
     assert not any(k.startswith("confidential.near") for k in items(run(cfg)))
+
+
+@pytest.mark.parametrize("value,verdict,shown", [(None, "in_tier", "disclose"), ("disclose", "in_tier", "disclose"),
+                                                 ("refuse", "in_tier", "refuse"), ("maybe", "off_tier", "maybe"),
+                                                 (True, "off_tier", "True")])
+def test_image_parts_accepts_both_values_and_shows_the_one_in_force(value, verdict, shown):
+    """Amendment 9: confidential.near.image_parts is disclose (default) or refuse; the item shows which."""
+    cfg = BASE if value is None else {**BASE, "confidential": {"near": {"image_parts": value}}}
+    item = next(i for i in run(cfg).items if i.key == "confidential.near.image_parts")
+    assert item.verdict == verdict and shown in str(item.value_redacted)

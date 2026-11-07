@@ -428,9 +428,9 @@ def test_non_chat_posts_are_refused_under_require_provider_tee_even_unencrypted(
     assert not any(m == "POST" for m, _, _ in world.requests)
 
 
-def test_text_part_beside_an_image_is_refused_before_sending(tmp_path):
+def test_text_part_beside_an_image_is_refused_before_sending_under_image_parts_refuse(tmp_path):
     world = NearWorld()
-    _, client, _ = _setup(world, tmp_path)
+    _, client, _ = _setup(world, tmp_path, image_parts="refuse")
     with pytest.raises(VerifyError) as ei:
         client.chat.completions.create(model=MODEL, messages=[
             {"role": "user", "content": [{"type": "text", "text": "PLAINTEXT-SECRET-PROMPT"}, IMAGE]}])
@@ -445,12 +445,12 @@ def test_text_only_list_is_flattened_and_encrypted(tmp_path):
     assert world.decrypted_requests[0]["messages"][0]["content"] == "A\nB"
 
 
-def test_vision_aux_through_the_profile_client_is_refused_before_sending(tmp_path):
+def test_vision_aux_through_the_profile_client_is_refused_before_sending_under_image_parts_refuse(tmp_path):
     """Auxiliary vision calls reach the same views without the LLM gate (review finding 6e): the refusal
     lives in the transport, so ConfidentialClient's sync and async paths both refuse."""
     from confidential_mode.client import ConfidentialClient
     world = NearWorld()
-    ad, _, _ = _setup(world, tmp_path)
+    ad, _, _ = _setup(world, tmp_path, image_parts="refuse")
     cc = ConfidentialClient(ad, api_key="sk-x", base_url=BASE)
     vision = [{"role": "user", "content": [{"type": "text", "text": "Describe"}, IMAGE]}]
     with pytest.raises(VerifyError):
@@ -461,6 +461,44 @@ def test_vision_aux_through_the_profile_client_is_refused_before_sending(tmp_pat
     with pytest.raises(VerifyError):
         asyncio.run(go())
     assert _no_chat_left(world)
+
+
+def test_an_image_leaves_beside_sealed_text_and_the_row_and_signature_say_so(tmp_path):
+    """Amendment 9, image_parts disclose (default): the text part reaches the gateway sealed, the image part
+    in plaintext; the provider_tee signature and the release rules are unchanged; the row counts the part."""
+    world = NearWorld()
+    _, client, rows = _setup(world, tmp_path)
+    out = client.chat.completions.create(model=MODEL, messages=[
+        {"role": "user", "content": [{"type": "text", "text": "PLAINTEXT-SECRET-PROMPT"}, IMAGE]}])
+    assert out.choices[0].message.content == world.reply_text
+    wire = world.chat_bodies[-1]
+    assert b"PLAINTEXT-SECRET-PROMPT" not in wire and b"data:image/png;base64,iVBORw0KGgo=" in wire
+    seen = world.decrypted_requests[-1]["messages"][0]["content"]
+    assert seen[0] == {"type": "text", "text": "PLAINTEXT-SECRET-PROMPT"} and seen[1] == IMAGE
+    d = rows[-1]["detail"]
+    assert rows[-1]["verdict"] == "verified" and d["fully_attested"] is True and d["reply_released"] is True
+    assert d["plaintext_parts"] == {"count": 1, "types": {"image_url": 1}}
+    assert d["plaintext_parts_note"] == "1 image part(s) left this host in plaintext to NEAR's gateway"
+
+
+def test_an_image_part_cannot_smuggle_text_into_a_text_part(tmp_path):
+    world = NearWorld()
+    _, client, _ = _setup(world, tmp_path)
+    with pytest.raises(VerifyError):
+        client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": [
+            IMAGE, {"type": "text", "text": "x", "extra_note": "PLAINTEXT-SECRET-PROMPT"}]}])
+    assert _no_chat_left(world)
+
+
+def test_the_image_notice_callback_fires_once_per_exchange_and_never_breaks_a_send(tmp_path):
+    world = NearWorld()
+    ad, client, rows = _setup(world, tmp_path)
+    seen = []
+    ad.on_plaintext_parts = lambda ctx, row: (seen.append(row["detail"]["plaintext_parts"]), 1 / 0)
+    msg = [{"role": "user", "content": [{"type": "text", "text": "a"}, IMAGE]}]
+    assert client.chat.completions.create(model=MODEL, messages=msg).choices[0].message.content == world.reply_text
+    client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "text only"}])
+    assert seen == [{"count": 1, "types": {"image_url": 1}}]
 
 
 def test_unknown_top_level_text_is_refused_before_sending(tmp_path):

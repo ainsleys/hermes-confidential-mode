@@ -39,7 +39,8 @@ from ._harness import Rec, no_lazy_installs, provider_ok  # noqa: F401  (fixture
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 MODULE = "hermes_plugins.confidential_mode"
 HOOKS = {"pre_tool_call", "post_approval_response", "pre_llm_call", "pre_api_request", "pre_auxiliary_call",
-         "post_auxiliary_call", "on_session_start", "on_session_end", "post_compaction", "pre_gateway_dispatch"}
+         "post_auxiliary_call", "on_session_start", "on_session_end", "post_compaction", "pre_gateway_dispatch",
+         "transform_llm_output"}
 ON_HOST_URL = "http://127.0.0.1:11434/v1"
 REMOTE_URL = "https://llm.example.test/v1"
 SK = "cm:w5:seam"
@@ -478,7 +479,7 @@ def test_plugins_doctor_ci_passes(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "OK: runtime discovery, manifest parsing, import, and registration passed" in proc.stdout
     assert "ERROR" not in proc.stdout and "registration adds" not in proc.stdout
-    assert "10 hook(s)" in proc.stdout
+    assert "11 hook(s)" in proc.stdout
 
 
 def test_live_verification_is_ledgered_with_evidence(plugin):

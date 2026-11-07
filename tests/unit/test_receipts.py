@@ -88,6 +88,9 @@ def fill_every_kind(led: Ledger, sid: str = SID) -> None:
                    detail={"reason": "compression summary sent off-tier"}))
     led.append(_ev("compaction", purpose="compaction", provider="attested-tinfoil", host="r1.tinfoil.invalid",
                    model="tf-model"))
+    led.append(_ev("notice", purpose="aux:vision", provider="attested-near", host="cloud-api.near.ai",
+                   verdict="disclosed", decision="image_plaintext",
+                   detail={"note": "1 image part(s) left this host in plaintext to NEAR's gateway"}))
     led.append(_ev("unlock", session_id="", decision="unlocked"))
     # Session markers (W5): never open or close a locked period; appended last so earlier row ids hold.
     led.append(_ev("session_start", decision="session_start", detail={"platform": "cli"}))
@@ -146,7 +149,7 @@ def test_every_kind_is_rendered_in_order(ledger, tmp_path):
     text = render(ledger, SID, pins=_pins(tmp_path))
     titles = ["Confidential mode receipt for session", "Trust roots in force", "Verification events",
               "Sends (purpose, host, bytes; never text)", "Refusals", "Asks and answers", "Breaches",
-              "Compactions", CLOSING_PARAGRAPH]
+              "Compactions", "Notices", CLOSING_PARAGRAPH]
     positions = [text.index(t) for t in titles]
     assert positions == sorted(positions)
     assert "Locked tier: attested" in text and "to " in text.split("Locked period:")[1].splitlines()[0]

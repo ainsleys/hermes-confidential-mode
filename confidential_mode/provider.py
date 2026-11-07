@@ -1004,6 +1004,13 @@ def api_key_for(env_var: str) -> str:
         return ""
 
 
+def image_parts_from(config: dict | None) -> str:
+    """confidential.near.image_parts: "disclose" (default, also when absent) or "refuse"; any other value
+    is "refuse" (fail closed; the preflight refuses the lock on it)."""
+    v = _cfg_get(config, "confidential", "near", "image_parts", default="disclose")
+    return v if v in ("disclose", "refuse") else "refuse"
+
+
 def refresh_lead_from(config: dict | None) -> float:
     """confidential.verify_refresh_lead_seconds: a number (0 or less turns the background refresh off);
     anything else is the default."""
@@ -1101,7 +1108,7 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
     """Wire the 'attested-near' profile into Hermes (same cache, pins file and ledger as Tinfoil's).
     No network at register. Reads confidential.near.{base_url, models, require_provider_tee,
     require_tls_binding, accepted_tcb_statuses, signature_wait_seconds, streaming, context_length, encrypt,
-    reverify_backoff_seconds}."""
+    reverify_backoff_seconds, image_parts}."""
     import providers
     if config is None:
         from hermes_cli.config import load_config_readonly
@@ -1120,7 +1127,8 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
             require_provider_tee=require_tee, require_tls_binding=near("require_tls_binding", default=True) is not False,
             accepted_tcb_statuses=[t for t in tcb if isinstance(t, str)] if isinstance(tcb, list) else DEFAULT_ACCEPTED_TCB,
             signature_wait_seconds=float(near("signature_wait_seconds", default=DEFAULT_SIGNATURE_WAIT_SECONDS)),
-            encrypt=encrypt, reverify_backoff_seconds=float(near("reverify_backoff_seconds", default=30.0)))
+            encrypt=encrypt, reverify_backoff_seconds=float(near("reverify_backoff_seconds", default=30.0)),
+            image_parts=image_parts_from(config))
     if hasattr(adapter, "provider_name"):
         adapter.provider_name = NEAR_PROFILE_NAME
     if pins is None:

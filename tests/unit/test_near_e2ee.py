@@ -213,10 +213,60 @@ def test_every_request_field_in_nears_table_is_encrypted_and_round_trips():
     (["bare string part"], "does not cover"),
     ([{"type": "text", "text": "x", "annotation": "leak"}], "carries fields"),
 ])
-def test_non_text_parts_are_refused(content, needle):
+def test_non_text_parts_are_refused_under_image_parts_refuse(content, needle):
+    body = {"model": "m", "messages": [{"role": "user", "content": content}]}
+    with pytest.raises(e2.E2EEError, match=needle):
+        e2.encrypt_request(body, MODEL_PUB, image_parts="refuse")
+
+
+IMG = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA", "detail": "auto"}}
+
+
+def test_image_parts_are_disclosed_by_default_and_the_text_beside_them_is_sealed():
+    body = {"model": "m", "messages": [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": [{"type": "text", "text": "DESCRIBE-SECRET", "cache_control": {"type": "ephemeral"}},
+                                     IMG, {"type": "input_image", "image_url": "data:image/png;base64,BB"}]}]}
+    out, rep = e2.encrypt_request(body, MODEL_PUB)
+    parts = out["messages"][1]["content"]
+    assert isinstance(parts, list) and len(parts) == 3
+    assert parts[0]["type"] == "text" and e2.is_wire(parts[0]["text"]) and "cache_control" not in parts[0]
+    assert b"DESCRIBE-SECRET" not in json.dumps(out).encode()
+    assert parts[1] == IMG and parts[2]["type"] == "input_image"           # plaintext, unchanged
+    assert rep["plaintext_parts"] == {"count": 2, "types": {"image_url": 1, "input_image": 1}}
+    assert "messages[].content[].text" in rep["encrypted_fields"] and rep["flattened_messages"] == 0
+    assert e2.plaintext_parts_note(rep["plaintext_parts"]) == \
+        "2 image part(s) left this host in plaintext to NEAR's gateway"
+
+
+def test_other_non_text_parts_are_disclosed_and_named():
+    body = {"model": "m", "messages": [{"role": "user", "content": [
+        {"type": "input_audio", "input_audio": {"data": "AA", "format": "wav"}}]}]}
+    _, rep = e2.encrypt_request(body, MODEL_PUB)
+    assert rep["plaintext_parts"] == {"count": 1, "types": {"input_audio": 1}}
+    assert "non-text part(s) (input_audio x1)" in e2.plaintext_parts_note(rep["plaintext_parts"])
+
+
+@pytest.mark.parametrize("content,needle", [
+    (["bare string part"], "has no type"),
+    ([IMG, {"text": "no type"}], "has no type"),
+    ([IMG, {"type": "text", "text": "x", "annotation": "leak"}], "carries fields"),
+    ([IMG, {"type": "text", "text": 3}], "text is not a string"),
+])
+def test_malformed_parts_beside_an_image_are_still_refused(content, needle):
     body = {"model": "m", "messages": [{"role": "user", "content": content}]}
     with pytest.raises(e2.E2EEError, match=needle):
         e2.encrypt_request(body, MODEL_PUB)
+
+
+def test_text_only_lists_are_still_flattened_and_an_unknown_mode_refuses():
+    body = {"model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "A"}]}]}
+    out, rep = e2.encrypt_request(body, MODEL_PUB)
+    assert isinstance(out["messages"][0]["content"], str) and rep["plaintext_parts"]["count"] == 0
+    assert e2.plaintext_parts_note(rep["plaintext_parts"]) is None
+    with pytest.raises(e2.E2EEError, match="does not cover image parts"):
+        e2.encrypt_request({"model": "m", "messages": [{"role": "user", "content": [IMG]}]}, MODEL_PUB,
+                           image_parts="sometimes")
 
 
 @pytest.mark.parametrize("extra,needle", [

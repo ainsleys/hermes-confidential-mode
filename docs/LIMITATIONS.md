@@ -402,9 +402,9 @@ as titles and compression, to an on-host model.
 **Why it exists.** The `on-host-only` rule refuses the enclave, and the `attested` rule refuses the
 on-host host (`confidential_mode/tiers.py`). This is a limit of the plugin, not of Hermes.
 
-One consequence concerns vision on NEAR. With request encryption on, NEAR refuses every image, so a
-profile locked to NEAR alone has no vision route that describes images. An on-host vision model would
-be the natural choice, and only a mixed tier would accept it.
+One consequence concerns vision on NEAR. Images sent to NEAR leave in plaintext to its gateway
+(section 14). A user who wants images to stay on this host would choose an on-host vision model, and
+only a mixed tier would accept it.
 
 **Plan.** A tier inside the plugin whose rule accepts any destination that either existing rule
 accepts. The attested checks would stay unchanged for attested routes. No core change is needed.
@@ -418,7 +418,12 @@ gateway and each NEAR-operated model run in Intel TDX virtual machines, which NE
 inside the model's CVM over `<model id>:<SHA-256 of the request body>:<SHA-256 of the response body>`.
 A `gateway` signature is made inside the gateway's CVM over `<request hash>:<response hash>` only.
 
-**The gap.** Ten things stay open after every NEAR check passes.
+**The gap.** Eleven things stay open after every NEAR check passes.
+
+- **The gateway reads every image.** NEAR's encryption covers text only. An image part leaves this
+  host in plaintext, so NEAR's gateway, and anything the gateway forwards it to, can read the image.
+  A model signature over the request covers the image bytes, but does not keep the gateway from
+  reading them.
 
 - **A gateway signature says nothing about the model.** The gateway signs its own output whenever it
   rewrites the bytes: on every streamed completion, when it resolves a model alias, and on the
@@ -492,10 +497,18 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
 - It encrypts every chat request to the verified model key before it leaves this host (NEAR's
   encryption, version 2, with all fields on). It refuses the attested-tier lock while
   `confidential.near.encrypt` is false, while an attested-near route sets an `api_mode` other than chat
-  completions, or while the `pynacl` package is missing. Before sending, it refuses image and other
-  non-text message parts, any POST other than chat completions, and any top-level request key that
-  would carry text in plaintext. NEAR's gateway would accept a request with a plaintext image part
-  (live probe, 2026-11-07). Refusing it is this plugin's policy.
+  completions, or while the `pynacl` package is missing. Before sending, it refuses any POST other
+  than chat completions and any top-level request key that would carry text in plaintext.
+- It sends image parts in plaintext beside the encrypted text, by default
+  (`confidential.near.image_parts: disclose`). Every text part of such a message is encrypted. Every
+  image part, and every other non-text part, leaves this host in plaintext to NEAR's gateway. The
+  live probe of 2026-11-07 showed that NEAR accepts this shape and still returns a `provider_tee`
+  signature. Each send's ledger row counts the plaintext parts by type, and the receipt says how many
+  left. The first time per lock, the plugin writes a `notice` row and appends one line to that turn's
+  reply through Hermes' `transform_llm_output` hook. That hook keeps the first non-empty rewrite, so
+  another plugin that rewrites the same reply can displace the line. The ledger row and the receipt
+  stay either way. With `confidential.near.image_parts: refuse`, the plugin refuses a message with any
+  non-text part before it is sent.
 - It checks the TLS certificate of every inference and signature connection right after the
   handshake, before any request byte is sent. The certificate's key must be the one the gateway's
   quote binds. A send over any other certificate is refused.

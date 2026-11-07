@@ -35,6 +35,9 @@ KINDS = frozenset({
     # Amendment 7: `pins retire` removed an approved entry; a later consent check no longer counts the
     # entry's earlier pin_applied row.
     "pin_retired",
+    # Amendment 9: something the user is told about, without a refusal (decision names it; today
+    # "image_plaintext": the first image part of a lock left as plaintext to NEAR's gateway).
+    "notice",
 })
 
 # Keys that carry conversation content in the provider request shapes Hermes sends

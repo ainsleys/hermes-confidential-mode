@@ -82,7 +82,7 @@ When you use the `attested-near` provider (NEAR AI Cloud), the plugin itself con
 
 | Host | Who calls it | What for |
 |---|---|---|
-| `cloud-api.near.ai` (or `confidential.near.base_url`) | The plugin's NEAR adapter. | `/v1/attestation/report` and `/v1/attestation/ita-token` with a fresh nonce, without an API key (NEAR documents them as public). Then your inference requests, and `/v1/signature/<id>` for each response, both with `NEAR_AI_API_KEY`, over connections pinned to the TLS key the gateway's quote binds. TLS ends inside NEAR's gateway CVM. With `confidential.near.encrypt` on (the default), chat message text, tool definitions and tool calls reach the gateway encrypted to the attested model key (PyNaCl, `pynacl==1.6.*`); the gateway still reads the model id, the plaintext parameters, the request headers, sizes and timing, and can read a reply by swapping the client key header, which the plugin detects afterwards and records as unverified. With encryption off it reads every request it routes. |
+| `cloud-api.near.ai` (or `confidential.near.base_url`) | The plugin's NEAR adapter. | `/v1/attestation/report` and `/v1/attestation/ita-token` with a fresh nonce, without an API key (NEAR documents them as public). Then your inference requests, and `/v1/signature/<id>` for each response, both with `NEAR_AI_API_KEY`, over connections pinned to the TLS key the gateway's quote binds. TLS ends inside NEAR's gateway CVM. With `confidential.near.encrypt` on (the default), chat message text, tool definitions and tool calls reach the gateway encrypted to the attested model key (PyNaCl, `pynacl==1.6.*`); image parts leave in plaintext (unless `confidential.near.image_parts: refuse`); the gateway still reads the model id, the plaintext parameters, the request headers, sizes and timing, and can read a reply by swapping the client key header, which the plugin detects afterwards and records as unverified. With encryption off it reads every request it routes. |
 | `portal.trustauthority.intel.com` (`/certs`) | The plugin's NEAR adapter. | Intel Trust Authority's token-signing keys. The adapter never fetches keys from a URL the vendor names; the key chain must end at a pinned Intel root. |
 
 When a verification stages a NEAR model entry, the approve command runs, or you run `hermes confidential
@@ -127,7 +127,8 @@ usage data anywhere.
 - **NEAR's gateway** is where TLS ends for NEAR. The gateway reads your API key header, the model
   id, the plaintext parameters, the request headers, sizes and timing, and your IP address. With
   request encryption on, the gateway does not read the message text, the tool definitions or the
-  tool calls. A gateway that swaps the client key header can read a reply. The plugin detects the swap only afterwards
+  tool calls. The gateway reads every image you send, because images leave in plaintext unless
+  `confidential.near.image_parts` is `refuse`. A gateway that swaps the client key header can read a reply. The plugin detects the swap only afterwards
   ([LIMITATIONS.md](LIMITATIONS.md), section 14).
 - **GitHub** sees each fetch of a NEAR compose file and of its commit metadata, from your IP address.
 - **The three `*.tinfoil.sh` proxies** are run by the vendor. They see each verification, from your
@@ -260,8 +261,10 @@ The plugin registers the following through `ctx`, Hermes' plugin context object.
 
 - **Hooks:** `pre_tool_call`, `post_approval_response`, `pre_llm_call`, `pre_api_request`,
   `pre_auxiliary_call`, `post_auxiliary_call`, `on_session_start`, `on_session_end`,
-  `post_compaction` and `pre_gateway_dispatch`. The last one rewrites a `/model` or `/moa` command
-  sent through the gateway while locked into a refusal.
+  `post_compaction`, `pre_gateway_dispatch` and `transform_llm_output`. `pre_gateway_dispatch`
+  rewrites a `/model` or `/moa` command sent through the gateway while locked into a refusal.
+  `transform_llm_output` changes a reply only once per lock: it appends one line to the reply of the
+  turn that first sent an image to NEAR's gateway in plaintext. Every other reply passes unchanged.
 - **Middleware:** `llm_execution` and `tool_execution`.
 - **Slash command:** `/confidential`.
 - **CLI command:** `hermes confidential`.
@@ -322,9 +325,13 @@ whole profile. While locked, the plugin blocks the following.
   verification's `verify_ok` row could not be written to the ledger.
 
 - **NEAR requests the encryption cannot cover (attested-near).** With `confidential.near.encrypt` on,
-  which the lock requires, the plugin refuses before sending: images and other non-text parts,
-  streaming, every POST other than chat completions, and settings whose value is a mapping it does not
-  know. The plugin releases a reply only after a verified `provider_tee` signature. The plugin
+  which the lock requires, the plugin refuses before sending: streaming, every POST other than chat
+  completions, and settings whose value is a mapping it does not know. Images and other non-text parts
+  are not refused by default (`confidential.near.image_parts: disclose`). They leave this host in
+  plaintext to NEAR's gateway, beside the encrypted text. Each send's ledger row and the receipt count
+  them. The first time per lock, the plugin writes a `notice` ledger row and appends one line to that
+  turn's reply. With `confidential.near.image_parts: refuse` the plugin refuses such a message before
+  sending. The plugin releases a reply only after a verified `provider_tee` signature. The plugin
   refuses a model not on `confidential.near.models`, and any connection whose TLS certificate is not
   the attested one.
 

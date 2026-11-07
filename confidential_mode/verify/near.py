@@ -68,7 +68,8 @@ the llm gate's guarded call, where the gate writes that row itself.
 Request encryption (``encrypt``, config confidential.near.encrypt, default true; near_e2ee.py): the only
 POST that leaves is chat completions, rebuilt as a new request whose body has every field of NEAR's table
 sealed to the one verified model key (``model_public_key``), with a fresh Ed25519 client key held on the
-exchange. Streaming, non-text parts, unlisted top-level text (structured settings such as
+exchange. Non-text content parts (images) leave as plaintext beside the sealed text and are recorded
+(``image_parts`` "disclose", the default) or refused ("refuse"). Streaming, unlisted top-level text (structured settings such as
 ``reasoning: {"effort": "low", "summary": "auto"}`` pass when their shape is one near_e2ee.STRUCTURED_KEYS
 allows) and every other POST raise VerifyError before sending. The digests are over the ciphertext bytes, which is what NEAR signs (live probe,
 2026-11-07). The reply is buffered, hashed and finished first; it is decrypted and handed over only when
@@ -774,6 +775,7 @@ class NearAdapter:
                  quote_verifier: nc.QuoteVerifier | None = None, ita_roots: Mapping[str, str] | None = None,
                  hold_until_accepted: bool = True, encrypt: bool = True,
                  reverify_backoff_seconds: float = DEFAULT_REVERIFY_BACKOFF_SECONDS,
+                 image_parts: str = "disclose",
                  clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep):
         parts = urlsplit(base_url or "")
@@ -790,6 +792,12 @@ class NearAdapter:
         self.encrypt = bool(encrypt)   # confidential.near.encrypt; the preflight refuses a lock with it off
         self.on_stale: Callable[[], None] | None = None   # set by the verification cache (provider.py)
         self.on_close: Callable[[], None] | None = None   # set by the verification cache: stops its refresh
+        # confidential.near.image_parts (Amendment 9): "disclose" sends non-text parts as plaintext beside the
+        # sealed text and records them; "refuse" refuses such a message. Anything else refuses.
+        self.image_parts = image_parts if image_parts in ("disclose", "refuse") else "refuse"
+        # Called with (send context, send_signed row) after an exchange that sent a part in plaintext; the
+        # plugin writes its once-per-lock notice from it. Never allowed to raise into a send.
+        self.on_plaintext_parts: Callable[[dict, dict], None] | None = None
         self.closed = False
         self.reverify_backoff_seconds = max(0.0, float(reverify_backoff_seconds))
         self._last_stale_mono: float | None = None
@@ -1190,7 +1198,7 @@ class NearAdapter:
                                   "unauthenticated (send unstreamed)")
             model_pub = self.model_public_key(model)
             client = e2.ClientKey.generate()
-            new_body, report = e2.encrypt_request(parsed, model_pub)
+            new_body, report = e2.encrypt_request(parsed, model_pub, image_parts=self.image_parts)
             raw = json.dumps(new_body, ensure_ascii=False).encode("utf-8")
             headers = httpx.Headers({k: v for k, v in request.headers.multi_items()
                                      if k.lower() not in ("content-length", "transfer-encoding")})
@@ -1304,6 +1312,9 @@ class NearAdapter:
             "dropped_fields": list((ex.e2ee_report or {}).get("dropped_fields") or []),
             # Top-level keys that left in plaintext (names only), besides model and messages' roles and ids.
             "plaintext_keys": list((ex.e2ee_report or {}).get("plaintext_keys") or []),
+            # Non-text content parts (images) that left beside the sealed text (Amendment 9).
+            "plaintext_parts": _plaintext_parts(ex.e2ee_report),
+            "plaintext_parts_note": _plaintext_parts_note(ex.e2ee_report),
             "e2ee_version": (ex.e2ee_report or {}).get("encryption_version") if ex.encrypted else None,
             "client_pub": ex.client_key.public_hex if ex.client_key is not None else None,
             "model_pub": ex.model_pub,
@@ -1317,6 +1328,13 @@ class NearAdapter:
                "tier": ctx.get("tier"), "verdict": check["verdict"],
                "decision": (check["kind"] or "missing") if data is not None else "missing", "detail": detail}
         ex.detail = detail
+        if detail["plaintext_parts"]["count"]:
+            cb = self.on_plaintext_parts
+            if cb is not None:
+                try:
+                    cb(dict(ctx), row)
+                except Exception:
+                    logger.warning("confidential-mode: the plaintext image notice failed", exc_info=True)
         if ex.encrypted:
             # The row waits for the release decision (decrypted and handed over, or withheld), so a reply
             # that fails to decrypt or times out is never recorded as fully attested.
@@ -1377,6 +1395,18 @@ class NearAdapter:
                             "verdict": "refused", "decision": "refused", "detail": detail})
         except Exception:
             logger.warning("confidential-mode: could not ledger a NEAR refusal", exc_info=True)
+
+
+def _plaintext_parts(report: Mapping | None) -> dict:
+    parts = (report or {}).get("plaintext_parts") if isinstance(report, Mapping) else None
+    if not isinstance(parts, Mapping):
+        return {"count": 0, "types": {}}
+    return {"count": int(parts.get("count") or 0), "types": dict(parts.get("types") or {})}
+
+
+def _plaintext_parts_note(report: Mapping | None) -> str | None:
+    from . import near_e2ee
+    return near_e2ee.plaintext_parts_note(_plaintext_parts(report))
 
 
 def _close_quietly(t) -> None:

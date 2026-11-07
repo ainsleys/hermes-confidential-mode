@@ -54,9 +54,9 @@ forces, the removal of fallbacks, the tool gate, and the vendor's own protocol.
 | Model choice | Frontier models unavailable. Open-weight models only: the Qwen, DeepSeek, Llama and gpt-oss families as served by the vendor. | Only models served inside enclaves are in tier. |
 | Response quality | Drops to the chosen open-weight model's level. The expected gap is noticeable on coding and reasoning and larger on long-context work. | The model, plus any quantization and context limit the enclave host applies. |
 | Side-job quality | Compression, titles and memory must run on an in-tier model. Summaries may differ from the default aux model's. | The preflight refuses side routes that leave the tier. |
-| Task success | Lower. A provider outage fails the turn instead of falling back. Off-host tools are asked or refused. Image inputs are refused on NEAR. Settings whose value is a mapping, such as a reasoning effort, are refused on NEAR. Cron is refused. | Fallbacks removed, tool gate, NEAR encryption scope. |
+| Task success | Lower. A provider outage fails the turn instead of falling back. Off-host tools are asked or refused. Image inputs on NEAR work, but each image leaves in plaintext to NEAR's gateway. Settings whose value is a mapping, such as a reasoning effort, are refused on NEAR. Cron is refused. | Fallbacks removed, tool gate, NEAR encryption scope. |
 | Latency per turn | Tinfoil: roughly unchanged. NEAR: the whole reply arrives at once, then one signature fetch. | No streaming on NEAR: encryption refuses it. One extra request per turn. |
-| Setup | One-time preflight failures until side routes, fallbacks and vision point in tier. On NEAR, vision needs a route on another vendor, or it refuses every image. | The preflight is strict by design. The setup command prints most of the config for you to paste. |
+| Setup | One-time preflight failures until side routes, fallbacks and vision point in tier. On NEAR, the setup command routes vision to a NEAR vision model, with a note that images are plaintext to the gateway. | The preflight is strict by design. The setup command prints most of the config for you to paste. |
 | Pin approval | Tinfoil: one prompt per new router build. NEAR: one prompt per new CVM configuration, and a NEAR model entry can be approved only after its compose files are fetched from GitHub. | NEAR serves one model from several configurations. The service map is pinned only with every file hash-checked. |
 
 ### Expected sizes
@@ -78,9 +78,9 @@ forces, the removal of fallbacks, the tool gate, and the vendor's own protocol.
 - **Task success in a tool-heavy session.** Close to the baseline when prompts are answered promptly.
   Sharply lower in unattended mode, where every off-host tool call is refused.
 - **Response quality.** The open-weight model's quality. The plugin neither improves nor degrades a
-  given model's output. The one exception is NEAR, where image inputs are refused while encryption is
-  on, so any task that needs vision through NEAR fails. Encryption is on by default, and the lock
-  requires it.
+  given model's output. On NEAR, image tasks run, and each image reaches NEAR's gateway in plaintext
+  while the text around it stays encrypted. `confidential.near.image_parts: refuse` refuses images
+  instead, and then any task that needs vision through NEAR fails.
 
 ### Outages the plugin adds
 
@@ -104,7 +104,7 @@ The README's sections on request encryption and on what happens while locked sta
 ## The honest summary
 
 The plugin's own overhead is small. The cost a user pays is the choice of tier. Attested inference
-means open-weight models served by two vendors, no fallbacks, no streaming and no images on NEAR, and
+means open-weight models served by two vendors, no fallbacks, no streaming on NEAR, images in plaintext to NEAR's gateway, and
 a prompt on every tool call that leaves the machine. A user who already runs Qwen or DeepSeek through
 an aggregator sees a quality change near zero, and pays mainly in prompts and lost fallbacks. A user on a Claude or
 GPT model pays the model switch, and that is a cost the lock makes explicit rather than causes.

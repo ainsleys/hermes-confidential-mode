@@ -98,8 +98,8 @@ confidential:
     # auxiliary.<task>.model name for attested-near. A request for any other model is refused before it
     # is sent, while require_provider_tee is true. A NEAR pin's identity is this list, so changing it
     # needs a new pin. Use full ids (NEAR signs the id it received). Default [].
-    # Do not route auxiliary.vision through attested-near: with encrypt on, every image is refused
-    # before it is sent. `hermes confidential setup --vendor near` leaves vision unset, with a note.
+    # auxiliary.vision may go through attested-near with a vision model listed here. Images then leave
+    # in plaintext to NEAR's gateway (see image_parts below).
     models: [Qwen/Qwen3.8-27B]
 
     # true: a send counts as verified only with a provider_tee signature, made by an attested model
@@ -117,12 +117,19 @@ confidential:
     # refused unless this is absent or exactly true. Default true.
     require_tls_binding: true
 
+    # What happens to an image or other non-text part of a message. NEAR's encryption covers text only.
+    # disclose: every text part is encrypted, every non-text part leaves this host in plaintext to NEAR's
+    # gateway, each send's ledger row counts those parts, and the first one per lock adds a notice row
+    # and one line to that turn's reply. refuse: such a message is refused before it is sent. Any other
+    # value refuses, and the preflight refuses the lock on it. Default disclose.
+    image_parts: disclose
+
     # true: every chat request is encrypted to the attested model's key before it leaves this host
     # (NEAR's encryption, version 2, with all fields on). The gateway then sees the model id, the
     # plaintext parameters, the request headers, sizes and timing, not the message text, the tool
     # definitions or the tool calls. Every instance of the model shares the key. The plugin refuses,
     # before sending:
-    # image or other non-text message parts, streaming, any POST other than chat completions, and any
+    # streaming, any POST other than chat completions, and any
     # top-level request key that would carry text in plaintext. A reply is decrypted only after a
     # verified provider_tee signature over the encrypted bytes. Needs the pynacl package
     # (docs/RUNNING_TESTS.md). The attested-tier lock is refused unless this is absent or exactly true.

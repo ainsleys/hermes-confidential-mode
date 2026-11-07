@@ -18,7 +18,7 @@ from confidential_mode.tiers import Tier  # noqa: E402
 
 FROZEN_COLUMNS = ["id", "ts", "session_id", "kind", "purpose", "provider", "host", "model", "bytes",
                   "tier", "verdict", "decision", "surface", "detail"]
-FROZEN_KINDS = {"send_observed", "send_refused", "verify_ok", "verify_fail", "tool_asked", "tool_allowed",
+FROZEN_KINDS = {"notice", "send_observed", "send_refused", "verify_ok", "verify_fail", "tool_asked", "tool_allowed",
                 "tool_refused", "pin_staged", "pin_applied", "pin_denied", "lock", "unlock", "preflight_fail",
                 "breach", "compaction",
                 "session_start", "session_end",   # Amendment 4 F7

@@ -364,6 +364,7 @@ def _sections(rows: list[dict]) -> dict:
         "allowed_without_prompt": unprompted,
         "breaches": by_kind(("breach",)),
         "compactions": by_kind(("compaction",)),
+        "notices": by_kind(("notice",)),
         "signed_sends": by_kind(("send_signed",)),
     }
 
@@ -412,6 +413,8 @@ def _near_sends(rows: list[dict], evidence: list[dict]) -> tuple[list[dict], dic
                     "e2ee_fields": list(d.get("e2ee_fields") or []),
                     "e2ee_version": d.get("e2ee_version"), "model_pub": d.get("model_pub"),
                     "plaintext_keys": list(d.get("plaintext_keys") or []),
+                    "plaintext_parts": dict(d.get("plaintext_parts") or {"count": 0, "types": {}}),
+                    "plaintext_parts_note": d.get("plaintext_parts_note"),
                     "reply_released": d.get("reply_released"), "withheld_reason": d.get("withheld_reason")})
     summary = {"sends": len(out), "fully_attested": all(s["fully_attested"] for s in out),
                "not_fully_attested_sends": [s["row"] for s in out if not s["fully_attested"]],
@@ -952,6 +955,10 @@ def render_text(doc: Mapping) -> str:
     section("Compactions", sec["compactions"],
             lambda r: f"{_p(r['purpose']) or 'compaction'}  host={_p(r['host']) or '(none)'}  "
                       f"{_p(r['provider']) or '?'}/{_p(r['model']) or '?'}")
+    if sec.get("notices"):
+        section("Notices", sec["notices"],
+                lambda r: f"{_p(r['decision']) or 'notice'}  {_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  "
+                          f"{_p((r['detail'] or {}).get('note') or (r['detail'] or {}).get('notice')) or ''}".rstrip())
 
     near = h.get("near")
     if near is not None:
@@ -971,6 +978,8 @@ def render_text(doc: Mapping) -> str:
                     f"(plugin self-report); encrypted to model key {_p(c.get('model_pub')) or '?'} (plugin self-report)")
                 if c.get("plaintext_keys"):
                     add(f"      left in plaintext besides the model id: {_p(', '.join(c['plaintext_keys']))}")
+                if c.get("plaintext_parts_note"):
+                    add(f"      {_p(c['plaintext_parts_note'])}")
                 if c.get("reply_released") is False:
                     add(f"      reply withheld: {_p(c.get('withheld_reason')) or '(no reason recorded)'}")
                 if c["replay_verdict"] == "pass" and c["fully_attested"]:

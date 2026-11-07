@@ -68,6 +68,8 @@ NOT_ESTABLISHED = (
     "the signature over the ciphertext digests (third-party checkable) and never sees the plaintext",
     "that only an approved instance could read an encrypted request: it is encrypted to the model's signing "
     "key, which every instance of that model shares, approved or not",
+    "that the gateway did not read an image: NEAR's encryption covers text only, so an image part of an "
+    "encrypted request leaves in plaintext (the send row's plaintext_parts counts them)",
     "that only this client could read a reply: the model seals it to the key in the X-Client-Pub-Key request "
     "header, which the signature does not cover, so a gateway that swaps that key reads the reply and is "
     "detected only afterwards, when the reply fails to decrypt or to verify and the send is marked unverified",

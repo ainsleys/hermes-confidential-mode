@@ -72,6 +72,10 @@ class Runtime:
         self._lock = threading.Lock()
         self._aux_seen: deque = deque(maxlen=512)
         self.last_live: Optional[dict] = None      # last live main runtime seen by pre_llm_call (status)
+        # Amendment 9: the lock (its locked_since) whose first plaintext image part was already noticed,
+        # and the sessions whose next reply gets the one-line notice.
+        self.image_notice_lock: Any = _NO_LOCK
+        self.reply_notices: set = set()
 
     # ── shared collaborators ──────────────────────────────────────────────────────────────────
     def module(self, name: str):
@@ -277,6 +281,8 @@ def _register(rt: Runtime) -> None:
         profile = provider.register_near_profile(ctx, config=rt.load_config(), ledger=rt.ledger, pins=rt.pins)
         rt.near_profile = profile
         rt.near_adapter = getattr(profile, "_confidential_adapter", None)
+        if rt.near_adapter is not None and hasattr(rt.near_adapter, "on_plaintext_parts"):
+            rt.near_adapter.on_plaintext_parts = _image_notice(rt)   # Amendment 9
         rt.registered["providers"].append(profile.name)
     _step(rt, "provider_near", near_profile)
     if rt.pins is None:
@@ -316,7 +322,8 @@ def _register(rt: Runtime) -> None:
                           ("post_auxiliary_call", _post_auxiliary_call),
                           ("on_session_start", _session_marker("session_start")),
                           ("on_session_end", _session_marker("session_end")),
-                          ("post_compaction", _post_compaction), ("pre_gateway_dispatch", _pre_gateway_dispatch)):
+                          ("post_compaction", _post_compaction), ("pre_gateway_dispatch", _pre_gateway_dispatch),
+                          ("transform_llm_output", _transform_llm_output)):
         _step(rt, name, lambda name=name, builder=builder: _hook(rt, name, builder(rt)))
 
     def slash():
@@ -331,6 +338,64 @@ def _register(rt: Runtime) -> None:
 
 
 # ── hooks ────────────────────────────────────────────────────────────────────────────────────────
+
+_NO_LOCK = object()
+IMAGE_NOTICE_LINE = ("Confidential mode: an image in this turn went to NEAR's gateway in plaintext; the text around "
+                     "it was encrypted.")
+
+
+def _image_notice(rt: Runtime):
+    """NearAdapter.on_plaintext_parts: the first time per lock a non-text part left as plaintext to NEAR's
+    gateway, write a ``notice`` ledger row and mark the session so ``transform_llm_output`` appends
+    IMAGE_NOTICE_LINE to its next reply. Every send's own row already records the parts. Never raises."""
+    def notice(context: dict, row: dict) -> None:
+        try:
+            locked, tier = rt.is_locked()
+            if locked is not True:
+                return
+            try:
+                since = rt.state.locked_since()
+            except Exception:  # noqa: BLE001
+                since = None
+            sid = str((context or {}).get("session_id") or "")
+            with rt._lock:
+                if rt.image_notice_lock == since:
+                    return
+                rt.image_notice_lock = since
+                rt.reply_notices.add(sid)
+            d = row.get("detail") or {}
+            rt.append({"kind": "notice", "session_id": sid, "purpose": row.get("purpose") or "",
+                       "provider": row.get("provider") or "", "host": row.get("host") or "",
+                       "model": row.get("model") or "", "tier": getattr(tier, "value", None),
+                       "verdict": "disclosed", "decision": "image_plaintext",
+                       "detail": {"notice": IMAGE_NOTICE_LINE, "note": d.get("plaintext_parts_note"),
+                                  "plaintext_parts": d.get("plaintext_parts"), "chat_id": d.get("chat_id"),
+                                  "locked_since": since, "reply_line": "transform_llm_output"}})
+            logger.info("confidential-mode: %s", d.get("plaintext_parts_note"))
+        except Exception:  # noqa: BLE001
+            logger.warning("confidential-mode: could not record the plaintext image notice", exc_info=True)
+    return notice
+
+
+def _transform_llm_output(rt: Runtime):
+    """Append IMAGE_NOTICE_LINE to the reply of a session whose turn sent the lock's first plaintext image
+    part to NEAR (a notice with no session id goes to the next reply). Returns None otherwise, so the reply
+    is unchanged. Never raises."""
+    def transform(response_text: str = "", session_id: str = "", **_kw: Any):
+        try:
+            if not rt.reply_notices or not isinstance(response_text, str) or not response_text:
+                return None
+            sid = str(session_id or "")
+            with rt._lock:
+                key = sid if sid in rt.reply_notices else ("" if "" in rt.reply_notices else None)
+                if key is None:
+                    return None
+                rt.reply_notices.discard(key)
+            return f"{response_text.rstrip()}\n\n{IMAGE_NOTICE_LINE}"
+        except Exception:  # noqa: BLE001
+            return None
+    return transform
+
 
 def _pre_llm_call(rt: Runtime):
     def pre_llm_call(session_id: str = "", **_kw: Any):

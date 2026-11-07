@@ -371,7 +371,12 @@ class NearWorld:
         all_fields = headers.get("x-encrypt-all-fields") == "true"
         out = json.loads(json.dumps(data))
         for m in out.get("messages") or []:
-            m["content"] = op(m.get("content"))
+            if isinstance(m.get("content"), list):    # Amendment 9: sealed text parts beside plaintext images
+                for part in m["content"]:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        part["text"] = op(part.get("text"))
+            else:
+                m["content"] = op(m.get("content"))
             if all_fields:
                 for k in ("name", "refusal"):
                     if k in m:

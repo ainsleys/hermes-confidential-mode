@@ -108,16 +108,39 @@ def test_live_tool_call_round_trip(adapter):
     assert "messages[].tool_calls[].function.arguments" in rows[-1]["detail"]["e2ee_fields"]
 
 
-def test_live_image_part_is_refused_before_sending(adapter):
+_PNG_1PX = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf"
+            "FcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+VISION_MODEL = os.environ.get("NEAR_LIVE_VISION_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct")
+
+
+def test_live_image_part_is_refused_before_sending_under_image_parts_refuse(tmp_path):
     from confidential_mode.verify.base import VerifyError
-    ad, _, rows = adapter
+    ad, _, rows = _adapter(tmp_path, image_parts="refuse")
     before = len(rows)
-    img = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf"
-                                                     "FcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}
+    img = {"type": "image_url", "image_url": {"url": _PNG_1PX}}
     with pytest.raises(VerifyError) as ei:
         _client(ad).chat.completions.create(model=MODEL, messages=[{"role": "user", "content": [
             {"type": "text", "text": "Describe"}, img]}], max_tokens=8)
     assert "does not cover image parts" in str(ei.value) and len(rows) == before
+
+
+def test_live_image_part_leaves_in_plaintext_beside_encrypted_text_and_is_provider_tee_verified(tmp_path):
+    """Amendment 9 (image_parts disclose, the default): one image part beside one encrypted text part. The
+    probe of 2026-11-07 showed NEAR accepts this shape and still signs with provider_tee."""
+    from confidential_mode.verify import near
+    ad = near.NearAdapter(data_dir=tmp_path, models=[VISION_MODEL], signature_wait_seconds=10.0)
+    rows: list[dict] = []
+    ad.event_sink = rows.append
+    ad.verify()
+    ad.release()
+    img = {"type": "image_url", "image_url": {"url": _PNG_1PX}}
+    _client(ad).chat.completions.create(model=VISION_MODEL, messages=[{"role": "user", "content": [
+        {"type": "text", "text": "What colour is this pixel? One word."}, img]}], max_tokens=200)
+    d = rows[-1]["detail"]
+    assert rows[-1]["decision"] == "provider_tee" and rows[-1]["verdict"] == "verified", d["check"]
+    assert d["fully_attested"] is True and d["reply_released"] is True
+    assert d["plaintext_parts"]["count"] == 1 and d["plaintext_parts"]["types"] == {"image_url": 1}
+    assert "messages[].content[].text" in d["e2ee_fields"]
 
 
 def test_live_streaming_is_refused_while_encrypting(adapter):

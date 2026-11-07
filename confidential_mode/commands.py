@@ -633,19 +633,20 @@ def config_block(rt: Any, model: str, *, vision_model: str = DEFAULT_VISION_MODE
 
 DEFAULT_NEAR_MODEL = "Qwen/Qwen3.8-27B"                      # a NEAR-operated vLLM model with attestation
 
-#: Printed in place of an auxiliary.vision route by `setup --vendor near`. With confidential.near.encrypt
-#: on (the default, and required by the attested lock) the NEAR transport refuses every image part before
-#: sending, so routing vision through attested-near would only refuse every image.
+DEFAULT_NEAR_VISION_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct"   # vision-capable, also NEAR-operated
+
+#: Printed above the auxiliary.vision route by `setup --vendor near` (Amendment 9). Image parts leave as
+#: plaintext to NEAR's gateway beside the encrypted text (confidential.near.image_parts: disclose).
 NEAR_VISION_NOTE = (
-    "  # vision: not set here, and not routed through attested-near. NEAR's request encryption covers text\n"
-    "  # only, so the plugin refuses every image part before it is sent. The attested-tier preflight refuses\n"
-    "  # the lock until auxiliary.vision names an in-tier route. An on-host vision route is off-tier on the\n"
-    "  # attested tier. Two in-tier choices:\n"
-    "  #   vision: {{provider: attested-tinfoil, model: {tinfoil_vision}}}   # needs TINFOIL_API_KEY and a Tinfoil pin\n"
-    "  #   vision: {{provider: attested-near, model: {model}}}   # locks, but every image is refused, undescribed")
+    "  # vision runs through attested-near. NEAR's request encryption covers text only: each image leaves\n"
+    "  # this host in plaintext to NEAR's gateway, and the text around it is encrypted. Every send records\n"
+    "  # its image parts. To refuse images instead, set confidential.near.image_parts: refuse, or route\n"
+    "  # vision through attested-tinfoil:\n"
+    "  #   vision: {{provider: attested-tinfoil, model: {tinfoil_vision}}}   # needs TINFOIL_API_KEY and a Tinfoil pin")
 
 
-def near_config_block(model: str, *, tinfoil_vision_model: str = DEFAULT_VISION_MODEL) -> str:
+def near_config_block(model: str, vision_model: str = DEFAULT_NEAR_VISION_MODEL, *,
+                      tinfoil_vision_model: str = DEFAULT_VISION_MODEL) -> str:
     try:
         tasks = list(dict.fromkeys(_pf.builtin_aux_task_names()
                                    + [e if isinstance(e, str) else e.get("key") for e in _locking._plugin_aux(None)]))
@@ -657,24 +658,28 @@ def near_config_block(model: str, *, tinfoil_vision_model: str = DEFAULT_VISION_
              "model:", f"  provider: {name}", f"  default: {model}", "fallback_providers: []", "auxiliary:"]
     for task in tasks:
         if task == "vision":
-            lines.append(NEAR_VISION_NOTE.format(model=model, tinfoil_vision=tinfoil_vision_model))
-            continue
-        lines += [f"  {task}:", f"    provider: {name}", f"    model: {model}"]
+            lines.append(NEAR_VISION_NOTE.format(tinfoil_vision=tinfoil_vision_model))
+        lines += [f"  {task}:", f"    provider: {name}", f"    model: {vision_model if task == 'vision' else model}"]
+    models = sorted({model, vision_model})
     lines += ["memory:", '  provider: ""', "voice:", "  auto_tts: false", "confidential:", "  near:",
               "    # every model id Hermes may send to NEAR. A NEAR pin's identity is this list, so changing it",
               "    # needs a new pin.",
-              f"    models: [{model}]",
-              "    require_provider_tee: true"]
+              f"    models: [{', '.join(models)}]",
+              "    require_provider_tee: true",
+              "    # images leave in plaintext to NEAR's gateway and are recorded; refuse refuses them",
+              "    image_parts: disclose"]
     return "\n".join(lines)
 
 
 def cli_setup_near(rt: Any, args: Any, out=None) -> int:
     """`hermes confidential setup --vendor near`: attest the NEAR gateway and the chosen model, approve the
     first pin on this terminal, print a config block. No API key is needed to attest (NEAR documents the
-    attestation endpoints as public); one is needed for inference and signatures. The block routes no
-    auxiliary task's images through NEAR: auxiliary.vision is left unset, with a note (NEAR_VISION_NOTE)."""
+    attestation endpoints as public); one is needed for inference and signatures. auxiliary.vision goes
+    through attested-near with a NEAR vision model, under a note that images are plaintext to the gateway
+    (NEAR_VISION_NOTE)."""
     out = out or sys.stdout
     model = getattr(args, "model", None) or DEFAULT_NEAR_MODEL
+    vision = getattr(args, "vision_model", None) or DEFAULT_NEAR_VISION_MODEL
     key_set = bool(_provider_module(rt).api_key_for(_locking.NEAR_API_KEY_ENV))
     out.write(f"{_locking.NEAR_API_KEY_ENV}: {'set' if key_set else 'NOT set (hermes auth / .env)'}\n")
     if not getattr(args, "no_verify", False):
@@ -682,7 +687,7 @@ def cli_setup_near(rt: Any, args: Any, out=None) -> int:
         if adapter is None:
             out.write("The attested-near provider is not registered; see `hermes confidential status`.\n")
             return 1
-        adapter.models = sorted(set(adapter.models) | {model})
+        adapter.models = sorted(set(adapter.models) | {model, vision})
         cache = _provider_module(rt).verification_cache
         cache.invalidate(_locking.NEAR_PROFILE_NAME)
         ok, reason, result = cache.ensure(_locking.NEAR_PROFILE_NAME, wait_seconds=INTERACTIVE_VERIFY_WAIT_SECONDS)
@@ -701,10 +706,9 @@ def cli_setup_near(rt: Any, args: Any, out=None) -> int:
             from .consent import approve_pending_pin
             out.write(approve_pending_pin(TerminalAsker(), rt.pins, rt.ledger, session_key="cli-setup",
                                           session_id="", platform="cli-setup") + "\n")
-    out.write("auxiliary.vision is left unset: with encryption on, NEAR refuses images. Set it as the note in "
-              "the block says before you lock.\n")
-    out.write(near_config_block(model, tinfoil_vision_model=getattr(args, "vision_model", None)
-                                or DEFAULT_VISION_MODEL) + "\n")
+    out.write("auxiliary.vision goes through attested-near: images leave in plaintext to NEAR's gateway, and "
+              "the text around them is encrypted. The note in the block says how to refuse them instead.\n")
+    out.write(near_config_block(model, vision) + "\n")
     out.write("Then run `hermes confidential check --tier attested` and `/confidential on attested`.\n")
     return 0
 
@@ -1107,8 +1111,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
         p = sub.add_parser("setup", help="verify the Tinfoil enclave, approve the first pin, print a config block")
         p.add_argument("--model", default=None, help="model id to put in the printed config block")
         p.add_argument("--vision-model", default=None,
-                       help=f"vision-capable Tinfoil model for auxiliary.vision (default {DEFAULT_VISION_MODEL}); "
-                            "with --vendor near it is only named in the printed vision note")
+                       help=f"vision-capable model for auxiliary.vision (default {DEFAULT_VISION_MODEL}; with "
+                            f"--vendor near, a NEAR model, default {DEFAULT_NEAR_VISION_MODEL})")
         p.add_argument("--aux-model", default=None,
                        help=f"cheaper model for short auxiliary jobs (default {DEFAULT_AUX_MODEL})")
         p.add_argument("--no-verify", action="store_true", help="only print the config block")
