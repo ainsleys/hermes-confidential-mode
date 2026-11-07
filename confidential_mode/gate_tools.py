@@ -1067,7 +1067,8 @@ def bypass_text(name: str, interactive: bool = False) -> str:
                 f"turn the bypass off to be asked, or run: hermes confidential allow {name} "
                 f"(in chat: /confidential allow {name})")
     return (f"confidential mode: {name} was blocked by confidential mode in an unattended run; to allow it, "
-            f"run: hermes confidential allow {name}, or run interactively to be asked")
+            f"run: hermes confidential allow {name}, or run interactively to be asked (approvals are bypassed "
+            "in an unattended run: nobody can be asked)")
 
 
 def _refusal_ledgered(choice: Any) -> bool:
