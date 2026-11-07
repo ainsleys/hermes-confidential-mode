@@ -26,6 +26,16 @@ from .ledger import LedgerEvent
 from .tiers import AttestedPredicate, OnHostPredicate, Tier, TierPredicate, Verdict, ZdrPredicate, host_of
 
 PROFILE_NAME = "attested-tinfoil"   # provider.PROFILE_NAME; repeated so this module imports no SDK code
+NEAR_PROFILE_NAME = "attested-near"  # provider.NEAR_PROFILE_NAME
+NEAR_API_KEY_ENV = "NEAR_AI_API_KEY"  # provider.NEAR_API_KEY_ENV
+ATTESTED_PROFILES = (PROFILE_NAME, NEAR_PROFILE_NAME)   # provider.ATTESTED_PROFILES (Amendment 5)
+
+
+def attested_profile_for(config: Mapping | None) -> str:
+    """The attested profile a locked profile uses: model.provider when it is one of ATTESTED_PROFILES,
+    else the Tinfoil profile (whose absence the preflight then reports)."""
+    provider = _main_route(config or {})[0]
+    return provider if provider in ATTESTED_PROFILES else PROFILE_NAME
 ZDR_REASON = "zero-retention tier not implemented"
 
 # User-facing disclosures (Amendment 4 F1(d), F12; must agree with the tool gate and the README).
@@ -115,7 +125,7 @@ def predicate_for(tier: Tier | str, *, config: Mapping | None = None,
     if tier is Tier.ON_HOST:
         return OnHostPredicate(extra_hosts=extra_hosts(config), profile_base_url=pbu)
     if tier is Tier.ATTESTED:
-        return AttestedPredicate([PROFILE_NAME], attested_ok or _default_attested_ok, profile_base_url=pbu)
+        return AttestedPredicate(list(ATTESTED_PROFILES), attested_ok or _default_attested_ok, profile_base_url=pbu)
     return ZdrPredicate()
 
 
@@ -159,7 +169,7 @@ def run_tier_preflight(tier: Tier | str, *, config: Mapping | None = None,
                                            profile_base_url=profile_base_url)
     return _pf.run_preflight(tier, predicate, config, plugin_aux_tasks=_plugin_aux(plugin_aux_tasks),
                              provider_lookup=provider_lookup or _pf.provider_lookup,
-                             attested_profile=PROFILE_NAME if tier is Tier.ATTESTED else None,
+                             attested_profile=attested_profile_for(config) if tier is Tier.ATTESTED else None,
                              builtin_aux_tasks=builtin_aux_tasks)
 
 
@@ -336,7 +346,8 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
             allowlist.persist(allowlist_path)
         except Exception:
             pass   # an unpersisted lock rebuilds as an empty allowlist after a restart: fail closed
-    verification_result = (verification or _default_verification)(PROFILE_NAME) if tier is Tier.ATTESTED else None
+    verification_result = (verification or _default_verification)(attested_profile_for(config)) \
+        if tier is Tier.ATTESTED else None
     message = lock_message(tier, config, verification=verification_result, clock=clock)
     provider, model, base_url = _main_route(config)
     from .gate_tools import Route
@@ -409,7 +420,8 @@ def unlock(*, state, ledger, session_id: str = "", surface: str = "",
 
 def _clear_verification_cache() -> None:
     from .provider import verification_cache
-    verification_cache.invalidate(PROFILE_NAME)
+    for name in ATTESTED_PROFILES:
+        verification_cache.invalidate(name)
 
 
 # ── per-turn recheck ─────────────────────────────────────────────────────────────────────────────

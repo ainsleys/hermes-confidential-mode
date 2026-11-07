@@ -21,7 +21,8 @@ FROZEN_COLUMNS = ["id", "ts", "session_id", "kind", "purpose", "provider", "host
 FROZEN_KINDS = {"send_observed", "send_refused", "verify_ok", "verify_fail", "tool_asked", "tool_allowed",
                 "tool_refused", "pin_staged", "pin_applied", "pin_denied", "lock", "unlock", "preflight_fail",
                 "breach", "compaction",
-                "session_start", "session_end"}   # Amendment 4 F7
+                "session_start", "session_end",   # Amendment 4 F7
+                "send_signed"}                    # Amendment 5 (NEAR signed responses)
 
 
 @pytest.fixture

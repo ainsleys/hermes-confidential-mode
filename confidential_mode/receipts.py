@@ -104,6 +104,20 @@ CLOSING_PARAGRAPH = (
     "come from this machine's clock and are not attested."
 )
 
+NEAR_CLOSING = (
+    "Signed responses (NEAR AI Cloud). For each send through attested-near the plugin recorded the SHA-256 "
+    "of the exact request body and of the response body as received, fetched NEAR's signature for that "
+    "completion id, and checked it against the signing key the attestation evidence binds. A send marked "
+    "verified with kind provider_tee carries an ed25519 signature, by a key that a verified model TEE's "
+    "quote binds, over \"<model>:<request sha256>:<response sha256>\"; anyone can re-check that from this "
+    "receipt alone (hermes confidential replay). A gateway-kind signature covers only \"<request sha256>:"
+    "<response sha256>\" and proves that the attested gateway signed those bytes, not which model produced "
+    "them. A missing signature (interrupted stream, fetch failure, failed request) proves nothing about "
+    "that send. The digests are the plugin's own: this receipt holds no bytes, so a third party can tie a "
+    "signature to a conversation only by hashing the exact request and response bytes themselves. "
+    "Instances of one model share one signing key, so a signature does not name the instance that answered."
+)
+
 SELF_REPORT_NOTE = ("This receipt is a self-report by the plugin from its ledger on this host. Only the attached evidence "
                     "blobs (JSON form) can be checked by a third party, by replaying them offline.")
 CHAIN_HEAD_NOTE = ("Record this chain head somewhere other than this machine now; later edits to this receipt are "
@@ -318,7 +332,40 @@ def _sections(rows: list[dict]) -> dict:
         "allowed_without_prompt": unprompted,
         "breaches": by_kind(("breach",)),
         "compactions": by_kind(("compaction",)),
+        "signed_sends": by_kind(("send_signed",)),
     }
+
+
+def _near_sends(rows: list[dict], evidence: list[dict]) -> tuple[list[dict], dict | None]:
+    """Per NEAR send: digests, signature kind, the live verdict, and an offline replay verdict computed
+    now from this receipt's own rows and evidence (verify/replay_near.py). (sends, header summary)."""
+    signed = [r for r in rows if r["kind"] == "send_signed"]
+    if not signed:
+        return [], None
+    try:
+        from .verify.replay_near import replay_receipt
+        replayed = {s["row"]: s for s in replay_receipt({"rows": rows, "evidence": evidence})["sends"]}
+    except Exception as exc:  # noqa: BLE001 - the receipt still renders; the verdict says why
+        replayed = {r["id"]: {"verdict": "not_run", "reason": f"replay unavailable ({type(exc).__name__})",
+                              "provider_tee": False} for r in signed}
+    out = []
+    for r in signed:
+        d = r["detail"] if isinstance(r["detail"], Mapping) else {}
+        sig = d.get("signature") if isinstance(d.get("signature"), Mapping) else {}
+        rep = replayed.get(r["id"]) or {"verdict": "not_run", "reason": "", "provider_tee": False}
+        live_tee = bool(d.get("fully_attested") is True)
+        out.append({"row": r["id"], "purpose": r["purpose"], "model": r["model"], "chat_id": d.get("chat_id"),
+                    "request_sha256": d.get("request_sha256"), "response_sha256": d.get("response_sha256"),
+                    "signature_kind": sig.get("signature_kind"), "signature_status": sig.get("status"),
+                    "live_verdict": r.get("verdict"), "live_reason": (d.get("check") or {}).get("reason"),
+                    "replay_verdict": rep.get("verdict"), "replay_reason": rep.get("reason"),
+                    "fully_attested": bool(live_tee and rep.get("verdict") == "pass" and rep.get("provider_tee")),
+                    "require_provider_tee": d.get("require_provider_tee") is not False})
+    summary = {"sends": len(out), "fully_attested": all(s["fully_attested"] for s in out),
+               "not_fully_attested_sends": [s["row"] for s in out if not s["fully_attested"]],
+               "replay_failures": [s["row"] for s in out if s["replay_verdict"] not in ("pass",)],
+               "require_provider_tee": any(s["require_provider_tee"] for s in out)}
+    return out, summary
 
 
 def _lock_info(rows: list[dict]) -> dict:
@@ -517,6 +564,11 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, on_host_extra_ho
     }
     doc["header"]["hpke_mismatches"] = [c["send"] for c in doc["sections"]["send_coverage"]
                                         if c.get("hpke_matches") is False]
+    near_sends, near_summary = _near_sends(rows, evidence)
+    if near_summary is not None:
+        doc["sections"]["near_sends"] = near_sends
+        doc["header"]["near"] = near_summary
+        doc["near_closing"] = NEAR_CLOSING
     leaks = forbidden_keys_in(doc)
     if leaks:  # unreachable after _redact; kept as the last line of defence
         raise ReceiptError(f"content-shaped keys in receipt: {', '.join(leaks[:5])}")
@@ -549,6 +601,8 @@ def verify_chain(receipt_json: str | Mapping) -> bool:
                 return False
         trust_digest = hashlib.sha256(canonical_json(doc["trust_roots"]).encode("utf-8")).hexdigest()
         if header.get("trust_roots_sha256") != trust_digest:
+            return False
+        if "near_closing" in doc and doc.get("near_closing") != NEAR_CLOSING:
             return False
         return doc.get("closing") == CLOSING_PARAGRAPH
     except Exception:
@@ -781,6 +835,29 @@ def render_text(doc: Mapping) -> str:
     section("Compactions", sec["compactions"],
             lambda r: f"{_p(r['purpose']) or 'compaction'}  host={_p(r['host']) or '(none)'}  "
                       f"{_p(r['provider']) or '?'}/{_p(r['model']) or '?'}")
+
+    near = h.get("near")
+    if near is not None:
+        add("")
+        add("Signed responses (NEAR AI Cloud; digests and signatures, never text)")
+        for c in sec.get("near_sends", []):
+            r = rows[c["row"]]
+            add(_line(r, sid, f"{_p(c['purpose']) or '?'}  {_p(c['model']) or '?'}  id={_p(c['chat_id']) or '(none)'}  "
+                              f"kind={_p(c['signature_kind']) or '(no signature)'}  live={_p(c['live_verdict'])}  "
+                              f"replay={_p(c['replay_verdict'])}"))
+            add(f"      request sha256 {_p(c['request_sha256']) or '(none)'}")
+            add(f"      response sha256 {_p(c['response_sha256']) or '(none: body incomplete)'}")
+            if c["live_reason"] or c["replay_reason"]:
+                add(f"      {_p(c['replay_reason'] or c['live_reason'])}")
+        if near["fully_attested"]:
+            add(f"  Session fully attested: all {near['sends']} NEAR send(s) carry a provider_tee signature by a "
+                "verified model key that replays from this receipt.")
+        else:
+            add(f"  SESSION NOT FULLY ATTESTED: {len(near['not_fully_attested_sends'])} of {near['sends']} NEAR "
+                "send(s) lack a provider_tee signature that verifies and replays: "
+                + ", ".join(f"#{i}" for i in near["not_fully_attested_sends"]))
+        add("")
+        add(NEAR_CLOSING)
 
     add("")
     add(CLOSING_PARAGRAPH)

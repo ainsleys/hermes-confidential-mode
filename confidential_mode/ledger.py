@@ -27,6 +27,9 @@ KINDS = frozenset({
     "breach", "compaction",
     # Amendment 4 F7: session boundary markers (never "lock": receipts open a locked period only at a lock row).
     "session_start", "session_end",
+    # Amendment 5: one row per send through a vendor that signs responses (NEAR AI Cloud): digests,
+    # signature, kind and the check's verdict ("verified" / "unverified").
+    "send_signed",
 })
 
 # Keys that carry conversation content in the provider request shapes Hermes sends

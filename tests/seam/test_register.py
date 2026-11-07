@@ -355,7 +355,8 @@ def test_one_registration_raising_leaves_the_others(monkeypatch, tmp_path, targe
         assert mod.register(ctx) is None                         # never raises
         rt = mod._RUNTIME
         expected = {"hooks": set(HOOKS), "middleware": {"llm_execution", "tool_execution"},
-                    "commands": {"confidential"}, "cli_commands": {"confidential"}, "providers": {"attested-tinfoil"}}
+                    "commands": {"confidential"}, "cli_commands": {"confidential"},
+                    "providers": {"attested-tinfoil", "attested-near"}}   # Amendment 5: NEAR registers too
         expected[missing[0]].discard(missing[1])
         assert {k: set(v) for k, v in rt.registered.items()} == expected
         assert set(mgr._hooks) == expected["hooks"]

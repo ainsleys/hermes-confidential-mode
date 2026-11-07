@@ -182,6 +182,8 @@ def pin_question(pending: Any, *, observers: Optional[list] = None, now: Optiona
     """The text a human judges before trusting an enclave build (Miller-frame review, "Pin prompt").
     Every field falls back to "unknown" so the prompt works with older PendingPin shapes."""
     now = time.time() if now is None else now
+    if _value(pending, "vendor") == "near":
+        return _near_pin_question(pending, observers=observers)
     url, compare = _release_urls(pending)
     rekor = _value(pending, "rekor_log_index")
     lines = [
@@ -201,6 +203,30 @@ def pin_question(pending: Any, *, observers: Optional[list] = None, now: Optiona
         f"Enclave fingerprint new: {_text(_value(pending, 'enclave_fingerprint'))}",
         *_observations(pending, observers),
         "Approving means trusting this build until it changes again.",
+    ]
+    return "\n".join(lines)
+
+
+def _near_pin_question(pending: Any, *, observers: Optional[list] = None) -> str:
+    """NEAR has no release tag or Sigstore bundle: the prompt shows the identity (host and model allowlist)
+    and the measured docker-compose of each CVM (Amendment 5)."""
+    comps = _value(pending, "components") or ()
+    lines = [
+        "Approve confidential pin update?",
+        _change_line(pending),
+        "Vendor: near (NEAR AI Cloud)",
+        f"Identity: {_text(_value(pending, 'router_repo'))} (gateway host # attested model allowlist)",
+        "Measured configuration (MRCONFIGID = SHA-256 of each CVM's docker-compose, checked against its quote):",
+        *([f"  {c}" for c in comps] or ["  unknown"]),
+        "NEAR runs instances of one model with different measured configurations under one signing key, so a "
+        "new instance can show up here as a change.",
+        f"Platform: {_text(_value(pending, 'platform'))}",
+        f"Code fingerprint old: {_text(_value(pending, 'previous'))}",
+        f"Code fingerprint new: {_text(_value(pending, 'code_fingerprint'))}",
+        f"Enclave fingerprint old: {_text(_value(pending, 'previous_enclave_fingerprint'))}",
+        f"Enclave fingerprint new: {_text(_value(pending, 'enclave_fingerprint'))}",
+        *_observations(pending, observers),
+        "Approving means trusting these measured configurations until they change again.",
     ]
     return "\n".join(lines)
 

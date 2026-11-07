@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 PROFILE_NAME = "attested-tinfoil"
 API_KEY_ENV = "TINFOIL_API_KEY"
+NEAR_PROFILE_NAME = "attested-near"
+NEAR_API_KEY_ENV = "NEAR_AI_API_KEY"
+# Every attested profile this plugin can register (locking.ATTESTED_PROFILES repeats it without importing
+# this module). A destination is in the attested tier only through one of these names.
+ATTESTED_PROFILES = (PROFILE_NAME, NEAR_PROFILE_NAME)
 DEFAULT_TTL_SECONDS = 300.0
 # After a failed attestation, further create_client()/attested_ok() calls refuse without re-attesting
 # for this long (Hermes calls create_client ~4 times before the first turn).
@@ -367,7 +372,10 @@ def _consent_recorded(e: _Entry, result: VerificationResult) -> bool:
 
 def _policy_check_detail(evidence) -> dict:
     """Second column at verify time: the standalone verify/policy_check.py re-verifies the captured
-    release bundle against the captured trust root (offline). {"ok": bool, "reason": str, ...}."""
+    release bundle against the captured trust root (offline). {"ok": bool, "reason": str, ...}.
+    NEAR evidence has no release bundle: n/a (its checks are in evidence["checks"])."""
+    if isinstance(evidence, dict) and evidence.get("vendor") == "near":
+        return {"ok": None, "reason": "n/a: NEAR evidence carries no Sigstore release bundle"}
     try:
         from pathlib import Path as _P
         from .verify import policy_check
@@ -474,10 +482,15 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
                  on_event: Callable[[dict], None] | None = None, ledger=None,
                  context_length: int = DEFAULT_CONTEXT_LENGTH,
                  verify_wait_seconds: float = DEFAULT_VERIFY_WAIT_SECONDS,
-                 consent_ledger=None, auto_approve_platform_only: bool = False):
-    """Build the 'attested-tinfoil' ProviderProfile and register its cache entry. Never touches the
-    network: base_url is the configured enclave URL, or the adapter's .invalid placeholder until the
-    first verify() resolves the host by router discovery (then it is updated in place)."""
+                 consent_ledger=None, auto_approve_platform_only: bool = False,
+                 name: str = PROFILE_NAME, display_name: str = "Tinfoil (attested)",
+                 description: str = "Tinfoil confidential inference; every client is bound to an attested enclave",
+                 env_var: str = API_KEY_ENV, supports_streaming: bool | None = None):
+    """Build an attested ProviderProfile (default 'attested-tinfoil') and register its cache entry. Never
+    touches the network: base_url is the configured enclave URL, or the adapter's .invalid placeholder
+    until the first verify() resolves the host by router discovery (then it is updated in place).
+    ``supports_streaming=False`` makes Hermes send its main calls unstreamed (agent/turn_api_call.py
+    _should_stream), which NEAR needs for model-signed (provider_tee) responses."""
     cache = cache if cache is not None else verification_cache
     ProviderProfile = _profile_base()
 
@@ -491,31 +504,34 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
             # enclave host off the attested transport (Amendment 4, T2).
             return int(self._confidential_context_length)
 
+    extra = {} if supports_streaming is None else {"supports_streaming": supports_streaming}
     profile = AttestedTinfoilProfile(
-        name=PROFILE_NAME,
-        display_name="Tinfoil (attested)",
-        description="Tinfoil confidential inference; every client is bound to an attested enclave",
+        name=name,
+        display_name=display_name,
+        description=description,
         base_url=adapter.base_url,
-        env_vars=(API_KEY_ENV,),
+        env_vars=(env_var,),
         auth_type="api_key",
+        **extra,
     )
     profile._confidential_adapter = adapter
+    profile._confidential_env_var = env_var
     profile._confidential_context_length = int(context_length)
     profile._confidential_pins = pins
     if on_event is None and ledger is not None:
         on_event = ledger.append
-    cache.register(PROFILE_NAME, adapter, pins, ttl_seconds, failure_backoff_seconds, on_event=on_event,
+    cache.register(name, adapter, pins, ttl_seconds, failure_backoff_seconds, on_event=on_event,
                    verify_wait_seconds=verify_wait_seconds)
     if consent_ledger is None and ledger is not None and callable(getattr(ledger, "tail", None)):
         consent_ledger = ledger
-    cache.entry(PROFILE_NAME).consent_ledger = consent_ledger
-    cache.entry(PROFILE_NAME).auto_approve_platform_only = bool(auto_approve_platform_only)
-    cache.entry(PROFILE_NAME).profile = profile
+    cache.entry(name).consent_ledger = consent_ledger
+    cache.entry(name).auto_approve_platform_only = bool(auto_approve_platform_only)
+    cache.entry(name).profile = profile
     return profile
 
 
 def _create_client(profile, cache: VerificationCache, client_kwargs: dict):
-    api_key = client_kwargs.get("api_key") or tinfoil_api_key()
+    api_key = client_kwargs.get("api_key") or api_key_for(getattr(profile, "_confidential_env_var", API_KEY_ENV))
     base_url = profile.base_url
     try:
         ok, reason, _ = cache.ensure(profile.name)
@@ -543,11 +559,16 @@ def tinfoil_api_key() -> str:
     """TINFOIL_API_KEY through Hermes' secret scope (agent.secret_scope.get_secret, as Hermes' own
     provider plugins do); never os.environ directly. get_secret falls back to the environment itself
     where Hermes allows it, and fails closed under multiplexing."""
+    return api_key_for(API_KEY_ENV)
+
+
+def api_key_for(env_var: str) -> str:
+    """An attested profile's API key through Hermes' secret scope (see tinfoil_api_key)."""
     try:
         from agent.secret_scope import get_secret
-        return (get_secret(API_KEY_ENV) or "").strip()
+        return (get_secret(env_var) or "").strip()
     except Exception as exc:
-        logger.warning("attested: could not resolve %s: %s", API_KEY_ENV, type(exc).__name__)
+        logger.warning("attested: could not resolve %s: %s", env_var, type(exc).__name__)
         return ""
 
 
@@ -605,5 +626,77 @@ def register_provider_profile(ctx, *, config: dict | None = None, data_dir: Path
                                            default=DEFAULT_VERIFY_WAIT_SECONDS)),
         auto_approve_platform_only=_cfg_get(config, "confidential", "pins", "auto_approve_platform_only",
                                             default=False) is True)
+    providers.register_provider(profile)
+    return profile
+
+
+# ── NEAR AI Cloud ────────────────────────────────────────────────────────────────────────────────
+
+def near_models(config: dict | None) -> list[str]:
+    """The NEAR model allowlist: confidential.near.models, plus model.default and any auxiliary.<task>.model
+    whose provider is attested-near (Hermes sends those ids verbatim; NEAR signs the id in the request)."""
+    out: list[str] = []
+    listed = _cfg_get(config, "confidential", "near", "models", default=[])
+    if isinstance(listed, list):
+        out += [m.strip() for m in listed if isinstance(m, str) and m.strip()]
+    model = _cfg_get(config, "model")
+    if isinstance(model, dict) and model.get("provider") == NEAR_PROFILE_NAME:
+        name = model.get("default") or model.get("model")
+        if isinstance(name, str) and name.strip():
+            out.append(name.strip())
+    aux = _cfg_get(config, "auxiliary", default={})
+    if isinstance(aux, dict):
+        for task in aux.values():
+            if isinstance(task, dict) and task.get("provider") == NEAR_PROFILE_NAME and \
+                    isinstance(task.get("model"), str) and task["model"].strip():
+                out.append(task["model"].strip())
+    return sorted(set(out))
+
+
+def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | str | None = None,
+                          adapter=None, pins: PinStore | None = None,
+                          on_event: Callable[[dict], None] | None = None, ledger=None):
+    """Wire the 'attested-near' profile into Hermes (same cache, pins file and ledger as Tinfoil's).
+    No network at register. Reads confidential.near.{base_url, models, require_provider_tee,
+    require_tls_binding, accepted_tcb_statuses, signature_wait_seconds, streaming, context_length}."""
+    import providers
+    if config is None:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly() or {}
+    if data_dir is None:
+        data_dir = ctx.state.data_dir
+    data_dir = Path(data_dir)
+    near = lambda *p, default=None: _cfg_get(config, "confidential", "near", *p, default=default)  # noqa: E731
+    require_tee = near("require_provider_tee", default=True) is not False
+    if adapter is None:
+        from .verify.near import DEFAULT_ACCEPTED_TCB, DEFAULT_BASE_URL, DEFAULT_SIGNATURE_WAIT_SECONDS, NearAdapter
+        tcb = near("accepted_tcb_statuses", default=list(DEFAULT_ACCEPTED_TCB))
+        adapter = NearAdapter(
+            data_dir=data_dir, base_url=str(near("base_url", default=DEFAULT_BASE_URL)), models=near_models(config),
+            require_provider_tee=require_tee, require_tls_binding=near("require_tls_binding", default=True) is not False,
+            accepted_tcb_statuses=[t for t in tcb if isinstance(t, str)] if isinstance(tcb, list) else DEFAULT_ACCEPTED_TCB,
+            signature_wait_seconds=float(near("signature_wait_seconds", default=DEFAULT_SIGNATURE_WAIT_SECONDS)))
+    if hasattr(adapter, "provider_name"):
+        adapter.provider_name = NEAR_PROFILE_NAME
+    if pins is None:
+        pins = PinStore(data_dir / "pins.yaml")
+    if ledger is None and on_event is None and ctx is not None:
+        try:
+            from .ledger import Ledger
+            ledger = Ledger()
+        except Exception:
+            logger.warning("attested-near: no ledger; pins will not be cross-checked against consent", exc_info=True)
+    # Unstreamed by default: NEAR's gateway re-signs streamed completions itself (gateway kind), so only an
+    # unstreamed completion can carry a model-signed provider_tee signature.
+    streaming = near("streaming", default=False) is True
+    profile = make_profile(
+        adapter, pins, float(_cfg_get(config, "confidential", "verify_ttl_seconds", default=DEFAULT_TTL_SECONDS)),
+        on_event=on_event, ledger=ledger, name=NEAR_PROFILE_NAME, display_name="NEAR AI Cloud (attested)",
+        description="NEAR AI Cloud private inference; the gateway and model TEEs are attested and every "
+                    "response signature is checked",
+        env_var=NEAR_API_KEY_ENV, supports_streaming=streaming,
+        context_length=int(near("context_length", default=DEFAULT_CONTEXT_LENGTH)),
+        verify_wait_seconds=float(_cfg_get(config, "confidential", "verify_wait_seconds",
+                                           default=DEFAULT_VERIFY_WAIT_SECONDS)))
     providers.register_provider(profile)
     return profile

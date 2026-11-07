@@ -74,6 +74,8 @@ class PendingPin:
     rekor_log_index: int | None = None           # verificationMaterial.tlogEntries[0].logIndex
     code_changed: bool = True                    # code_fingerprint != previous (True when no previous pin)
     hardware_measurements_verified: bool = False  # SDK's signed hardware-measurements check (TDX) passed
+    # Amendment 5 (NEAR): one line per measured component ("gateway compose sha256:...", "model M compose ...")
+    components: tuple[str, ...] = ()
 
     @property
     def key(self) -> tuple[str, str]:
@@ -137,8 +139,11 @@ def _prompt_context(result: VerificationResult) -> dict:
     the evidence the adapter captured. Missing pieces are None/False; never raises."""
     ev = result.evidence if isinstance(result.evidence, dict) else {}
     out: dict = {"platform": None, "release_published_at": None, "rekor_log_index": None,
-                 "hardware_measurements_verified": False}
+                 "hardware_measurements_verified": False, "components": ()}
     try:
+        comps = (ev.get("claims") or {}).get("components") if isinstance(ev.get("claims"), dict) else None
+        if isinstance(comps, (list, tuple)):
+            out["components"] = tuple(str(c) for c in comps)
         platform = ev.get("platform")
         out["platform"] = platform if platform in ("sev-snp", "tdx") else None
         rel = ev.get("release") or {}
@@ -173,6 +178,8 @@ def _record_from_dict(cls, d: dict):
     fields = cls.__dataclass_fields__
     kwargs = {k: v for k, v in d.items() if k in fields}
     kwargs["models_seen"] = tuple(kwargs.get("models_seen") or ())
+    if "components" in fields:
+        kwargs["components"] = tuple(kwargs.get("components") or ())
     try:
         return cls(**kwargs)
     except TypeError as exc:
@@ -302,6 +309,7 @@ class PinStore:
                 rekor_log_index=ctx["rekor_log_index"],
                 code_changed=(current is None or current.code_fingerprint != result.code_fingerprint),
                 hardware_measurements_verified=ctx["hardware_measurements_verified"],
+                components=ctx["components"],
             )
             self.save(pins, new)
             return new

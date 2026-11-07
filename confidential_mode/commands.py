@@ -52,8 +52,34 @@ def _verification_line(rt: Any, clock: Callable[[], float] = time.time) -> str:
         cache = _provider_module(rt).verification_cache
     except Exception:  # noqa: BLE001
         return "Last verification: unavailable"
+    near = _near_verification_line(cache, clock)
     result = cache.result(PROFILE_NAME)
     error = cache.last_error(PROFILE_NAME)
+    if near and result is None and not error:
+        return near
+    if near:
+        return _tinfoil_verification_line(result, error, clock) + "\n" + near
+    return _tinfoil_verification_line(result, error, clock)
+
+
+def _near_verification_line(cache: Any, clock: Callable[[], float]) -> str:
+    """'' unless the NEAR profile has verified or failed in this process."""
+    name = _locking.NEAR_PROFILE_NAME
+    try:
+        result, error = cache.result(name), cache.last_error(name)
+    except Exception:  # noqa: BLE001
+        return ""
+    if result is not None:
+        claims = (result.evidence or {}).get("claims") or {} if isinstance(result.evidence, dict) else {}
+        return (f"NEAR verification: {_locking.age_text(clock() - result.verified_at_host_clock)} ago (host clock), "
+                f"{result.router_repo}, code {_short(result.code_fingerprint)} enclave "
+                f"{_short(result.enclave_fingerprint)}, gateway TCB {claims.get('tcb_status') or 'unknown'}")
+    if error:
+        return f"NEAR verification: failed ({error[:120]})"
+    return ""
+
+
+def _tinfoil_verification_line(result: Any, error: Any, clock: Callable[[], float]) -> str:
     if result is not None:
         return (f"Last verification: {_locking.age_text(clock() - result.verified_at_host_clock)} ago (host clock), "
                 f"code {_short(result.code_fingerprint)} enclave {_short(result.enclave_fingerprint)}"
@@ -366,7 +392,8 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
         return result.message
     if cmd in ("off", "unlock"):
         result = _locking.unlock(state=rt.state, ledger=rt.ledger, session_id=sid, surface=surface,
-                                 clear_cache=lambda: _provider_module(rt).verification_cache.invalidate(PROFILE_NAME))
+                                 clear_cache=lambda: [_provider_module(rt).verification_cache.invalidate(n)
+                                                      for n in _locking.ATTESTED_PROFILES])
         rt.set_allowlist(None)
         try:   # Amendment 4 F6 (W4): allow grants are scoped to the lock
             from .gate_tools import clear_persisted
@@ -511,8 +538,71 @@ def config_block(rt: Any, model: str, *, vision_model: str = DEFAULT_VISION_MODE
     return "\n".join(lines)
 
 
+DEFAULT_NEAR_MODEL = "Qwen/Qwen3.8-27B"                      # a NEAR-operated vLLM model with attestation
+DEFAULT_NEAR_VISION_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct"   # vision-capable, also NEAR-operated
+
+
+def near_config_block(model: str, vision_model: str) -> str:
+    try:
+        tasks = list(dict.fromkeys(_pf.builtin_aux_task_names()
+                                   + [e if isinstance(e, str) else e.get("key") for e in _locking._plugin_aux(None)]))
+    except Exception:  # noqa: BLE001
+        tasks = list(_pf.BUILTIN_AUX_TASKS_SNAPSHOT)
+    tasks = [t for t in tasks if t and not t.startswith("moa")]
+    name = _locking.NEAR_PROFILE_NAME
+    lines = ["# Add to config.yaml (review first; setup never writes your config):",
+             "model:", f"  provider: {name}", f"  default: {model}", "fallback_providers: []", "auxiliary:"]
+    for task in tasks:
+        lines += [f"  {task}:", f"    provider: {name}", f"    model: {vision_model if task == 'vision' else model}"]
+    lines += ["memory:", '  provider: ""', "voice:", "  auto_tts: false", "confidential:", "  near:",
+              "    # every model id Hermes may send to NEAR; the pin covers exactly this list",
+              f"    models: [{model}{', ' + vision_model if vision_model != model else ''}]",
+              "    require_provider_tee: true"]
+    return "\n".join(lines)
+
+
+def cli_setup_near(rt: Any, args: Any, out=None) -> int:
+    """`hermes confidential setup --vendor near`: attest the NEAR gateway and the chosen models, approve the
+    first pin on this terminal, print a config block. No API key is needed to attest (NEAR documents the
+    attestation endpoints as public); one is needed for inference and signatures."""
+    out = out or sys.stdout
+    model = getattr(args, "model", None) or DEFAULT_NEAR_MODEL
+    vision = getattr(args, "vision_model", None) or DEFAULT_NEAR_VISION_MODEL
+    key_set = bool(_provider_module(rt).api_key_for(_locking.NEAR_API_KEY_ENV))
+    out.write(f"{_locking.NEAR_API_KEY_ENV}: {'set' if key_set else 'NOT set (hermes auth / .env)'}\n")
+    if not getattr(args, "no_verify", False):
+        adapter = getattr(rt, "near_adapter", None)
+        if adapter is None:
+            out.write("The attested-near provider is not registered; see `hermes confidential status`.\n")
+            return 1
+        adapter.models = sorted(set(adapter.models) | {model, vision})
+        cache = _provider_module(rt).verification_cache
+        cache.invalidate(_locking.NEAR_PROFILE_NAME)
+        ok, reason, result = cache.ensure(_locking.NEAR_PROFILE_NAME, wait_seconds=INTERACTIVE_VERIFY_WAIT_SECONDS)
+        if result is None:
+            out.write(f"Verification failed: {reason}\n")
+            return 1
+        claims = (result.evidence or {}).get("claims") or {}
+        out.write(f"Verified {result.router_repo}: code {_short(result.code_fingerprint, 16)} enclave "
+                  f"{_short(result.enclave_fingerprint, 16)}; gateway TCB {claims.get('tcb_status')}\n")
+        for line in claims.get("components") or []:
+            out.write(f"  {line}\n")
+        if rt.pins.match(result):
+            out.write("This build is already pinned.\n")
+        else:
+            rt.pins.stage(result, model=model)
+            from .consent import approve_pending_pin
+            out.write(approve_pending_pin(TerminalAsker(), rt.pins, rt.ledger, session_key="cli-setup",
+                                          session_id="", platform="cli-setup") + "\n")
+    out.write(near_config_block(model, vision) + "\n")
+    out.write("Then run `hermes confidential check --tier attested` and `/confidential on attested`.\n")
+    return 0
+
+
 def cli_setup(rt: Any, args: Any, out=None) -> int:
     out = out or sys.stdout
+    if getattr(args, "vendor", None) == "near":
+        return cli_setup_near(rt, args, out)
     model = getattr(args, "model", None) or _locking._cfg(rt.load_config(), "confidential", "model") or "<model>"
     out.write(f"TINFOIL_API_KEY: {'set' if _provider_module(rt).tinfoil_api_key() else 'NOT set (hermes auth / .env)'}\n")
     if not getattr(args, "no_verify", False):
@@ -564,6 +654,10 @@ DEFAULT_EXPECTED_REPO = "tinfoilsh/confidential-model-router"
 
 def _replay_module():
     return importlib.import_module(__package__ + ".verify.replay")
+
+
+def _near_replay_module():
+    return importlib.import_module(__package__ + ".verify.replay_near")
 
 
 def _call_replay(replay_fn: Callable[..., Any], evidence: dict, *, expected_repo: str,
@@ -731,10 +825,16 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         row_id = item.get("row_id")
         claimed = _row_claims(doc, row_id)
         vendor = str(_row_vendor(doc, row_id) or ev.get("vendor") or "tinfoil")
+        row_repo, row_replay = expected_repo, replay_fn
+        if ev.get("schema") == _near_replay_module().EVIDENCE_SCHEMA:
+            # NEAR (Amendment 5): the pin identity is "<host>#<models>"; --expected-repo overrides it only
+            # when given explicitly.
+            vendor, row_replay = "near", _near_replay_module().replay
+            row_repo = expected_repo if expected_repo != DEFAULT_EXPECTED_REPO else str(ev.get("repo") or "")
         fps, fps_source = _expected_for_row(flag=flag_fps, pin_records=pin_records, pins_path=pins_path,
-                                            vendor=vendor, expected_repo=expected_repo, claimed=claimed)
+                                            vendor=vendor, expected_repo=row_repo, claimed=claimed)
         try:
-            result, notes = _call_replay(replay_fn, ev, expected_repo=expected_repo, expected_fingerprints=fps,
+            result, notes = _call_replay(row_replay, ev, expected_repo=row_repo, expected_fingerprints=fps,
                                          trusted_root=trusted_root, as_of=as_of,
                                          expected_repo_id=getattr(args, "expected_repo_id", None),
                                          expected_owner_id=getattr(args, "expected_owner_id", None))
@@ -746,8 +846,8 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         repo = getattr(result, "repo", None) or ev.get("repo") or ""
         host = getattr(result, "enclave_host", None) or getattr(result, "host", None) or ev.get("enclave_host") or ""
         platform = getattr(result, "platform", None) or (ev.get("attestation") or {}).get("format") or ""
-        if "expected_repo" in notes and repo != expected_repo:
-            problems.append(f"repo {repo or '(none)'} is not the expected {expected_repo}")
+        if "expected_repo" in notes and repo != row_repo:
+            problems.append(f"repo {repo or '(none)'} is not the expected {row_repo}")
         if fps and "expected_fingerprints" in notes:
             got = (getattr(result, "code_fingerprint", None), getattr(result, "enclave_fingerprint", None))
             if got != tuple(fps):
@@ -780,11 +880,28 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         row_ne = tuple(getattr(result, "not_established", ()) or ())
         if row_ne:
             not_established = row_ne
+    signed_failed = 0
+    near = None
+    if any(isinstance(r, dict) and r.get("kind") == "send_signed" for r in doc.get("rows") or []):
+        near = _near_replay_module().replay_receipt(doc)
+        out.write("\nSigned responses (NEAR AI Cloud):\n")
+        for snd in near["sends"]:
+            mark = "OK" if snd["verdict"] == "pass" else snd["verdict"].upper()
+            tee = "provider_tee" if snd["provider_tee"] else (snd["kind"] or "no signature")
+            out.write(f"  Row #{snd['row']}: {mark}  {tee}  id {snd['chat_id'] or '(none)'}"
+                      f"{'' if snd['verdict'] == 'pass' else '  ' + str(snd['reason'] or '')}\n")
+            signed_failed += 0 if snd["verdict"] == "pass" else 1
+        out.write("  Session fully attested: " + ("yes" if near["fully_attested"] else
+                                                   "NO (not every NEAR send has a provider_tee signature that replays)")
+                  + "\n")
+        not_established = tuple(not_established) + tuple(_near_replay_module().NOT_ESTABLISHED)
     out.write("\nA replay does NOT establish:\n")
-    for line in not_established:
+    for line in dict.fromkeys(not_established):
         out.write(f"  - {line}\n")
     out.write(f"\n{len(items) - failed}/{len(items)} evidence row(s) replayed OK.\n")
-    return 1 if failed else 0
+    if near is not None:
+        out.write(f"{len(near['sends']) - signed_failed}/{len(near['sends'])} signed response(s) replayed OK.\n")
+    return 1 if (failed or signed_failed) else 0
 
 
 CLI_VERBS = ("on", "off", "receipts", "pins", "allow")
@@ -832,6 +949,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
         p.add_argument("--aux-model", default=None,
                        help=f"cheaper model for short auxiliary jobs (default {DEFAULT_AUX_MODEL})")
         p.add_argument("--no-verify", action="store_true", help="only print the config block")
+        p.add_argument("--vendor", default="tinfoil", choices=["tinfoil", "near"],
+                       help="which attested vendor to set up (default tinfoil)")
         p = sub.add_parser("check", help="run the lock preflight and print the table")
         p.add_argument("--tier", default=None, choices=[t.value for t in Tier])
         p = sub.add_parser("watch", help="stream the ledger (works unlocked)")

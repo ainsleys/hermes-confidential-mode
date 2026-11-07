@@ -239,7 +239,8 @@ class LlmGate:
         if self.is_false(locked):
             self.record("send_observed", dest, context, host=_host(dest.base_url),
                         nbytes=request_bytes(request), decision="observed")
-            return next_call(request)
+            with self.send_context(dest, context, None):
+                return next_call(request)
 
         predicate = self.predicate_for(tier)
         if not self.same_tier(Tier(predicate.tier), tier):
@@ -265,6 +266,18 @@ class LlmGate:
 
         return self.guarded_call(request, next_call, dest, context, tier, verdict)
 
+    @staticmethod
+    def send_context(dest: Destination, context: Mapping[str, Any], tier: Tier | None):
+        """Session and purpose for adapters that ledger their own per-send rows (NEAR signatures, sendctx.py).
+        Never fails the call: a broken import degrades to no context."""
+        try:
+            from .sendctx import send_context
+            return send_context(session_id=str(context.get("session_id") or ""), purpose=dest.purpose,
+                                provider=dest.provider, model=dest.model, tier=tier.value if tier else None)
+        except Exception:  # noqa: BLE001
+            import contextlib
+            return contextlib.nullcontext()
+
     # Identity checks, one place so mutant tests can target each use (``what``).
     @staticmethod
     def permits(value: Any, what: str) -> bool:
@@ -283,7 +296,8 @@ class LlmGate:
         self.record("send_observed", dest, context, host=verdict.host or _host(dest.base_url),
                     nbytes=nbytes, tier=tier.value, verdict="in_tier", decision="allowed")
         try:
-            return next_call(request)
+            with self.send_context(dest, context, tier):
+                return next_call(request)
         except Exception as exc:
             original = getattr(exc, "original", exc)
             if isinstance(original, InterruptedError):

@@ -10,7 +10,7 @@
 - pre_api_request / pre_auxiliary_call / post_auxiliary_call: ledger ``send_observed`` with host and
   bytes; an off-tier auxiliary destination while locked is a breach (aux calls cannot be blocked);
 - on_session_start / on_session_end / post_compaction: receipt rows;
-- the 'attested-tinfoil' provider profile (no network at register);
+- the 'attested-tinfoil' and 'attested-near' provider profiles (no network at register);
 - ``/confidential`` and ``hermes confidential``.
 
 Every registration is its own step: a failure is logged, ledgered (``preflight_fail``, purpose
@@ -57,6 +57,8 @@ class Runtime:
         self.profile: Any = None
         self.pins: Any = None
         self.adapter: Any = None
+        self.near_profile: Any = None
+        self.near_adapter: Any = None
         self.allowlist_path: Any = None
         self.registered: dict[str, list[str]] = {"hooks": [], "middleware": [], "commands": [],
                                                  "cli_commands": [], "providers": []}
@@ -246,6 +248,15 @@ def _register(rt: Runtime) -> None:
         rt.adapter = getattr(profile, "_confidential_adapter", None)
         rt.registered["providers"].append(profile.name)
     _step(rt, "provider", provider_profile)
+
+    def near_profile():
+        # Amendment 5: NEAR AI Cloud, same verification cache, pins file and ledger as Tinfoil's.
+        provider = _cm("provider")
+        profile = provider.register_near_profile(ctx, config=rt.load_config(), ledger=rt.ledger, pins=rt.pins)
+        rt.near_profile = profile
+        rt.near_adapter = getattr(profile, "_confidential_adapter", None)
+        rt.registered["providers"].append(profile.name)
+    _step(rt, "provider_near", near_profile)
     if rt.pins is None:
         def fallback_pins():
             rt.pins = _cm("pins").PinStore(ctx.state.data_dir / "pins.yaml")

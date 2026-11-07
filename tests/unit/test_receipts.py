@@ -90,6 +90,10 @@ def fill_every_kind(led: Ledger, sid: str = SID) -> None:
     # Session markers (W5): never open or close a locked period; appended last so earlier row ids hold.
     led.append(_ev("session_start", decision="session_start", detail={"platform": "cli"}))
     led.append(_ev("session_end", decision="session_end", detail={"platform": "cli"}))
+    # Amendment 5: a NEAR signed-response row (no matching evidence here, so its replay verdict is fail).
+    led.append(_ev("send_signed", purpose="main", provider="attested-near", host="cloud-api.near.ai",
+                   model="m", bytes=10, verdict="unverified", decision="missing",
+                   detail={"vendor": "near", "signature": {"status": "missing", "reason": "interrupted stream"}}))
 
 
 def _pins(tmp_path) -> PinStore:
