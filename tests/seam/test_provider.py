@@ -528,15 +528,33 @@ def test_pin_staged_is_emitted_once_per_new_pending(env):
 
 
 @pytest.mark.parametrize("fail", [None, "boom"])
-def test_a_raising_on_event_never_changes_the_decision(env, fail):
+def test_a_raising_on_event_refuses_rather_than_accept_an_unrecorded_verification(env, fail):
+    # Amendment 5.2: a verification whose verify_ok row cannot be written is refused (no receipt could show
+    # its evidence); a failed verification stays failed. Either way nothing attested is sent.
     env["sdk"]["fail"] = fail
 
     def broken(ev):
         raise RuntimeError("ledger disk full")
     profile = env["register"](on_event=broken)
     client = profile.create_client(api_key="tf-key", base_url=BASE_URL)
-    assert isinstance(client, RefusingClient if fail else ConfidentialClient)
-    assert provider_mod.attested_ok(PROFILE).in_tier is (not fail)
+    assert isinstance(client, RefusingClient)
+    v = provider_mod.attested_ok(PROFILE)
+    assert v.in_tier is False
+    if not fail:
+        assert "verify_ok ledger row could not be written" in str(v.reason)
+
+
+def test_a_verify_ok_row_the_ledger_refuses_is_loud(env):
+    events = []
+
+    def picky(ev):
+        if ev["kind"] == "verify_ok":
+            raise RuntimeError("detail exceeds the ledger size cap")
+        events.append(ev)
+    profile = env["register"](on_event=picky)
+    assert isinstance(profile.create_client(api_key="tf-key", base_url=BASE_URL), RefusingClient)
+    assert [e["kind"] for e in events][:1] == ["verify_fail"]
+    assert events[0]["detail"]["error"] == provider_mod.REASON_VERIFY_ROW_LOST
 
 
 def test_ledger_kwarg_is_a_shortcut_for_on_event(env, tmp_path):

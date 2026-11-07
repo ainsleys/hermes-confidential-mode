@@ -49,6 +49,8 @@ def is_verification_pending(reason: str | None) -> bool:
     return isinstance(reason, str) and reason.startswith(VERIFY_PENDING_PREFIX)
 REASON_NO_CONSENT = "pin has no consent record"
 REASON_BAD_RESULT = "attestation returned no usable fingerprints"
+REASON_VERIFY_ROW_LOST = ("attestation verified but its verify_ok ledger row could not be written (for example its "
+                          "evidence is over the ledger size cap); refused, because no receipt could show it")
 REASON_NOT_REGISTERED = "attested provider is not registered"
 REASON_PIN_MISMATCH = "enclave build changed; run /confidential pins approve"
 REASON_NO_PIN = "no approved enclave build pinned; run /confidential pins approve"
@@ -165,9 +167,17 @@ class VerificationCache:
                                      "error_type": type(exc).__name__, "error": str(exc)[:300],
                                      "enclave_host": _adapter_host(e.adapter)}})
                 raise exc if isinstance(exc, VerifyError) else VerifyError(e.last_error) from exc
+            if not self._emit_verify_ok(provider, e, result):
+                reason = REASON_VERIFY_ROW_LOST
+                with e.lock:
+                    e.result, e.failed_mono, e.last_error = None, self._now(), reason
+                _emit(e, {"kind": "verify_fail", "provider": provider, "purpose": "verify",
+                          "host": result.enclave_host,
+                          "detail": {"vendor": result.vendor, "error_type": "LedgerError", "error": reason,
+                                     "enclave_host": result.enclave_host}})
+                raise VerifyError(reason)
             with e.lock:
                 e.result, e.verified_mono, e.last_error, e.failed_mono = result, self._now(), None, None
-            self._emit_verify_ok(provider, e, result)
             return result
 
     def _start_refresh(self, provider: str, e: _Entry) -> threading.Event:
@@ -188,7 +198,10 @@ class VerificationCache:
             threading.Thread(target=run, name=f"confidential-verify-{provider}", daemon=True).start()
         return e.inflight
 
-    def _emit_verify_ok(self, provider: str, e: _Entry, result: VerificationResult) -> None:
+    def _emit_verify_ok(self, provider: str, e: _Entry, result: VerificationResult) -> bool:
+        """Write the verify_ok row. False only when a ledger sink is configured and the write failed (for
+        example a detail over the size cap): the caller then refuses the verification, loudly, rather than
+        accept a result whose evidence no receipt could show."""
         claims = (result.evidence or {}).get("claims") or {} if isinstance(result.evidence, dict) else {}
         observe = getattr(e.adapter, "observe_key", None)
         try:
@@ -196,7 +209,8 @@ class VerificationCache:
                                  claims.get("hpke_public_key")) if callable(observe) else None
         except Exception:
             first_seen = None
-        _emit(e, {"kind": "verify_ok", "provider": provider, "purpose": "verify", "host": result.enclave_host,
+        return e.on_event is None or _emit(e, {"kind": "verify_ok", "provider": provider, "purpose": "verify",
+                  "host": result.enclave_host,
                   "detail": {"vendor": result.vendor, "source": "verify", "key_first_seen": first_seen,
                              "code_fingerprint": result.code_fingerprint,
                              "enclave_fingerprint": result.enclave_fingerprint,
@@ -217,8 +231,10 @@ class VerificationCache:
             return False
         if at <= max(e.verified_mono or 0.0, e.failed_mono or 0.0):
             return False  # never resurrect a result older than the cache's last attempt (e.g. a failed refresh)
+        if not self._emit_verify_ok(provider, e, res):
+            e.result, e.failed_mono, e.last_error = None, self._now(), REASON_VERIFY_ROW_LOST
+            return False
         e.result, e.verified_mono, e.last_error, e.failed_mono = res, float(at), None, None
-        self._emit_verify_ok(provider, e, res)
         return True
 
     def ensure(self, provider: str, *, wait_seconds: float | None = None) -> tuple[bool, str, VerificationResult | None]:

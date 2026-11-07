@@ -55,47 +55,50 @@ def test_the_ledger_moves_evidence_blobs_to_the_store_and_keeps_their_ids(tmp_pa
     assert "blobs" in ev   # the in-memory evidence is not changed
 
 
-def _worst_case() -> dict:
-    """Three allowlisted models, two candidates each, every candidate with its own 86-action log (the
-    longest seen) and its own app_compose; two of the models have no prompt-path rule, so their claims
-    carry the whole 46-service map."""
-    big = real.GPU13["candidate"]
-    models = {}
-    for k, name in enumerate(MODELS):
-        cands = []
-        for i in range(2):
-            c = copy.deepcopy(big)
-            c["model_name"] = name
-            c["compose_manager_attestation"]["actions"].append({"action": "docker_restart", "timestamp": f"{k}{i}"})
-            c["info"]["tcb_info"]["app_compose"] += " " * (2 * k + i + 1)
-            cands.append(c)
-        models[name] = {"model_attestations": cands}
-    ev = real.evidence(models=models)
-    one = near.appraise(real.evidence())
-    state, images = nc.deployment_map(big["compose_manager_attestation"]["actions"])
-    cvms = [dict(one.cvms[0])]
-    for name in MODELS:
-        for i in range(2):
-            svc, scope = nc.prompt_path(state, name)
-            cm = {"services": svc, "services_scope": scope, "cm_image_running": nc.image_ref(images[-1]),
-                  "cm_image_measured": real.CM_MEASURED}
-            cvms.append(near._cvm(f"model:{name}", {"compose_hash": "ab" * 32}, one.cvms[1], cm))
-    ev["checks"] = one.checks
-    ev["policy"] = {"require_tls_binding": True, "require_provider_tee": True, "accepted_tcb_statuses": ["UpToDate"]}
-    ev["claims"] = {**near.evidence_claims(ev, one), "cvms": cvms,
-                    "components": list(one.components[:2]) + [ln for c in cvms for ln in near._cvm_lines(c)]}
-    return ev
+def _worst_case(tmp_path):
+    """Six allowlisted models, none with a service name list, two candidates each, every candidate with the
+    longest real actions log seen (86 actions, 46 services): claims from the adapter's own verify()."""
+    from tests.near_world import NearWorld
+    names = [f"vendor/model-{i}" for i in range(6)]
+    world = NearWorld(models=names)
+    world.model_candidates = 2
+    world.cm_actions = copy.deepcopy(real.GPU13["candidate"]["compose_manager_attestation"]["actions"])
+    return world.adapter(tmp_path / "adapter", encrypt=False).verify().evidence
 
 
 def test_worst_case_evidence_row_stays_under_the_ledger_cap(tmp_path):
-    ev = _worst_case()
+    ev = _worst_case(tmp_path)
+    assert len(ev["claims"]["cvms"]) == 13 and all(
+        set(c["services"]) == {"$blob"} for c in ev["claims"]["cvms"][1:])     # maps live in the blobs
     inline = _size({"vendor": "near", "evidence": ev})
-    assert inline > MAX_DETAIL_BYTES, inline        # what the row would be without the store
     led = Ledger(tmp_path / "ledger.sqlite")
     led.append(_row(ev))
     stored = _size(led.tail()[0].detail)
-    assert stored < MAX_DETAIL_BYTES * 0.6, (inline, stored)
-    assert len(led.tail()[0].detail["evidence"]["blob_refs"]) == len(ev["blobs"]) >= 13
+    assert stored < MAX_DETAIL_BYTES * 0.5 < inline, (inline, stored)
+
+
+def test_a_row_refused_for_its_size_leaves_no_blob_behind(tmp_path):
+    ev = dict(real.evidence(), padding="x" * (MAX_DETAIL_BYTES + 1))
+    led = Ledger(tmp_path / "ledger.sqlite")
+    with pytest.raises(LedgerError, match="size cap"):
+        led.append(_row(ev))
+    assert not (tmp_path / "evidence" / "blobs").exists() or not list((tmp_path / "evidence" / "blobs").iterdir())
+
+
+def test_unreferenced_blobs_are_deleted_after_the_retention_period(tmp_path):
+    import os
+    import time
+    led = Ledger(tmp_path / "ledger.sqlite")
+    led.append(_row(_verified_evidence(real.evidence())))
+    store = led.blobs
+    store.put("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "")   # an orphan
+    kept = set(led.tail()[0].detail["evidence"]["blob_refs"])
+    assert led.gc_blobs() == []                                  # too young
+    old = time.time() - 2 * 24 * 3600
+    for f in store.root.iterdir():
+        os.utime(f, (old, old))
+    assert led.gc_blobs() == ["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]
+    assert {f.name for f in store.root.iterdir()} == kept       # every referenced blob stays
 
 
 def test_the_content_key_scan_covers_the_compose_manager_block(tmp_path):
@@ -140,7 +143,8 @@ def test_the_receipt_embeds_every_referenced_blob_and_replays_offline(tmp_path):
     code = commands.cli_replay(argparse.Namespace(receipt=str(path), expected_fingerprints=None, pins=None,
                                                   expected_repo=None, trusted_root=None, as_of=None), out=out)
     text = out.getvalue()
-    assert "cm_same_td: pass" in text and "cm_image: recorded (not a pass)" in text
+    assert "cm_same_td: pass" in text and "cm_image: recorded (not a pass; " in text
+    assert "schema: confidential-mode/near-evidence/v2" in text
     assert "1/1 evidence row(s) replayed OK" in text and code == 0, text
     for line in replay_near.NOT_ESTABLISHED:
         assert f"  - {line}\n" in text
@@ -175,3 +179,19 @@ def test_an_old_v1_receipt_still_replays_under_v1_rules(tmp_path):
     assert f"cm_quote: {near.CM_NOT_RUN_V1}" in text
     assert "NEAR's compose_manager_attestation is not checked here" in text
     assert "The compose-manager check establishes only" not in text
+
+
+def test_a_mixed_v1_and_v2_receipt_prints_every_rows_caveats(tmp_path):
+    led = Ledger(tmp_path / "ledger.sqlite")
+    led.append({"kind": "lock", "tier": "attested", "decision": "locked", "session_id": "s", "detail": {}})
+    led.append(_row(_verified_evidence(real.evidence())))
+    led.append(_row(copy.deepcopy(real.V1)))
+    path = tmp_path / "receipt.json"
+    path.write_text(json.dumps(build_receipt(led, "s")))
+    out = io.StringIO()
+    commands.cli_replay(argparse.Namespace(receipt=str(path), expected_fingerprints=None, pins=None,
+                                           expected_repo=None, trusted_root=None, as_of=None), out=out)
+    text = out.getvalue()
+    assert "schema: confidential-mode/near-evidence/v1" in text and "schema: confidential-mode/near-evidence/v2" in text
+    for line in set(replay_near.NOT_ESTABLISHED) | set(replay_near.NOT_ESTABLISHED_V1):
+        assert f"  - {line}\n" in text

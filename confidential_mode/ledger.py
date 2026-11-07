@@ -47,6 +47,10 @@ MAX_DETAIL_BYTES = 256 * 1024  # verification evidence can carry certificate cha
 # next to the ledger file: <data_dir>/evidence/blobs/<sha256>. A row keeps only the ids (Amendment 5.2).
 BLOB_SUBDIR = ("evidence", "blobs")
 MAX_BLOB_BYTES = 8 * 1024 * 1024
+# Retention: a blob stays while any ledger row lists it in blob_refs (receipts and replays need it; pins keep
+# their own copy of what they show). A blob no row lists, which only a refused or failed append leaves, is
+# deleted once it is older than this, at the first evidence write of each Ledger instance.
+BLOB_ORPHAN_SECONDS = 24 * 3600
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -122,7 +126,9 @@ class BlobStore:
             return None
         return self.root / blob_id
 
-    def put(self, blob_id: str, text: str) -> None:
+    def put(self, blob_id: str, text: str) -> bool:
+        """Write the blob durably (fsync of the file, then of the directory). True when this call created
+        it, False when an intact copy was already there."""
         path = self._path(blob_id)
         data = text.encode("utf-8") if isinstance(text, str) else None
         if path is None or data is None or hashlib.sha256(data).hexdigest() != blob_id:
@@ -130,11 +136,58 @@ class BlobStore:
         if len(data) > MAX_BLOB_BYTES:
             raise LedgerError("evidence blob exceeds the blob size cap")
         if path.exists() and self.get(blob_id) is not None:
-            return
+            return False
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{blob_id}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
+        try:
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+        try:
+            fd = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+        return True
+
+    def delete(self, blob_id: str) -> None:
+        path = self._path(blob_id)
+        try:
+            if path is not None:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def gc(self, referenced: set, *, older_than: float = BLOB_ORPHAN_SECONDS, now: float | None = None) -> list:
+        """Delete blobs (and stale temporary files) not in ``referenced`` and older than ``older_than``
+        seconds. Returns the ids deleted."""
+        now = time.time() if now is None else now
+        gone = []
+        try:
+            entries = list(self.root.iterdir())
+        except OSError:
+            return gone
+        for f in entries:
+            try:
+                old = now - f.stat().st_mtime > older_than
+                if f.name.startswith(".") and f.name.endswith(".tmp") and old:
+                    f.unlink()
+                elif self._path(f.name) is not None and f.name not in referenced and old:
+                    f.unlink()
+                    gone.append(f.name)
+            except OSError:
+                continue
+        return gone
 
     def get(self, blob_id: str) -> str | None:
         path = self._path(blob_id)
@@ -154,24 +207,23 @@ def _blob_json(text: str) -> Any:
         return None
 
 
-def externalize_evidence(detail: dict, store: BlobStore | None) -> dict:
-    """A copy of ``detail`` whose ``evidence.blobs`` texts are written to ``store`` and replaced by
-    ``evidence.blob_refs`` (sorted ids). Each blob must hash to its id and pass the content-key scan. With
-    no store the detail is returned unchanged (blobs stay inline and count toward the size cap)."""
+def externalize_evidence(detail: dict, store: BlobStore | None) -> tuple[dict, dict]:
+    """(a copy of ``detail`` whose ``evidence.blobs`` are replaced by ``evidence.blob_refs``, the blobs to
+    write). Each blob must hash to its id and pass the content-key scan. Nothing is written here, so a row
+    refused for its size leaves no blob behind. With no store the detail is returned unchanged (blobs stay
+    inline and count toward the size cap)."""
     ev = detail.get("evidence")
     if not isinstance(ev, Mapping) or not isinstance(ev.get("blobs"), Mapping):
-        return detail
+        return detail, {}
     for blob_id, text in ev["blobs"].items():
         if not isinstance(text, str) or hashlib.sha256(text.encode("utf-8")).hexdigest() != blob_id:
             raise LedgerError("evidence blob does not hash to its id")
         _check_detail(_blob_json(text), f"detail.evidence.blobs[{blob_id[:12]}]")
     if store is None:
-        return detail
-    for blob_id, text in ev["blobs"].items():
-        store.put(blob_id, text)
+        return detail, {}
     stripped = {k: v for k, v in ev.items() if k != "blobs"}
     stripped["blob_refs"] = sorted(ev["blobs"])
-    return {**detail, "evidence": stripped}
+    return {**detail, "evidence": stripped}, dict(ev["blobs"])
 
 
 def coerce_event(event: Any) -> LedgerEvent:
@@ -226,6 +278,7 @@ class Ledger:
         # resolved on first use; an injected connection without blob_dir has no store.
         self._blob_dir = Path(blob_dir) if blob_dir is not None else None
         self._blob_default = path is None and connect is None
+        self._gc_done = False
         self._connect = connect or _default_connect
         self._clock = clock
         self._lock = threading.Lock()
@@ -263,7 +316,8 @@ class Ledger:
             raise LedgerError(f"unknown ledger kind {event.kind!r}")
         detail = dict(event.detail or {})
         _check_detail(detail)
-        detail = externalize_evidence(detail, self.blobs)
+        store = self.blobs
+        detail, to_write = externalize_evidence(detail, store)
         encoded = json.dumps(detail, sort_keys=True, default=str)
         if len(encoded.encode("utf-8")) > MAX_DETAIL_BYTES:
             raise LedgerError("detail exceeds the ledger size cap")
@@ -274,13 +328,47 @@ class Ledger:
             event.kind, event.purpose or "", event.provider or "", event.host or "", event.model or "",
             event.bytes, event.tier, event.verdict, event.decision, event.surface, encoded,
         )
+        created: list[str] = []
+        try:
+            for blob_id, text in to_write.items():
+                if store.put(blob_id, text):
+                    created.append(blob_id)
+            with self._lock:
+                db = self._db()
+                cur = db.execute(
+                    "INSERT INTO events (ts, session_id, kind, purpose, provider, host, model, bytes, tier,"
+                    " verdict, decision, surface, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+                db.commit()
+                row_id = int(cur.lastrowid)
+        except BaseException:
+            for blob_id in created:   # no row lists them: remove what this append wrote
+                store.delete(blob_id)
+            raise
+        if to_write and not self._gc_done:
+            self._gc_done = True
+            try:
+                self.gc_blobs()
+            except Exception:
+                pass
+        return row_id
+
+    def referenced_blobs(self) -> set:
+        """Every blob id any row lists in its evidence's blob_refs."""
         with self._lock:
-            db = self._db()
-            cur = db.execute(
-                "INSERT INTO events (ts, session_id, kind, purpose, provider, host, model, bytes, tier,"
-                " verdict, decision, surface, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
-            db.commit()
-            return int(cur.lastrowid)
+            rows = self._db().execute("SELECT detail FROM events WHERE detail LIKE '%\"blob_refs\"%'").fetchall()
+        out: set = set()
+        for (text,) in rows:
+            try:
+                refs = (json.loads(text or "{}").get("evidence") or {}).get("blob_refs")
+            except (ValueError, AttributeError):
+                continue
+            out.update(r for r in refs or [] if isinstance(r, str))
+        return out
+
+    def gc_blobs(self, *, older_than: float = BLOB_ORPHAN_SECONDS) -> list:
+        """Delete blobs no row references once older than ``older_than`` seconds (the retention rule above)."""
+        store = self.blobs
+        return store.gc(self.referenced_blobs(), older_than=older_than) if store is not None else []
 
     def _rows(self, sql: str, params: Iterable[Any]) -> list[LedgerEvent]:
         with self._lock:
