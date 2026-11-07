@@ -1,7 +1,7 @@
-<!-- PLUGIN_NAME: confidential-mode  (working name; swap it here, in the title, and in the install lines) -->
-# confidential-mode
+<!-- PLUGIN_NAME: confidential-mode  (final catalog slug; the prose name is Hermes Confidential Mode) -->
+# Hermes Confidential Mode
 
-Hermes cannot verify a confidential-compute provider on its own. confidential-mode makes it checkable:
+Hermes cannot verify a confidential-compute provider on its own. Hermes Confidential Mode makes it checkable:
 it verifies the enclave, pins its build, keeps every model call and fallback inside it, encrypts what
 leaves, and writes a receipt anyone can replay.
 
@@ -222,7 +222,6 @@ except where noted.
 - [docs/COSTS.md](docs/COSTS.md): what locking costs in latency, quality and task success.
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md): every gap, and the change that would close it.
 - [docs/DISCLOSURE.md](docs/DISCLOSURE.md): what the plugin touches on your machine and the network.
-- [docs/INTERFACES.md](docs/INTERFACES.md): how the plugin's modules fit together.
 
 ## Prior work
 
