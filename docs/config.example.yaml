@@ -103,7 +103,8 @@ confidential:
     # true: the TLS certificate of the attestation connection must be the one the gateway's report
     # binds. Every inference and signature connection is also checked against that certificate's key
     # right after the handshake, before any request byte is sent. A send over any other certificate is
-    # refused, or recorded as unverified when the certificate cannot be read. Default true.
+    # refused, or recorded as unverified when the certificate cannot be read. The attested-tier lock is
+    # refused unless this is absent or exactly true. Default true.
     require_tls_binding: true
 
     # true: every chat request is encrypted to the attested model's key before it leaves this host
@@ -112,8 +113,15 @@ confidential:
     # image or other non-text message parts, streaming, any POST other than chat completions, and any
     # top-level request key that would carry text in plaintext. A reply is decrypted only after a
     # verified provider_tee signature over the encrypted bytes. Needs the pynacl package
-    # (docs/RUNNING_TESTS.md). The attested-tier lock is refused while this is false. Default true.
+    # (docs/RUNNING_TESTS.md). The attested-tier lock is refused unless this is absent or exactly true.
+    # The reply is sealed to a per-request key named in a header NEAR's signature does not cover, so a
+    # gateway that swaps that key can read a reply; the plugin then withholds it and marks the send
+    # unverified (docs/LIMITATIONS.md section 14). Default true.
     encrypt: true
+
+    # At most one re-attestation per this many seconds when the gateway answers HTTP 421 (model key no
+    # longer valid) or a send meets a certificate other than the attested one. Default 30.
+    reverify_backoff_seconds: 30
 
     # Intel TCB status values accepted for the gateway, from Intel Trust Authority's token.
     # Default [UpToDate].

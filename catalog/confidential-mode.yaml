@@ -39,8 +39,12 @@ description: >-
   sizes, timing and your IP address where it terminates TLS. Your DNS resolver sees every lookup.
   With the attested-near provider, the plugin contacts cloud-api.near.ai for attestation reports,
   Intel Trust Authority tokens, inference and response signatures, sending NEAR_AI_API_KEY only with
-  inference and signature requests, and portal.trustauthority.intel.com for Intel's token-signing
-  keys; NEAR's gateway reads every request it routes.
+  inference and signature requests over connections pinned to the gateway's attested TLS key, and
+  portal.trustauthority.intel.com for Intel's token-signing keys. With confidential.near.encrypt on
+  (the default; needs pynacl==1.6.*), chat message text, tool definitions and tool calls reach NEAR's
+  gateway encrypted to the attested model key. The gateway still reads the model id, the plaintext
+  parameters, the request headers, sizes and timing, and can read a reply by swapping the client key
+  header; the plugin detects that afterwards and records the send as unverified.
 
   Disclosure, files. Everything is under <HERMES_HOME>/plugin-data/. The plugin writes
   ledger.sqlite, which holds hosts, byte counts, verdicts and verification evidence. It never holds

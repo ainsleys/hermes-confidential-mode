@@ -459,18 +459,25 @@ default. The attested-tier lock is refused while it is false.
 The plugin encrypts each chat request to the model's key. That key is the one the plugin verified in
 the model's attestation report. The message text, the tool definitions and the tool calls then leave
 this host as ciphertext. NEAR's model server encrypts its reply to a key the plugin makes for that one
-request.
+request. That key travels in a request header, `X-Client-Pub-Key`, which NEAR's signature does not
+cover.
 
 The plugin decrypts a reply only after NEAR's `provider_tee` signature over the encrypted bytes has
-verified. Anyone can encrypt a reply to the plugin's key, because that key is sent with the request,
+verified. Only an HTTP 200 reply that verifies and decrypts reaches Hermes. Any other reply is refused,
+and Hermes does not resend the request. Anyone can encrypt a reply to the plugin's key, because that key is sent with the request,
 so decryption alone proves nothing.
 
 What this establishes, and what it does not:
 
 - The request left this host as ciphertext for the listed fields. It can be read by any holder of the
   model key, which the plugin verified. Every instance of the model shares that key, approved or not.
-- The gateway no longer reads the message text. It still reads the model id, the plaintext
-  parameters, the sizes and the timing.
+  The gateway cannot read those request fields.
+- The gateway still reads the model id, the plaintext parameters (for example `stop`,
+  `response_format`, `metadata` and `user`), the request headers, the sizes and the timing.
+- The reply is sealed to the key named in `X-Client-Pub-Key`. A gateway that swaps that header for
+  its own key can read the reply. The plugin detects the swap only afterwards: the reply then either
+  fails to decrypt or fails its signature. The plugin withholds that reply and marks the send
+  unverified, but the gateway has already read it.
 - That a request was encrypted is the plugin's own report. The receipt says "plugin self-report" for
   it. The signature check is different: anyone can re-check it from the receipt.
 

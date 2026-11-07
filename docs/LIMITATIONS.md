@@ -411,7 +411,7 @@ gateway and each NEAR-operated model run in Intel TDX virtual machines, which NE
 inside the model's CVM over `<model id>:<SHA-256 of the request body>:<SHA-256 of the response body>`.
 A `gateway` signature is made inside the gateway's CVM over `<request hash>:<response hash>` only.
 
-**The gap.** Nine things stay open after every NEAR check passes.
+**The gap.** Ten things stay open after every NEAR check passes.
 
 - **A gateway signature says nothing about the model.** The gateway signs its own output whenever it
   rewrites the bytes: on every streamed completion, when it resolves a model alias, and on the
@@ -436,8 +436,15 @@ A `gateway` signature is made inside the gateway's CVM over `<request hash>:<res
   the request to route it. With request encryption on (`confidential.near.encrypt`, the default), the
   message text, tool definitions and tool calls reach the gateway as ciphertext. The gateway still reads
   the model id, the plaintext parameters (for example `max_tokens`, `stop`, `response_format`, `user`
-  and `metadata`), the sizes and the timing. With encryption off it reads the whole request. The
-  attestation says which code the gateway runs. It does not say what that code does with what it reads.
+  and `metadata`), the sizes and the timing. It also reads the request headers: the `Authorization` header with the API key, `User-Agent` and the OpenAI SDK's `x-stainless-*` headers (SDK version, operating system, Python version), `content-type`, the encryption headers (the client and model public keys) and any extra headers Hermes adds. With
+  encryption off it reads the whole request. The attestation says which code the gateway runs. It does
+  not say what that code does with what it reads.
+- **The gateway can read a reply, and is caught only afterwards.** The model seals its reply to the key
+  in the `X-Client-Pub-Key` request header. NEAR's signature does not cover that header. A gateway that
+  puts its own key there can read the reply. If it forwards the reply unchanged, the reply does not
+  decrypt for the plugin. If it re-encrypts the reply to the plugin's key, the signed response digest no
+  longer matches. Either way the plugin withholds the reply and records the send as unverified. By then
+  the gateway has read the reply, and any part of the request the model repeated in it.
 - **Encryption names a key, not an instance.** The plugin encrypts each request to the model key that it
   verified in the attestation report. Every instance of that model shares that key, approved or not. So
   the encryption does not establish that only an approved instance could read the request.
@@ -470,7 +477,12 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
 - It records every send's digests and signature in a `send_signed` ledger row. A send without a
   `provider_tee` signature that verifies is marked unverified, and the receipt says "SESSION NOT FULLY
   ATTESTED". With encryption on, the reply of such a send never reaches the agent: the plugin decrypts
-  a reply only after a verified `provider_tee` signature over the encrypted bytes. With encryption
+  a reply only after a verified `provider_tee` signature over the encrypted bytes. Only an HTTP 200
+  reply that verifies and decrypts is handed over; any other status is refused. Neither the OpenAI SDK
+  nor Hermes resends a refused request. A timeout or a reset is not a refusal, so Hermes may retry it;
+  each attempt is a new request and gets its own ledger row.
+- The model key is not part of a pin yet. Within one Hermes process, a re-verification that reports a
+  different model key is refused. A restart accepts the new key without a prompt. With encryption
   off, the send is not refused, because the response has already arrived when the signature is
   fetched.
 - It pins the measured docker-compose of the gateway and of every model instance it saw. A new

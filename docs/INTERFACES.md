@@ -229,10 +229,26 @@ Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only.
   outside `near_e2ee.PLAINTEXT_KEYS` that carry text, `logprobs`, and every other POST raise
   `VerifyError` before sending. While `require_provider_tee` (encrypting or not), POSTs outside the
   signable set raise too. An unstreamed reply is buffered, hashed, completed, finished (signature fetch
-  and verdict); it is released only when the row is `fully_attested`, then decrypted, without
-  `content-length`/`content-encoding`. HTTP 421 (the gateway no longer accepts the model key) raises
-  `VerifyError`, holds the adapter and invalidates the cache entry. Errors other than 421 pass as errors.
-  Nothing is retried and no status is synthesised.
+  and verdict). Only one outcome hands a body over: HTTP 200, a `fully_attested` send, and a body that
+  decrypts under the exchange's key; it is returned without `content-length`/`content-encoding`. Every
+  other outcome (any other status, 2xx included; a missing or bent signature; a reply that does not
+  decrypt) raises. HTTP 421 (the gateway no longer accepts the model key) also holds the adapter and
+  invalidates the cache entry, at most once per `confidential.near.reverify_backoff_seconds` (default
+  30); a TLS pin mismatch on a send does the same and drops the pooled connections.
+- Refusals from the NEAR views are `verify.near.NearRefusal`, a `VerifyError` and an `openai.OpenAIError`:
+  the OpenAI SDK re-raises it as is, without its own retries. The attested profiles set
+  `ProviderProfile.classify_api_error = provider.classify_refusal`, which Hermes' error classifier
+  consults (`agent/error_classifier.py` `_profile_verdict`) and which marks a NearRefusal
+  `provider_policy_blocked`, `retryable: False`, `should_fallback: False`, so Hermes' loop does not
+  resend it either. Transport errors (timeouts, resets) are not refusals: the SDK and Hermes may retry
+  them, each attempt is a new exchange with a new client key, and each gets its own `send_signed` row.
+  No status is synthesised.
+- An encrypted exchange's `send_signed` row is written once both the signature verdict and the release
+  outcome are known. It gains `reply_released` and `withheld_reason`; a withheld reply is `unverified`
+  and not `fully_attested` even when its signature verified. A send that raised before a response
+  arrived gets a row whose reason says "TLS pin mismatch, nothing sent" or "transport error (...)".
+- A re-verify whose model signing key differs from the accepted one is refused (`VerifyError`, "model
+  signing key ... changed") until pins cover the key (W12); a restart accepts it.
 - TLS pin: inference and signature connections use pools whose SSL context checks the peer SPKI SHA-256
   against `pinned_spki()` right after the handshake (`pinned_ssl_context`). Attestation GETs keep an
   unpinned pool. `check.tls_verified` joins the send check; a send whose certificate differs, or cannot be
@@ -242,13 +258,16 @@ Owner W11 (branch `w11-e2ee`). Numbered 5.1 because it extends Amendment 5 only.
   different keys; equal keys are one signer (`model_signers` lists unique keys). `Appraisal.cvms` and
   `claims.cvms` record role, app_id, instance_id, compose_hash and signer per CVM.
 - `send_signed` detail gains `encrypted`, `encrypted_fields` (paths with `[]` for indices),
-  `encrypted_field_count`, `dropped_fields`, `encryption_version`, `client_pub`, `model_pub`.
+  `encrypted_field_count`, `dropped_fields`, `plaintext_keys` (top-level keys that left in plaintext,
+  by name), `encryption_version`, `client_pub`, `model_pub`, `reply_released`, `withheld_reason`.
 - Receipts: `near_sends[]` gains `encrypted`, `encrypted_fields`, `encryption_version`, `model_pub`; a
-  receipt with an encrypted send carries `near_encryption_note` (a constant, checked by `verify_chain`
-  when present). `replay_receipt` sends gain `encrypted`. `replay_near.NOT_ESTABLISHED` gains two items.
-- Preflight (attested tier, any attested-near route): `<route>.api_mode` must be chat completions;
-  `confidential.near.encrypt` must not be false in the config or in the running adapter;
-  `confidential.near.encryption_library` is `missing` when PyNaCl does not import.
+  receipt with an encrypted send must carry `near_encryption_note` (a constant; `verify_chain` fails a
+  receipt that holds an encrypted send without it). `near_sends[]` also gains `plaintext_keys`,
+  `reply_released` and `withheld_reason`. `replay_receipt` sends gain `encrypted`. `replay_near.NOT_ESTABLISHED` gains two items.
+- Preflight (attested tier, any attested-near route, auxiliary fallback chains included): `<route>.api_mode`
+  must be chat completions; `confidential.near.encrypt` and `confidential.near.require_tls_binding` must
+  be absent or exactly true, and on in the running adapter; `confidential.near.encryption_library` is
+  `missing` when PyNaCl does not import.
 
 ## Amendment 6 (2026-11-07, after the independent codebase review): contract changes
 
@@ -265,4 +284,3 @@ Each item names the review finding it resolves.
 - Finding 27, gateway commands. When `hermes_cli.commands.resolve_command` cannot be imported or raises, `pre_gateway_dispatch` refuses every slash command while locked (decision `command_unresolved`) except, by exact typed word, `/confidential`, `/stop`, `/pause`, `/approve`, `/deny`, `/new`, `/help` and `/status`.
 - Finding 9 addendum, unlock. `/confidential off` removes `allowlist.yaml` before clearing the lock flag, and only when the file's `lock_id` is the lock being cleared (`gate_tools.clear_persisted(path, lock_id=...)`).
 - Open findings, owned elsewhere. Finding 1 (no per-send TLS pin or verdict for NEAR inference), finding 7 (two NEAR candidates under one key read as ambiguous), finding 11 (NEAR POSTs outside chat completions and responses skip the model allowlist) and finding 19 (the NEAR adapter's lock held across a capture) belong to W11 on branch `w11-e2ee`. Finding 6 (the 256 KB ledger cap can drop NEAR verification evidence) belongs to W13. This amendment does not change any of them; README and DISCLOSURE text on NEAR TLS is left for W11 to rewrite.
-
