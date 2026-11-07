@@ -431,9 +431,11 @@ A `gateway` signature is made inside the gateway's CVM over `<request hash>:<res
   deployment map the plugin derives from the log is what the operator's own tooling reported. A pass
   does not establish that the docker-compose files deployed after launch are measured. A pass does not
   establish that the reported services are the ones running. Two facts stand in the way.
-  - The running compose-manager is not the measured one. The measured docker-compose names one
-    compose-manager image. A launcher service replaces that image after boot, and the log records the
-    replacement's digest. On 2026-11-07 every instance the plugin saw ran a replacement.
+  - The log reports a compose-manager other than the measured one. The measured docker-compose names
+    one compose-manager image. The measured docker-compose also starts a launcher service that can
+    replace that image after boot.
+    On 2026-11-07 the log of every instance the plugin saw recorded such a replacement. The log is the
+    operator's report, so the plugin cannot confirm which compose-manager image runs.
   - The deployed services hold the quote socket. The model proxies that compose-manager deploys run as
     root and privileged, with the dstack socket (`/var/run/dstack.sock`) mounted. Any program that holds
     that socket can get a quote of this TD over report data it chooses. Such a program could produce a
@@ -505,18 +507,29 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   that carries one is refused before it is sent. With encryption
   off, the send is not refused, because the response has already arrived when the signature is
   fetched.
-- It pins the measured docker-compose of the gateway and of every model instance it saw. A new
-  instance with a different compose is a pin prompt. With two instances behind one model, you may be
+- It pins the measured docker-compose of the gateway and of every model instance it saw. It also pins
+  each one's app_id, OS image and KMS key as RTMR3 records them. A new instance with a different
+  compose, app_id, OS image or KMS key is a pin prompt. With two instances behind one model, you may be
   asked again when a later verification lands on the second instance.
 - The plugin checks the compose-manager attestation of every model report it accepts. While
   `require_provider_tee` is true, a report without one is refused. The pin prompt shows what that
-  attestation reported, under a heading that says the report is not a measurement. The prompt lists the
-  services on the model's prompt path, which are the services a request for that model passes through, and the release
-  each one was deployed from. The plugin picks those services by name, from a list per model that it
-  ships. For a model not on that list it shows every service. The prompt also shows the running and the
-  measured compose-manager images. A running image that differs from the measured one is shown as a
-  mismatch. The mismatch is never counted as a pass, and it does not refuse the verification. A change
-  in these reported lines alone does not ask for a new pin.
+  attestation reported, under a heading that says the report is not a measurement. The plugin records
+  every service in the log, with the release each one was deployed from. The prompt lists first the
+  services that a per-model name list, shipped with the plugin, names for that model. Such a list can
+  miss services, so every other service follows. A long list is folded into a count, and the command
+  `hermes confidential pins` prints every line. The prompt does not say which services hold the quote
+  socket or run privileged: the log does not say, and the plugin does not fetch the deployed
+  docker-compose files. The prompt also shows the compose-manager image the log reports and the image
+  the measured docker-compose names. Both images are recorded and never scored, because the log is the
+  operator's report. A change in these reported lines alone does not ask for a new pin.
+- Vendor strings from the log are shown escaped. A control character or an escape sequence appears as a
+  visible backslash escape, and its line is tagged. The ledger, the pins file and the receipt JSON keep
+  the raw bytes.
+- The plugin reads each CVM's app_id, OS image and KMS key from dstack's boot events in RTMR3. Each event
+  must appear once, before the `system-ready` event, with dstack's boot event type. A report that lacks
+  one, or repeats one, is refused. Whether a program inside the CVM can add an event with one of those
+  names after boot could not be determined from the captures. If such a program adds one, the repeat
+  rule refuses the report.
 - The replay's `NOT_ESTABLISHED` list names every item above.
 
 **The change that would close it.** On NEAR's side: one signature chain from the model's bytes through
