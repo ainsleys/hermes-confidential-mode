@@ -51,6 +51,14 @@ FORBIDDEN_DETAIL_KEYS = frozenset({
     "contents",
 })
 MAX_DETAIL_BYTES = 256 * 1024  # verification evidence can carry certificate chains
+# FI-6: strings a caller does not bound (a tool name the model chose, Hermes' compaction reason, a session or
+# tool call id) are clipped to this many characters before the row is built: every text column, and these
+# top-level detail keys. Verification evidence is never clipped.
+MAX_CALLER_CHARS = 1024
+CALLER_STRING_KEYS = frozenset({
+    "tool", "tool_call_id", "reason", "session_key", "old_session_id", "session_id", "kind", "raw_pick",
+    "choice", "error", "message", "name", "server", "url", "host", "model", "provider", "purpose",
+})
 # Content-addressed store for large evidence texts (NEAR app_compose files and compose-manager logs),
 # next to the ledger file: <data_dir>/evidence/blobs/<sha256>. A row keeps only the ids (Amendment 5.2).
 BLOB_SUBDIR = ("evidence", "blobs")
@@ -120,6 +128,23 @@ def _check_detail(value: Any, path: str = "detail") -> None:
 
 
 _EVENT_FIELDS = frozenset(_COLUMNS)
+
+
+def clip_text(value: Any, limit: int = MAX_CALLER_CHARS) -> Any:
+    """``value`` clipped to ``limit`` characters with a marker naming its full length; non-strings unchanged."""
+    if isinstance(value, str) and len(value) > limit:
+        return f"{value[:limit]}...(clipped, {len(value)} chars)"
+    return value
+
+
+def clip_caller_strings(detail: dict) -> dict:
+    """A copy of ``detail`` whose top-level caller-string values (CALLER_STRING_KEYS) are clipped (FI-6)."""
+    return {k: clip_text(v) if k in CALLER_STRING_KEYS else v for k, v in detail.items()}
+
+
+def too_large_marker(size: int) -> dict:
+    """The detail written in place of one still over MAX_DETAIL_BYTES after clipping (FI-6)."""
+    return {"detail_too_large": f"detail too large: {size} bytes, truncated"}
 
 
 class BlobStore:
@@ -432,17 +457,25 @@ class Ledger:
             raise LedgerError(f"unknown ledger kind {event.kind!r}")
         detail = dict(event.detail or {})
         _check_detail(detail)
+        detail = clip_caller_strings(detail)
         store = self.blobs
         detail, to_write = externalize_evidence(detail, store)
         encoded = json.dumps(detail, sort_keys=True, default=str)
-        if len(encoded.encode("utf-8")) > MAX_DETAIL_BYTES:
-            raise LedgerError("detail exceeds the ledger size cap")
+        size = len(encoded.encode("utf-8"))
+        if size > MAX_DETAIL_BYTES:
+            if event.kind == "verify_ok" or "evidence" in detail:
+                # Amendment 5.2: a verify_ok row, or a row with evidence, that no receipt could show in full is
+                # refused by its caller (a verify_fail row says so), never written without its detail.
+                raise LedgerError("detail exceeds the ledger size cap")
+            encoded = json.dumps(too_large_marker(size), sort_keys=True)   # FI-6: written, never dropped
         if event.bytes is not None and not isinstance(event.bytes, int):
             raise LedgerError("bytes must be an int or None")
         row = (
-            float(event.ts if event.ts is not None else self._clock()), event.session_id or "",
-            event.kind, event.purpose or "", event.provider or "", event.host or "", event.model or "",
-            event.bytes, event.tier, event.verdict, event.decision, event.surface, encoded,
+            float(event.ts if event.ts is not None else self._clock()), clip_text(event.session_id or ""),
+            event.kind, clip_text(event.purpose or ""), clip_text(event.provider or ""),
+            clip_text(event.host or ""), clip_text(event.model or ""),
+            event.bytes, clip_text(event.tier), clip_text(event.verdict), clip_text(event.decision),
+            clip_text(event.surface), encoded,
         )
         created: list[str] = []
         try:

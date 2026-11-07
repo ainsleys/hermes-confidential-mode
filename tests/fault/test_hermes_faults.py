@@ -459,8 +459,6 @@ def test_a_near_send_from_a_thread_without_the_send_context_is_still_recorded(tm
 
 # ── a model-chosen or Hermes-supplied string larger than the ledger's row cap ───────────────────
 
-@pytest.mark.xfail(strict=True, reason="FI-6: a refusal whose detail carries an unclipped caller string (the tool "
-                                       "name the model chose) exceeds the 256 KB detail cap and its row is dropped")
 def test_a_refusal_for_a_huge_tool_name_is_still_recorded(plugin):
     """Amendment 3: unknown names are blocked by the hook and refused by the middleware, each "ledgered
     tool_refused"; ledger.MAX_DETAIL_BYTES rejects a detail over 256 KB. Fault: the model names a tool with a
@@ -474,8 +472,6 @@ def test_a_refusal_for_a_huge_tool_name_is_still_recorded(plugin):
     assert len(refused) == 2, "the hook's and the middleware's refusals were not recorded"
 
 
-@pytest.mark.xfail(strict=True, reason="FI-6: post_compaction copies Hermes' reason unclipped into detail, so a long "
-                                       "reason drops the compaction row")
 def test_a_compaction_with_a_long_reason_is_still_recorded(plugin):
     """__init__: on_session_start / on_session_end / post_compaction write "receipt rows"; a compaction the
     receipt cannot show is a silent skip. Fault: a 300 KB reason string."""
