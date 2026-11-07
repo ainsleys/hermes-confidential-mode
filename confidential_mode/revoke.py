@@ -151,10 +151,14 @@ def _command_allowlist(config: Any) -> list:
 
 
 def remove_command_allowlist_grants(tools: Optional[set[str]]) -> tuple[list[str], list[str]]:
-    """Remove the plugin's keys for ``tools`` (None = every plugin key) from command_allowlist.
-    Returns (tools removed, other entries that name one of ``tools`` and were left alone)."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
+    """Remove the plugin's keys for ``tools`` (None = every plugin key) from command_allowlist in config.yaml:
+    read the user's file with ``read_raw_config``, drop only entries ``gate_tools.parse_pattern_key`` reads as
+    the plugin's own rule key, and save with ``save_config``; nothing is written when there is none. Returns
+    (tools removed, other entries that name one of ``tools`` and were left alone)."""
+    from hermes_cli.config import load_config, read_raw_config, save_config
+    # The user's file as written (no defaults merged, no migration stamp), so the save changes the plugin's own
+    # command_allowlist entries and nothing else; Hermes' save_config keeps comments and env references.
+    config = read_raw_config()
     entries = _command_allowlist(config)
     ours = [e for e in entries if _is_ours(e, tools)]
     foreign = sorted({e for e in entries if isinstance(e, str) and not _is_ours(e, None) and tools

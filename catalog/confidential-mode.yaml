@@ -20,8 +20,8 @@ description: >-
   (raw.githubusercontent.com, api.github.com) for NEAR compose files, also in the background after a
   verification stages a NEAR entry; the plugin sends no telemetry. The plugin writes under
   <HERMES_HOME>/plugin-data/ (including the ledger, evidence blobs, pins.yaml, allowlist.yaml, state and
-  SDK caches), Hermes' tool-discovery cache on a terminal lock, and, on a revoke only, its own
-  command_allowlist entries in config.yaml; the plugin reads
+  SDK caches), Hermes' tool-discovery cache on a terminal lock, and, on a revoke only, config.yaml, removing its own plugin_rule:confidential-mode:tool entries from
+  command_allowlist and nothing else; the plugin reads
   config.yaml and script files a locked tool call runs. The
   plugin reads TINFOIL_API_KEY, NEAR_AI_API_KEY, TERMINAL_ENV, TERMINAL_CWD, HERMES_HOME,
   CONFIDENTIAL_MODE_PROGRESS and CONFIDENTIAL_MODE_NO_FETCH, sets XDG_CONFIDENTIAL_MODE_TOOL_PROCESS,

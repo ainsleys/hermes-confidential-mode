@@ -104,6 +104,23 @@ def test_a_session_only_grant_is_withdrawn_without_touching_hermes_tables(world)
     assert _decide(world.al, world.watcher).decision == "remembered"
 
 
+def test_the_config_write_changes_nothing_but_the_plugin_entries(world):
+    """Amendment 13: the revoke's config.yaml write removes the plugin's own rule-key entries, both key forms,
+    and leaves every other key, value, comment and env reference as it was (no merged defaults written back)."""
+    from hermes_cli.config_backend import read_config_doc as load
+    world.cfg.write_text("# keep me\nmodel:\n  provider: custom  # inline\n  base_url: ${MY_URL}\nzeta: 1\n"
+                         f"command_allowlist:\n- {rv.plugin_key('web_search')}\n- rm -rf /tmp/x\n"
+                         "- plugin_rule:confidential-mode:tool@0123456789ab:web_search\nagent:\n  max_turns: 90\n")
+    before = dict(load(world.cfg))
+    status, _ = rv.revoke(world.rt, "web_search", surface="cli")
+    assert status == rv.REVOKED
+    text = world.cfg.read_text()
+    after = dict(load(world.cfg))
+    assert after.pop("command_allowlist") == ["rm -rf /tmp/x"]
+    before.pop("command_allowlist")
+    assert after == before and "# keep me" in text and "# inline" in text and "_config_version" not in text
+
+
 def test_revoke_all_keeps_foreign_entries(world):
     world.cfg.write_text("model:\n  provider: custom\ncommand_allowlist:\n"
                          f"- {rv.plugin_key('web_search')}\n- {rv.plugin_key('vision_analyze')}\n"

@@ -143,11 +143,14 @@ config sends them. The plugin only writes ledger rows that describe them, as des
 ### What it writes to Hermes' files
 
 - **`config.yaml`, on a revoke only.** `hermes confidential revoke <tool>`, `revoke --all` and
-  `/confidential revoke` load the config with `hermes_cli.config.load_config` and save the config with
-  `save_config`, removing only the plugin's own `plugin_rule:confidential-mode:tool:<name>` entries
-  from `command_allowlist`, as Hermes itself does when it saves an `always` answer. When the saved file
-  still holds an entry (a managed install, or a file that is not writable), the revoke fails and says
-  so. Nothing else in the plugin writes `config.yaml`; `hermes confidential setup` prints a config
+  `/confidential revoke` read your file as written with `hermes_cli.config.read_raw_config` (no
+  defaults merged), remove from `command_allowlist` only the plugin's own entries,
+  `plugin_rule:confidential-mode:tool:<name>` and `plugin_rule:confidential-mode:tool@<generation>:<name>`
+  (the keys Hermes stored for an `always` answer to the plugin's prompt), and save with Hermes'
+  `save_config`, which keeps every other key, value, comment and environment reference. When no such
+  entry exists the file is not written. When the saved file still holds an entry (a managed install,
+  or a file that is not writable), the revoke fails and names the line to delete by hand; the entry no
+  longer grants anything, because the plugin then asks under a new approval key. Nothing else in the plugin writes `config.yaml`; `hermes confidential setup` prints a config
   block for you to apply yourself.
 - **The tool-discovery cache, on a terminal lock.** See the next section.
 
@@ -339,7 +342,7 @@ when the plugin loads.
 | `tools.mcp_tool`, `tools.mcp_tool_config`, `tools.mcp_tool_scope` | `_servers`, `_mcp_tool_server_names`, `_load_mcp_config`, `_key_name` | To map an MCP tool to its server, and to read whether that server is a URL or an on-host command. |
 | `tools.delegate_tool_config` | `_load_config` | To read the delegation backend and route keys for `delegate_task`. |
 | `providers`, `providers.base` | `register_provider`, `get_provider_profile`, `ProviderProfile` | To register `attested-tinfoil` and `attested-near`, and to check at lock time that the locked profile is visible in the process. |
-| `hermes_cli.config`, `hermes_cli.config_defaults` | `load_config_readonly`, `load_config`, `save_config`, `DEFAULT_CONFIG` | To read the config, and to list the built-in auxiliary tasks. A revoke uses `load_config` and `save_config` to remove the plugin's own `command_allowlist` entries, as Hermes does when Hermes saves an `always` answer. |
+| `hermes_cli.config`, `hermes_cli.config_defaults` | `load_config_readonly`, `load_config`, `read_raw_config`, `save_config`, `DEFAULT_CONFIG` | To read the config, and to list the built-in auxiliary tasks. A revoke uses `read_raw_config`, `save_config` and `load_config` (to confirm) to remove the plugin's own `command_allowlist` entries and nothing else. |
 | `hermes_cli.plugins` | `get_plugin_manager`, `get_plugin_auxiliary_tasks` | To tell plugin tools from built-in tools, and to include plugin-registered auxiliary tasks in the preflight. |
 | `plugins.plugin_storage` | `plugin_db`, `plugin_data_dir` | To open the ledger database. |
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
