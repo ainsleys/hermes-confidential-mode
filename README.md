@@ -391,22 +391,37 @@ today.
 - an exact host you list in `confidential.on_host.extra_hosts`.
 
 The plugin looks up one name in DNS: this machine's own host name, and only when a route names that host.
-The plugin looks that name up once per process and fails closed on an error or a two-second timeout. Any
-other hostname is off-tier unless you list that hostname in `extra_hosts`.
+The lookup has a two-second timeout. An error, a timeout or any non-loopback answer makes the name
+off-tier for the rest of the process. A loopback answer is rechecked at most once a minute. Any other
+hostname is off-tier unless you list that hostname in `extra_hosts`.
 
 **Private ranges are off-tier unless listed.** These ranges can hold another machine, so the tier
 refuses them by default: the private IPv4 ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`,
-the carrier-grade NAT range `100.64.0.0/10` (which tailnets also use), IPv6 link-local `fe80::/10` and
-IPv6 unique-local `fc00::/7`. A user on a cloud VM or a corporate network could otherwise lock
+the carrier-grade NAT range `100.64.0.0/10` (which tailnets also use), IPv4 link-local
+`169.254.0.0/16`, IPv6 link-local `fe80::/10` and IPv6 unique-local `fc00::/7`. A user on a cloud VM or a corporate network could otherwise lock
 `on-host-only` while the model runs on a neighbour's machine. The preflight row for such a host names
 its range and the `confidential.on_host.extra_hosts` key.
 
 **What listing a host means.** Each entry in `extra_hosts` is one exact host name or one IP address.
-A range, a wildcard, a URL or a port is refused, and the lock fails until you fix the entry. Listing
-`10.0.0.5` admits that one address and no other address in `10.0.0.0/8`. A listed host name matches
-only that name, never an address the name resolves to. When you list a host, you are telling the
-plugin that you trust that host. The plugin cannot check that the host is yours. The list is part of
-the config fingerprint, so a change to the list after locking counts as a config change.
+A range, a wildcard, a URL or a port is refused, and the lock fails until you fix the entry. The
+unspecified addresses `0.0.0.0` and `::`, multicast and broadcast addresses, and the cloud metadata
+address `169.254.169.254` are refused too. A zone id such as `%en0` is accepted only on an IPv6
+link-local address. Listing `10.0.0.5` admits that one address and no other address in `10.0.0.0/8`.
+
+A listed host name matches only that exact name. The plugin does not look the name up. The HTTP
+client does, at every send, through DNS, mDNS or your search domains. Whoever answers DNS for that
+name therefore picks where the text goes. Listing a name is a statement that you trust that name's
+DNS, and not only the machine. Prefer an IP address when you can. The ledger and the receipt mark a
+listed host as "listed on-host host", so a send to a listed host never reads as loopback.
+
+When you list a host, you are telling the plugin that you trust that host. The plugin cannot check
+that the host is yours. The list is part of the config fingerprint, so a change to the list after
+locking counts as a config change.
+
+**Upgrading from a build that admitted private ranges.** A lock made before this change on a model at
+a private-range address stops passing the per-turn preflight. List the exact host in `extra_hosts`
+and lock again. A lock made with a non-empty `extra_hosts` list reads as a config change after the
+upgrade, because the list joined the fingerprint, so lock again as well.
 
 **What it costs you.** The model's quality is whatever your hardware can run. Its availability is
 your hardware's availability.
@@ -1011,10 +1026,29 @@ and the lock's identity.
 
 A revoke from the command line reaches a running gateway on the gateway's next tool call. The
 gateway re-reads `allowlist.yaml` when the file changes, and Hermes re-reads `command_allowlist` on
-every check. Session approvals live only in the gateway's memory. So the revoke also appends a
-record to `grants_revoked.json` in the plugin's data directory, and the gateway drops the matching
-session approvals when the gateway sees a new record. Revoking only narrows what runs, so the command asks
-nobody, and the command works in a process a Hermes tool started.
+every check. Session approvals live only in the gateway's memory. So every revoke appends a record
+to `grants_revoked.json` in the plugin's data directory, even when the revoking process found nothing
+to remove itself. The gateway drops the matching session approvals when the gateway sees a new record.
+A revoke that finds nothing in the files says so and still sends the record.
+
+A revoke that does not take effect is reported as a failure, and `hermes confidential revoke` then
+exits non-zero. This covers a `config.yaml` that Hermes did not write (a managed install) and a Hermes
+release without the private approval state the plugin reads. In the second case the reply says to
+restart the gateway, because the in-memory session grant could not be dropped.
+
+Revoking only narrows what runs, so the command asks nobody, and the self-approval marker does not
+refuse the command. Run revoke from a terminal you opened yourself, or from chat as
+`/confidential revoke`. While locked, the tool gate refuses any terminal, process or code tool whose
+text names `hermes confidential`, revoke included, so the agent cannot run revoke through a tool.
+
+The prefix `plugin_rule:confidential-mode:tool:` is a naming convention. Hermes builds the key from the
+rule key a caller chooses, and does not reserve the prefix for this plugin. A revoke removes any entry
+under the prefix, which only narrows.
+
+Writes to `allowlist.yaml` and `grants_revoked.json` take a lock file next to each file, so a command
+line revoke and a gateway never interleave a change. An approval prompt already open in the gateway can
+still be answered after a revoke, and that answer grants the tool again. A tool call already past the
+gate finishes.
 
 ## Pins
 

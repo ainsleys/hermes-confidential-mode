@@ -171,13 +171,18 @@ confidential:
   on_host:
     # Extra hosts that the on-host-only tier counts as on-host. Each entry is one exact host name or
     # one IP address, for example gpu-box.lan or 192.168.1.20. A range (10.0.0.0/8), a wildcard
-    # (*.lan), a URL or a port is refused, and the lock fails until the entry is fixed.
+    # (*.lan), a URL or a port is refused, and the lock fails until the entry is fixed. The addresses
+    # 0.0.0.0, ::, multicast, broadcast and the cloud metadata address 169.254.169.254 are refused too.
+    #
+    # A listed name is resolved by the HTTP client at every send, through DNS, mDNS or your search
+    # domains, so whoever answers DNS for that name picks the destination. Listing a name is a
+    # statement of trust in that name's DNS. Prefer an IP address when you can.
     #
     # Without this list, the on-host-only tier accepts loopback addresses (127.0.0.0/8, ::1),
     # localhost, and this machine's own host name when that name resolves only to loopback. Private ranges
     # (10/8, 172.16/12, 192.168/16), carrier-grade NAT (100.64/10), IPv6 link-local (fe80::/10) and
     # unique-local (fc00::/7) addresses are off-tier unless listed here, because they can be another
-    # machine. The plugin never looks a listed name up in DNS. The list is part of the config
+    # machine. The plugin itself never looks a listed name up. The list is part of the config
     # fingerprint, so changing the list after locking counts as a config change. Default [].
     extra_hosts: []
 

@@ -27,7 +27,8 @@ The word is "lock" and not "seal", because sealing means something else in confi
 **On-host** means on the machine that runs Hermes, and **off-host** means anywhere else.
 The `on-host-only` tier accepts loopback hosts and the exact hosts you list in
 `confidential.on_host.extra_hosts`. A private-range, carrier-grade NAT, link-local or unique-local
-address is off-tier unless you list that address. The plugin cannot check that a listed host is a machine you
+address is off-tier unless you list that address. A listed DNS name is resolved by the HTTP client at every
+send, so whoever answers DNS for that name picks the destination. The plugin cannot check that a listed host is a machine you
 control. The `attested` tier accepts only
 Tinfoil's verified enclave, or NEAR AI Cloud's verified gateway and models (section 14). A
 destination the rule accepts is "in-tier", and any other is "off-tier".

@@ -309,7 +309,7 @@ which means it happens inside a function, not when the plugin loads.
 | `plugins.plugin_storage` | `plugin_db`, `plugin_data_dir` | To open the ledger database. |
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
 
-`hermes plugins validate` reports 30 of these import sites as private core imports. This is a warning,
+`hermes plugins validate` reports 31 of these import sites as private core imports. This is a warning,
 not a failure. The imports are the price of classifying tools and approvals without a public seam. The
 upstream roadmap in [LIMITATIONS.md](LIMITATIONS.md) lists the seams that would remove them.
 
