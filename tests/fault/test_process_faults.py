@@ -423,9 +423,6 @@ _RO_HOLDER = textwrap.dedent("""
 """)
 
 
-@pytest.mark.xfail(strict=True, reason="FI-7: filelock.exclusive drops to the thread lock alone when the lock file "
-                                       "cannot be opened for append (EACCES, a directory), so a mutation proceeds "
-                                       "while another process holds the flock")
 def test_a_pins_lock_file_this_process_cannot_open_still_excludes_the_other_process(tmp_path, monkeypatch):
     """Amendment 10: pins.yaml writes "hold PinStore._mutating; both use filelock.exclusive (thread lock plus a
     non-blocking <file>.lock flock ...). A lock still held raises LockBusy ... a pin mutation raises
@@ -445,6 +442,34 @@ def test_a_pins_lock_file_this_process_cannot_open_still_excludes_the_other_proc
     finally:
         holder.kill()
         holder.wait(5)
+        os.chmod(lock, 0o600)
+
+
+def test_a_lock_file_that_cannot_be_opened_at_all_fails_closed(tmp_path):
+    """FI-7: a directory where the lock file should be cannot be opened for append or for reading, so
+    filelock.exclusive raises LockBusy and a pin mutation raises PinStoreError, changing nothing."""
+    store = PinStore(tmp_path / "pins.yaml")
+    store.stage(_result(code="c2", enclave="e2"))
+    (tmp_path / "pins.yaml.lock").unlink(missing_ok=True)
+    (tmp_path / "pins.yaml.lock").mkdir()
+    with pytest.raises(filelock.LockBusy):
+        with filelock.exclusive(tmp_path / "pins.yaml.lock"):
+            pass
+    with pytest.raises(PinStoreError):
+        store.apply(store.pending(), approved_via="cli")
+    assert store.approved_entries() == []
+
+
+def test_a_read_only_lock_file_nobody_holds_still_locks(tmp_path):
+    """FI-7: a lock file this process can only read is opened read-only, which flock accepts, so the lock is
+    still taken when no other process holds the file."""
+    lock = tmp_path / "x.lock"
+    lock.write_text("")
+    os.chmod(lock, 0o400)
+    try:
+        with filelock.exclusive(lock):
+            pass
+    finally:
         os.chmod(lock, 0o600)
 
 
