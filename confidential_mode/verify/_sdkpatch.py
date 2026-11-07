@@ -1,9 +1,12 @@
 """Thread-scoped hooks into tinfoil 0.14.2 internals (evidence capture and offline replay).
 
 The SDK exposes no injection points for its fetchers, its Sigstore verifier or its clock, so capture
-and replay wrap module/class attributes. Wrappers are installed once, process-wide, and are inert
-unless the CURRENT THREAD has pushed an override for that attribute: a live verify on another thread
-(e.g. a gateway turn) during a replay never sees stored collateral or a pinned clock.
+and replay wrap module/class attributes. A wrapper exists only while some thread is inside
+``overrides()`` for that attribute (Amendment 13): it is installed on entry and the original attribute
+is put back when the last such window closes. Inside the window the wrapper is inert unless the CURRENT
+THREAD pushed an override: another thread's call (a gateway turn, Hermes' own ``requests`` use) runs the
+original function unchanged, and a live verify on another thread during a replay never sees stored
+collateral or a pinned clock.
 
 Also redirects the SDK's on-disk caches (see redirect_sdk_caches).
 """
@@ -18,6 +21,8 @@ from typing import Any, Callable, Iterator
 _local = threading.local()
 _install_lock = threading.Lock()
 _installed: dict[tuple[int, str], Any] = {}  # (id(owner), attr) -> the wrapper object we installed
+_originals: dict[tuple[int, str], tuple[Any, str, Any]] = {}  # (id(owner), attr) -> (owner, attr, what we replaced)
+_windows: dict[tuple[int, str], int] = {}    # open overrides() windows per attribute, across threads
 
 
 def _overrides() -> dict:
@@ -57,6 +62,7 @@ def install(owner, attr: str) -> None:
         raw = owner.__dict__[attr] if isinstance(owner, type) else getattr(owner, attr)
         if _installed.get(k) is raw:
             return
+        _originals[k] = (owner, attr, raw)
         if isinstance(owner, type) and isinstance(raw, classmethod):
             func = raw.__func__
 
@@ -85,17 +91,43 @@ def install(owner, attr: str) -> None:
             _installed[k] = fn
 
 
+def _uninstall(k) -> None:
+    """Put the original attribute back, when ours is still the one in place (something that wrapped on top
+    keeps its wrapper, which calls through ours). Caller holds _install_lock."""
+    entry, wrapper = _originals.get(k), _installed.get(k)
+    if entry is None or wrapper is None:
+        return
+    owner, attr, raw = entry
+    current = owner.__dict__.get(attr) if isinstance(owner, type) else getattr(owner, attr, None)
+    if current is wrapper:
+        setattr(owner, attr, raw)
+    _installed.pop(k, None)
+    _originals.pop(k, None)
+
+
+def installed_now() -> list[tuple[Any, str]]:
+    """(owner, attr) of every wrapper in place right now (tests, status)."""
+    with _install_lock:
+        return [(o, a) for (o, a, _r) in _originals.values()]
+
+
 @contextlib.contextmanager
 def overrides(mapping: dict[tuple[Any, str], Callable]) -> Iterator[None]:
-    """Push per-thread overrides: {(owner, attr): fn(original, *args, **kwargs)}."""
+    """Push per-thread overrides: {(owner, attr): fn(original, *args, **kwargs)}. Each wrapper is installed on
+    entry and removed when the last open window for its attribute closes, so outside these windows the SDK's,
+    sigstore's and requests' attributes are their own."""
     ov = _overrides()
     saved = {}
-    for (owner, attr), fn in mapping.items():
-        install(owner, attr)
-        k = _key(owner, attr)
-        saved[k] = ov.get(k)
-        ov[k] = fn
+    opened = []
     try:
+        for (owner, attr), fn in mapping.items():
+            k = _key(owner, attr)
+            with _install_lock:
+                _windows[k] = _windows.get(k, 0) + 1
+            opened.append(k)
+            install(owner, attr)
+            saved[k] = ov.get(k)
+            ov[k] = fn
         yield
     finally:
         for k, prev in saved.items():
@@ -103,6 +135,14 @@ def overrides(mapping: dict[tuple[Any, str], Callable]) -> Iterator[None]:
                 ov.pop(k, None)
             else:
                 ov[k] = prev
+        with _install_lock:
+            for k in opened:
+                left = _windows.get(k, 1) - 1
+                if left <= 0:
+                    _windows.pop(k, None)
+                    _uninstall(k)
+                else:
+                    _windows[k] = left
 
 
 # ── clock pinning ─────────────────────────────────────────────────────────────────────────────

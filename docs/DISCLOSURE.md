@@ -210,11 +210,17 @@ plugin's first verification, it may already have written to the default paths.
 
 These are assignments into a third-party SDK. The assignments are not changes to Hermes core.
 
-Evidence capture and offline replay also install wrappers (`confidential_mode/verify/_sdkpatch.py`),
-once and process-wide, on SDK functions and on the HTTP clients the replay's dependencies can reach:
-`requests.Session.request`, `urllib.request.urlopen`, urllib3's `HTTPConnectionPool.urlopen`, and the
-httpx transports. Hermes shares these clients. Each wrapper does nothing unless the current thread
-has pushed an override, which only a capture or a replay does.
+Evidence capture and offline replay also wrap attributes for a bounded window
+(`confidential_mode/verify/_sdkpatch.py`). In a live process the window is one Tinfoil attestation (each
+verification, and each attestation the SDK runs when it builds a pool or re-verifies after a key
+rotation): the SDK's fetch functions and, while the SDK reads its latest release, `requests.Session.request`.
+A replay, which only the `hermes confidential replay` command runs, also wraps
+`urllib.request.urlopen`, urllib3's `HTTPConnectionPool.urlopen` and the httpx transports, for the
+offline network ban. Each wrapper is installed when the window opens and the original attribute is put
+back when the last open window for it closes. Inside the window the wrapper is shared by the whole
+process, Hermes' own `requests` calls included, and does nothing for any thread but the one that opened
+the window: another thread's call runs the original function unchanged. Hermes core attributes are never
+wrapped.
 
 ## Credentials
 
@@ -222,7 +228,9 @@ The plugin uses two secrets, one for each attested vendor. `TINFOIL_API_KEY` is 
 `attested-tinfoil` provider. `NEAR_AI_API_KEY` is for the `attested-near` provider. You need only the
 key of the vendor you use. The `on-host-only` tier needs neither.
 
-`plugin.yaml` declares `TINFOIL_API_KEY` in `requires_env` and `NEAR_AI_API_KEY` in `optional_env`.
+`plugin.yaml` declares `TINFOIL_API_KEY` in `requires_env` and `NEAR_AI_API_KEY`, `OPENROUTER_API_KEY`
+and `NOUS_API_KEY` in `optional_env` (the last two for a presence check only, under "Environment
+variables").
 NEAR's key is optional because most installs use one vendor, and an install-time prompt for an unused
 key serves no purpose. Each key is also in `env_vars` on its provider profile. Hermes therefore
 resolves it like any provider key and passes it to `create_client`.
