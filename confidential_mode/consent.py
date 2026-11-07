@@ -66,6 +66,14 @@ def _ask(ctx: Any, question: str, choices: list) -> tuple[Optional[str], Optiona
         return None, f"{type(exc).__name__}: {exc}"
 
 
+def _pick_repr(raw: Any) -> Any:
+    """What is stored for an answer: a choice value or None verbatim, anything else classified, never the
+    text itself (review finding 20: a surface that passed free text through must not ledger a secret)."""
+    if raw is None or (type(raw) is str and raw in ("approve", "deny")):
+        return raw
+    return "other" if isinstance(raw, str) else f"<{type(raw).__name__}>"
+
+
 def _is_exact(raw: Any, value: str) -> bool:
     """Exact str match: a str subclass with a lying __eq__ must never count as a pick (C3 review)."""
     return type(raw) is str and raw == value
@@ -254,12 +262,12 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
             "enclave_fingerprint": str(_field(pending, "enclave_fingerprint", "") or "")}
 
     raw, error = _ask(ctx, pin_question(pending, observers=observers), PIN_CHOICES)
-    detail = {**base, "raw_pick": raw}
+    detail = {**base, "raw_pick": _pick_repr(raw)}
     if error:
         detail["error"] = error
     if not _is_exact(raw, "approve"):
         _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
-                             decision="no_answer" if raw is None else str(raw), detail=detail))
+                             decision="no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
         if raw is None:
             return "No answer (timed out, cancelled, or not one of the options): pin update denied; current pin kept."
         return "Pin update denied; current pin kept."
@@ -322,12 +330,12 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
                 f"It sends data off this machine (toolset {info.toolset}, origin {info.origin.value}).\n"
                 "Once allowed, it runs without asking for the rest of this lock.")
     raw, error = _ask(ctx, question, TOOL_CHOICES)
-    detail = {"tool": name, "raw_pick": raw, "session_key": session_key or "", "change": "allowlist_add"}
+    detail = {"tool": name, "raw_pick": _pick_repr(raw), "session_key": session_key or "", "change": "allowlist_add"}
     if error:
         detail["error"] = error
     if not _is_exact(raw, "approve"):
         _ledger(ledger, _event("tool_refused", session_id=session_id, platform=platform, purpose=f"tool:{name}",
-                             decision="no_answer" if raw is None else str(raw), detail=detail))
+                             decision="no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
         return f"{name} was not added; it still needs approval each call."
     allowlist.add(name)
     _ledger(ledger, _event("tool_allowed", session_id=session_id, platform=platform, purpose=f"tool:{name}",

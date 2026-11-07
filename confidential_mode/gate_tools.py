@@ -1045,8 +1045,20 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
     return confidential_mode_tool_execution
 
 
+#: Hermes' own approval answers (tools/approval.py). Only these are stored verbatim (review finding 20).
+KNOWN_CHOICES = frozenset({"once", "session", "always", "deny", "timeout", "cancelled", "notify_failed",
+                           "smart_approve", "smart_deny"})
+
+
 def _choice_repr(choice: Any) -> Any:
-    return choice if isinstance(choice, str) or choice is None else repr(choice)[:80]
+    """A classification of an approval answer, safe to store and to show the model. A human may type a
+    secret at the prompt by mistake (review finding 20), so free text is never kept: Hermes' fixed answers
+    and "" stay as they are, None stays None, any other string is "other", any other value is its type."""
+    if choice is None or choice == "" and isinstance(choice, str):
+        return choice
+    if isinstance(choice, str):
+        return choice if choice in KNOWN_CHOICES else "other"
+    return f"<{type(choice).__name__}>"
 
 
 def build_post_approval_response(is_locked: Callable[[], Any], ledger: Any,
@@ -1071,7 +1083,8 @@ def build_post_approval_response(is_locked: Callable[[], Any], ledger: Any,
             detail = {"tool": tool_name, "choice": _choice_repr(choice), "tool_call_id": tool_call_id or "",
                       "session_key": session_key or "", "locked": _safe(is_locked)}
             ledger.append(_event("tool_allowed" if allowed else "tool_refused", tool_name=tool_name,
-                                 session_id=session_id or "", decision=(pick or "unexpected_choice")[:64],
+                                 session_id=session_id or "",
+                                 decision=pick if pick in KNOWN_CHOICES else "unexpected_choice",
                                  surface=surface or None, detail=detail))
         except Exception:
             pass

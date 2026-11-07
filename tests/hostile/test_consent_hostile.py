@@ -727,3 +727,13 @@ def _allowlist(**kw):
 
 def allow(ctx, allowlist, ledger, name):
     return consent.allow_tool(ctx, allowlist, ledger, name, session_key=SK, session_id="sess-1", platform="cli")
+
+
+def test_free_text_pick_is_classified_never_ledgered_withstood():
+    """Review finding 20: a surface that passes the human's free text through (a typo'd password) must not
+    put that text in the ledger; the denial stores "other"."""
+    import json
+    store, ledger = FakeStore(make_pending()), FakeLedger()
+    approve_pin(FakeCtx(lambda q, c: "hunter2-correct-horse"), store, ledger)
+    assert store.applied == [] and "hunter2" not in json.dumps([_text(e) for e in ledger.events])
+    assert "other" in _text(ledger.events[-1])

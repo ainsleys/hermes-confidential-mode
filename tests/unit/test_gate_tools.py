@@ -350,7 +350,20 @@ def test_hermes_grant_on_an_unexpected_answer_is_refused(answer):
     out = r.run("web_search", {"q": "x"})
     assert refused(out) and r.ran() == []
     assert r.ledger.kinds()[-1] == "tool_refused" and r.ledger.events[-1]["decision"] == "unexpected_choice"
-    assert r.ledger.events[-1]["detail"]["choice"] == answer
+    # Review finding 20: free text is classified, never stored (a typed secret must not reach the ledger).
+    assert r.ledger.events[-1]["detail"]["choice"] == (answer if answer in (None, "") else "other")
+
+
+def test_a_secret_typed_at_the_approval_prompt_never_reaches_the_ledger_or_the_model():
+    secret = "hunter2-correct-horse"
+    r = Rig(answer=secret, hermes_approved=True)
+    out = r.run("web_search", {"q": "x"})
+    assert refused(out) and secret not in out
+    assert secret not in json.dumps(r.ledger.events)
+    ledger = FakeLedger()
+    post = build_post_approval_response(lambda: True, ledger)
+    post(pattern_key=PATTERN_KEY_PREFIX + "web_search", choice=secret, session_id="s", tool_call_id="c")
+    assert ledger.events[0]["decision"] == "unexpected_choice" and secret not in json.dumps(ledger.events)
 
 
 def test_denied_and_no_surface_are_refused():
