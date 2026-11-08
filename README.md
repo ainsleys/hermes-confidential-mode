@@ -227,7 +227,7 @@ the change that would close each.
 - **A receipt is a self-report.** It's the plugin's record, from a file on your machine that you or
   another plugin could edit. Only the attached enclave evidence can be checked by someone else.
   ([section 6](docs/LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process))
-- **Tools ask once per lock, then run without asking.** The plugin asks you the first time each tool
+- **Tools ask once per lock in each conversation, then run without asking.** The plugin asks you the first time each tool
   would send data off the machine during a lock; after Allow once, later calls to that tool in the
   same conversation run until you unlock, each with a ledger row. An answer an agent gave itself
   through a nested chat counts the same way. The grant lives in the process that asked, so a restart

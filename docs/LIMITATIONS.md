@@ -826,7 +826,7 @@ Each item below is a smaller gap. Each one is stated in full.
 
 - **Voice paths.** The plugin does not examine the voice-chat and gateway voice-note TTS paths. The preflight's
   "disabled" verdict for `tts.provider` holds only while `voice.auto_tts` is false and the
-  `text_to_speech` tool asks before it runs (once per lock by default; set
+  `text_to_speech` tool asks before it runs (once per lock and conversation by default; set
   `confidential.tools.ask: each_call` to have it ask on every call).
 
 - **A `once` answer covers the tool for the rest of the lock, in that conversation and that

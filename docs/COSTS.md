@@ -115,7 +115,7 @@ The guide's sections on [request encryption](GUIDE.md#request-encryption) and on
 
 The plugin's own overhead is small. What you pay for is the tier. Attested inference means
 open-weight models from two vendors, no fallbacks, no streaming on NEAR, images in plaintext to NEAR's
-gateway, and one prompt per lock for each tool that sends data off the machine (every call with
+gateway, and one prompt per lock and conversation for each tool that sends data off the machine (every call with
 `confidential.tools.ask: each_call`). If you already run Qwen or DeepSeek
 through an aggregator, the quality change is near zero, and you pay mainly in prompts and lost
 fallbacks. If you're on a Claude or GPT model, you pay for the model switch; the lock makes that cost
