@@ -856,7 +856,14 @@ Each item below is a smaller gap. Each one is stated in full.
   process; after a restart with the file deleted, the old key is used again, and only a `command_allowlist`
   entry the revoke could not remove would then apply. An approval prompt already open in the
   gateway can still be answered after a revoke, and that answer grants the tool again. A tool call
-  already past the gate finishes.
+  already past the gate finishes. A revoke that finds nothing to remove records nothing when the ledger
+  shows no prompt for the tool since the last revoke that moved the key; a prompt shown before such a
+  revoke and answered `once` after it, whose answer row then fails to write, leaves a lock grant in the
+  asking process that a later revoke of this kind does not end, until unlock. That check reads the
+  ledger, while the approval key comes from `grants_revoked.json`: with that file deleted or reset, a
+  process that starts afterwards asks under the original key, so a session approval under the original
+  key held by another process applies again, and a later revoke that finds no prompt in the ledger
+  records nothing and does not move the key.
 
 - **`/confidential allow` additions last for one lock only.** The plugin stores additions in
   `allowlist.yaml`, tagged with the lock's identity. A new lock starts with none. A file tagged with
