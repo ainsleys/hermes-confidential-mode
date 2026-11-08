@@ -144,8 +144,8 @@ PROCESSED_KEYS = frozenset({"messages", "tools", "tool_choice"})
 REFUSED_KEYS = frozenset({"logprobs", "top_logprobs"})
 # Response fields the plugin refuses rather than passes through or guesses at (issue #36): logprobs (the page
 # does not define the encrypted token format) and nearai_tool_result (NEAR's guide says its ``output`` is
-# encrypted to the client key; no captured shape yet). Checked at the top level, on each choice, message and
-# tool call.
+# encrypted to the client key; no captured shape yet). Checked at the top level, on each choice, message, tool
+# call and tool-call function.
 REFUSED_RESPONSE_KEYS = frozenset({"logprobs", "nearai_tool_result"})
 REFUSED_RESPONSE_REASONS = {
     "logprobs": "the response carries logprobs, whose encrypted format NEAR does not define; refused",
@@ -711,6 +711,7 @@ def decrypt_response(body: Mapping, client) -> tuple[dict, dict]:
                     raise E2EEError("a response tool call carries no function; response refused")
                 _refuse_unhandled(call)
                 fn = dict(call["function"])
+                _refuse_unhandled(fn)
                 if not (isinstance(fn.get("name"), str) and fn["name"]):
                     raise E2EEError("a response tool call has no name ciphertext; response refused")
                 for fk in ("name", "arguments"):

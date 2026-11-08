@@ -562,3 +562,11 @@ def test_a_response_carrying_nearai_tool_result_is_refused_by_name(place):
         e2.decrypt_response(body, client)
     assert "refused" in str(got.value) and "deadbeef" not in str(got.value)
     assert "nearai_tool_result" in e2.REFUSED_RESPONSE_KEYS and "logprobs" in e2.REFUSED_RESPONSE_KEYS
+
+
+def test_a_refused_field_inside_a_tool_call_function_is_refused_too():
+    client = e2.ClientKey.generate()
+    body = full_response(client.public_hex)
+    body["choices"][0]["message"]["tool_calls"][0]["function"]["nearai_tool_result"] = {"output": "00" * 8}
+    with pytest.raises(e2.E2EEError, match="nearai_tool_result"):
+        e2.decrypt_response(body, client)
