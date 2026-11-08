@@ -594,3 +594,31 @@ def test_pruning_a_closed_loop_pool_forgets_its_in_flight_count(world, tmp_path)
     ad._prune_closed_loops()
     assert ad._async_transports == {} and ad._inflight == {} and pool.sock.fileno() == -1
     pool.close_peer()
+
+
+def test_a_release_during_pruning_is_not_undone(world, tmp_path):
+    """Review L5: a finalizer's release that runs on the pruning thread removes its entry for good."""
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    live = asyncio.new_event_loop()
+    dead = asyncio.new_event_loop()
+    dead.close()
+    released, dead_pool = _SocketPool(), _SocketPool()
+
+    class Probe(list):
+        fired = False
+
+        def __iter__(inner):
+            # The release of ``released`` runs after the first entry is read, as a finalizer would.
+            for n, entry in enumerate(list.__iter__(list(list.__iter__(inner)))):
+                yield entry
+                if n == 0 and not Probe.fired:
+                    Probe.fired = True
+                    kept = [e for e in list.__iter__(inner) if e[1] is not released]
+                    list.__setitem__(inner, slice(None), kept)
+    ad._retired_async = Probe([(live, released), (dead, dead_pool)])
+    ad._prune_closed_loops()
+    assert [p for _, p in ad._retired_async] == []
+    live.close()
+    for p in (released, dead_pool):
+        p.sock.close()
+        p.close_peer()

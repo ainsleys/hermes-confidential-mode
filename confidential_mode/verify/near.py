@@ -1144,14 +1144,14 @@ class NearAdapter:
                 at = self._async_transports.pop(key)[1]
                 gone.append(at)
                 self._inflight.pop(id(at), None)
-            keep = []
-            for lp, at in self._retired_async:
-                if lp.is_closed():
-                    gone.append(at)
-                    self._inflight.pop(id(at), None)
-                else:
-                    keep.append((lp, at))
-            self._retired_async = keep
+            # A finalizer's release() can run on this thread while the list is read (a collection under the
+            # RLock), so the list is filtered by identity at the end, never restored from a copy (review L5).
+            closed = [(lp, at) for lp, at in list(self._retired_async) if lp.is_closed()]
+            for _, at in closed:
+                gone.append(at)
+                self._inflight.pop(id(at), None)
+            drop = {id(at) for _, at in closed}
+            self._retired_async = [e for e in self._retired_async if id(e[1]) not in drop]
         for at in gone:
             _close_pool_sockets(at)
         _sweep_closed_loops(self._async_closing)
