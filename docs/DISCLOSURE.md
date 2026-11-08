@@ -135,7 +135,7 @@ config sends them. The plugin only writes ledger rows that describe those calls 
   `hermes auth`, and the preflight note says so.
 - **Hermes' in-process approval state, tool registry, MCP server config and delegation config.** The
   approval state is the yolo flag, the approval mode and the remembered grants. The plugin reads
-  these to classify tools. A revoke also edits the approval state (below).
+  these to classify tools. A revoke edits the plugin's own entries in `command_allowlist` in `config.yaml`, not this in-memory state (see "What it writes to Hermes' files").
 - **Script files a locked tool call runs.** While locked, when a `terminal` or `execute_code` command
   runs a script file, the tool gate reads up to 1 MB of that file, relative to `TERMINAL_CWD` or the
   working directory, to scan it for the plugin's own commands (LIMITATIONS section 15).
@@ -159,7 +159,7 @@ config sends them. The plugin only writes ledger rows that describe those calls 
   or a file that is not writable), the revoke fails and names the line to delete by hand; the entry no
   longer grants anything, because the plugin then asks under a new approval key. Nothing else in the plugin writes `config.yaml`; `hermes confidential setup` prints a config
   block for you to apply yourself.
-- **The tool-discovery cache, on a terminal lock.** See the next section.
+- **The tool-discovery cache, on a terminal lock.** See "What it writes in its own data".
 
 ### What it writes in its own data
 
@@ -192,7 +192,7 @@ back to the full import, and its cache rewrite, only when a recorded tool is sti
 | The same directory, `trust-roots/<sha256>.json` | The Sigstore trust root used at verification. The plugin stores each distinct trust root once, named by the hash of its content. The evidence in the ledger also carries the trust root's bytes, so a receipt replays offline on any machine. The evidence records no local path. |
 | The same directory, `modes-checked` | The commit for which the plugin last set mode 0600 on every file in both data directories. The walk runs again on a new commit, or when the ledger, `pins.yaml` or `allowlist.yaml` has another mode. |
 | The same directory, `loaded-commit` | The commit that last started here. The plugin prints its start-up progress lines on the first start of a new commit only ([GUIDE.md, Install in detail](GUIDE.md#install-in-detail)). |
-| The same directory, `sdk-cache/` | The on-disk caches of the tinfoil SDK and of sigstore-python, redirected here. The next section explains how. |
+| The same directory, `sdk-cache/` | The on-disk caches of the tinfoil SDK and of sigstore-python, redirected here. "SDK cache redirect" explains how. |
 
 **The plugin holds tool grants from a `once` answer in memory, not on disk.** Under the default
 `confidential.tools.ask: once_per_lock`, an exact `once` answer to a tool prompt grants that tool for
@@ -326,7 +326,7 @@ The plugin reads these environment variables:
 - `OPENROUTER_API_KEY` and `NOUS_API_KEY`, whether each is set and nothing else, through
   `agent.secret_scope.get_secret`, when you lock or run `check`: the preflight reports whether Hermes'
   side-call fall-through to OpenRouter or Nous would have a credential. The plugin sends neither key
-  anywhere. `plugin.yaml` and the catalog entry declare both under `optional_env`;
+  anywhere. `plugin.yaml` declares both under `optional_env`, and the catalog entry's description names them;
 - `TERMINAL_ENV`, to resolve the terminal backend as Hermes does;
 - `HERMES_HOME`, to tell whether a path a tool call names lies in the Hermes home;
 - `TERMINAL_CWD`, to find a script file a locked tool call runs;
