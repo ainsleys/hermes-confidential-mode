@@ -47,12 +47,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-try:  # Hermes ships ruamel-backed hermes_yaml and no PyYAML in its venv
-    import hermes_yaml as yaml
-except ImportError:  # standalone use (unit tests outside Hermes)
-    import yaml  # type: ignore[no-redef]
-
+from .hermes_compat import yaml_module
 from .verify.base import VerificationResult
+
+# Hermes ships ruamel-backed hermes_yaml and no PyYAML in its venv; PyYAML for standalone use.
+yaml = yaml_module()
 
 SCHEMA_VERSION = 3
 LEGACY_VERSION = 2

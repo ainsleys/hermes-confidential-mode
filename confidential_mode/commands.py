@@ -164,17 +164,10 @@ def _pin_lines(rt: Any) -> list[str]:
 
 def hermes_approval_keys(session_key: Optional[str] = None) -> tuple[set, set]:
     """(Hermes' permanent approval keys, its session approval keys for ``session_key``, or for every session
-    when None). Read-only, under Hermes' own lock; raises when Hermes' tables cannot be read."""
-    from tools import approval
-    with approval._lock:
-        permanent = set(approval._permanent_set())
-        if session_key is None:
-            session: set = set()
-            for held in approval._session_approved.values():
-                session |= set(held)
-        else:
-            session = set(approval._session_approved.get(session_key, set()))
-    return permanent, session
+    when None). Read-only, under Hermes' own lock (hermes_compat.approval_keys); raises when Hermes' tables
+    cannot be read."""
+    from . import hermes_compat
+    return hermes_compat.approval_keys(session_key)
 
 
 def remembered_grants(session_key: str = "", current_key=None) -> list[str]:

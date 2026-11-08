@@ -65,7 +65,7 @@ def _near_key() -> str:
     """NEAR_AI_API_KEY through Hermes: its env-file loader for HERMES_HOME, then its secret scope. "" when
     Hermes is not importable or the scope refuses."""
     try:
-        from hermes_cli.env_loader import load_hermes_dotenv
+        from confidential_mode.hermes_compat import load_hermes_dotenv
         load_hermes_dotenv(load_external_secrets=False)
     except Exception:  # noqa: BLE001
         pass

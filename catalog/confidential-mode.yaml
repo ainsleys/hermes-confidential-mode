@@ -34,7 +34,7 @@ description: >-
   compose-file fetch, the own-host-name DNS lookup, and, while locked, one long-running re-verification
   thread per attested provider. During each Tinfoil attestation only, the plugin wraps the SDK's fetch
   functions and requests.Session.request process-wide, inert for every other thread, and puts the original
-  functions back afterwards. hermes plugins validate counts 32 private core import sites
+  functions back afterwards. hermes plugins validate counts 31 private core import sites
   (docs/DISCLOSURE.md).
 maintainer: ainsleys
 tier: community

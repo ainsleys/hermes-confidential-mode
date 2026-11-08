@@ -373,8 +373,8 @@ def _read_json_or_yaml(path: Path) -> Any:
         return json.loads(text)
     except ValueError:
         try:
-            import hermes_yaml   # a hand-edited YAML file
-            return hermes_yaml.safe_load(text)
+            from . import hermes_compat   # a hand-edited YAML file
+            return hermes_compat.hermes_yaml().safe_load(text)
         except Exception:
             return None
 
@@ -448,18 +448,18 @@ def ensure_tools_for_lock(path: Optional[Path], progress: Any = None) -> None:
 
 
 def _import_modules(missing: list, progress: Any = None) -> None:
-    import importlib
+    from .hermes_compat import import_tool_module
     try:
         if progress is not None and getattr(progress, "enabled", False):
             with progress.phase("loading the locked tools") as box:
                 for name in missing:
                     with contextlib.suppress(Exception):
-                        importlib.import_module(name)
+                        import_tool_module(name)
                 box["result"] = f"{len(missing)} modules"
         else:
             for name in missing:
                 with contextlib.suppress(Exception):
-                    importlib.import_module(name)
+                    import_tool_module(name)
     except Exception:
         pass
 
@@ -469,21 +469,19 @@ def _default_mcp_configs() -> dict[str, dict]:
     the live connection configs. Never raises."""
     configs: dict[str, dict] = {}
     try:
-        from tools.mcp_tool_config import _load_mcp_config
-        for name, cfg in (_load_mcp_config() or {}).items():
+        from . import hermes_compat
+        for name, cfg in (hermes_compat.mcp_server_configs() or {}).items():
             if isinstance(cfg, dict):
                 configs[str(name)] = dict(cfg)
     except Exception:
         pass
     try:
-        from tools import mcp_tool as _core
-        from tools.mcp_tool_scope import _key_name
-        with _core._lock:
-            live = list(_core._servers.items())
+        from . import hermes_compat
+        live = hermes_compat.mcp_live_servers()
         for key, server in live:
             cfg = getattr(server, "_config", None)
             if isinstance(cfg, dict) and cfg:
-                name = _key_name(key)
+                name = hermes_compat.mcp_key_name(key)
                 # url anywhere wins (fail closed): merge rather than replace.
                 configs[name] = {**configs.get(name, {}), **cfg}
     except Exception:
@@ -493,17 +491,16 @@ def _default_mcp_configs() -> dict[str, dict]:
 
 def _default_mcp_tool_servers() -> dict[str, str]:
     try:
-        from tools import mcp_tool as _core
-        with _core._lock:
-            return dict(_core._mcp_tool_server_names)
+        from .hermes_compat import mcp_tool_server_names
+        return mcp_tool_server_names()
     except Exception:
         return {}
 
 
 def _default_plugin_tool_names() -> set[str]:
     try:
-        from hermes_cli.plugins import get_plugin_manager
-        return set(getattr(get_plugin_manager(), "_plugin_tool_names", ()) or ())
+        from .hermes_compat import plugin_tool_names
+        return plugin_tool_names()
     except Exception:
         return set()
 
@@ -698,10 +695,9 @@ def _hermes_approval_state() -> tuple[bool, bool]:
     """(bypassed, someone present): ``bypassed`` is yolo or approvals.mode off; ``someone present`` is a CLI,
     gateway or ask surface that could answer. Mirrors ``_run_approval_gate`` (tools/approval.py:1071-1113).
     Raises when Hermes cannot be read; each caller fails closed."""
-    from tools.approval import _presence, _yolo_active
-    from tools.approval_context import _get_approval_mode
-    bypassed = bool(_yolo_active() or _get_approval_mode() == "off")
-    _cb, is_cli, is_gateway, is_ask = _presence(None)
+    from . import hermes_compat
+    bypassed = bool(hermes_compat.yolo_active() or hermes_compat.approval_mode() == "off")
+    _cb, is_cli, is_gateway, is_ask = hermes_compat.approval_presence(None)
     return bypassed, bool(is_cli or is_gateway or is_ask)
 
 
@@ -722,10 +718,9 @@ def hermes_remembered_grant(tool_name: str, rule_key: Optional[str] = None) -> b
     The plugin_rule: prefix trap: the grant is stored under the PREFIXED key; is_approved(sk, rule_key)
     without it is always False (tests/spikes/test_approval_gate.py:384). Any error -> False (ask)."""
     try:
-        from tools.approval import is_approved
-        from tools.approval_context import get_current_session_key
+        from . import hermes_compat
         key = rule_key if rule_key is not None else rule_key_for(tool_name)
-        return bool(is_approved(get_current_session_key(), f"plugin_rule:{key}"))
+        return bool(hermes_compat.is_approved(hermes_compat.current_session_key(), f"plugin_rule:{key}"))
     except Exception:
         return False
 
@@ -744,9 +739,10 @@ def hermes_terminal_backend(task_id: str = "") -> str:
       reported as unknown, which blocks.
 
     Raises when Hermes cannot be read; the caller then blocks."""
-    from tools.terminal_tool import _get_env_config
-    from tools.terminal_tool_lifecycle import get_active_env
+    from .hermes_compat import active_env_reader, terminal_env_config_reader
     from .preflight import LOCAL_BACKEND, normalize_backend
+    _get_env_config = terminal_env_config_reader()
+    get_active_env = active_env_reader()
     backend = normalize_backend(_get_env_config().get("env_type"))
     if backend != LOCAL_BACKEND:
         return backend
@@ -762,10 +758,9 @@ def hermes_terminal_backend(task_id: str = "") -> str:
 def cached_remote_environments() -> list[tuple[str, str]]:
     """(task key, backend) of every environment Hermes has cached that is not local (or not tagged).
     The lock is refused while any exists. Raises when Hermes cannot be read."""
-    from tools.terminal_tool import _active_environments, _env_lock
+    from .hermes_compat import cached_terminal_environments
     from .preflight import LOCAL_BACKEND, normalize_backend
-    with _env_lock:
-        items = list(_active_environments.items())
+    items = cached_terminal_environments()
     out = []
     for key, env in items:
         tag = getattr(env, "env_type", None) or getattr(env, "_hermes_backend_name", None)
@@ -819,8 +814,8 @@ def _norm_key(key: Any) -> str:
 
 
 def _load_delegation_config() -> dict:
-    from tools.delegate_tool_config import _load_config
-    cfg = _load_config()
+    from .hermes_compat import delegation_config
+    cfg = delegation_config()
     return cfg if isinstance(cfg, dict) else {}
 
 
@@ -992,8 +987,8 @@ def grant_scope(session_id: str = "") -> tuple[str, str]:
     still needs the same session id. Both empty names no conversation: LockGrants makes no grant for that
     scope, so such a caller is asked on every call instead of sharing one grant with every other such caller."""
     try:
-        from tools.approval_context import get_current_session_key
-        key = get_current_session_key("")
+        from .hermes_compat import current_session_key
+        key = current_session_key("")
     except Exception:  # noqa: BLE001
         key = ""
     return (str(key or ""), str(session_id or ""))
@@ -1374,15 +1369,14 @@ def hermes_request_approval(tool_name: str, message: str, *, rule_key: str, appr
     """Ask through Hermes' own gate (CLI panel / gateway card), from the agent thread, with the
     observability context set so post_approval_response carries ``approval_id`` as tool_call_id
     (same mechanism as hermes_cli/plugins.py:1996-2009)."""
-    from tools.approval import request_tool_approval
-    from tools.approval_context import reset_current_observability_context, set_current_observability_context
-    tokens = set_current_observability_context(turn_id=turn_id, tool_call_id=approval_id, session_id=session_id)
+    from .hermes_compat import request_tool_approval, reset_observability_context, set_observability_context
+    tokens = set_observability_context(turn_id=turn_id, tool_call_id=approval_id, session_id=session_id)
     try:
         # Hermes shows "<name> (plugin approval rule)" as the prompt's target line; the plugin's label goes
         # there in place of the bare tool name. The rule key (our grant key) still names the tool.
         return request_tool_approval(f"{APPROVAL_LABEL} {tool_name}", message, rule_key=rule_key)
     finally:
-        reset_current_observability_context(tokens)
+        reset_observability_context(tokens)
 
 
 def _refusal_result(message: str) -> str:

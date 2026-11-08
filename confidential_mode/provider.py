@@ -945,8 +945,8 @@ def _is_overflow(body: Any, message: str) -> bool:
     text = " ".join(str(v) for v in ((err or {}).values() if isinstance(err, dict) else ())) + " " + (message or "")
     text = text.lower()
     try:
-        from agent.error_classifier import _CONTEXT_OVERFLOW_PATTERNS
-        hints = tuple(_CONTEXT_OVERFLOW_PATTERNS) + _OVERFLOW_HINTS
+        from .hermes_compat import context_overflow_patterns
+        hints = context_overflow_patterns() + _OVERFLOW_HINTS
     except Exception:
         hints = _OVERFLOW_HINTS
     return any(h in text for h in hints)

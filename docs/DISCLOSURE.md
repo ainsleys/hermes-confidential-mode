@@ -370,6 +370,15 @@ module attributes or private dicts in place; `hermes plugins validate` warns on 
 undocumented core module. Every import below is lazy, which means it happens inside a function, not
 when the plugin loads.
 
+Every import of an undocumented core module is in one file, `confidential_mode/hermes_compat.py`. Each
+name there has its own accessor function, whose docstring names the Hermes symbol, the Hermes commit it
+was checked against (84a0301), what the plugin uses it for, and what the plugin does when the symbol is
+missing. A Hermes release that moves or renames one of these names breaks that file only. The other
+modules import only the documented plugin surface directly: `tools.registry`, `agent.secret_scope`,
+`providers`, `providers.base`, `hermes_cli.config` and `plugins.plugin_storage`.
+`tests/unit/test_hermes_compat.py` fails when any other plugin module imports an undocumented core
+module.
+
 | Module | Names | Why |
 |---|---|---|
 | `tools.approval` | `request_tool_approval`, `is_approved`, `_yolo_active`, `_presence`, and, in `/confidential status` and `pins`, `_lock`, `_session_approved`, `_permanent_set` (read only) | To ask before an off-host tool call. To detect bypass states that would approve a call without asking. To list the remembered grants stored under the plugin's own rule key. |
@@ -381,17 +390,19 @@ when the plugin loads.
 | `hermes_cli.env_loader` (in `scripts/near_first_contact.py` only) | `load_hermes_dotenv` | To load the `HERMES_HOME` env file before the script reads `NEAR_AI_API_KEY` through `get_secret`, as `hermes` does at start-up. Hermes' loader (84a0301): can rewrite `<HERMES_HOME>/.env` in place (a UTF-16 file becomes UTF-8, NUL characters are stripped, malformed lines are normalised); loads every variable the env file sets into the script's process environment, overriding exported values, and removes exported provider-selection variables Hermes manages that the env file does not set; loads `<HERMES_HOME>/.op.env`, without overriding, when that file exists and `OP_SERVICE_ACCOUNT_TOKEN` is unset; when the install has an administrator-managed scope with its own `.env`, rewrites that file the same way and loads it last, overriding every other value; writes `config.yaml`'s `terminal.*` settings into the process environment; publishes the deployment names into the environment and boots the config backend the home selects (a remote backend fetches the home's config); queries no external secret source (`load_external_secrets=False`); and does nothing at all in safe-worker mode. Every change to the environment ends with the process. The script itself never writes any of these files. |
 | `tools.terminal_tool`, `tools.terminal_tool_lifecycle`, `tools.terminal_scope` | `_get_env_config`, `_active_environments`, `_env_lock`, `get_active_env`, and `terminal_env` as a fallback | To read the terminal backend a terminal, code or file tool call would run on, the way Hermes' tools resolve it, and the backend of the environment Hermes has cached for the task. The plugin blocks the call, and refuses to lock, unless both are `local`. |
 | `hermes_cli.commands` | `resolve_command` | To recognise `/model` and `/moa`, and their aliases, in `pre_gateway_dispatch`. |
-| `tools.mcp_tool`, `tools.mcp_tool_config`, `tools.mcp_tool_scope` | `_servers`, `_mcp_tool_server_names`, `_load_mcp_config`, `_key_name` | To map an MCP tool to its server, and to read whether that server is a URL or an on-host command. |
+| `tools.mcp_tool`, `tools.mcp_tool_config`, `tools.mcp_tool_scope` | `_lock`, `_servers`, `_mcp_tool_server_names` (read only), `_load_mcp_config`, `_key_name` | To map an MCP tool to its server, and to read whether that server is a URL or an on-host command. |
 | `tools.delegate_tool_config` | `_load_config` | To read the delegation backend and route keys for `delegate_task`. |
 | `providers`, `providers.base` | `register_provider`, `get_provider_profile`, `ProviderProfile` | To register `attested-tinfoil` and `attested-near`, and to check at lock time that the locked profile is visible in the process. |
 | `hermes_cli.config`, `hermes_cli.config_defaults` | `load_config_readonly`, `load_config`, `read_raw_config`, `save_config`, `DEFAULT_CONFIG` | To read the config, and to list the built-in auxiliary tasks. A revoke uses `read_raw_config`, `save_config` and `load_config` (to confirm) to remove the plugin's own `command_allowlist` entries and nothing else. |
 | `hermes_cli.plugins` | `get_plugin_manager`, `get_plugin_auxiliary_tasks` | To tell plugin tools from built-in tools, and to include plugin-registered auxiliary tasks in the preflight. |
 | `plugins.plugin_storage` | `plugin_db`, `plugin_data_dir` | To open the ledger database. |
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
+| `tools.*` built-in tool modules named in `allowlist.yaml` | (the module) | A lock rebuilt in a `hermes confidential` command-line process imports the tool modules the lock recorded, so their tools register. The names come from the lock file, so the validator does not count these imports. |
 
-`hermes plugins validate` reports 32 of these import sites as private core imports, counting module
-imports as it does; it does not count the private attributes read, such as `approval._lock`,
-`_session_approved`, `_permanent_set` and `mcp_tool._servers`. This is a warning, not a failure.
+`hermes plugins validate` reports 31 of these import sites as private core imports, all in
+`confidential_mode/hermes_compat.py`: each undocumented name is imported at one line, so each site is one
+name, the private attributes read (`approval._lock`, `_session_approved`, `_permanent_set`,
+`mcp_tool._servers`) included. This is a warning, not a failure.
 
 The plugin makes no in-place edit of Hermes core (rule 9). Every private name above is read, never
 written. Two places where an edit would have been the short way:

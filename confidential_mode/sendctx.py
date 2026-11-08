@@ -62,8 +62,8 @@ def aux_current() -> Optional[dict]:
     context per auxiliary call (agent/auxiliary_client.py ``_RELAY_AUX_CALL_CONTEXT``, a ContextVar
     copied into the provider worker thread, Hermes 84a0301); its task gives the purpose. Never raises."""
     try:
-        from agent.auxiliary_client import _RELAY_AUX_CALL_CONTEXT
-        relay = _RELAY_AUX_CALL_CONTEXT.get()
+        from .hermes_compat import relay_aux_call_context
+        relay = relay_aux_call_context().get()
     except Exception:  # noqa: BLE001 - not running inside Hermes, or Hermes moved the variable
         return None
     if not isinstance(relay, dict) or not relay.get("task"):

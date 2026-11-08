@@ -702,8 +702,7 @@ def _pre_gateway_dispatch(rt: Runtime):
             name = word.split("@", 1)[0].lower()
             canonical, resolved = name, True
             try:
-                from hermes_cli.commands import resolve_command
-                found = resolve_command(name)
+                found = _cm("hermes_compat").resolve_command(name)
                 canonical = str(getattr(found, "name", None) or name).lower()
             except Exception:  # noqa: BLE001
                 resolved = False

@@ -355,7 +355,8 @@ def live_main_runtime() -> Optional[dict]:
     Raises LiveRuntimeUnreadable when the accessor itself cannot be read (review finding 8): "bound to no
     runtime" is None, "cannot read the runtime" is an error, and every caller fails closed on the error."""
     try:
-        from agent.auxiliary_client import _RUNTIME_MAIN_CONTEXT
+        from .hermes_compat import runtime_main_context
+        _RUNTIME_MAIN_CONTEXT = runtime_main_context()
     except Exception as exc:  # noqa: BLE001
         raise LiveRuntimeUnreadable(f"cannot import the live runtime accessor ({type(exc).__name__})") from exc
     try:

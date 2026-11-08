@@ -1063,8 +1063,8 @@ def load_core_config() -> dict:
 def builtin_aux_task_names() -> list[str]:
     """Dict-valued keys of DEFAULT_CONFIG['auxiliary'] (hermes_cli/config_defaults.py:725-800)."""
     try:
-        from hermes_cli.config_defaults import DEFAULT_CONFIG
-        aux = DEFAULT_CONFIG.get("auxiliary", {})
+        from .hermes_compat import default_config
+        aux = default_config().get("auxiliary", {})
         names = [k for k, v in aux.items() if isinstance(v, dict)]
         if names:
             return names
@@ -1075,8 +1075,8 @@ def builtin_aux_task_names() -> list[str]:
 
 def plugin_aux_task_entries() -> list[dict]:
     """Registration dicts from ``hermes_cli.plugins.get_plugin_auxiliary_tasks`` (plugins.py:2130)."""
-    from hermes_cli.plugins import get_plugin_auxiliary_tasks
-    return [dict(e) for e in get_plugin_auxiliary_tasks()]
+    from .hermes_compat import plugin_auxiliary_tasks
+    return [dict(e) for e in plugin_auxiliary_tasks()]
 
 
 def plugin_aux_task_names() -> list[str]:
@@ -1123,12 +1123,12 @@ def resolved_terminal_backend() -> Optional[str]:
     first and reads the per-profile terminal scope on multiplexed surfaces. Falls back to the scope-aware
     ``tools.terminal_scope.terminal_env`` and then to ``os.environ`` when those cannot be imported. A failure
     to read is returned as a non-local marker, so the preflight item fails (closed)."""
+    from . import hermes_compat
     try:
-        from tools.terminal_tool import _get_env_config
+        _get_env_config = hermes_compat.terminal_env_config_reader()
     except Exception:  # noqa: BLE001
         try:
-            from tools.terminal_scope import terminal_env
-            return terminal_env(TERMINAL_BACKEND_ENV, "") or None
+            return hermes_compat.terminal_env_fallback(TERMINAL_BACKEND_ENV, "") or None
         except ImportError:
             return os.environ.get(TERMINAL_BACKEND_ENV)
         except Exception as exc:  # noqa: BLE001

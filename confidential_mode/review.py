@@ -186,11 +186,8 @@ def fetch_compose(cdir: Path, commit: str, file: str, sha256: str, *, repo: Opti
 
 
 def _yaml_load(text: str) -> Any:
-    try:
-        import hermes_yaml as yaml
-    except ImportError:  # standalone use
-        import yaml  # type: ignore[no-redef]
-    return yaml.safe_load(text)
+    from .hermes_compat import yaml_module   # hermes_yaml, or PyYAML for standalone use
+    return yaml_module().safe_load(text)
 
 
 def _vol_source(v: Any) -> str:
