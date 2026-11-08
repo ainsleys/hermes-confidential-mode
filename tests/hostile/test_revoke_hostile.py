@@ -36,11 +36,19 @@ def test_revoke_of_grants_the_plugin_did_not_write_is_a_noop_with_a_message(plug
     _with_allowlist(plugin, FOREIGN)
     before = plugin.cfg.read_bytes()
     out = plugin.slash("revoke web_search")
-    assert out.startswith("Nothing to revoke for web_search in this process: no grant written by confidential "
-                          "mode was found"), out
+    # Amendment 14: nothing was ever granted, so nothing is recorded.
+    assert out.startswith("Nothing to revoke for web_search: confidential mode has not granted web_search since "
+                          "the last revoke"), out
+    assert "Nothing was recorded" in out and _grant_rows(plugin) == []
     assert "did not write were left alone" in out and "plugin_rule:other-plugin:tool:web_search" in out
     assert plugin.cfg.read_bytes() == before
-    # The revoke is still recorded for running processes and ledgered, with nothing removed here.
+    # After an answer another process ledgered, the revoke is recorded for running processes and ledgered, with
+    # nothing removed here.
+    plugin.rt.ledger.append({"kind": "tool_allowed", "purpose": "tool:web_search", "decision": "session",
+                             "session_id": "gateway-session"})
+    out = plugin.slash("revoke web_search")
+    assert out.startswith("Nothing to revoke for web_search in this process: no grant written by confidential "
+                          "mode was found"), out
     (row,) = _grant_rows(plugin)
     detail = row.detail if isinstance(row.detail, dict) else json.loads(row.detail)
     assert detail["removed"] == {"allowlist": [], "command_allowlist": [], "lock_grants": []}
@@ -67,8 +75,10 @@ def test_revoke_with_no_grant_at_all_changes_no_grant_file(plugin):
         assert out.startswith("Nothing to revoke for web_search"), (state, out)
         assert plugin.cfg.read_bytes() == before
     assert plugin.rt.allowlist_path.read_bytes() == before_al
-    assert plugin.slash("revoke --all").startswith("Nothing to revoke for every confidential-mode tool grant")
-    assert all(r.decision in ("revoke", "revoke_all") for r in _grant_rows(plugin))
+    assert plugin.slash("revoke --all").startswith("Nothing to revoke: confidential mode has granted no tool")
+    assert _grant_rows(plugin) == []                  # Amendment 14: nothing granted, nothing recorded
+    rv = _sub(plugin, "revoke")
+    assert not rv.revocations_path(plugin.rt.allowlist_path).exists()
 
 
 @pytest.mark.parametrize("args", ["revoke", "revoke a b", "revoke --al", "revoke -x", "revoke '*'",

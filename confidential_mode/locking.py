@@ -672,6 +672,13 @@ def _unlock_held(*, state, ledger, session_id, surface, clear_cache, clock, allo
         counts = period_counts(ledger, since)
     except Exception:
         counts = {}
+    if locked is False:
+        # Amendment 14: nothing to unlock, so nothing is recorded (the caches are still cleared).
+        try:
+            (clear_cache or _clear_verification_cache)()
+        except Exception:
+            pass
+        return LockResult(True, "Not locked; nothing to do, and nothing was recorded.", counts=counts)
     state.unlock()
     try:
         (clear_cache or _clear_verification_cache)()
@@ -681,8 +688,6 @@ def _unlock_held(*, state, ledger, session_id, surface, clear_cache, clock, allo
                                 tier=tier.value if tier else None, decision="unlocked", surface=surface or None,
                                 detail={"counts": counts, "was_locked": locked is True,
                                         "repaired": locked is None}))
-    if locked is False:
-        return LockResult(True, "Not locked; nothing to do.", counts=counts)
     period = f" for {age_text(clock() - since)}" if since else ""
     head = "Lock state was unreadable; it is now cleared (unlocked)." if locked is None else \
         f"Unlocked ({tier.value}). Locked{period}:"

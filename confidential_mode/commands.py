@@ -833,6 +833,21 @@ def config_block(rt: Any, model: str, *, vision_model: str = DEFAULT_VISION_MODE
     return "\n".join(lines)
 
 
+#: The Tinfoil model ids docs/config.example.yaml lists (Tinfoil's list, read 2026-11-06).
+TINFOIL_DOCUMENTED_MODELS = ("kimi-k3-1-pro", "glm-5-3", "deepseek-v4-1-flash", "gemma4-31b", "gpt-oss-120b",
+                             "llama3-3-70b")
+
+
+def tinfoil_model_note(model: str) -> str:
+    """Setup cannot validate a Tinfoil model id (Amendment 14): Tinfoil offers no model list the plugin can
+    fetch, and the SDK carries none. Says so, and whether the id is one config.example.yaml lists."""
+    listed = model in TINFOIL_DOCUMENTED_MODELS
+    return (f"Model {model}: setup cannot check model ids against Tinfoil, which offers no model list the plugin "
+            "can fetch. " + (f"{model} is one of the ids docs/config.example.yaml lists." if listed else
+                             f"{model} is not one of the ids docs/config.example.yaml lists ("
+                             + ", ".join(TINFOIL_DOCUMENTED_MODELS) + "); check the id before you lock."))
+
+
 DEFAULT_NEAR_MODEL = "Qwen/Qwen3.8-27B"                      # a NEAR-operated vLLM model with attestation
 
 DEFAULT_NEAR_VISION_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct"   # vision-capable, also NEAR-operated
@@ -1027,6 +1042,8 @@ def cli_setup(rt: Any, args: Any, out=None) -> int:
     model = getattr(args, "model", None) or _locking._cfg(rt.load_config(), "confidential", "model") or "<model>"
     key_set = bool(_provider_module(rt).tinfoil_api_key())
     out.write(f"TINFOIL_API_KEY: {'set' if key_set else KEY_NOT_SET_TEXT}\n")
+    if model != "<model>":
+        out.write(tinfoil_model_note(model) + "\n")
     if not getattr(args, "no_verify", False):
         if rt.adapter is None:
             out.write("The attested provider is not registered; see `hermes confidential status`.\n")

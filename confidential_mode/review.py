@@ -870,6 +870,14 @@ def cli_review(rt: Any, args: Any, out=None) -> int:
         return 1
     if getattr(args, "json", False):
         out.write(json.dumps(bundle, ensure_ascii=True, indent=1, sort_keys=False) + "\n")
+    elif not bundle.get("pending"):
+        # Amendment 14: no empty reviewer brief when nothing is pending.
+        out.write(NOTHING_PENDING_TEXT + "\n")
     else:
         out.write(render_text(bundle) + "\n")
     return 0
+
+
+NOTHING_PENDING_TEXT = ("No pin update is waiting for approval, so there is nothing to review. A verification "
+                        "that reports a build you have not approved stages one: hermes confidential check --tier "
+                        "attested.")

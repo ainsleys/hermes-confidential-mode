@@ -417,6 +417,7 @@ class TinfoilAdapter:
             if sink is not None:
                 sink({"kind": "verify_fail", "purpose": "tls_pin", "host": request.url.host,
                       "detail": {"vendor": VENDOR, "reason_code": "tls_pin_mismatch", "error": str(pin)[:300],
+                                 "reason": "a Tinfoil connection presented a certificate other than the attested one",
                                  "expected_tls_key_fp": self.expected_tls_fp(), "path": request.url.path,
                                  "reverify_requested": asked, "nothing_sent": True}})
         except Exception:
@@ -700,6 +701,7 @@ class TinfoilAdapter:
                     try:
                         sink({"kind": "verify_fail", "purpose": "tls_pin", "host": result.enclave_host,
                               "detail": {"vendor": VENDOR, "reason_code": "tls_pin_mismatch", "stage": "verification",
+                                         "reason": "the enclave's TLS certificate is not the one its report binds",
                                          "error": str(pin)[:300], "expected_tls_key_fp": want,
                                          "path": "/.well-known/tinfoil-attestation", "nothing_sent": True}})
                     except Exception:  # noqa: BLE001

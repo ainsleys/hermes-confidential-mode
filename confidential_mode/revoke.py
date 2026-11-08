@@ -375,6 +375,11 @@ def _drop_cached_added(rt: Any, tools: Optional[set[str]]) -> list[str]:
 
 
 REVOKED, NOTHING, FAILED = "revoked", "nothing", "failed"
+
+
+def left_alone_text(foreign: list) -> str:
+    return (f" Entries in command_allowlist that confidential mode did not write were left alone: "
+            f"{', '.join(foreign)}." if foreign else "")
 _GATEWAY = "A running gateway applies the revoke on its next tool call"
 _SESSION_NOT_ENDED = ("the running gateway applies the revoke on its next tool call; a grant Hermes itself holds "
                       "for this session ends when the session ends or Hermes restarts")
@@ -390,6 +395,35 @@ def _drop_lock_grants(rt: Any, tools: Optional[set[str]]) -> list[str]:
         return grants.drop(tools)
     except Exception:  # noqa: BLE001
         return []
+
+
+def granted_since_last_revoke(ledger: Any, tools: Optional[set[str]]) -> Optional[set[str]]:
+    """The tools (of ``tools``, or any tool when None) with a ``tool_allowed`` ledger row after the latest
+    revoke that moved their rule key (Amendment 14). A grant only ever starts with an answer the plugin
+    ledgers, in whichever process asked, so an empty set means confidential mode holds nothing to revoke.
+    None when the ledger cannot be read (the caller then revokes as before)."""
+    cut: dict[str, int] = {}
+    allowed: dict[str, int] = {}
+    try:
+        last = 0
+        while True:
+            rows = ledger.tail(last)
+            for ev in rows:
+                purpose = str(getattr(ev, "purpose", "") or "")
+                if not purpose.startswith("tool:"):
+                    continue
+                name = purpose[len("tool:"):]
+                if ev.kind == "grant_revoked" and (getattr(ev, "detail", None) or {}).get("rule_key_rotated"):
+                    cut[name] = ev.id
+                elif ev.kind == "tool_allowed":
+                    allowed[name] = ev.id
+            if len(rows) < 1000:
+                break
+            last = rows[-1].id
+    except Exception:  # noqa: BLE001
+        return None
+    every = cut.get(ALL, 0)
+    return {t for t, row in allowed.items() if (tools is None or t in tools) and row > max(cut.get(t, 0), every)}
 
 
 def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id: str = "",
@@ -436,6 +470,15 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
         from_hermes = []
         config_error = (f"command_allowlist in config.yaml could not be read or written ({type(exc).__name__}); "
                         "an entry for the tool may still be there")
+    if not (from_allowlist or from_cache or from_lock_grants or from_hermes or errors or config_error):
+        # Amendment 14: nothing was granted since the last revoke, so nothing is recorded and no key moves.
+        granted = granted_since_last_revoke(getattr(rt, "ledger", None), tools)
+        if granted == set():
+            whom = f" for {tool}: confidential mode has not granted {tool}" if tools else \
+                ": confidential mode has granted no tool"
+            return NOTHING, (f"Nothing to revoke{whom} since the last revoke (no allow, no answer to a prompt, "
+                             "no allowlist or command_allowlist entry). Nothing was recorded."
+                             + left_alone_text(foreign))
     rotated = False
     try:
         rec_id = append_record(revocations_path(getattr(rt, "allowlist_path", None)), tools)
@@ -472,8 +515,7 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
         rt.ledger.append(row)
     except Exception as exc:  # noqa: BLE001
         note = f" The grant_revoked ledger row could not be written ({type(exc).__name__})."
-    left_alone = (f" Entries in command_allowlist that confidential mode did not write were left alone: "
-                  f"{', '.join(foreign)}." if foreign else "")
+    left_alone = left_alone_text(foreign)
     places = []
     if from_allowlist or from_cache:
         places.append("this lock's allowlist (allowlist.yaml)")

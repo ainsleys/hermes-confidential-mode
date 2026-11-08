@@ -43,12 +43,30 @@ def severity(ev: Any) -> str:
     return ""
 
 
+REASON_KINDS = frozenset({"verify_fail"})
+
+
+def reason_of(ev: Any) -> str:
+    """The reason a row records (detail ``reason``, else ``error``, else ``reason_code``), or ''."""
+    d = getattr(ev, "detail", None)
+    if not isinstance(d, dict):
+        return ""
+    for key in ("reason", "error", "reason_code"):
+        value = d.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def verdict_text(ev: Any) -> str:
     parts = [ev.kind]
     for value in (ev.verdict, ev.decision):
         if value and value not in parts:
             parts.append(str(value))
-    return " ".join(parts)
+    text = " ".join(parts)
+    if ev.kind in REASON_KINDS:   # Amendment 14: every verify_fail row shows why
+        text += ": " + (reason_of(ev)[:160] or "no reason recorded")
+    return text
 
 
 def header() -> str:

@@ -428,6 +428,18 @@ def _approved_set(store: Any, pending: Any) -> Optional[tuple]:
         return None
 
 
+def _has_approved(store: Any, pending: Any) -> bool:
+    """Whether an approved entry exists for the pending batch's vendor and identity (Amendment 14: a first
+    run says "no pin approved yet" rather than "current pin kept"). True when unknown."""
+    got = _approved_set(store, pending)
+    if isinstance(got, tuple) and got:
+        return bool(got[0])
+    try:
+        return store.get(_field(pending, "vendor", ""), _field(pending, "router_repo", "")) is not None
+    except Exception:
+        return True
+
+
 SERVICES_UNPINNED_REPLY = ("Not asked: the service map of {roles} is not pinned, because its socket tags cannot be "
                            "shown ({why}). Approval is unavailable until the command hermes confidential pins "
                            "review fetches and hash-checks the inner compose files; run it in a terminal you "
@@ -521,11 +533,12 @@ def _approve_batch(ctx: Any, store: Any, ledger: Any, pending: Any, *, session_k
         _ledger(ledger, _event("pin_denied", session_id=session_id, platform=platform, provider=vendor,
                              decision="self_approval" if refused else
                              "no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
+        kept = "current pin kept" if _has_approved(store, pending) else "no pin approved yet; nothing changed"
         if refused:
-            return SELF_APPROVAL_REPLY + ". Pin update not applied; current pin kept."
+            return SELF_APPROVAL_REPLY + f". Pin update not applied; {kept}."
         if raw is None:
-            return "No answer (timed out, cancelled, or not one of the options): pin update denied; current pin kept."
-        return "Pin update denied; current pin kept."
+            return f"No answer (timed out, cancelled, or not one of the options): pin update denied; {kept}."
+        return f"Pin update denied; {kept}."
 
     # Re-check and apply under one lock: two approvals racing for the same pending pin apply once
     # (the second sees pending cleared or changed). PinStore.apply is additionally idempotent (W2).

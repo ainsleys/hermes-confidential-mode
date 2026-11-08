@@ -491,7 +491,9 @@ never applies a pin and never changes your config.
 hermes confidential watch
 ```
 
-`watch` streams the ledger: one row per send, with its purpose, host and size. On an unlocked install
+`watch` streams the ledger: one row per send, with its purpose, host and size. A `verify_fail` row
+also shows its reason, such as `verify_fail: <model>: attestation unavailable (HTTP 503 from NEAR)`.
+On an unlocked install
 it tends to surprise people:
 
 ```
@@ -537,7 +539,7 @@ a timeout that short lets Hermes skip the plugin's per-turn check. The preflight
 
 The lock survives a restart: the plugin rebuilds the allowlist from the copy it saved at lock time,
 not from what happens to be registered after the restart. `/confidential off` unlocks and prints the
-lock period's counts.
+lock period's counts. On a profile that isn't locked it says so and writes no ledger row.
 
 ### What happens while locked
 
@@ -681,14 +683,18 @@ the revoke on, so a `session` or `always` answer Hermes holds for the old key no
 the next call asks again.
 
 Any other `command_allowlist` entry was written by you or another plugin, so a revoke leaves it alone
-and names it in the reply. A revoke that finds no grant says so. Each revoke that removes a grant
-writes a `grant_revoked` row with the tool, the surface and the lock's identity. The prefix
+and names it in the reply. A revoke for a tool confidential mode has granted nothing since the last
+revoke (no `allow`, no answer to its prompt in any process, which the ledger shows, and no entry in
+either file) says so and records nothing: no `grant_revoked` row and no record in
+`grants_revoked.json`. Every other revoke writes a `grant_revoked` row with the tool, the surface and
+the lock's identity. The prefix
 `plugin_rule:confidential-mode:tool:` is a convention Hermes doesn't reserve; a revoke removes any
 entry under it, which only narrows what runs.
 
 A command-line revoke reaches a running gateway on the gateway's next tool call. The gateway re-reads
 `allowlist.yaml` when it changes, and Hermes re-reads `command_allowlist` on every check. Every revoke
-appends a record to `grants_revoked.json`, even when it found nothing to remove. The gateway reads the
+appends a record to `grants_revoked.json`, even when this process found nothing to remove, unless
+nothing was granted at all. The gateway reads the
 file before each tool decision and asks under the approval key the latest record gives, so a session
 approval the gateway holds for the old key stops applying on its next tool call. Writes to `allowlist.yaml` and `grants_revoked.json` take a lock file beside each;
 the plugin waits at most two seconds for it, and otherwise fails, names the lock file and exits
@@ -739,9 +745,11 @@ hermes confidential setup --model <tinfoil model id>
 Setup reports whether `TINFOIL_API_KEY` is set, verifies the router, shows the two fingerprints and the
 release tag, and asks you on the terminal to Approve or Deny. The choice, its number, or `y`, `yes`,
 `n` or `no` in any case counts. Any other answer asks once more and then counts as no answer, which
-pins nothing; every Approve or Deny prompt in a terminal (`pins approve`, `allow`) works the same way.
+pins nothing (on a first run the reply says "no pin approved yet; nothing changed"); every Approve or Deny prompt in a terminal (`pins approve`, `allow`) works the same way.
 On a non-interactive terminal there's no answer and no pin. Setup then prints a config block for
-`config.yaml`. Setup never writes your config. `--vision-model` and `--aux-model` choose the vision and
+`config.yaml`. Setup never writes your config. Tinfoil offers no model list the plugin can fetch, so
+setup says it cannot check the `--model` id and whether the id is one `config.example.yaml` lists;
+NEAR setup checks each id by attesting the model, so an id NEAR doesn't attest stops setup. `--vision-model` and `--aux-model` choose the vision and
 short-job models in the block, and `--no-verify` only prints the block.
 
 ### When Tinfoil ships a new build
@@ -777,7 +785,9 @@ hermes confidential pins approve --reviewed-by <name> --note "<verdict>"
 
 `pins review` builds a review bundle with everything a reviewer needs to judge each pending entry.
 Run it yourself in a terminal you opened; you can hand the bundle to another agent in a fresh session
-with no access to the locked profile. `--no-fetch` uses only cached compose files. A Tinfoil entry
+with no access to the locked profile. `--no-fetch` uses only cached compose files. With nothing
+pending, `pins review` prints one line saying there is nothing to review (`--json` still prints the
+empty bundle). A Tinfoil entry
 carries its release and compare links. A NEAR entry carries:
 
 - the old and new value of every component, and the verified signing address old and new;

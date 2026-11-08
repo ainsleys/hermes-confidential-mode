@@ -238,7 +238,7 @@ class VerificationCache:
                 _emit(e, {"kind": "verify_fail", "provider": provider, "purpose": "verify",
                           "host": result.enclave_host,
                           "detail": {"vendor": result.vendor, "error_type": "LedgerError", "error": reason,
-                                     "enclave_host": result.enclave_host}})
+                                     "reason": reason, "enclave_host": result.enclave_host}})
                 raise VerifyError(reason)
             with e.lock:
                 e.result, e.verified_mono, e.last_error, e.failed_mono = result, self._now(), None, None
@@ -264,7 +264,8 @@ class VerificationCache:
 
     def _emit_verify_fail(self, provider: str, e: _Entry, exc: BaseException, *, source: str | None = None) -> None:
         detail = {"vendor": getattr(e.adapter, "vendor", ""), "error_type": type(exc).__name__,
-                  "error": str(exc)[:300], "enclave_host": _adapter_host(e.adapter)}
+                  "error": str(exc)[:300], "reason": (str(exc) or type(exc).__name__)[:300],
+                  "enclave_host": _adapter_host(e.adapter)}
         if source is not None:
             detail["source"] = source
         _emit(e, {"kind": "verify_fail", "provider": provider, "purpose": "verify",

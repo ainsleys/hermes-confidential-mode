@@ -780,10 +780,17 @@ def test_a_lock_refused_by_a_state_write_failure_keeps_another_locks_allowlist(p
 
 # ── grants_revoked.json (revoke) ─────────────────────────────────────────────────────────────────
 
+def _answered_elsewhere(plugin):
+    """A 'session' answer another process ledgered (Amendment 14: a revoke with no grant records nothing)."""
+    plugin.rt.ledger.append({"kind": "tool_allowed", "purpose": "tool:web_search", "decision": "session",
+                             "session_id": "gateway-session"})
+
+
 def test_an_unwritable_revocation_record_makes_revoke_fail_loudly(plugin, monkeypatch):
     """Amendment 10: revoke "failed covers ... an allowlist.yaml or record write error ...; the reply then starts
     'Revoke failed for' ... The row's decision gets a _failed suffix and the detail carries errors"."""
     assert plugin.slash("on on-host-only").startswith("Locked")
+    _answered_elsewhere(plugin)
     fail_replace(monkeypatch, {"grants_revoked.json"}, ENOSPC)
     out = plugin.slash("revoke web_search")
     assert out.startswith("Revoke failed for web_search"), out
@@ -796,6 +803,7 @@ def test_a_damaged_revocation_file_never_breaks_a_gate_decision(plugin, damage):
     """Amendment 10: "A forged or corrupt record can only take grants away, and the watcher never raises";
     RevocationWatcher.apply runs "before every gate decision"."""
     assert plugin.slash("on on-host-only").startswith("Locked")
+    _answered_elsewhere(plugin)
     assert plugin.slash("revoke web_search").startswith(("Nothing to revoke", "Revoked"))
     p = plugin.rt.allowlist_path.parent / "grants_revoked.json"
     if damage == "truncated":

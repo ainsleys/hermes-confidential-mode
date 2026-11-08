@@ -793,3 +793,57 @@ def test_setup_lists_the_real_next_steps_in_order(plugin, capsys, monkeypatch):
     assert tail[1] == "  1. Merge the block above into config.yaml."
     assert tail[2] == ("  2. Approve the pin in a terminal you opened: hermes confidential pins review, then "
                        "hermes confidential pins approve.")
+
+
+# ── Amendment 14, smaller items ──────────────────────────────────────────────────────────────────────
+
+def test_pins_review_with_nothing_pending_says_so(plugin):
+    import io
+    out = io.StringIO()
+    assert _sub(plugin, "review").cli_review(plugin.rt, argparse.Namespace(json=False, no_fetch=True), out=out) == 0
+    assert out.getvalue().startswith("No pin update is waiting for approval, so there is nothing to review.")
+    assert "Rules for the reviewer" not in out.getvalue()
+
+
+def test_off_while_unlocked_says_so_and_records_nothing(plugin):
+    before = plugin.kinds()
+    assert plugin.slash("off") == "Not locked; nothing to do, and nothing was recorded."
+    assert plugin.kinds() == before
+
+
+def test_every_verify_fail_row_shows_a_reason_in_watch(plugin):
+    watch = _sub(plugin, "watch")
+    plugin.rt.ledger.append({"kind": "verify_fail", "purpose": "verify", "host": "h",
+                             "detail": {"error": "m: attestation unavailable (HTTP 503 from NEAR)"}})
+    plugin.rt.ledger.append({"kind": "verify_fail", "purpose": "verify", "host": "h", "detail": {}})
+    text = plugin.slash("watch")
+    assert "verify_fail: m: attestation unavailable (HTTP 503 from NEAR)" in text
+    assert "verify_fail: no reason recorded" in text
+    cache = _sub(plugin, "provider").verification_cache
+    rows = []
+    entry = cache.entry("attested-tinfoil")
+    entry.on_event, old = (lambda row: rows.append(row) or True), entry.on_event
+    try:
+        cache._emit_verify_fail("attested-tinfoil", entry, RuntimeError("boom"))
+    finally:
+        entry.on_event = old
+    assert rows and rows[0]["detail"]["reason"] == "boom"
+
+
+def test_a_first_run_denial_says_no_pin_was_approved_yet(plugin):
+    plugin.rt.pins.stage(_result(plugin))
+    with bind_asker(lambda q, labels: "Deny"):
+        assert plugin.slash("pins approve") == "Pin update denied; no pin approved yet; nothing changed."
+    with bind_asker(lambda q, labels: "Approve"):
+        assert plugin.slash("pins approve").startswith("Pinned")
+    plugin.rt.pins.stage(_result(plugin, code="ab" * 32))
+    with bind_asker(lambda q, labels: "Deny"):
+        assert plugin.slash("pins approve") == "Pin update denied; current pin kept."
+
+
+def test_setup_says_it_cannot_validate_a_tinfoil_model_id(plugin, capsys):
+    out, _ = _setup_block(plugin, capsys, "--model", "not-a-real-model")
+    assert ("Model not-a-real-model: setup cannot check model ids against Tinfoil, which offers no model list the "
+            "plugin can fetch. not-a-real-model is not one of the ids docs/config.example.yaml lists") in out
+    out, _ = _setup_block(plugin, capsys, "--model", "llama3-3-70b")
+    assert "llama3-3-70b is one of the ids docs/config.example.yaml lists." in out
