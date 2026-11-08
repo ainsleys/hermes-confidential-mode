@@ -61,10 +61,16 @@ does not look inside them, so a command such as `curl` could send text anywhere;
 so. The receipt itself is written by the plugin on your machine, so someone else can trust only
 its signed evidence.
 
-![Figure 2. With the plugin, shown for Tinfoil: preflight checks every configured route, side calls
-go to the verified enclave, fallback is refused, tools ask, memory stays on the host, shell and code
-stay open on this host, and a ledger records model sends and tool
-answers.](docs/images/routes-figure-2-with-the-plugin.svg)
+![Figure 1. On the attested tier, one model call runs in six steps: the plugin verifies the
+enclave's report against the build you approved, pins the connection to the report's TLS key before
+any byte leaves, encrypts the body, checks the reply's signature on NEAR before releasing the reply,
+writes a ledger row without the text, and renders a receipt anyone can replay
+offline.](docs/images/attested-send.svg)
+
+![Figure 2. While a profile is locked, main chat and side calls go only to the verified enclave,
+fallback is refused, tools outside the on-host list ask once per lock in each conversation, memory
+must be the built-in store, and shell, code and command MCP servers stay open on this
+host.](docs/images/routes-figure-2-with-the-plugin.svg)
 
 ## Requirements
 

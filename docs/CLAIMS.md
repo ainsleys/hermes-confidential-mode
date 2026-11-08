@@ -1,7 +1,7 @@
 # Claim index
 
 This index lists every claim on the [README](../README.md)'s first screen (the tagline, "What Hermes
-does today", "What the plugin does", the Figure 2 caption, "The receipt" and "Four limits") and every
+does today", "What the plugin does", the Figure 1 and Figure 2 captions, "The receipt" and "Four limits") and every
 row of its Commands table: 54 entries. Each entry gives the claim in one sentence, the code that
 enforces the claim, the tests that prove the claim, and the section of
 [LIMITATIONS.md](LIMITATIONS.md) that bounds the claim.
@@ -334,19 +334,36 @@ lock's refusal, ask and allow counts; `receipts` shows where each call went.**
   `tests/seam/test_commands.py::test_cli_status_check_watch`.
 - Bound: [9](LIMITATIONS.md#9-what-the-network-still-sees-and-what-the-receipt-leaks).
 
-## Figure 2 caption
+## Figure captions
 
-**F1. With the plugin, the preflight checks every configured route, side calls go to the verified
-enclave, fallback is refused, tools ask, memory stays on the host, shell and code stay open on the
-host, and a ledger records model sends and tool answers.** P2, P1, P4, P13, L3 and P17 cover every
-part except memory and tool answers.
+**F1. Figure 1: on the attested tier, one model call runs in six steps: the plugin verifies the
+enclave's report against the build the user approved, pins the connection to the report's TLS key
+before any byte leaves, encrypts the body, checks the reply's signature on NEAR before releasing the
+reply, writes a ledger row without the text, and renders a receipt anyone can replay offline.
+Figure 2: while a profile is locked, main chat and side calls go only to the verified enclave,
+fallback is refused, tools outside the on-host list ask once per lock in each conversation, memory
+must be the built-in store, and shell, code and command MCP servers stay open on this host.**
+Figure 1: T1 and T2 (verified against the approved build), P7 (pinned before any byte), P9 (the
+fetch drawn unpinned), P10 and P11 (encrypted body; the NEAR reply released only after its
+signature verifies), P12 (the gateway note), P17 (the ledger row) and R5 (offline replay) cover every
+part. Figure 2: P1 (enclave only; a stray side call recorded), P2 and P3 (the preflight, at lock and
+every turn), P4 and L2 (fallback refused; a failed request ends the turn), P13 to P15 (ask once per
+lock in each conversation; blocked under yolo and unattended runs) and L3 (shell and code open,
+unproven in the receipt) cover every part except memory, command MCP servers and the ledger rows for
+tool answers.
 - Code: memory: `preflight.py:run_preflight` (`memory.provider` must be on-host or the built-in);
-  tool answers: `gate_tools.py:build_post_approval_response` (`tool_allowed` and `tool_refused` rows).
+  command MCP servers: `gate_tools.py:classify_tool` (a `command:` server is on-host, a `url:` server
+  off-tier is blocked); tool answers: `gate_tools.py:build_post_approval_response` (`tool_allowed`
+  and `tool_refused` rows).
 - Tests: `tests/unit/test_preflight.py::test_memory_external_off_tier`,
   `tests/hostile/test_preflight_hostile.py::test_hosted_memory_provider_is_flagged`,
+  `tests/hostile/test_gate_tools_hostile.py::test_mcp_command_server_is_on_host_per_contract_GAP`,
   `tests/seam/test_register.py::test_locked_web_search_asks_and_runs_only_on_exact_once`.
 - Bound: [1](LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution),
-  [3](LIMITATIONS.md#3-shell-and-code-execution-tools-are-not-inspected).
+  [3](LIMITATIONS.md#3-shell-and-code-execution-tools-are-not-inspected),
+  [4](LIMITATIONS.md#4-mcp-command-servers-are-not-inspected),
+  [9](LIMITATIONS.md#9-what-the-network-still-sees-and-what-the-receipt-leaks),
+  [14](LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open).
 
 ## The receipt
 

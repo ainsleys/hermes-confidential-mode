@@ -51,8 +51,8 @@ provider for the main chat covers the first route and nothing else.
 6. **The messaging platform.** Telegram, Discord and the other messaging platforms see your messages
    before Hermes does. No plugin can close this route.
 
-![Figure 1. With a verified provider alone, the main chat is verified and five other routes carry
-text to hosts nobody checks.](images/routes-figure-1-verified-provider-alone.svg)
+![Figure 1. With a verified provider alone, only the main chat is verified, and five other routes
+can carry text to hosts nobody checks.](images/routes-figure-1-verified-provider-alone.svg)
 
 ## What the plugin does
 
@@ -76,10 +76,10 @@ The plugin does four things for a Hermes profile.
    can't prove. Anyone holding the JSON form can replay the evidence offline; for NEAR, the replay
    also re-checks each response signature ([Receipts and replay](#receipts-and-replay)).
 
-![Figure 2. With the plugin, shown for Tinfoil: preflight checks every configured route, side calls
-go to the verified enclave, fallback is refused, tools ask, memory stays on the host, shell and code
-stay open on this host, and a ledger records model sends and tool
-answers.](images/routes-figure-2-with-the-plugin.svg)
+![Figure 2. While a profile is locked, main chat and side calls go only to the verified enclave,
+fallback is refused, tools outside the on-host list ask once per lock in each conversation, memory
+must be the built-in store, and shell, code and command MCP servers stay open on this
+host.](images/routes-figure-2-with-the-plugin.svg)
 
 **Limits.** Shell, code execution and MCP servers started as a command on this host run unchecked
 ([LIMITATIONS 3](LIMITATIONS.md#3-shell-and-code-execution-tools-are-not-inspected),
