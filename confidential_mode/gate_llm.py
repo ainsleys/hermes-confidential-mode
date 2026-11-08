@@ -162,14 +162,18 @@ _RESPONSE_DEPTH = 32
 
 def _plain(value: Any, depth: int = 0) -> Any:
     """A JSON-ready copy of a response built of SimpleNamespace objects, dicts, lists and pydantic models.
-    Attributes whose names start with "_" are Hermes' own markers on the object (a partial-stream stub's
-    ``_clean_eof``), not part of the provider's response, and are left out."""
+    Attributes and dict keys whose names start with "_" are Hermes' own markers (a partial-stream stub's
+    ``_clean_eof``, the ``_issuer_kind`` Hermes' Codex path adds to its dicts), not part of the provider's
+    response, and are left out. A bytes value counts as its length (a string of that many characters), not
+    as its repr."""
     if depth > _RESPONSE_DEPTH:
         raise ValueError("response nested too deeply to measure")
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "b" * len(bytes(value))
     if isinstance(value, Mapping):
-        return {str(k): _plain(v, depth + 1) for k, v in value.items()}
+        return {str(k): _plain(v, depth + 1) for k, v in value.items() if not str(k).startswith("_")}
     if isinstance(value, (list, tuple)):
         return [_plain(v, depth + 1) for v in value]
     if isinstance(value, SimpleNamespace):

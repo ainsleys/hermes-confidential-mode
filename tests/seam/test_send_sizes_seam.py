@@ -64,7 +64,14 @@ def test_each_main_send_shows_request_and_response_sizes(plugin):
         assert f"request {result.bytes} bytes, response " in line and "response size unknown" not in line, line
     sizes = [int(ln.split(", response ")[1].split(" bytes")[0]) for ln in lines]
     assert sizes[0] < sizes[1] and all(s > 0 for s in sizes), sizes
-    assert "_clean_eof" not in str(rows[-1].detail)     # Hermes' markers on the stub are not counted as response
+    # Hermes' markers on the stub (_dropped_tool_names, _overflow_terminal, _clean_eof) are not counted: the stub
+    # measures the same as a copy with them deleted (fix-pass-3 review finding 1; removing the filter fails this).
+    gate_llm = importlib.import_module(f"{plugin.mod.__name__}.confidential_mode.gate_llm")
+    bare = _build_partial_stream_stub("assistant", "partial", None, "llama3", None)
+    for name in [k for k in vars(bare) if k.startswith("_")]:
+        delattr(bare, name)
+    assert [k for k in vars(stub) if k.startswith("_")]          # the real stub carries markers
+    assert sizes[2] == gate_llm.response_bytes(bare) == gate_llm.response_bytes(stub)
 
 
 def test_a_live_stream_is_not_consumed_and_says_size_unknown(plugin):
@@ -79,3 +86,29 @@ def test_a_live_stream_is_not_consumed_and_says_size_unknown(plugin):
     assert consumed == []
     lines = _send_lines(plugin, "sess-st")
     assert len(lines) == 1 and "response size unknown" in lines[0], lines
+
+
+def test_a_response_with_tool_calls_is_measured_with_its_arguments(plugin):
+    """The tool-call shape Hermes' stream assembly builds (agent/chat_completion_helpers.py
+    _StreamingCall._assemble_tool_calls), measured larger than the same reply without the call."""
+    from agent.chat_completion_helpers import _StreamingCall
+    gate_llm = importlib.import_module(f"{plugin.mod.__name__}.confidential_mode.gate_llm")
+    acc = {0: {"id": "call_1", "type": "function", "thought_signature": None,
+               "function": {"name": "web_search", "arguments": '{"query": "' + "x" * 500 + '"}'}}}
+    calls, truncated = _StreamingCall._assemble_tool_calls(acc, "tool_calls")
+    assert truncated is False and calls[0].function.args_repaired is False
+    with_calls = _stream_response("")
+    with_calls.choices[0].message.tool_calls = calls
+    plain = _stream_response("")
+    assert gate_llm.response_bytes(with_calls) > gate_llm.response_bytes(plain) + 500
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    assert _send(plugin, "sess-tc", "sess-tc:api:1", with_calls) is with_calls
+    (line,) = _send_lines(plugin, "sess-tc")
+    assert f"response {gate_llm.response_bytes(with_calls)} bytes" in line, line
+
+
+def test_underscore_dict_keys_and_bytes_are_measured_as_the_rule_says(plugin):
+    gate_llm = importlib.import_module(f"{plugin.mod.__name__}.confidential_mode.gate_llm")
+    marked = {"type": "reasoning", "encrypted_content": "abc", "_issuer_kind": "codex", "_issuer_model": "gpt"}
+    assert gate_llm.response_bytes(marked) == gate_llm.response_bytes({"type": "reasoning", "encrypted_content": "abc"})
+    assert gate_llm.response_bytes({"blob": b"\x00" * 100}) == gate_llm.response_bytes({"blob": "b" * 100})
