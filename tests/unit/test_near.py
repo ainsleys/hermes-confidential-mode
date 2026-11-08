@@ -581,3 +581,16 @@ def test_send_context_is_scoped():
     with sendctx.send_context(session_id="a", purpose="main", tier=None) as c:
         assert sendctx.current() == {"session_id": "a", "purpose": "main"} == c
     assert sendctx.current() is None
+
+
+def test_pruning_a_closed_loop_pool_forgets_its_in_flight_count(world, tmp_path):
+    """Review L7: a pool of a closed loop leaves no in-flight count behind."""
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    loop = asyncio.new_event_loop()
+    loop.close()
+    pool = _SocketPool()
+    ad._async_transports[id(loop)] = (loop, pool)
+    ad._inflight[id(pool)] = 1                      # a body abandoned on that loop
+    ad._prune_closed_loops()
+    assert ad._async_transports == {} and ad._inflight == {} and pool.sock.fileno() == -1
+    pool.close_peer()

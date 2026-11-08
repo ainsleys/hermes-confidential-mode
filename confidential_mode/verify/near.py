@@ -1141,7 +1141,9 @@ class NearAdapter:
         gone = []
         with self._lock:
             for key in [k for k, (lp, _) in self._async_transports.items() if lp.is_closed()]:
-                gone.append(self._async_transports.pop(key)[1])
+                at = self._async_transports.pop(key)[1]
+                gone.append(at)
+                self._inflight.pop(id(at), None)
             keep = []
             for lp, at in self._retired_async:
                 if lp.is_closed():
