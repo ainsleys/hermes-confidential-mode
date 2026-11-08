@@ -40,15 +40,32 @@ on a newer interpreter, so `tests/unit/test_python311_syntax.py` parses every pl
 3.11 rejects (a quote, backslash, comment or line break inside a replacement field that only 3.12 and
 later accept). That test runs on every interpreter.
 
-To run the whole suite on 3.11 itself, build a separate environment on that interpreter from Hermes'
-lock file, add the SDK and PyNaCl as above, and point the test command at it:
+Hermes 84a0301's lock file covers Python 3.14 only (`[tool.uv] environments`), and each of its core
+dependencies carries the marker `python_version >= '3.14'`, so `uv sync --python 3.11` refuses with
+"not compatible with the lockfile's supported environments". To run the whole suite on 3.11 (or 3.12
+or 3.13), export the lock, drop only the `>= '3.14'` clause from each marker, and install exactly those
+versions into a separate environment:
 
     uv python install 3.11
-    cd ~/hermes-agent && UV_PROJECT_ENVIRONMENT=<dir311>/.venv uv sync --python 3.11
-    uv pip install --python <dir311>/.venv/bin/python tinfoil==0.14.2 pynacl==1.6.*
+    cd ~/hermes-agent && uv export --frozen --no-hashes --no-emit-project --no-dev > <dir311>/lock.txt
+    sed -E -e "s/python_full_version >= '3\.14' and //" \
+      -e "s/ ; python_full_version >= '3\.14'$//" <dir311>/lock.txt > <dir311>/requirements.txt
+    uv venv --python 3.11 <dir311>/.venv
+    uv pip install --python <dir311>/.venv/bin/python --no-deps -r <dir311>/requirements.txt
+    uv pip install --python <dir311>/.venv/bin/python --no-deps -e ~/hermes-agent
+    uv pip install --python <dir311>/.venv/bin/python -r ~/hermes-confidential-mode/pyproject.toml \
+      pytest==9.1.1 pytest-asyncio==1.4.0
     cd ~/hermes-agent && PYTHONDONTWRITEBYTECODE=1 HERMES_HOME=$(mktemp -d) \
-      UV_PROJECT_ENVIRONMENT=<dir311>/.venv uv run --no-sync --with pytest==9.1.1 \
-      --with pytest-asyncio==1.4.0 pytest ~/hermes-confidential-mode/tests -q -p no:cacheprovider
+      <dir311>/.venv/bin/python -m pytest ~/hermes-confidential-mode/tests -q -p no:cacheprovider
+
+The continuous-integration workflow, `.github/workflows/tests.yml`, runs these steps on 3.11, 3.12
+and 3.13, and `uv sync --frozen` on 3.14.
+
+Keep the plugin checkout in a directory named `hermes-confidential-mode`. The repository root has an
+`__init__.py`, so when the checkout directory's name is a valid Python identifier (`plugin`, say),
+pytest imports the test modules as `<name>.tests...`. `tests.near_world` is then two modules, and the
+NEAR tests that patch `tests.near_world` fail. A name with a hyphen keeps pytest's package names at
+`tests...`.
 
 A quicker check that every file compiles on 3.11:
 
