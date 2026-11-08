@@ -20,6 +20,20 @@ NEAR_AI_API_KEY when the env file does not set it. A key held only in Hermes' cr
 (`hermes auth`) is not read. The key is only ever sent as the Authorization header to the configured
 base URL. It is not printed, logged or written to --out.
 
+Hermes' loader does more than read the env file, the same as when `hermes` starts:
+  - It can rewrite <HERMES_HOME>/.env: an env file saved as UTF-16 is rewritten as UTF-8, NUL characters
+    are stripped, and lines Hermes considers malformed are normalised in place. The script itself never
+    writes the file.
+  - It also loads <HERMES_HOME>/.op.env (a 1Password service account token) into this process's
+    environment when that file exists and OP_SERVICE_ACCOUNT_TOKEN is not already set. With
+    load_external_secrets=False, Hermes' external secret sources (1Password among them) are not queried.
+  - It loads every variable the env file sets, not only NEAR_AI_API_KEY, into this process's
+    environment, and removes exported provider-selection variables Hermes manages that the env file does
+    not set. That environment ends with the process.
+  - It boots the config backend the home selects; a home set up with a remote config backend has its
+    config fetched from that backend, as at `hermes` start-up.
+Run with HERMES_HOME pointing at a home you are willing to have Hermes touch in these ways.
+
 Run it in Hermes' environment (it needs tinfoil 0.14.2 for the TDX quote check), for example:
     cd ~/hermes-agent && HERMES_HOME=~/.hermes UV_PROJECT_ENVIRONMENT=<venv with tinfoil> uv run --no-sync \\
       python ~/hermes-confidential-mode/scripts/near_first_contact.py --model Qwen/Qwen3.8-27B
