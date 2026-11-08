@@ -41,14 +41,14 @@ on a newer interpreter, so `tests/unit/test_python311_syntax.py` parses every pl
 later accept). That test runs on every interpreter.
 
 Hermes 84a0301's lock file covers Python 3.14 only (`[tool.uv] environments`), and each of its core
-dependencies carries the marker `python_version >= '3.14'`, so `uv sync --python 3.11` refuses with
-"not compatible with the lockfile's supported environments". To run the whole suite on 3.11 (or 3.12
-or 3.13), export the lock, drop only the `>= '3.14'` clause from each marker, and install exactly those
-versions into a separate environment:
+dependencies carries the marker `python_full_version >= '3.14'` in the lock, so `uv sync --python
+3.11` refuses with "not compatible with the lockfile's supported environments". To run the whole suite
+on 3.11 (or 3.12 or 3.13), export the lock, remove every `python_full_version >= '3.14'` clause from
+each marker, and install exactly those versions into a separate environment:
 
     uv python install 3.11
     cd ~/hermes-agent && uv export --frozen --no-hashes --no-emit-project --no-dev > <dir311>/lock.txt
-    sed -E -e "s/python_full_version >= '3\.14' and //" \
+    sed -E -e "s/python_full_version >= '3\.14' and //g" \
       -e "s/ ; python_full_version >= '3\.14'$//" <dir311>/lock.txt > <dir311>/requirements.txt
     uv venv --python 3.11 <dir311>/.venv
     uv pip install --python <dir311>/.venv/bin/python --no-deps -r <dir311>/requirements.txt
@@ -59,7 +59,7 @@ versions into a separate environment:
       <dir311>/.venv/bin/python -m pytest ~/hermes-confidential-mode/tests -q -p no:cacheprovider
 
 The continuous-integration workflow, `.github/workflows/tests.yml`, runs these steps on 3.11, 3.12
-and 3.13, and `uv sync --frozen` on 3.14.
+and 3.13, and `uv sync --frozen --no-dev` on 3.14.
 
 Keep the plugin checkout in a directory named `hermes-confidential-mode`. The repository root has an
 `__init__.py`, so when the checkout directory's name is a valid Python identifier (`plugin`, say),
