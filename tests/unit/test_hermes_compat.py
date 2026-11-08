@@ -40,23 +40,80 @@ def _plugin_sources() -> list[Path]:
     return [p for p in files if "__pycache__" not in p.parts]
 
 
-def _imports(tree: ast.AST):
+def _is_public(module: str, name: str = "") -> bool:
+    """Exactly the documented modules (``import providers``), or a public name taken from one
+    (``from providers import get_provider_profile``); a submodule (``import providers.openrouter``) is not."""
+    if not name:
+        return module in PUBLIC
+    return module in PUBLIC and not name.startswith("_")
+
+
+def _private_uses(tree: ast.AST, hermes: set[str]) -> list[tuple[int, str]]:
+    """(line, target) of every reach into a private Hermes name the scan can see statically:
+
+    * ``import m`` / ``from m import n`` of a Hermes module outside the documented surface, or of a ``_`` name;
+    * a ``_`` attribute on a name an import bound to a Hermes module or object (``tools.registry._x``,
+      ``import tools.registry as r; r._x``, ``from tools.registry import registry; registry._tools``);
+    * ``importlib.import_module("m")`` (``importlib`` or ``import_module`` under any alias) and
+      ``__import__("m")`` with a literal name;
+    * ``sys.modules["m"]`` and ``sys.modules.get / pop / setdefault("m")`` with a literal name.
+
+    Out of reach, and left to review: module names built at run time (``"tools." + x``),
+    ``getattr(__import__(...), ...)``, ``builtins.__import__`` and ``_`` attributes on values returned by calls.
+    """
+    out: list[tuple[int, str]] = []
+    bound: dict[str, str] = {}
+    importlib_names, import_module_names, sys_names = {"importlib"}, set(), {"sys"}
+
+    def hermes_target(module: str) -> bool:
+        return module.split(".")[0] in hermes
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                yield node.lineno, alias.name
+                if alias.name == "importlib":
+                    importlib_names.add(alias.asname or "importlib")
+                elif alias.name == "sys":
+                    sys_names.add(alias.asname or "sys")
+                elif hermes_target(alias.name):
+                    if not _is_public(alias.name):
+                        out.append((node.lineno, alias.name))
+                    if alias.asname:
+                        bound[alias.asname] = alias.name
+                    else:
+                        top = alias.name.split(".")[0]
+                        bound[top] = top
         elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
             for alias in node.names:
-                yield node.lineno, f"{node.module}.{alias.name}"
-        elif isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant) \
-                and isinstance(node.args[0].value, str) \
-                and ast.unparse(node.func) in ("importlib.import_module", "import_module", "__import__"):
-            yield node.lineno, node.args[0].value
+                if node.module == "importlib" and alias.name == "import_module":
+                    import_module_names.add(alias.asname or alias.name)
+                elif hermes_target(node.module):
+                    if not _is_public(node.module, alias.name):
+                        out.append((node.lineno, f"{node.module}.{alias.name}"))
+                    bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    loaders = {"__import__"} | {f"{n}.import_module" for n in importlib_names} | import_module_names
+    sys_modules = {f"{n}.modules" for n in sys_names}
 
+    def literal(arg: ast.AST) -> str:
+        return arg.value if isinstance(arg, ast.Constant) and isinstance(arg.value, str) else ""
 
-def _is_public(target: str) -> bool:
-    return any(target == mod or target.startswith(mod + ".") and not target[len(mod) + 1:].startswith("_")
-               for mod in PUBLIC)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr.startswith("_") and not node.attr.startswith("__"):
+            base = node.value
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(base, ast.Name) and base.id in bound:
+                out.append((node.lineno, ast.unparse(node)))
+        elif isinstance(node, ast.Call) and node.args:
+            func, module = ast.unparse(node.func), literal(node.args[0])
+            sys_lookup = func in {f"{m}.{verb}" for m in sys_modules for verb in ("get", "pop", "setdefault")}
+            if (func in loaders or sys_lookup) and module and hermes_target(module) and not _is_public(module):
+                out.append((node.lineno, module))
+        elif isinstance(node, ast.Subscript) and ast.unparse(node.value) in sys_modules:
+            module = literal(node.slice)
+            if module and hermes_target(module) and not _is_public(module):
+                out.append((node.lineno, module))
+    return out
 
 
 def test_no_module_but_hermes_compat_imports_a_private_hermes_module():
@@ -67,17 +124,47 @@ def test_no_module_but_hermes_compat_imports_a_private_hermes_module():
         rel = path.relative_to(ROOT).as_posix()
         if rel == COMPAT:
             continue
-        for line, target in _imports(ast.parse(path.read_text(encoding="utf-8"))):
-            if target.split(".")[0] in hermes and not _is_public(target):
-                offenders.append(f"{rel}:{line} {target}")
+        offenders += [f"{rel}:{line} {target}"
+                      for line, target in _private_uses(ast.parse(path.read_text(encoding="utf-8")), hermes)]
     assert offenders == [], "import private Hermes names through confidential_mode/hermes_compat.py"
 
 
 def test_the_scan_sees_the_imports_in_hermes_compat():
     """Guards the scan itself: hermes_compat's own imports read as private."""
-    found = [t for _l, t in _imports(ast.parse((ROOT / COMPAT).read_text(encoding="utf-8")))
-             if t.split(".")[0] in _hermes_top_level() and not _is_public(t)]
+    found = [t for _l, t in _private_uses(ast.parse((ROOT / COMPAT).read_text(encoding="utf-8")),
+                                          _hermes_top_level())]
     assert "tools.approval._presence" in found and "hermes_yaml" in found
+
+
+@pytest.mark.parametrize("source", [
+    "from tools import approval",
+    "import tools.approval",
+    "import providers.openrouter",
+    "from providers import _private",
+    "import tools.registry\ntools.registry._x",
+    "import tools.registry as r\nr._x",
+    "from tools.registry import registry\nregistry._tools",
+    "import importlib as il\nil.import_module('tools.approval')",
+    "from importlib import import_module as im\nim('tools.approval')",
+    "__import__('tools.approval')",
+    "import sys\nsys.modules['tools.approval']",
+    "import sys\nsys.modules.get('agent.auxiliary_client')",
+])
+def test_the_scan_flags_each_form_it_covers(source):
+    assert _private_uses(ast.parse(source), _hermes_top_level())
+
+
+@pytest.mark.parametrize("source", [
+    "import providers",
+    "from providers import get_provider_profile",
+    "from tools.registry import registry\nregistry.get_entry('x')",
+    "import importlib\nimportlib.import_module(__package__ + '.provider')",
+    "import sys\nsys.modules['confidential_mode.pins']",
+    "import yaml",
+    "x = object()\nx._y",
+])
+def test_the_scan_allows_the_documented_surface(source):
+    assert _private_uses(ast.parse(source), _hermes_top_level()) == []
 
 
 def test_the_validator_names_only_hermes_compat():
@@ -112,21 +199,24 @@ ACCESSORS = [
     ("hermes_cli.commands", ("resolve_command",), lambda: hc.resolve_command("model"), ()),
     ("tools.approval", ("_session_approved",), lambda: hc.approval_keys(None), ()),
     ("tools.approval", ("_permanent_set",), lambda: hc.approval_keys("s"), ()),
-    ("tools.approval", ("_yolo_active",), hc.yolo_active, ()),
-    ("tools.approval_context", ("_get_approval_mode",), hc.approval_mode, ()),
-    ("tools.approval", ("_presence",), lambda: hc.approval_presence(None), ()),
+    ("tools.approval", ("_lock",), lambda: hc.approval_keys(None), ()),
+    ("tools.approval", ("_yolo_active",), hc.approval_state_functions, ()),
+    ("tools.approval_context", ("_get_approval_mode",), hc.approval_state_functions, ()),
+    ("tools.approval", ("_presence",), hc.approval_state_functions, ()),
     ("tools.approval", ("is_approved",), lambda: hc.is_approved("s", "plugin_rule:x"), ()),
     ("tools.approval_context", ("get_current_session_key",), lambda: hc.current_session_key(""), ()),
-    ("tools.approval", ("request_tool_approval",), lambda: hc.request_tool_approval("t", "m", rule_key="k"), ()),
-    ("tools.approval_context", ("set_current_observability_context",), lambda: hc.set_observability_context(), ()),
-    ("tools.approval_context", ("reset_current_observability_context",),
-     lambda: hc.reset_observability_context(None), ()),
+    ("tools.approval", ("request_tool_approval",), hc.request_tool_approval_functions, ()),
+    ("tools.approval_context", ("set_current_observability_context",), hc.request_tool_approval_functions, ()),
+    ("tools.approval_context", ("reset_current_observability_context",), hc.request_tool_approval_functions, ()),
     ("tools.terminal_tool", ("_get_env_config",), hc.terminal_env_config_reader, ()),
     ("tools.terminal_tool_lifecycle", ("get_active_env",), hc.active_env_reader, ()),
     ("tools.terminal_tool", ("_active_environments",), hc.cached_terminal_environments, ()),
+    ("tools.terminal_tool", ("_env_lock",), hc.cached_terminal_environments, ()),
     ("tools.terminal_scope", ("terminal_env",), lambda: hc.terminal_env_fallback("TERMINAL_ENV"), ()),
     ("tools.mcp_tool_config", ("_load_mcp_config",), hc.mcp_server_configs, ()),
     ("tools.mcp_tool", ("_servers",), hc.mcp_live_servers, ()),
+    ("tools.mcp_tool", ("_lock",), hc.mcp_live_servers, ()),
+    ("tools.mcp_tool", ("_lock",), hc.mcp_tool_server_names, ()),
     ("tools.mcp_tool_scope", ("_key_name",), lambda: hc.mcp_key_name("x"), ()),
     ("tools.mcp_tool", ("_mcp_tool_server_names",), hc.mcp_tool_server_names, ()),
     ("hermes_cli.plugins", ("get_plugin_manager",), hc.plugin_tool_names, ()),
@@ -150,7 +240,8 @@ def test_each_accessor_raises_import_error_when_its_symbol_is_missing(monkeypatc
 def test_every_accessor_is_covered():
     public = {n for n, v in vars(hc).items() if callable(v) and not n.startswith("_")
               and getattr(v, "__module__", "") == hc.__name__}
-    covered = {"yaml_module", "import_tool_module"}           # tested on their own below
+    covered = {"yaml_module", "import_tool_module",           # tested on their own below
+               "mcp_server_config", "env_backend_tag"}
     for _m, _n, call, _ in ACCESSORS:
         code = call.__code__
         covered |= set(code.co_names) | {getattr(call, "__name__", "")}
@@ -161,7 +252,7 @@ def test_each_accessor_reads_hermes_at_call_time(monkeypatch):
     """A patch of the Hermes module is seen by the next call: nothing is cached at import."""
     import tools.approval as approval
     monkeypatch.setattr(approval, "_yolo_active", lambda: "patched")
-    assert hc.yolo_active() == "patched"
+    assert hc.approval_state_functions()[0]() == "patched"
 
 
 def test_yaml_module_falls_back_to_pyyaml(monkeypatch):
@@ -259,3 +350,56 @@ def test_yaml_read_of_the_allowlist_without_hermes_yaml(monkeypatch, tmp_path):
     assert gate_tools._read_added(path) == {"a"}
     monkeypatch.setitem(sys.modules, "hermes_yaml", None)
     assert gate_tools._read_added(path) == set()                           # adds nothing
+
+
+def test_attribute_readers_default_to_none():
+    from types import SimpleNamespace
+    assert hc.mcp_server_config(SimpleNamespace(_config={"url": "u"})) == {"url": "u"}
+    assert hc.mcp_server_config(object()) is None
+    assert hc.env_backend_tag(SimpleNamespace(env_type="ssh", _hermes_backend_name="docker")) == "ssh"
+    assert hc.env_backend_tag(SimpleNamespace(_hermes_backend_name="docker")) == "docker"
+    assert hc.env_backend_tag(object()) is None
+
+
+def test_plugin_tool_names_without_the_attribute_is_empty(monkeypatch):
+    import hermes_cli.plugins as plugins
+    monkeypatch.setattr(plugins, "get_plugin_manager", lambda: object())
+    assert hc.plugin_tool_names() == set()
+
+
+@pytest.mark.parametrize("missing", ["request_tool_approval", "set_current_observability_context",
+                                     "reset_current_observability_context"])
+def test_a_missing_approval_function_asks_nobody_and_binds_nothing(monkeypatch, missing):
+    """Review S1: the three functions are resolved before the context is set, so a Hermes without one of
+    them neither shows the prompt nor leaves the plugin's ids bound for Hermes' later approvals."""
+    import tools.approval as approval
+    import tools.approval_context as ac
+    from confidential_mode import gate_tools
+    asked, bound = [], []
+    if missing != "request_tool_approval":
+        monkeypatch.setattr(approval, "request_tool_approval",
+                            lambda name, reason, rule_key="": asked.append(name) or {"choice": "once"})
+    if missing != "set_current_observability_context":
+        real_set = ac.set_current_observability_context
+        monkeypatch.setattr(ac, "set_current_observability_context",
+                            lambda **kw: bound.append(kw) or real_set(**kw))
+    monkeypatch.delattr(approval if missing == "request_tool_approval" else ac, missing)
+    before = (ac._approval_tool_call_id.get(), ac._approval_turn_id.get(), ac._approval_session_id.get())
+    with pytest.raises(ImportError):
+        gate_tools.hermes_request_approval("web_search", "m", rule_key="k", approval_id="APPROVAL-1",
+                                           turn_id="t", session_id="s")
+    assert asked == [] and bound == []
+    assert (ac._approval_tool_call_id.get(), ac._approval_turn_id.get(), ac._approval_session_id.get()) == before
+
+
+def test_yolo_on_with_approval_mode_missing_reads_as_unattended(monkeypatch):
+    """Review L1: the three approval readers are resolved before any is read, so a missing one gives the
+    unattended refusal text even while yolo is on."""
+    import tools.approval as approval
+    import tools.approval_context as ac
+    from confidential_mode import gate_tools
+    monkeypatch.setattr(approval, "_yolo_active", lambda: True)
+    monkeypatch.setattr(approval, "_presence", lambda cb=None: (None, True, False, False))
+    monkeypatch.delattr(ac, "_get_approval_mode")
+    assert gate_tools.hermes_bypass_active("web_search") is True
+    assert gate_tools.hermes_bypass_is_interactive() is False

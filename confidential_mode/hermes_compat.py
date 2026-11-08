@@ -2,20 +2,23 @@
 
 Hermes documents a plugin surface (``ctx.*``, the hooks, ``tools.registry``, ``agent.secret_scope``,
 ``providers``, ``hermes_cli.config``, ``plugins.plugin_storage``); modules that use only that surface import it
-where they use it. Everything else the plugin reads from Hermes core goes through an accessor below, so a
-Hermes release that moves or renames one of these names breaks this file and no other, and
-``hermes plugins validate`` names only this file in its private-import warning.
-``tests/unit/test_hermes_compat.py`` fails when any other plugin module imports a private Hermes module.
+where they use it. Every private Hermes module or name the plugin imports, and every private attribute it reads
+on a Hermes object (``MCPServerTask._config``, an environment's ``_hermes_backend_name``, the plugin manager's
+``_plugin_tool_names``), goes through an accessor below. A Hermes release that moves or renames one of these
+names breaks this file and no other, and ``hermes plugins validate`` names only this file in its private-import
+warning. ``tests/unit/test_hermes_compat.py`` fails when any other plugin module imports a private Hermes module.
 
 Rules every accessor follows (INTERFACES Amendment 15):
 
 * The import happens inside the accessor, at call time. Nothing here is imported when this module loads, so
-  import timing is the same as at the call sites the accessors replaced (lazy: no import cycle into Hermes
-  and no start-up cost), and a test that patches the Hermes module (``monkeypatch.setattr(tools.approval,
-  ...)``, ``sys.modules[...]``) is seen by the next call.
+  importing this module costs nothing and cannot cycle into Hermes, and a test that patches the Hermes module
+  (``monkeypatch.setattr(tools.approval, ...)``, ``sys.modules[...]``) is seen by the next call.
 * An accessor never swallows an error. A missing module or name raises ``ImportError``; a failing Hermes
-  call raises whatever it raises. The fallback stays at the call site, where it was before: each docstring
-  names it. The one exception is ``yaml_module``, whose PyYAML fallback was part of the import itself.
+  call raises whatever it raises. The fallback is at the call site; each docstring names it. The exceptions:
+  ``yaml_module`` falls back to PyYAML, and the attribute readers (``mcp_server_config``,
+  ``env_backend_tag``, ``plugin_tool_names``) read with a ``getattr`` default.
+* Where a call site needs several Hermes functions and must fail before the first has any effect, one
+  accessor returns them all uncalled (``*_functions``, ``*_reader``), so a missing one raises before any runs.
 * Each private Hermes name is imported at one line only, so the validator lists each name once.
 * "Verified" names the Hermes commit the symbol, its signature and its use were read at: 84a0301.
 """
@@ -43,10 +46,10 @@ def hermes_yaml() -> Any:
 def yaml_module() -> Any:
     """``hermes_yaml`` when Hermes is importable, else PyYAML's ``yaml``. Verified at 84a0301.
 
-    Used by ``pins`` (at module load, as before) to read and write ``pins.yaml``, and by
+    Used by ``pins`` (at module load) to read and write ``pins.yaml``, and by
     ``review._yaml_load`` for compose files. Hermes' venv ships ``hermes_yaml`` and no PyYAML.
     Missing ``hermes_yaml``: falls back to PyYAML (standalone use, unit tests outside Hermes); neither:
-    raises ImportError, which fails the ``pins`` import as before."""
+    raises ImportError, which fails the ``pins`` import."""
     try:
         return hermes_yaml()
     except ImportError:
@@ -80,7 +83,7 @@ def approval_keys(session_key: str | None = None) -> tuple[set, set]:
 
     Used by ``commands.hermes_approval_keys`` (``/confidential status`` grant lines, ``revoke``'s check for a
     grant Hermes still holds). Missing: raises ImportError; ``remembered_grants`` lists nothing and
-    ``revoke.hermes_holds_grant`` returns True (the revoke proceeds as before)."""
+    ``revoke.hermes_holds_grant`` returns True (the revoke records and moves the rule key)."""
     from tools.approval import _lock
     from tools.approval import _permanent_set
     from tools.approval import _session_approved
@@ -95,32 +98,18 @@ def approval_keys(session_key: str | None = None) -> tuple[set, set]:
     return permanent, session
 
 
-def yolo_active() -> bool:
-    """``tools.approval._yolo_active()``: yolo is on for this context. Verified at 84a0301.
+def approval_state_functions() -> tuple[Callable[[], bool], Callable[[], str], Callable[..., tuple]]:
+    """(``tools.approval._yolo_active``, ``tools.approval_context._get_approval_mode``,
+    ``tools.approval._presence``), uncalled: yolo is on for this context; ``approvals.mode`` ("off" is a
+    bypass); (callback, is_cli, is_gateway, is_ask), the surfaces Hermes' gate could ask. Verified at 84a0301.
 
-    Used by ``gate_tools._hermes_approval_state`` (bypass detection). Missing: raises ImportError; the gate
-    treats the state as unreadable and blocks (``hermes_bypass_active`` -> True)."""
+    Used by ``gate_tools._hermes_approval_state``, which resolves all three before reading any. Missing (any
+    of the three): raises ImportError; ``hermes_bypass_active`` returns True (block) and
+    ``hermes_bypass_is_interactive`` False (the unattended refusal text)."""
     from tools.approval import _yolo_active
-    return _yolo_active()
-
-
-def approval_mode() -> str:
-    """``tools.approval_context._get_approval_mode()``: ``approvals.mode`` ("off" is a bypass). Verified at
-    84a0301.
-
-    Used by ``gate_tools._hermes_approval_state``. Missing: raises ImportError; the gate blocks."""
     from tools.approval_context import _get_approval_mode
-    return _get_approval_mode()
-
-
-def approval_presence(approval_callback: Any = None) -> tuple:
-    """``tools.approval._presence(approval_callback)``: (callback, is_cli, is_gateway, is_ask), the surfaces
-    Hermes' gate could ask. Verified at 84a0301.
-
-    Used by ``gate_tools._hermes_approval_state`` (nobody to ask means no human decides). Missing: raises
-    ImportError; ``hermes_bypass_active`` returns True (block), ``hermes_bypass_is_interactive`` False."""
     from tools.approval import _presence
-    return _presence(approval_callback)
+    return _yolo_active, _get_approval_mode, _presence
 
 
 def is_approved(session_key: str, pattern_key: str) -> bool:
@@ -144,33 +133,20 @@ def current_session_key(*args: Any) -> str:
     return get_current_session_key(*args)
 
 
-def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "") -> dict:
-    """``tools.approval.request_tool_approval(tool_name, reason, rule_key=)``: ask through Hermes' own gate
-    (CLI panel, gateway card). Verified at 84a0301.
+def request_tool_approval_functions() -> tuple[Callable[..., dict], Callable[..., Any], Callable[[Any], None]]:
+    """(``tools.approval.request_tool_approval``, ``tools.approval_context.set_current_observability_context``,
+    ``tools.approval_context.reset_current_observability_context``), uncalled. Verified at 84a0301.
 
-    Used by ``gate_tools.hermes_request_approval``. Missing: raises ImportError; the tool gate's ``except``
-    turns it into a refusal of the call."""
-    from tools.approval import request_tool_approval as _request_tool_approval
-    return _request_tool_approval(tool_name, reason, rule_key=rule_key)
-
-
-def set_observability_context(*, turn_id: str = "", tool_call_id: str = "", session_id: str = "") -> Any:
-    """``tools.approval_context.set_current_observability_context(turn_id=, tool_call_id=, session_id=)``:
-    binds the ids ``post_approval_response`` reports; returns the reset tokens. Verified at 84a0301.
-
-    Used by ``gate_tools.hermes_request_approval`` so the answer carries the plugin's approval id. Missing:
-    raises ImportError before anything is asked; the tool gate refuses the call."""
+    ``request_tool_approval(tool_name, reason, *, rule_key=)`` asks through Hermes' own gate (CLI panel,
+    gateway card); ``set_current_observability_context(turn_id=, tool_call_id=, session_id=)`` binds the ids
+    ``post_approval_response`` reports and returns the tokens ``reset_current_observability_context(tokens)``
+    takes. Used by ``gate_tools.hermes_request_approval``, which resolves all three before it sets the context,
+    so a missing reset can never leave the plugin's ids bound for Hermes' later approvals. Missing (any of the
+    three): raises ImportError before any context is set or anyone is asked; the tool gate refuses the call."""
+    from tools.approval import request_tool_approval
     from tools.approval_context import set_current_observability_context
-    return set_current_observability_context(turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id)
-
-
-def reset_observability_context(tokens: Any) -> None:
-    """``tools.approval_context.reset_current_observability_context(tokens)``. Verified at 84a0301.
-
-    Used by ``gate_tools.hermes_request_approval`` after the ask. Missing: raises ImportError; the tool gate
-    refuses the call."""
     from tools.approval_context import reset_current_observability_context
-    reset_current_observability_context(tokens)
+    return request_tool_approval, set_current_observability_context, reset_current_observability_context
 
 
 # --------------------------------------------------------------------------------------------------
@@ -186,6 +162,15 @@ def terminal_env_config_reader() -> Callable[[], dict]:
     ImportError; ``gate_tools.hermes_terminal_backend`` raises and the gate blocks; the preflight falls back."""
     from tools.terminal_tool import _get_env_config
     return _get_env_config
+
+
+def env_backend_tag(env: Any) -> Any:
+    """The backend tag Hermes puts on a terminal environment it creates: ``env.env_type``, else the private
+    ``env._hermes_backend_name``. Verified at 84a0301.
+
+    Used by ``gate_tools.hermes_terminal_backend`` and ``cached_remote_environments``. Missing: None (read with
+    a ``getattr`` default); both callers report an untagged environment as unknown, which blocks."""
+    return getattr(env, "env_type", None) or getattr(env, "_hermes_backend_name", None)
 
 
 def active_env_reader() -> Callable[[str], Any]:
@@ -252,6 +237,15 @@ def mcp_live_servers() -> list:
         return list(_servers.items())
 
 
+def mcp_server_config(server: Any) -> Any:
+    """The private ``MCPServerTask._config`` of a live MCP server: the config it was connected with. Verified
+    at 84a0301.
+
+    Used by ``gate_tools._default_mcp_configs``. Missing: None (read with a ``getattr`` default); the caller
+    skips that server and keeps its configured entry."""
+    return getattr(server, "_config", None)
+
+
 def mcp_key_name(key: Any) -> str:
     """``tools.mcp_tool_scope._key_name(key)``: the server name of a live server key. Verified at 84a0301.
 
@@ -280,8 +274,9 @@ def plugin_tool_names() -> set:
     """``hermes_cli.plugins.get_plugin_manager()._plugin_tool_names``: the tools plugins registered.
     Verified at 84a0301.
 
-    Used by ``gate_tools._default_plugin_tool_names`` to tell plugin tools from built-in ones. Missing:
-    raises ImportError; the caller returns an empty set."""
+    Used by ``gate_tools._default_plugin_tool_names`` to tell plugin tools from built-in ones. Missing
+    ``get_plugin_manager``: raises ImportError and the caller returns an empty set. Missing
+    ``_plugin_tool_names`` on the manager: an empty set (read with a ``getattr`` default)."""
     from hermes_cli.plugins import get_plugin_manager
     return set(getattr(get_plugin_manager(), "_plugin_tool_names", ()) or ())
 
@@ -291,7 +286,7 @@ def plugin_auxiliary_tasks() -> list:
     auxiliary tasks. Verified at 84a0301.
 
     Used by ``preflight.plugin_aux_task_entries``. Missing: raises ImportError; ``plugin_aux_task_entries``
-    raises as before and ``locking._plugin_aux`` checks no plugin auxiliary task."""
+    raises and ``locking._plugin_aux`` checks no plugin auxiliary task."""
     from hermes_cli.plugins import get_plugin_auxiliary_tasks
     return get_plugin_auxiliary_tasks()
 

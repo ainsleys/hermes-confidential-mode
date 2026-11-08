@@ -479,7 +479,7 @@ def _default_mcp_configs() -> dict[str, dict]:
         from . import hermes_compat
         live = hermes_compat.mcp_live_servers()
         for key, server in live:
-            cfg = getattr(server, "_config", None)
+            cfg = hermes_compat.mcp_server_config(server)
             if isinstance(cfg, dict) and cfg:
                 name = hermes_compat.mcp_key_name(key)
                 # url anywhere wins (fail closed): merge rather than replace.
@@ -695,9 +695,10 @@ def _hermes_approval_state() -> tuple[bool, bool]:
     """(bypassed, someone present): ``bypassed`` is yolo or approvals.mode off; ``someone present`` is a CLI,
     gateway or ask surface that could answer. Mirrors ``_run_approval_gate`` (tools/approval.py:1071-1113).
     Raises when Hermes cannot be read; each caller fails closed."""
-    from . import hermes_compat
-    bypassed = bool(hermes_compat.yolo_active() or hermes_compat.approval_mode() == "off")
-    _cb, is_cli, is_gateway, is_ask = hermes_compat.approval_presence(None)
+    from .hermes_compat import approval_state_functions
+    _yolo_active, _get_approval_mode, _presence = approval_state_functions()
+    bypassed = bool(_yolo_active() or _get_approval_mode() == "off")
+    _cb, is_cli, is_gateway, is_ask = _presence(None)
     return bypassed, bool(is_cli or is_gateway or is_ask)
 
 
@@ -739,7 +740,7 @@ def hermes_terminal_backend(task_id: str = "") -> str:
       reported as unknown, which blocks.
 
     Raises when Hermes cannot be read; the caller then blocks."""
-    from .hermes_compat import active_env_reader, terminal_env_config_reader
+    from .hermes_compat import active_env_reader, env_backend_tag, terminal_env_config_reader
     from .preflight import LOCAL_BACKEND, normalize_backend
     _get_env_config = terminal_env_config_reader()
     get_active_env = active_env_reader()
@@ -749,7 +750,7 @@ def hermes_terminal_backend(task_id: str = "") -> str:
     env = get_active_env(task_id or "default")
     if env is None:
         return backend
-    tag = getattr(env, "env_type", None) or getattr(env, "_hermes_backend_name", None)
+    tag = env_backend_tag(env)
     if not isinstance(tag, str) or not tag.strip():
         return "unknown (a cached environment with no backend tag)"
     return normalize_backend(tag)
@@ -758,12 +759,12 @@ def hermes_terminal_backend(task_id: str = "") -> str:
 def cached_remote_environments() -> list[tuple[str, str]]:
     """(task key, backend) of every environment Hermes has cached that is not local (or not tagged).
     The lock is refused while any exists. Raises when Hermes cannot be read."""
-    from .hermes_compat import cached_terminal_environments
+    from .hermes_compat import cached_terminal_environments, env_backend_tag
     from .preflight import LOCAL_BACKEND, normalize_backend
     items = cached_terminal_environments()
     out = []
     for key, env in items:
-        tag = getattr(env, "env_type", None) or getattr(env, "_hermes_backend_name", None)
+        tag = env_backend_tag(env)
         backend = normalize_backend(tag) if isinstance(tag, str) and tag.strip() else "unknown"
         if backend != LOCAL_BACKEND:
             out.append((str(key), backend))
@@ -1369,14 +1370,17 @@ def hermes_request_approval(tool_name: str, message: str, *, rule_key: str, appr
     """Ask through Hermes' own gate (CLI panel / gateway card), from the agent thread, with the
     observability context set so post_approval_response carries ``approval_id`` as tool_call_id
     (same mechanism as hermes_cli/plugins.py:1996-2009)."""
-    from .hermes_compat import request_tool_approval, reset_observability_context, set_observability_context
-    tokens = set_observability_context(turn_id=turn_id, tool_call_id=approval_id, session_id=session_id)
+    from .hermes_compat import request_tool_approval_functions
+    # All three resolved before anything is set: a missing one raises here, before the context is bound or
+    # anyone is asked, so the plugin's ids never stay bound for Hermes' later approvals.
+    request_tool_approval, set_context, reset_context = request_tool_approval_functions()
+    tokens = set_context(turn_id=turn_id, tool_call_id=approval_id, session_id=session_id)
     try:
         # Hermes shows "<name> (plugin approval rule)" as the prompt's target line; the plugin's label goes
         # there in place of the bare tool name. The rule key (our grant key) still names the tool.
         return request_tool_approval(f"{APPROVAL_LABEL} {tool_name}", message, rule_key=rule_key)
     finally:
-        reset_observability_context(tokens)
+        reset_context(tokens)
 
 
 def _refusal_result(message: str) -> str:
