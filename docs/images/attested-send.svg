@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" font-family="IBM Plex Sans, Helvetica Neue, Arial, sans-serif" viewBox="0 0 1060 352" role="img" aria-label="One model call on the attested tier, in six steps from left to right. 1: the enclave's attestation report is fetched over an unpinned connection and verified on this host against the pinned build. 2: the connection is pinned to the report's TLS key before any byte, headers and API key included, is sent. 3: the request body leaves as ciphertext. 4: the signed reply comes back and, on NEAR, its signature is checked before release. 5: a ledger row is written on this host with bytes and never text. 6: a receipt is rendered that anyone can replay offline. A note on the NEAR gateway lane says the gateway still sees images, the model id, settings, headers, sizes and timing.">
+  <style>
+    svg { color: #1f2320; }
+    .muted { opacity: 0.72; }
+    @media (prefers-color-scheme: dark) { svg { color: #e6edf3; } }
+  </style>
+  <defs>
+    <marker id="a-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+  </defs>
+
+  <!-- lane names -->
+  <text x="20" y="51" font-size="14" font-weight="600" fill="currentColor">Enclave</text>
+  <text x="20" y="157" font-size="14" font-weight="600" fill="currentColor">NEAR gateway</text>
+  <text x="20" y="291" font-size="14" font-weight="600" fill="currentColor">This host</text>
+
+  <!-- lanes -->
+  <rect x="150" y="20" width="580" height="52" rx="6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+  <text x="440" y="51" text-anchor="middle" font-size="12" fill="currentColor" class="muted">build you approved once</text>
+  <rect x="150" y="130" width="580" height="44" rx="6" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="5 4" class="muted"/>
+  <rect x="150" y="236" width="890" height="100" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+
+  <!-- gateway note -->
+  <text x="746" y="148" font-size="12" fill="currentColor" class="muted">gateway sees images, model id,</text>
+  <text x="746" y="164" font-size="12" fill="currentColor" class="muted">settings, headers, sizes, timing</text>
+
+  <!-- 1 · report fetched (unpinned), verified on this host -->
+  <line x1="220" y1="72" x2="220" y2="254" stroke="currentColor" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a-head)"/>
+  <text x="228" y="106" font-size="12" fill="currentColor">report · fetch unpinned</text>
+  <rect x="155" y="256" width="130" height="60" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+  <text x="220" y="291" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">1 Verify build</text>
+
+  <!-- 2 · TLS pinned before any byte -->
+  <line x1="360" y1="256" x2="360" y2="74" stroke="currentColor" stroke-width="1.6" marker-end="url(#a-head)"/>
+  <text x="368" y="106" font-size="12" fill="currentColor">headers, API key</text>
+  <rect x="295" y="256" width="130" height="60" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+  <text x="360" y="291" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">2 Pin TLS key</text>
+
+  <!-- 3 · body encrypted before it leaves -->
+  <line x1="500" y1="256" x2="500" y2="74" stroke="currentColor" stroke-width="1.6" marker-end="url(#a-head)"/>
+  <text x="508" y="106" font-size="12" fill="currentColor">ciphertext</text>
+  <rect x="435" y="256" width="130" height="60" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+  <text x="500" y="291" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">3 Encrypt body</text>
+
+  <!-- 4 · reply, signature checked before release (NEAR) -->
+  <line x1="640" y1="72" x2="640" y2="254" stroke="currentColor" stroke-width="1.6" marker-end="url(#a-head)"/>
+  <text x="648" y="106" font-size="12" fill="currentColor">signed reply</text>
+  <rect x="575" y="256" width="130" height="60" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+  <text x="640" y="282" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">4 Check signature</text>
+  <text x="640" y="301" text-anchor="middle" font-size="12" fill="currentColor" class="muted">NEAR</text>
+
+  <!-- 5 · ledger row on this host -->
+  <rect x="755" y="256" width="130" height="60" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+  <text x="820" y="282" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">5 Ledger row</text>
+  <text x="820" y="301" text-anchor="middle" font-size="12" fill="currentColor" class="muted">bytes, never text</text>
+
+  <!-- 6 · receipt, replayable offline -->
+  <rect x="900" y="256" width="130" height="60" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+  <text x="965" y="282" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">6 Receipt</text>
+  <text x="965" y="301" text-anchor="middle" font-size="12" fill="currentColor" class="muted">replay offline</text>
+</svg>
