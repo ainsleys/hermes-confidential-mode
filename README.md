@@ -1,6 +1,8 @@
 <!-- PLUGIN_NAME: confidential-mode  (final catalog slug; the prose name is Hermes Confidential Mode) -->
 # Hermes Confidential Mode
 
+[![tests](https://github.com/ainsleys/hermes-confidential-mode/actions/workflows/tests.yml/badge.svg)](https://github.com/ainsleys/hermes-confidential-mode/actions/workflows/tests.yml)
+
 Hermes cannot verify a confidential-compute provider on its own. Hermes Confidential Mode makes it checkable:
 it verifies the enclave, pins its build, keeps every model call and fallback inside it, encrypts what
 leaves, and writes a receipt anyone can replay.
