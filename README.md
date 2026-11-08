@@ -8,10 +8,10 @@ leaves, and writes a receipt anyone can replay.
 **What Hermes does today.** Point Hermes at Tinfoil or NEAR AI Cloud and you get an ordinary HTTPS
 connection to a URL and the vendor's word. No hardware report is checked, no build is pinned, the
 vendor's encrypted transport is not used, and no reply signature is verified. Hermes also makes more
-model calls than the one you see, for titles, compression, images and more, and when one of those
-calls to the main provider fails, or the main model cannot take an image, Hermes' default side-call
-chain can send that text to OpenRouter or Nous, if you have keys for them. Tools such as web search
-pass parts of what you wrote on to outside sites.
+model calls than the one you see, for titles, compression, images and more. Those side calls follow
+your main provider, but two routes can leave it: an image sent while the vision route is on `auto`,
+which Hermes may hand to OpenRouter or Nous if you hold a key for them, and any provider you list under
+`fallback_providers`. Tools such as web search pass parts of what you wrote on to outside sites.
 
 **What the plugin does.** You lock a profile to a tier, which is a rule for where text may go.
 `attested` allows only enclaves whose hardware report the plugin has verified and whose build you
@@ -278,8 +278,10 @@ except where noted.
 ## Prior work
 
 Five contributors tried to add confidential inference to Hermes core before this plugin. The
-maintainers closed each pull request asking for the work to arrive as a plugin instead. Their
-designs and findings shaped this one, and the guide's
+maintainers closed four of the pull requests under the policy that provider integrations arrive as
+plugins, and closed the first, #7045, as too large for core with a hard Tinfoil dependency, adding that
+they would revisit enclave inference if users asked for it. Their designs and findings shaped this one,
+and the guide's
 [comparison chapter](docs/GUIDE.md#comparison-with-earlier-approaches) sets each against what the
 plugin does now.
 

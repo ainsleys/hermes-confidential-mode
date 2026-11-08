@@ -92,9 +92,10 @@ the plugin's own record; only its evidence can be checked by someone else
 ## Comparison with earlier approaches
 
 Five earlier pull requests tried to add confidential inference to Hermes core. Each added a verified
-provider for the main chat, and each was closed with the request to ship it as a plugin. This plugin
+provider for the main chat. Four were closed under the policy that provider integrations ship as
+plugins; the first, #7045, was closed as too large for core with a hard Tinfoil dependency. This plugin
 ships that verified provider as a plugin, and adds the routing checks, the tool gate, the ledger and
-the receipt, so the privacy claim covers the whole session rather than one endpoint.
+the receipt, so the claim covers every model call in the session rather than one endpoint.
 
 "Yes" means present and enforced, "Partial" means present with a gap, and "No" means absent. The pull
 requests are Hermes #4231 (Venice), #5015 (RedPill), #7045 (Tinfoil), #12201 (NEAR AI and Phala) and
