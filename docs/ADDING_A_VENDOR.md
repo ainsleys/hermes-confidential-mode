@@ -6,7 +6,7 @@ provider profile, pins, a replay module, setup, tests and documentation. Tinfoil
 rule below is read from their code. The last section, "Known coupling", lists the places where Tinfoil
 or NEAR is named outside the adapters, so a third vendor also needs edits there.
 
-Paths are relative to `confidential_mode/` unless they start with `tests/`, `docs/` or name a file at
+Paths are relative to `confidential_mode/` unless the path starts with `tests/`, `docs/` or name a file at
 the repository root (`__init__.py`, `plugin.yaml`, `pyproject.toml`, `catalog/`).
 [INTERFACES.md](INTERFACES.md) is the developer contract. Its Amendments 5, 5.1, 5.2, 7 and 9 hold the
 contract entries for the NEAR adapter, the nearest model for a third adapter's contract.
@@ -91,8 +91,8 @@ Its keys:
 Two ledger rules bind the evidence. The row detail, evidence included, must fit
 `ledger.py:MAX_DETAIL_BYTES` (256 KB) once blobs are moved out. No key anywhere in the detail may be
 one of `ledger.py:FORBIDDEN_DETAIL_KEYS` (`messages`, `prompt`, `prompts`, `request`, `input`,
-`instructions`, `system`, `content`, `contents`); rename such keys from a vendor report before storing
-them. A `verify_ok` row that cannot be written refuses the verification (`REASON_VERIFY_ROW_LOST`), so
+`instructions`, `system`, `content`, `contents`); rename such keys in a vendor report before storing
+the report. A `verify_ok` row that cannot be written refuses the verification (`REASON_VERIFY_ROW_LOST`), so
 breaking either rule makes the vendor unusable rather than unrecorded.
 
 ### Transport views and the TLS pin per send
@@ -137,7 +137,7 @@ fields in `gate_llm.py:SEND_RECORD_FIELDS` (`hpke_key_used`, `encrypted`, `respo
 
 ### Hooks the cache wires
 
-`provider.py:VerificationCache._wire_adapter_sink` sets these attributes on an adapter that defines them:
+`provider.py:VerificationCache._wire_adapter_sink` sets these attributes on an adapter that defines the attributes:
 `event_sink`, `on_close` (stops the background refresh), `on_stale` (invalidates the cache entry, so
 the next call verifies inline). Optional members other modules read when present:
 `observe_key(host, tls_fp, hpke)` (first-seen record per key pair, Tinfoil),
@@ -331,7 +331,7 @@ outside the adapters; a third vendor edits each one.
 - **Receipts.** `receipts.py:_near_sends`, `NEAR_CLOSING` and `NEAR_ENCRYPTION_NOTE` render the
   signed-response section for NEAR rows only; `receipts.py:verify_chain` checks those constants.
   `CLOSING_PARAGRAPH` speaks of a router, a release tag and an HPKE key, which is Tinfoil's shape.
-- **Manifest.** `plugin.yaml` and the catalog entry list `TINFOIL_API_KEY` as the one required
+- **Manifest.** `plugin.yaml` and the catalog entry list `TINFOIL_API_KEY` as the only required
   variable.
 - **Client.** `client.py:ConfidentialClient` assumes an OpenAI-compatible API, and passes the
   placeholder key `"tinfoil"` to the OpenAI client when Hermes supplies none.

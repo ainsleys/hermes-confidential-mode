@@ -15,12 +15,12 @@ enforces the claim, the tests that prove the claim, and the section of
 
 ## UNTRACED
 
-These claims, or parts of claims, have no code or test in this repository that establishes them as
+These claims, or parts of claims, have no code or test in this repository that establishes those claims as
 worded.
 
 1. **H1, Hermes' own Tinfoil or NEAR connection.** Hermes 84a0301 has no Tinfoil or NEAR provider
    (no file in its source names either vendor), so reaching either vendor is an ordinary
-   OpenAI-compatible `base_url`. The statement is read from Hermes' source; no test here asserts it.
+   OpenAI-compatible `base_url`. The statement is read from Hermes' source; no test here asserts the statement.
 2. **L1, the model half: "those are open-weight models such as the Qwen, DeepSeek, Llama and gpt-oss
    families, so a hosted frontier model cannot be in the tier".** The README states this as a fact
    about the two vendors' catalogues. The code admits a provider, not a model family:
@@ -88,7 +88,7 @@ file in the Hermes checkout.
 hardware report is checked, no build is pinned, the vendor's encrypted transport is not used, and no
 reply signature is verified.** UNTRACED (see above).
 
-**H2. Hermes makes more model calls than the one the user sees, for titles, compression, images and
+**H2. Hermes makes more model calls than the call the user sees, for titles, compression, images and
 more.**
 - Code: Hermes `agent/auxiliary_client.py`; the plugin lists the tasks with
   `preflight.py:builtin_aux_task_names` and `preflight.py:plugin_aux_task_names`.
@@ -97,7 +97,7 @@ more.**
 - Bound: [1](LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution).
 
 **H3. Side calls follow the main provider, but an image sent while the vision route is on `auto` may
-go to OpenRouter or Nous when the user holds a key for them.**
+go to OpenRouter or Nous when the user holds a key for either service.**
 - Code: Hermes `agent/auxiliary_client.py:_vision_auto_route` and `_get_provider_chain`; the plugin
   reports the case with `preflight.py:auto_chain_readable` and `preflight.py:AUTO_CHAIN_KEYS`.
 - Tests: `tests/hostile/test_preflight_hostile.py::test_vision_auto_or_implicit_is_flagged_even_with_on_host_main`,
