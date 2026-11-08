@@ -1328,15 +1328,13 @@ GitHub compose fetches).
 
 - [INTERFACES.md](INTERFACES.md) is the developer contract: package layout, shared types, each
   module's contract with Hermes, and the change record.
-- [dev/C0-spikes.md](dev/C0-spikes.md) records the Hermes behaviour the `tests/spikes/` checks
-  established before the plugin was built.
 - [RUNNING_TESTS.md](RUNNING_TESTS.md) gives the test command, the PyNaCl setup, the live NEAR tests and
   the real captures.
 - `tests/` is laid out by kind: `unit/` (pure logic, no Hermes import), `seam/` (real Hermes modules
   at commit 84a0301, with fakes only for the SDK, the network and the person answering prompts),
   `hostile/` (adversarial cases against each module's contract), `fault/` (injected filesystem,
   process, vendor, Hermes and crypto failures), `scenario/` (an end-to-end demo), `live/` (real NEAR
-  calls, skipped unless `NEAR_AI_API_KEY` is set), `spikes/` (checks of the Hermes behaviour the plugin
-  depends on), and `fixtures/` (real vendor captures and test vectors).
+  calls, skipped unless `NEAR_AI_API_KEY` is set), and `fixtures/` (real vendor captures and test
+  vectors).
 - `hermes plugins validate --install-deps <plugin dir>` and `hermes plugins doctor --ci <plugin dir>`
   check the plugin against the catalog rules.

@@ -1,7 +1,7 @@
 """T4 hostile tests for the W4 locked-mode tool gate (confidential_mode.gate_tools).
 
 Labels used below: the project ran in workstreams. W4 built the tool gate; T4 is the tester who attacked
-it; C0 is the compatibility spike phase (docs/dev/C0-spikes.md); C1 is the interface freeze
+it; C0 was the compatibility-check phase; C1 is the interface freeze
 (docs/INTERFACES.md) that the tests were written against.
 
 Written BEFORE the implementation, against the C1 contract in docs/INTERFACES.md ("W4"). Every
@@ -9,7 +9,7 @@ attack goes through the real Hermes seams at 84a0301 wherever one exists:
   * model_tools.handle_function_call -> _pre_dispatch_guards -> _dispatch_pre_tool_call_hooks ->
     the real PluginManager.invoke_hook (worker thread, hook_callback_timeout, fail-closed policy) ->
     _resolve_block_from_details -> tools.approval.request_tool_approval (CLI callback seat), the
-    path the C0 spike test_approval_gate.py::test_g proved;
+    path a CLI approval takes;
   * for delegate_task (an agent-loop tool, model_tools._AGENT_LOOP_TOOLS: handle_function_call
     refuses it before any hook) the agent loop's own seam, hermes_cli.plugins._dispatch_pre_tool_call_hooks.
 Only the human (the CLI approval callback) and the W1 ledger/state (not merged yet) are faked.

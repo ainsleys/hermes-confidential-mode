@@ -7,7 +7,7 @@ need none of it: the [README](../README.md) states what the plugin claims, and t
 [guide](GUIDE.md) describes how it behaves. Names such as W1 to W14, T1 to T4 and C0 to C2 are the
 work packages that owned each part when the contract was written.
 
-Hermes is pinned at 84a0301. Facts marked (C0) are asserted by tests in tests/spikes and recorded in [dev/C0-spikes.md](dev/C0-spikes.md).
+Hermes is pinned at 84a0301. Facts marked (C0) were established against that commit before the plugin was built.
 
 ## Package layout and ownership
 
@@ -30,7 +30,6 @@ Hermes is pinned at 84a0301. Facts marked (C0) are asserted by tests in tests/sp
     tests/
       unit/                     pure logic, no Hermes import
       seam/                     real Hermes modules, fakes only at SDK/network/human boundaries
-      spikes/                   C0, read-only from here
 
 Each workstream owns its files and tests only. Shared types live in tiers.py and verify/base.py and are frozen below; a workstream that needs a change asks rather than edits.
 
@@ -95,13 +94,13 @@ State (ctx.state, per profile): locked (bool), locked_tier (str), locked_since (
 - Reads context: provider, base_url, model, api_mode, session_id, request. Builds Destination(purpose="main" or "fallback" when agent fallback index > 0 if available, else "main").
 - If not locked: call next_call unchanged, but ledger send_observed with host and byte size of the serialised request (watch view works unlocked).
 - If locked: classify via the active TierPredicate. Off-tier -> ledger send_refused, return refusal (never call next_call). In-tier -> wrap next_call in try/except Exception: unwrap `getattr(exc, "original", exc)`; if InterruptedError re-raise; else ledger and return refusal "attested endpoint unavailable; this turn ended; resend". Never let fallback arm.
-- Refusal builders per api_mode exactly as in docs/dev/C0-spikes.md (`tests/spikes/test_refusal_shape.py`) (ChatCompletion / Response / anthropic-shaped / bedrock dict). finish_reason "stop", stop_reason "end_turn", status "completed". Never a dict, never content_filter/length/refusal. Unknown api_mode -> chat_completions shape and a ledger note.
+- Refusal builders per api_mode (ChatCompletion / Response / anthropic-shaped / bedrock dict). finish_reason "stop", stop_reason "end_turn", status "completed". Never a dict, never content_filter/length/refusal. Unknown api_mode -> chat_completions shape and a ledger note.
 - Attested tier: before next_call, ask W2 `attested_ok(provider)`; W2 handles TTL. On mismatch, W2 stages pending_pin; W1 refuses with "enclave build changed; run /confidential pins approve".
-- Tests: one allow test and a mutant twin per branch; assert on a recording transport that the provider received zero requests on refusal; a test that the verifier raising never reaches the provider; a 429/500 test proving `_try_activate_fallback` is never called (reuse the C0 harness in tests/spikes/test_refusal_shape.py).
+- Tests: one allow test and a mutant twin per branch; assert on a recording transport that the provider received zero requests on refusal; a test that the verifier raising never reaches the provider; a 429/500 test proving `_try_activate_fallback` is never called (on the harness in tests/seam/_harness.py).
 
 ### W2 verify/, client.py, provider.py, pins.py
 - Adapter builds `SecureClient(enclave=<host from atc or config>, user_cache_secret=<from plugin data dir, never ~/.tinfoil>)` once per profile; `verify()` via the SDK default path (never pinned-measurement mode); extracts fingerprints from get_verification_document or equivalent; VerifyError on anything.
-- ConfidentialClient per docs/dev/C0-spikes.md follow-up (`tests/spikes/test_create_client_async.py`): HERMES_SKIP_TRANSPORT_WRAP = HERMES_SKIP_ASYNC_WRAP = True; sync OpenAI on a non-closing view; AsyncOpenAI per running loop; chat.completions.create dispatches by caller coroutine check; __getattr__ delegates to the sync client; close() closes only the view.
+- ConfidentialClient: HERMES_SKIP_TRANSPORT_WRAP = HERMES_SKIP_ASYNC_WRAP = True; sync OpenAI on a non-closing view; AsyncOpenAI per running loop; chat.completions.create dispatches by caller coroutine check; __getattr__ delegates to the sync client; close() closes only the view.
 - RefusingClient: same surface; every create raises ConfidentialRefused(reason). Returned by create_client when verification is not fresh and cannot be refreshed. create_client NEVER raises and NEVER returns None (fail-open otherwise).
 - provider.py: `ProviderProfile(name="attested-tinfoil", base_url=<enclave host URL>, env_vars=("TINFOIL_API_KEY",), auth_type="api_key")` with create_client(**kw) -> ConfidentialClient | RefusingClient; registered from register(ctx) via providers.register_provider. Cache verification; TTL default 300 s (`confidential.verify_ttl_seconds`).
 - Dependency: pyproject `tinfoil==0.14.2` exact. No network in unit tests; seam tests stub SecureClient.verify and use httpx.MockTransport recorders.
@@ -115,7 +114,7 @@ State (ctx.state, per profile): locked (bool), locked_tier (str), locked_since (
 ### W4 gate_tools.py, consent.py
 - Allowlist built at lock from tools.registry: on-host set = {terminal, process_manage, execute_code, read_file, write_file, patch, search_files, skills_list, skill_view, skill_manage, todo_list, memory, clarify, session_search}; everything else is off-host. Print the computed lists on lock.
 - pre_tool_call(tool_name, args, task_id, session_id, ...): unlocked -> None (observe only, ledger nothing). Locked: on-host -> None; cronjob_manage -> block; delegate_task -> allow only if route is default backend and no profile/acp fields, else block; MCP tool from a URL server -> block; other off-host tool -> if yolo/bypass active (tools.approval._yolo_active() or approvals.mode off) -> block, else return {"action": "approve", "message": f"{tool_name} wants to send ~{n} KB of this conversation off the machine"} with n from len(json.dumps(args)); ledger tool_asked and, from post_approval_response, tool_allowed/tool_refused.
-- consent.py: `approve_pending_pin(ctx, store, ledger, *, session_key, session_id, platform)` using ctx.ask_choice exactly as in docs/dev/C0-spikes.md (`tests/spikes/test_ask_choice.py`); sync only; None -> deny; re-check pending equality before apply; ledger pin_applied/pin_denied with raw_pick. `allow_tool(ctx, name)` same primitive for allowlist additions.
+- consent.py: `approve_pending_pin(ctx, store, ledger, *, session_key, session_id, platform)` using ctx.ask_choice; sync only; None -> deny; re-check pending equality before apply; ledger pin_applied/pin_denied with raw_pick. `allow_tool(ctx, name)` same primitive for allowlist additions.
 - Tests: registry-driven allowlist from a fake registry; bypass-state -> block not approve; ask_choice returning None -> deny and no apply; pending swapped during wait -> not applied.
 
 ## Decisions carried from C0

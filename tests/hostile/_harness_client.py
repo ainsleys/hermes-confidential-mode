@@ -579,7 +579,7 @@ _SCRUB_ENV = (
 
 @pytest.fixture
 def hermes(tmp_path, monkeypatch):
-    """Fresh HERMES_HOME + isolated provider/auth/plugin/aux-cache state (as tests/spikes do). Returns a
+    """Fresh HERMES_HOME + isolated provider/auth/plugin/aux-cache state. Returns a
     register(profile) function that installs the W2 profile into Hermes' provider registry."""
     import hermes_cli.auth as _auth
     import hermes_cli.plugins as _plugins

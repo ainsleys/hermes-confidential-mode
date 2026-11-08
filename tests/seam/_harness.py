@@ -1,6 +1,6 @@
 """Shared seam harness: one real ``AIAgent.run_conversation`` turn through a real PluginManager.
 
-Copied from the C0 spike (tests/spikes/test_refusal_shape.py, Hermes 84a0301). Only the terminal
+Written against Hermes 84a0301. Only the terminal
 provider call (``agent._interruptible_api_call`` / ``_interruptible_streaming_api_call``) and the
 backoff delays are replaced; everything between ``perform_api_call`` and ``finish_text_response``
 is real Hermes code. The recording terminal is the "recording transport": an empty

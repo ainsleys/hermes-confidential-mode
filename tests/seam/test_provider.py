@@ -1,6 +1,6 @@
 """Seam tests: the real 'attested-tinfoil' profile inside the pinned Hermes checkout (84a0301).
 
-Reuses the C0 harness (tests/spikes/test_create_client*.py): fresh HERMES_HOME, provider/auth/plugin/aux
+The harness: fresh HERMES_HOME, provider/auth/plugin/aux
 registries snapshotted, and Hermes' own keepalive httpx builder patched to a recording transport
 labelled "hermes-default-*" so any request that lost the attested transport is visible. Fakes only
 at the SDK boundary: SecureClient.verify and the SDK http-client builders are recorders (no network).

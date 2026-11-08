@@ -1,7 +1,7 @@
 """Seam tests for confidential_mode.consent on the REAL gateway ask_choice path: a plugin slash
 command sent through GatewayRunner._handle_message with no agent turn running, the prompt rendered
 by the base adapter's send_clarify, the user's reply injected through the adapter's real
-handle_message (same harness as tests/spikes/test_ask_choice.py). Fakes: the PinStore and the
+handle_message. Fakes: the PinStore and the
 ledger (W2/W1 own the real ones) and the text platform adapter's transport."""
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def hermes(monkeypatch):
         cfg.unlink(missing_ok=True)
 
 
-# ---- the gateway harness (tests/spikes/test_ask_choice.py) --------------------------------------
+# ---- the gateway harness --------------------------------------------------------------------------
 
 def _text_adapter_cls():
     from gateway.config import Platform, PlatformConfig

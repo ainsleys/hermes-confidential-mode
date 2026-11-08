@@ -2,7 +2,7 @@
 
 Register with ``ctx.register_middleware("llm_execution", build_middleware(...))``.
 
-Proven constraints (docs/dev/C0-spikes.md, tests/spikes/test_refusal_shape.py):
+Constraints Hermes 84a0301 places on the gate (tests/seam/test_gate_llm.py runs each through a real turn):
 - An exception escaping a middleware is FAIL-OPEN: Hermes skips the frame and calls the
   provider itself (hermes_cli/middleware.py ``_run_execution_chain``). So nothing the gate
   itself raises may escape; every internal failure becomes a refusal.
@@ -57,7 +57,7 @@ def attested_fail_text(reason: str) -> str:
 
 
 # ---------------------------------------------------------------------------------------------
-# Refusal builders, one per api_mode (shapes proven in tests/spikes/test_refusal_shape.py)
+# Refusal builders, one per api_mode (tests/seam/test_gate_llm.py::test_refusal_shapes_are_never_forbidden)
 # ---------------------------------------------------------------------------------------------
 
 

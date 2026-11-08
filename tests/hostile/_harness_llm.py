@@ -4,8 +4,7 @@ Every test drives a REAL ``AIAgent.run_conversation`` turn on the pinned Hermes 
 (84a0301) through a real ``PluginManager`` / ``PluginContext.register_middleware``. Only the
 terminal provider seam (``agent._interruptible_api_call`` / ``_interruptible_streaming_api_call``,
 or, for the request-scoped client path, ``agent._create_openai_client`` backed by an
-``httpx.MockTransport``) and the backoff sleeps are replaced. This is the C0 harness from
-tests/spikes/test_refusal_shape.py, extended to record WHERE each provider call was going
+``httpx.MockTransport``) and the backoff sleeps are replaced. The harness records WHERE each provider call was going
 (agent.provider / agent.base_url at call time) so a send to a fallback host is visible.
 
 The gate is built through the public W1 name only:

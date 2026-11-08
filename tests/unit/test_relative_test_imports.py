@@ -28,6 +28,6 @@ def _absolute_test_imports(tree: ast.AST) -> list[int]:
 
 def test_no_test_module_imports_tests_absolutely():
     offenders = [f"{p.relative_to(TESTS)}:{line}"
-                 for p in sorted(TESTS.rglob("*.py")) if "spikes" not in p.parts and "__pycache__" not in p.parts
+                 for p in sorted(TESTS.rglob("*.py")) if "__pycache__" not in p.parts
                  for line in _absolute_test_imports(ast.parse(p.read_text(encoding="utf-8")))]
     assert offenders == [], "import test modules relatively (from ..near_world import ...)"

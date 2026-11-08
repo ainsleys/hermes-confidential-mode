@@ -1,19 +1,20 @@
 """Human consent outside a turn (W4), on ``ctx.ask_choice`` only.
 
-Why ask_choice and not ``tools.approval.request_tool_approval`` (docs/dev/C0-spikes.md, spike 3):
+Why ask_choice and not ``tools.approval.request_tool_approval`` (Hermes 84a0301):
 request_tool_approval asks nobody from a slash command (no turn -> no gateway notifier -> it returns
 ``approval_required`` at once) and auto-approves under every bypass state (yolo, approvals.mode off,
 remembered grants, cron/unattended approve modes). ``ctx.ask_choice`` blocks on the surface with no
 turn running, never auto-picks, and returns None on no surface / timeout / cancel / prose /
-out-of-range (tests/spikes/test_ask_choice.py). It fires no approval hooks, so we ledger here.
+out-of-range (tests/seam/test_consent.py drives it through the real gateway). It fires no approval hooks, so
+we ledger here.
 
 Both entry points are SYNC and refuse to run on an event loop. Reason: ask_choice waits for the
 user's reply, which the gateway delivers on its event loop; waiting on that loop would deadlock it,
 so Hermes' ask_choice returns None with only a warning when called from a coroutine
-(hermes_cli/plugin_choices.py; tests/spikes/test_ask_choice.py::test_a). A None there would look
+(hermes_cli/plugin_choices.py). A None there would look
 exactly like the user saying no. We raise ``ConsentContextError`` instead so the mistake is loud
 and is never ledgered as a human denial. Register the slash-command handler as a plain ``def``;
-the gateway runs it on an executor thread (tests/spikes/test_ask_choice.py::test_b_e).
+the gateway runs it on an executor thread (tests/seam/test_consent.py sends the command that way).
 
 Interfaces used (duck-typed, W1/W2 own the real ones):
   ledger.append(event: dict)

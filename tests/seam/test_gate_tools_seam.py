@@ -7,7 +7,7 @@
   _dispatch_authorized_once (:677-736) do.
 
 Substituted only at the human boundary: the CLI approval callback seat
-(terminal_tool.set_approval_callback), as tests/spikes/test_approval_gate.py::test_g does."""
+(terminal_tool.set_approval_callback)."""
 from __future__ import annotations
 
 import json

@@ -131,7 +131,7 @@ jobs:
           uv pip install --python venv/bin/python pytest==9.1.1 pytest-asyncio==1.4.0
           venv/bin/python -c "import cryptography.x509, nacl, sigstore, tinfoil, hermes_cli; print('imports ok')"
 
-      - name: Run the suite (tests/spikes and tests/live excluded)
+      - name: Run the suite (tests/live excluded)
         working-directory: hermes-agent
         run: |
           export HERMES_HOME="$(mktemp -d)"
@@ -139,7 +139,7 @@ jobs:
           unset TINFOIL_API_KEY NEAR_AI_API_KEY OPENROUTER_API_KEY NOUS_API_KEY
           PLUGIN="$GITHUB_WORKSPACE/hermes-confidential-mode"
           "$GITHUB_WORKSPACE/venv/bin/python" -m pytest "$PLUGIN/tests" \
-            --ignore="$PLUGIN/tests/spikes" --ignore="$PLUGIN/tests/live" \
+            --ignore="$PLUGIN/tests/live" \
             -q -p no:cacheprovider
 
   validate:

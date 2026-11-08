@@ -25,7 +25,7 @@ Hermes facts this module relies on (pinned checkout 84a0301):
 * The approval gate auto-approves WITHOUT asking anybody under: yolo (``_yolo_active``: --yolo,
   session /yolo, ``hermes -z`` unattended turns), ``approvals.mode: off``, and cron /
   unattended-platform / single-query contexts whose mode is ``approve`` (tools/approval.py:1071-1113).
-  Locked mode BLOCKS in those instead of returning the approve directive (docs/dev/C0-spikes.md, spike 3).
+  Locked mode BLOCKS in those instead of returning the approve directive.
   A remembered once/session/always grant on OUR rule key is a human's answer to our own prompt and is
   honoured (INTERFACES.md Amendment 2): ledgered as tool_allowed, decision "remembered".
 """
@@ -723,7 +723,7 @@ def hermes_remembered_grant(tool_name: str, rule_key: str | None = None) -> bool
     """True when Hermes holds a session/always grant for our rule key (``rule_key``, default the key before any
     revoke) in this session.
     The plugin_rule: prefix trap: the grant is stored under the PREFIXED key; is_approved(sk, rule_key)
-    without it is always False (tests/spikes/test_approval_gate.py:384). Any error -> False (ask)."""
+    without it is always False (tools/approval.py, approve_session). Any error -> False (ask)."""
     try:
         from . import hermes_compat
         key = rule_key if rule_key is not None else rule_key_for(tool_name)

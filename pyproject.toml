@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-    # Exact: 0.15.0 requires openai>=3.26 and Hermes pins openai 2.54.0 (docs/dev/C0-spikes.md, spike 2).
+    # Exact: 0.15.0 requires openai>=3.26 and Hermes pins openai 2.54.0.
     "tinfoil==0.14.2",
     # Provided by Hermes' own environment (httpx 0.28.1; hermes_yaml stands in for PyYAML there). Bounded
     # because the NEAR adapter reads httpx internals (httpx._decoders, Response._content).
@@ -39,7 +39,6 @@ testpaths = ["tests"]
 # The code is written to about 115 columns; 120 is the nearest limit that leaves it as it is.
 line-length = 120
 target-version = "py311"
-extend-exclude = ["tests/spikes"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

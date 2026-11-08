@@ -1,8 +1,7 @@
 """Hostile tests for W2's attested client and provider profile (confidential_mode.client / .provider).
 
-Written before the implementation, against docs/INTERFACES.md (W2) and docs/dev/C0-spikes.md (spike 2 and
-its follow-up). Every test asserts on the recording transports in _harness_client: which transport each
-request used ("secure-sync", "secure-async", "hermes-default-*", network), and how often the adapter
+Written before the implementation, against docs/INTERFACES.md (W2). Every test asserts on the recording
+transports in _harness_client: which transport each request used ("secure-sync", "secure-async", "hermes-default-*", network), and how often the adapter
 attested. Policy decisions this suite makes where the contract is silent are marked DECISION.
 """
 from __future__ import annotations

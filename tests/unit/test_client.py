@@ -1,7 +1,7 @@
 """ConfidentialClient / RefusingClient and the Tinfoil adapter's pool model, with no Hermes and no network.
 
 The SDK is never allowed to reach the network: SecureClient.verify and the http-client builders are
-replaced by recorders, exactly as the C0 spikes did.
+replaced by recorders.
 """
 from __future__ import annotations
 
