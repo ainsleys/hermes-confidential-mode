@@ -307,6 +307,8 @@ except where noted.
 - [docs/CLAIMS.md](docs/CLAIMS.md): where each claim is enforced and tested.
 - [docs/ADDING_A_VENDOR.md](docs/ADDING_A_VENDOR.md): what a new attested vendor's adapter must provide.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): every module, what it imports, and the data files.
+- [docs/INTERFACES.md](docs/INTERFACES.md): the developer contract: shared types, each module's rules,
+  and the file and row formats.
 - [SECURITY.md](SECURITY.md): how to report a vulnerability, and the threat model in brief.
 
 ## Prior work

@@ -8,8 +8,10 @@ or NEAR is named outside the adapters, so a third vendor also needs edits there.
 
 Paths are relative to `confidential_mode/` unless the path starts with `tests/` or `docs/` or names a file at
 the repository root (`__init__.py`, `plugin.yaml`, `pyproject.toml`, `catalog/`).
-[INTERFACES.md](INTERFACES.md) is the developer contract. Its Amendments 5, 5.1, 5.2, 7 and 9 hold the
-contract entries for the NEAR adapter, the nearest model for a third adapter's contract.
+[INTERFACES.md](INTERFACES.md) is the developer contract. Its sections
+[Vendor adapter interface](INTERFACES.md#vendor-adapter-interface), [NEAR adapter](INTERFACES.md#near-adapter)
+and [Pins file](INTERFACES.md#pins-file) hold the contract for the NEAR adapter, the nearest model for a
+third adapter's contract.
 [ARCHITECTURE.md](ARCHITECTURE.md) describes every module named below, what it imports, and the data files.
 The NEAR adapter spans `verify/near.py` (`NearAdapter`) and its siblings: `verify/near_evidence.py` (the
 evidence document), `verify/near_appraise.py` (the appraisal), `verify/near_send.py` (the send views),

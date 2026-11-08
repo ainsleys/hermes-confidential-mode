@@ -1,6 +1,6 @@
 """Every plugin code and test reference in the developer documents resolves to a definition.
 
-docs/CLAIMS.md, docs/ADDING_A_VENDOR.md, docs/ARCHITECTURE.md and SECURITY.md cite code as
+docs/CLAIMS.md, docs/ADDING_A_VENDOR.md, docs/ARCHITECTURE.md, docs/INTERFACES.md and SECURITY.md cite code as
 ``file:name`` (``file:Class.member``) and tests as ``file::test_name``. A path is from the repository root
 when it starts with ``tests/`` or ``scripts/`` or is ``__init__.py``; every other path is under
 ``confidential_mode/``. The name must be defined in the cited file, not only imported there. A bare
@@ -16,7 +16,7 @@ from functools import cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DOCS = ("docs/CLAIMS.md", "docs/ADDING_A_VENDOR.md", "docs/ARCHITECTURE.md", "SECURITY.md")
+DOCS = ("docs/CLAIMS.md", "docs/ADDING_A_VENDOR.md", "docs/ARCHITECTURE.md", "docs/INTERFACES.md", "SECURITY.md")
 
 SPAN = re.compile(r"`([^`]+)`", re.S)
 CODE_REF = re.compile(r"^(?P<path>[\w./]+\.py):(?P<name>[A-Za-z_][\w.]*)")
