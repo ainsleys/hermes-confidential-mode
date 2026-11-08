@@ -1,9 +1,9 @@
 """Offline replay of NEAR AI Cloud evidence (schemas confidential-mode/near-evidence/v1 and v2; v1 under v1
-rules) and of the signed responses a receipt records. No network: the TDX quotes are re-verified with tinfoil
-0.14.2's verifier
-against the Intel SGX Root CA it embeds, the Intel Trust Authority JWTs against the captured JWKS whose
-x5c chains must end at a root pinned in near_checks.ITA_ROOT_SHA256, and each response signature against
-the signing key the replayed evidence binds, over the payload rebuilt from the digests in the row.
+rules) and of the signed responses a receipt records. No network: the TDX quotes are re-verified with
+tinfoil 0.14.2's verifier against the Intel SGX Root CA it embeds, the Intel Trust Authority JWTs against
+the captured JWKS whose x5c chains must end at a root pinned in near_checks.ITA_ROOT_SHA256, and each
+response signature against the signing key the replayed evidence binds, over the payload rebuilt from the
+digests in the row.
 
 ``replay(evidence)`` mirrors verify/replay.py's ReplayResult fields so ``hermes confidential replay``
 prints both vendors the same way. ``replay_signed_send(detail, evidence)`` judges one ``send_signed``
@@ -12,9 +12,8 @@ but the receipt.
 
 v2 evidence keeps its large strings (each app_compose, each compose_manager_attestation, each TDX quote
 and each Intel Trust Authority token) as blobs by SHA-256. A ledger row holds only ``blob_refs``; a JSON
-receipt carries the texts beside the evidence
-(``blobs``), and ``with_blobs`` joins them for replay. A blob that is missing or does not hash to its id
-fails the check that needs it.
+receipt carries the texts beside the evidence (``blobs``), and ``with_blobs`` joins them for replay. A
+blob that is missing or does not hash to its id fails the check that needs it.
 
 What a replay can NOT establish is in ``NOT_ESTABLISHED`` (returned with every result; v1 evidence gets
 ``NOT_ESTABLISHED_V1``).

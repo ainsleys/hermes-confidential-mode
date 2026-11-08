@@ -1328,6 +1328,7 @@ GitHub compose fetches).
 
 - [INTERFACES.md](INTERFACES.md) is the developer contract: package layout, shared types, each
   module's contract with Hermes, and the change record.
+- [ARCHITECTURE.md](ARCHITECTURE.md) describes each module, what it imports, and the data files.
 - [RUNNING_TESTS.md](RUNNING_TESTS.md) gives the test command, the PyNaCl setup, the live NEAR tests and
   the real captures.
 - `tests/` is laid out by kind: `unit/` (pure logic, no Hermes import), `seam/` (real Hermes modules

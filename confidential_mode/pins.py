@@ -28,8 +28,8 @@ instance_ids_seen, approved_by, approved_at, approved_via, approval_rule_key, re
 Match rule: a result matches when every CVM it reports has an approved entry with equal fingerprints.
 A Tinfoil record migrated from version 2 matches exactly as before. A NEAR record migrated from version 2
 matches nothing, so NEAR asks once after the upgrade; approving the new entries removes it. Before the first
-version-3 save of a version-2 file, pins.yaml.v2.bak is
-written. A version-3 file is never written back as version 2; any other version matches nothing.
+version-3 save of a version-2 file, pins.yaml.v2.bak is written. A version-3 file is never written back
+as version 2; any other version matches nothing.
 
 Only consent.py (a person's answer) and provider._auto_apply (Tinfoil, replace only) call apply().
 Writes are atomic (temp file in the same directory, fsync, os.replace) and serialised across processes

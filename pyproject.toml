@@ -59,6 +59,9 @@ ignore = [
     # Fault and hostile tests assert that a step refuses or fails, not which exception class it raises.
     "B017",
 ]
+# One import statement per private Hermes name, so each is one site in `hermes plugins validate`
+# (INTERFACES Amendment 15).
+"confidential_mode/hermes_compat.py" = ["I001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["confidential_mode"]

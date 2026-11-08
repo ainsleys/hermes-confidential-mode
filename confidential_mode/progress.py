@@ -8,8 +8,7 @@ step runs is Hermes' own work; the plugin cannot report on it (README, Install).
 The lines are written only to a terminal (stderr is a TTY), and only on the first start of each installed
 commit, so an ordinary start stays quiet. ``CONFIDENTIAL_MODE_PROGRESS=1`` shows them on every start, with or
 without a terminal, and ``CONFIDENTIAL_MODE_PROGRESS=0`` never. No line carries a secret: phase names and
-counts only. Nothing here
-raises.
+counts only. Nothing here raises.
 """
 from __future__ import annotations
 

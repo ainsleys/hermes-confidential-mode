@@ -218,8 +218,8 @@ check and the tool's own start, if the backend changed in that instant. The next
 blocked, because the cached environment is no longer local. Only that one call runs on the other
 backend.
 
-A three-mode rule is reserved in the code but not shipped (`gate_tools.MODE_TOOLS`). The three modes
-would be: ask on commands that look like network access, allow all, or block.
+A three-mode rule is reserved in the code but not shipped (`gate_tools_classify.MODE_TOOLS`). The three
+modes would be: ask on commands that look like network access, allow all, or block.
 
 **The core change that would close it.** A network policy on the terminal backend that a plugin can
 read and require. One example is the docker backend with networking off, exposed through

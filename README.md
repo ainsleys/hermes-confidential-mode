@@ -302,6 +302,7 @@ except where noted.
 - [docs/DISCLOSURE.md](docs/DISCLOSURE.md): what the plugin touches on your machine and the network.
 - [docs/CLAIMS.md](docs/CLAIMS.md): where each claim is enforced and tested.
 - [docs/ADDING_A_VENDOR.md](docs/ADDING_A_VENDOR.md): what a new attested vendor's adapter must provide.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): every module, what it imports, and the data files.
 - [SECURITY.md](SECURITY.md): how to report a vulnerability, and the threat model in brief.
 
 ## Prior work

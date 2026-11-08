@@ -16,11 +16,10 @@ under: every revoke appends a record to ``grants_revoked.json``, and from then o
 ``confidential-mode:tool@<generation>:<tool>``, where the generation names the latest record covering the
 tool. A session or always answer Hermes holds for the older key then matches nothing the plugin asks for.
 A command_allowlist entry under any other key is the user's or another plugin's, and is left alone. The key
-prefix is a convention, not something Hermes
-enforces: Hermes forms the key from the rule_key a caller chooses, so another plugin could write an entry
-under this prefix, and revoke would remove that entry too (which only narrows). Revoking narrows and never
-widens, so it asks nobody
-and runs under the self-approval marker.
+prefix is a convention, not something Hermes enforces: Hermes forms the key from the rule_key a caller
+chooses, so another plugin could write an entry under this prefix, and revoke would remove that entry too
+(which only narrows). Revoking narrows and never widens, so it asks nobody and runs under the
+self-approval marker.
 
 How a running gateway sees a revoke made in another process (the ``hermes confidential`` CLI): the
 gateway re-reads allowlist.yaml on its next tool call when the file changes, and Hermes re-syncs

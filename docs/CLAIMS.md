@@ -32,7 +32,7 @@ worded.
 **T1. The plugin verifies the enclave.**
 - Code: `verify/tinfoil.py:TinfoilAdapter.prepare_verification`, `TinfoilAdapter._result_from_document`
   (the SDK document must be `security_verified`, with every required step, repository and host);
-  `verify/near.py:NearAdapter.prepare_verification`, `verify/near.py:appraise`;
+  `verify/near.py:NearAdapter.prepare_verification`, `verify/near_appraise.py:appraise`;
   `verify/near_checks.py:check_report`, `verify_jwt`, `check_compose_manager`;
   `provider.py:VerificationCache.refresh`.
 - Tests: `tests/unit/test_client.py::test_adapter_verify_raises_verify_error_on_anything`,
@@ -72,7 +72,7 @@ down.
   [14](LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open).
 
 **T5. The plugin writes a receipt anyone can replay.** R1 to R5 break this claim down.
-- Code: `receipts.py:build_receipt`; `commands.py:cli_replay`; `verify/replay.py:replay`;
+- Code: `receipts.py:build_receipt`; `commands_replay.py:cli_replay`; `verify/replay.py:replay`;
   `verify/replay_near.py:replay_receipt`.
 - Tests: `tests/unit/test_replay.py::test_evidence_replays_from_the_receipt_alone_on_another_machine`,
   `tests/seam/test_near_seam.py::test_cli_replay_checks_evidence_and_every_signed_response`.
@@ -110,7 +110,8 @@ go to OpenRouter or Nous when the user holds a key for either service.**
 - Bound: Smaller gaps: "A locked session has no fallback".
 
 **H5. Tools such as web search pass parts of what the user wrote on to outside sites.**
-- Code: Hermes `tools/`; the plugin classifies such tools as off-host with `gate_tools.py:classify_tool`.
+- Code: Hermes `tools/`; the plugin classifies such tools as off-host with
+  `gate_tools_classify.py:classify_tool`.
 - Tests: `tests/seam/test_register.py::test_locked_web_search_asks_and_runs_only_on_exact_once` (shows the
   plugin asking before `web_search` runs; no test here observes what the outside site receives).
 - Bound: [3](LIMITATIONS.md#3-shell-and-code-execution-tools-are-not-inspected).
@@ -199,7 +200,7 @@ mid-turn is recorded, not stopped.**
 
 **P7. On both vendors every inference connection is pinned, inside the TLS handshake and before any
 request byte, to the TLS key of the verified report the plugin accepted.**
-- Code: `verify/near.py:pinned_ssl_context` (checks the peer SPKI in `wrap_socket` and in the
+- Code: `verify/near_transport.py:pinned_ssl_context` (checks the peer SPKI in `wrap_socket` and in the
   `wrap_bio` handshake); `verify/near.py:NearAdapter.default_send_transport`, `NearAdapter.pinned_spki`;
   `verify/tinfoil.py:TinfoilAdapter.expected_tls_fp`, `TinfoilAdapter.pinned_context`,
   `TinfoilAdapter.pin_pool`, `TinfoilAdapter._pin_ehbp_builders`.
@@ -212,18 +213,20 @@ request byte, to the TLS key of the verified report the plugin accepted.**
 
 **P8. A connection with another certificate is refused, recorded, and triggers a re-verification.**
 - Code: `verify/tinfoil.py:TinfoilAdapter._pin_failure` (`verify_fail` row, purpose `tls_pin`) and
-  `TinfoilAdapter.mark_stale`; `verify/near.py:_send_failed` (`send_signed` row "TLS pin mismatch,
-  nothing sent", then a `send_refused` row) and `NearAdapter.mark_stale`; both bounded by
-  `reverify_backoff_seconds`; `provider.py:VerificationCache._wire_adapter_sink` (`on_stale` invalidates).
+  `TinfoilAdapter.mark_stale`; `verify/near_exchange.py:_send_failed` (`send_signed` row "TLS pin
+  mismatch, nothing sent", then a `send_refused` row) and `verify/near.py:NearAdapter.mark_stale`; both
+  bounded by `reverify_backoff_seconds`; `provider.py:VerificationCache._wire_adapter_sink` (`on_stale`
+  invalidates).
 - Tests: `tests/hostile/test_tinfoil_tls_pin_hostile.py::test_a_mismatch_through_the_view_is_ledgered_held_and_re_verified_once`,
   `tests/hostile/test_tinfoil_tls_pin_hostile.py::test_the_verification_cache_wires_the_re_verify`,
   `tests/hostile/test_near_e2ee_hostile.py::test_tls_pin_mismatch_on_send_gets_a_row_drops_pools_and_reverifies`.
 - Bound: [9](LIMITATIONS.md#9-what-the-network-still-sees-and-what-the-receipt-leaks).
 
 **P9. The attestation fetch is not pinned; the attestation the fetch returns is checked by the attestation's signatures.**
-- Code: `verify/near.py:NearAdapter._attest_pool` (unpinned) and `verify/near.py:appraise` (the
+- Code: `verify/near.py:NearAdapter._attest_pool` (unpinned) and `verify/near_appraise.py:appraise` (the
   certificate seen must carry the SPKI the gateway quote binds); Tinfoil: the SDK's own checks,
-  required by `TinfoilAdapter._result_from_document`, and the TLS probe `TinfoilAdapter._probe_tls`.
+  required by `verify/tinfoil.py:TinfoilAdapter._result_from_document`, and the TLS probe
+  `TinfoilAdapter._probe_tls`.
 - Tests: `tests/unit/test_near.py::test_tls_certificate_other_than_the_bound_one_fails`,
   `tests/unit/test_replay.py::test_tampered_tls_cert_binding_fails_replay`,
   `tests/hostile/test_tinfoil_tls_pin_hostile.py::test_a_probe_mismatch_fails_the_verification_with_a_tls_pin_row`.
@@ -243,7 +246,7 @@ before the text leaves the machine.**
 every reply is signed by that key.**
 - Code: `verify/near_e2ee.py:encrypt_request` (`_message`, `_tools`, `_tool_calls`, `_tool_choice`),
   `verify/near_e2ee.py:decrypt_response`; `verify/near.py:NearAdapter._encrypt`,
-  `NearAdapter.finish_exchange`, `NearAdapter.fetch_signature`, `verify/near.py:_release_sealed`
+  `NearAdapter.finish_exchange`, `NearAdapter.fetch_signature`, `verify/near_exchange.py:_release_sealed`
   (a reply is released only when fully attested); `verify/near_checks.py:check_signature`.
 - Tests: `tests/unit/test_near_e2ee.py::test_every_request_field_in_nears_table_is_encrypted_and_round_trips`,
   `tests/hostile/test_near_e2ee_hostile.py::test_encrypted_round_trip_no_plaintext_on_the_wire_and_provider_tee_over_ciphertext`,
@@ -256,8 +259,8 @@ headers, sizes and timing, and a gateway that swapped the reply key would be cau
 - Code: `verify/near_e2ee.py:PLAINTEXT_KEYS`, `verify/near_e2ee.py:_image_part`;
   `verify/near.py:NearAdapter.finish_exchange` (records `plaintext_keys` and `plaintext_parts`);
   `provider.py:image_parts_from` (`disclose` or `refuse`); `__init__.py:_image_notice`;
-  `verify/near.py:_release_sealed` with `verify/near_e2ee.py:decrypt_response` (a reply sealed to
-  another client key does not decrypt and is withheld).
+  `verify/near_exchange.py:_release_sealed` with `verify/near_e2ee.py:decrypt_response` (a reply sealed
+  to another client key does not decrypt and is withheld).
 - Tests: `tests/unit/test_near_e2ee.py::test_every_top_level_key_that_leaves_in_plaintext_is_reported`,
   `tests/unit/test_near_e2ee.py::test_image_parts_are_disclosed_by_default_and_the_text_beside_them_is_sealed`,
   `tests/seam/test_near_seam.py::test_an_image_to_near_while_locked_is_disclosed_once_per_lock_and_the_reply_gets_one_line`,
@@ -266,9 +269,10 @@ headers, sizes and timing, and a gateway that swapped the reply key would be cau
 
 **P13. The plugin asks the user the first time each tool outside its 14-tool on-host list runs
 during a lock.**
-- Code: `gate_tools.py:ON_HOST_TOOLS`, `gate_tools.py:classify_tool`, `gate_tools.py:build_allowlist`,
-  `gate_tools.py:_Policy.decide`; `gate_tools.py:build_pre_tool_call` asks, and
-  `gate_tools.py:build_tool_execution` runs the tool only on an exact `once`, `session` or `always`.
+- Code: `gate_tools_classify.py:ON_HOST_TOOLS`, `gate_tools_classify.py:classify_tool`,
+  `gate_tools_allowlist.py:build_allowlist`, `gate_tools_policy.py:_Policy.decide`;
+  `gate_tools.py:build_pre_tool_call` asks, and `gate_tools.py:build_tool_execution` runs the tool only
+  on an exact `once`, `session` or `always`.
 - Tests: `tests/unit/test_gate_tools.py::test_on_host_set_is_exactly_the_contract`,
   `tests/unit/test_gate_tools.py::test_on_host_name_overridden_by_plugin_is_not_on_host`,
   `tests/seam/test_register.py::test_locked_web_search_asks_and_runs_only_on_exact_once`.
@@ -277,8 +281,8 @@ during a lock.**
 
 **P14. An allow lasts until unlock, in that conversation only; `confidential.tools.ask: each_call`
 asks on every call.**
-- Code: `gate_tools.py:LockGrants`, `gate_tools.py:grant_scope`, `gate_tools.py:_Policy.once_per_lock`,
-  `gate_tools.py:ask_mode_from`.
+- Code: `gate_tools_grants.py:LockGrants`, `gate_tools_grants.py:grant_scope`,
+  `gate_tools_policy.py:_Policy.once_per_lock`, `gate_tools_grants.py:ask_mode_from`.
 - Tests: `tests/seam/test_tool_ask_scope_seam.py::test_a_grant_covers_only_the_conversation_that_answered`,
   `tests/seam/test_tool_ask_scope_seam.py::test_the_grant_ends_with_the_lock`,
   `tests/seam/test_tool_ask_scope_seam.py::test_each_call_keeps_the_old_behaviour`.
@@ -286,8 +290,8 @@ asks on every call.**
   [15](LIMITATIONS.md#15-an-agent-with-a-terminal-can-reach-the-approval-prompt).
 
 **P15. When nobody can answer (yolo, approvals off, cron, one-shot runs), the tool is blocked.**
-- Code: `gate_tools.py:hermes_bypass_active`, `gate_tools.py:_Policy.decide` (`bypass_active`),
-  `gate_tools.py:bypass_text`.
+- Code: `gate_tools_hermes.py:hermes_bypass_active`, `gate_tools_policy.py:_Policy.decide`
+  (`bypass_active`), `gate_tools_hermes.py:bypass_text`.
 - Tests: `tests/seam/test_gate_tools_seam.py::test_under_yolo_the_same_tool_is_blocked_and_no_prompt_occurs`,
   `tests/seam/test_gate_tools_seam.py::test_unattended_approve_mode_blocks_where_hermes_would_auto_approve`,
   `tests/seam/test_tool_ask_scope_seam.py::test_a_lock_grant_never_applies_where_nobody_is_asked`,
@@ -295,8 +299,8 @@ asks on every call.**
 - Bound: Smaller gaps: "A timing window around yolo".
 
 **P16. Tool servers on off-tier remote hosts, scheduled jobs and routed delegation are blocked.**
-- Code: `gate_tools.py:_mcp_url_route`, `gate_tools.py:classify_tool` (routes `block-mcp-url`,
-  `block-cron`, `delegate`), `gate_tools.py:default_delegation_ok`.
+- Code: `gate_tools_classify.py:_mcp_url_route`, `gate_tools_classify.py:classify_tool` (routes
+  `block-mcp-url`, `block-cron`, `delegate`), `gate_tools_calls.py:default_delegation_ok`.
 - Tests: `tests/hostile/test_gate_tools_hostile.py::test_mcp_hosted_url_server_tool_is_blocked`,
   `tests/hostile/test_gate_tools_hostile.py::test_cronjob_every_action_blocked_and_handler_never_runs`,
   `tests/hostile/test_gate_tools_hostile.py::test_delegate_with_routing_field_is_blocked`,
@@ -318,15 +322,15 @@ is enabled.** An installed plugin that is not enabled registers nothing and logs
 
 **P18. `hermes confidential status` shows the configured route, the live runtime, breaches and this
 lock's refusal, ask and allow counts; `receipts` shows where each call went.**
-- Code: `commands.py:status_text` (`_main_route_line`, `_live_runtime_line`, the breach line,
+- Code: `commands_status.py:status_text` (`_main_route_line`, `_live_runtime_line`, the breach line,
   `locking.py:period_counts`); `receipts.py:render_text` (the Sends section lists each call's host).
 - Tests: `tests/seam/test_commands.py::test_status_unlocked_and_locked`,
   `tests/unit/test_receipts.py::test_every_kind_is_rendered_in_order`.
 - Bound: none.
 
 **P19. `hermes confidential watch` streams model calls live.**
-- Code: `watch.py:run`, `watch.py:latest`, `watch.py:format_row`; in chat, `commands.py:watch_text`
-  shows the latest rows only.
+- Code: `watch.py:run`, `watch.py:latest`, `watch.py:format_row`; in chat,
+  `commands_status.py:watch_text` shows the latest rows only.
 - Tests: `tests/unit/test_watch.py::test_streaming_polls_tail_for_new_rows` (streams a `tool_refused`
   row; the polling is the same for every kind), `tests/unit/test_watch.py::test_once_prints_header_and_every_row_without_ansi_when_not_a_tty`
   (prints `send_observed`, `send_refused` and `breach` rows),
@@ -372,7 +376,7 @@ ledger rows for tool answers.
 ## The receipt
 
 **R1. A receipt is rendered on demand, for the current session or any past one.**
-- Code: `commands.py:receipts_text`, `receipts.py:render`, `receipts.py:collect_rows`.
+- Code: `commands_status.py:receipts_text`, `receipts.py:render`, `receipts.py:collect_rows`.
 - Tests: `tests/seam/test_commands.py::test_receipts_delegate_to_w6_render`,
   `tests/unit/test_receipts.py::test_empty_session_ignores_other_sessions_and_profile_rows`,
   `tests/unit/test_receipts.py::test_receipt_reads_only_the_sessions_locked_period`.
@@ -409,9 +413,9 @@ carries the enclave's signature over the exact bytes.**
   [14](LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open).
 
 **R5. Anyone can re-check the JSON form offline with `hermes confidential replay`.**
-- Code: `commands.py:cli_replay` (dispatches by evidence schema), `commands.py:_expected_for_row`;
-  `verify/replay.py:replay` (no network, `_network_ban`); `verify/replay_near.py:replay`,
-  `replay_receipt`, `with_blobs`.
+- Code: `commands_replay.py:cli_replay` (dispatches by evidence schema),
+  `commands_replay.py:_expected_for_row`; `verify/replay.py:replay` (no network, `_network_ban`);
+  `verify/replay_near.py:replay`, `replay_receipt`, `with_blobs`.
 - Tests: `tests/unit/test_replay.py::test_evidence_replays_from_the_receipt_alone_on_another_machine`,
   `tests/unit/test_replay.py::test_replay_network_ban_covers_urllib3_and_httpx`,
   `tests/unit/test_near_evidence_blobs.py::test_the_receipt_embeds_every_referenced_blob_and_replays_offline`,
@@ -443,8 +447,8 @@ elsewhere.**
 
 **L3. The agent can still run shell commands and code, which the plugin does not look inside, and
 every receipt says so.**
-- Code: `gate_tools.py:ON_HOST_TOOLS` (`terminal`, `execute_code`, `process_manage`),
-  `gate_tools.py:_Policy.on_host_decision` (checks only the plugin's own commands and the terminal
+- Code: `gate_tools_classify.py:ON_HOST_TOOLS` (`terminal`, `execute_code`, `process_manage`),
+  `gate_tools_policy.py:_Policy.on_host_decision` (checks only the plugin's own commands and the terminal
   backend); `receipts.py:CLOSING_PARAGRAPH`; `locking.py:lock_disclosures`.
 - Tests: `tests/unit/test_gate_tools.py::test_locked_on_host_tools_run_silently_even_under_bypass`,
   `tests/unit/test_receipts.py::test_closing_paragraph_discloses_the_in_process_and_aux_limits`,
@@ -467,8 +471,8 @@ Every verb goes through `commands.py:handle_slash`; the terminal form goes throu
 `commands.py:cli_verb` or its own handler, registered by `commands.py:register_cli`.
 
 **K1. `on <on-host-only|attested>` locks this profile after the preflight runs.**
-- Code: `locking.py:lock`, `locking.py:_lock_held`; `gate_tools.py:ensure_tools_for_lock`,
-  `gate_tools.py:build_allowlist`.
+- Code: `locking.py:lock`, `locking.py:_lock_held`; `gate_tools_allowlist.py:ensure_tools_for_lock`,
+  `gate_tools_allowlist.py:build_allowlist`.
 - Tests: `tests/seam/test_register.py::test_lock_refuses_with_the_report_when_preflight_fails`,
   `tests/seam/test_commands.py::test_allowlist_is_on_disk_before_the_lock_flag_and_an_empty_cache_is_rebuilt`,
   `tests/seam/test_commands.py::test_cli_on_and_off_in_another_process_govern_the_running_gateway`.
@@ -485,8 +489,9 @@ Every verb goes through `commands.py:handle_slash`; the terminal form goes throu
 
 **K3. `status [--verbose]` shows lock state, pins, verification, breaches and the installed commit;
 `--verbose` adds the tool list and the preflight.**
-- Code: `commands.py:status_text`, `commands.py:plugin_identity`, `commands.py:data_paths_line`;
-  `gate_tools.py:format_allowlist`; `preflight.py:format_report`.
+- Code: `commands_status.py:status_text`, `commands_status.py:plugin_identity`,
+  `commands_status.py:data_paths_line`; `gate_tools_allowlist.py:format_allowlist`;
+  `preflight.py:format_report`.
 - Tests: `tests/seam/test_commands.py::test_status_unlocked_and_locked`,
   `tests/seam/test_commands.py::test_status_shows_pinned_and_pending_fingerprints_and_verification_age`,
   `tests/seam/test_commands.py::test_receipt_states_the_configured_ttl_and_status_shows_the_plugin_commit`.
@@ -494,8 +499,8 @@ Every verb goes through `commands.py:handle_slash`; the terminal form goes throu
 
 **K4. `check [tier] [--verbose]` prints the preflight table; with no tier, the command names the tier
 `check` picks and why.**
-- Code: `commands.py:check_result`, `commands.py:default_check_tier`; `locking.py:run_tier_preflight`;
-  `preflight.py:format_report`.
+- Code: `commands_status.py:check_result`, `commands_status.py:default_check_tier`;
+  `locking.py:run_tier_preflight`; `preflight.py:format_report`.
 - Tests: `tests/seam/test_commands.py::test_check_prints_the_preflight_table`,
   `tests/seam/test_commands.py::test_cli_check_takes_a_positional_tier_and_names_the_tier_it_checks`,
   `tests/seam/test_ux_pass_1.py::test_check_exits_1_on_fail_and_0_on_pass`.
@@ -503,8 +508,9 @@ Every verb goes through `commands.py:handle_slash`; the terminal form goes throu
 
 **K5. `setup` runs in a terminal only: setup verifies the vendor, asks for the first pin and prints a
 config block.**
-- Code: `commands.py:cli_setup`, `commands.py:cli_setup_near`, `commands.py:config_block`,
-  `commands.py:near_config_block`, `commands.py:setup_next_steps`; `commands.py:TERMINAL_ONLY`.
+- Code: `commands_setup.py:cli_setup`, `commands_setup.py:cli_setup_near`,
+  `commands_setup.py:config_block`, `commands_setup.py:near_config_block`,
+  `commands_setup.py:setup_next_steps`; `commands.py:TERMINAL_ONLY`.
 - Tests: `tests/seam/test_commands.py::test_setup_lists_the_real_next_steps_in_order`,
   `tests/seam/test_commands.py::test_setup_block_gives_vision_and_side_jobs_suitable_models`,
   `tests/seam/test_near_seam.py::test_setup_stops_when_the_main_model_attestation_is_unavailable`,
@@ -513,7 +519,7 @@ config block.**
 - Bound: Smaller gaps: "The first pin is trust on first use".
 
 **K6. `allow <tool>` lets an off-host tool run without asking for this lock, after asking the user.**
-- Code: `consent.py:allow_tool`; `gate_tools.py:Allowlist.add`, `Allowlist.persist`.
+- Code: `consent.py:allow_tool`; `gate_tools_allowlist.py:Allowlist.add`, `Allowlist.persist`.
 - Tests: `tests/seam/test_consent.py::test_allow_tool_adds_on_allow_only`,
   `tests/seam/test_consent.py::test_allow_tool_refuses_hard_blocked_and_on_host_without_asking`,
   `tests/seam/test_cli_allow_seam.py::test_cli_lock_then_cli_allow_web_search_reaches_the_gateway`.
@@ -529,7 +535,7 @@ config block.**
 - Bound: Smaller gaps: "Remembered `always` grants outlive the lock".
 
 **K8. `pins` lists the approved pins, the pending pin and the tool grants.**
-- Code: `commands.py:pins_text`, `commands.py:_pin_lines`, `commands.py:_grant_lines`.
+- Code: `commands_pins.py:pins_text`, `commands_pins.py:_pin_lines`, `commands_pins.py:_grant_lines`.
 - Tests: `tests/seam/test_commands.py::test_pins_approve_applies_only_on_explicit_approve` (asserts the
   approval history and the code fingerprint),
   `tests/hostile/test_near_cm_hostile.py::test_a_long_service_list_folds_into_a_count_and_pins_prints_every_line`
@@ -555,27 +561,27 @@ config block.**
 - Bound: [15](LIMITATIONS.md#15-an-agent-with-a-terminal-can-reach-the-approval-prompt).
 
 **K11. `pins retire <fingerprint>` removes one approved entry.**
-- Code: `commands.py:retire_text`, `pins.py:PinStore.retire`, `provider.py:clear_consent_cache`.
+- Code: `commands_pins.py:retire_text`, `pins.py:PinStore.retire`, `provider.py:clear_consent_cache`.
 - Tests: `tests/unit/test_pins_v3.py::test_retire_needs_a_unique_prefix`,
   `tests/unit/test_pins_v3.py::test_a_gateway_entry_shared_by_two_identities_retires_per_identity`,
   `tests/unit/test_pins_v3.py::test_a_pin_retired_row_stored_with_the_too_large_marker_still_withdraws_consent`.
 - Bound: Smaller gaps: "Pins need a consent record".
 
 **K12. `receipts <session> [--json]` renders a session receipt.** R1 to R3 cover the content.
-- Code: `commands.py:receipts_text`, `receipts.py:render`.
+- Code: `commands_status.py:receipts_text`, `receipts.py:render`.
 - Tests: `tests/seam/test_commands.py::test_cli_on_refusal_and_receipts_exit_codes`,
   `tests/fault/test_fs_faults.py::test_receipts_of_a_corrupt_ledger_answer_instead_of_raising`.
 - Bound: [6](LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process).
 
 **K13. `replay <receipt.json>` runs in a terminal only and replays a receipt's attestation evidence
 offline.** R5 covers the replay.
-- Code: `commands.py:cli_replay`; `commands.py:TERMINAL_ONLY`.
+- Code: `commands_replay.py:cli_replay`; `commands.py:TERMINAL_ONLY`.
 - Tests: `tests/seam/test_commands.py::test_cli_replay_passes_identity_arguments_and_exits_zero_only_when_all_match`,
   `tests/seam/test_ux_pass_1.py::test_chat_help_lists_every_cli_verb` (the chat form refuses `replay`).
 - Bound: Smaller gaps: "The offline replay's identity checks have limits".
 
 **K14. `watch` shows the latest ledger rows, live in a terminal.** P19 covers the live view.
-- Code: `commands.py:watch_text`, `watch.py:run`.
+- Code: `commands_status.py:watch_text`, `watch.py:run`.
 - Tests: `tests/seam/test_commands.py::test_slash_watch_shows_the_ledger`,
   `tests/unit/test_watch.py::test_limit_shows_only_the_latest_rows`.
 - Bound: none.

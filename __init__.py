@@ -330,8 +330,7 @@ class _ChangedConfigPredicate:
 
 def _locked_now(rt: Runtime) -> bool:
     """True only when the persisted state reads locked on the attested tier. Never raises (unreadable counts
-    as not locked,
-    which stops the background refresh; the gates fail closed on their own)."""
+    as not locked, which stops the background refresh; the gates fail closed on their own)."""
     try:
         locked, tier = rt.is_locked()
         return locked is True and getattr(tier, "value", tier) == "attested"

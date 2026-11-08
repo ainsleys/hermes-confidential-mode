@@ -10,18 +10,22 @@ Paths are relative to `confidential_mode/` unless the path starts with `tests/` 
 the repository root (`__init__.py`, `plugin.yaml`, `pyproject.toml`, `catalog/`).
 [INTERFACES.md](INTERFACES.md) is the developer contract. Its Amendments 5, 5.1, 5.2, 7 and 9 hold the
 contract entries for the NEAR adapter, the nearest model for a third adapter's contract.
+[ARCHITECTURE.md](ARCHITECTURE.md) describes every module named below, what it imports, and the data files.
+The NEAR adapter spans `verify/near.py` (`NearAdapter`) and its siblings: `verify/near_evidence.py` (the
+evidence document), `verify/near_appraise.py` (the appraisal), `verify/near_send.py` (the send views),
+`verify/near_exchange.py` (one signed send) and `verify/near_transport.py` (the TLS pin and pools).
 
 ## The pieces of a vendor
 
 | Piece | Tinfoil | NEAR AI Cloud |
 |---|---|---|
 | Adapter | `verify/tinfoil.py:TinfoilAdapter` | `verify/near.py:NearAdapter` |
-| Pure checks (no I/O) | the vendor SDK (`tinfoil==0.14.2`), `verify/sev_check.py`, `verify/policy_check.py` | `verify/near_checks.py`, `verify/near.py:appraise` |
+| Pure checks (no I/O) | the vendor SDK (`tinfoil==0.14.2`), `verify/sev_check.py`, `verify/policy_check.py` | `verify/near_checks.py`, `verify/near_appraise.py:appraise` |
 | Request encryption | the SDK's EHBP transport | `verify/near_e2ee.py` |
 | Provider profile | `provider.py:register_provider_profile` | `provider.py:register_near_profile` |
 | Profile name, key variable | `attested-tinfoil`, `TINFOIL_API_KEY` | `attested-near`, `NEAR_AI_API_KEY` |
 | Offline replay | `verify/replay.py:replay` | `verify/replay_near.py:replay`, `replay_receipt` |
-| Setup | `commands.py:cli_setup` | `commands.py:cli_setup_near` |
+| Setup | `commands_setup.py:cli_setup` | `commands_setup.py:cli_setup_near` |
 | Pin identity (`router_repo`) | `tinfoilsh/confidential-model-router` | `<host>#<model,model,...>` |
 | Pin entries | one `router` entry per result | one entry per CVM (`gateway`, `model:<id>`) |
 | Real capture | `tests/fixtures/real_capture_sev/` | `tests/fixtures/near_real_capture/` |
@@ -103,8 +107,8 @@ running event loop, `openai.AsyncOpenAI(http_client=adapter.async_http_for_loop(
 - forward to the adapter's current pinned pool, and never close that pool on `close()`;
 - refuse while held (`_check_not_held()`), before any request byte;
 - send only on connections pinned to the TLS key of the accepted result.
-  `verify/near.py:pinned_ssl_context(expected_spki, ...)` builds an SSL context that keeps the normal
-  chain and host-name checks and compares the peer's SPKI SHA-256 with `expected_spki()` inside
+  `verify/near_transport.py:pinned_ssl_context(expected_spki, ...)` builds an SSL context that keeps the
+  normal chain and host-name checks and compares the peer's SPKI SHA-256 with `expected_spki()` inside
   `wrap_socket` and the `wrap_bio` handshake. Both adapters use the function; `expected_spki` reads
   the accepted result, never a value the vendor SDK holds before the pin check
   (`TinfoilAdapter.expected_tls_fp`, `NearAdapter.pinned_spki`). With no accepted fingerprint the
@@ -215,21 +219,21 @@ and `verify/replay_near.py`:
   `checks` (each value `True` or a string starting `fail:`, `n/a:` or `not_run:`), `code_fingerprint`,
   `enclave_fingerprint`, `release_tag`, `as_of`, `sdk_version`, `repo`, `enclave_host_asserted`,
   `platform`, `captured_at_asserted`, `not_established` and, for per-CVM vendors, `cvms`.
-  `commands.py:_call_replay` passes only the keyword arguments the function accepts and reports the
-  identity checks that function cannot take.
+  `commands_replay.py:_call_replay` passes only the keyword arguments the function accepts and reports
+  the identity checks that function cannot take.
 - The checks are the same functions the live verification ran (NEAR: `appraise` in both), with every
   clock pinned to `as_of`, which defaults to the capture time.
 - Every network library raises inside the replaying thread (`verify/replay.py:_network_ban`).
 - A vendor that signs responses also provides a per-row check (`replay_signed_send`) and a
   whole-receipt pass (`replay_receipt`) that `receipts.py` and `hermes confidential replay` call.
 
-`commands.py:cli_replay` picks the replay function by `evidence["schema"]`, so a new vendor's schema
-string must be distinct and registered there.
+`commands_replay.py:cli_replay` picks the replay function by `evidence["schema"]`, so a new vendor's
+schema string must be distinct and registered there.
 
 ## Setup
 
 `hermes confidential setup` dispatches on `--vendor` (`commands.py:register_cli`, choices
-`tinfoil` and `near`; `commands.py:cli_setup`). A vendor's setup function:
+`tinfoil` and `near`; `commands_setup.py:cli_setup`). A vendor's setup function:
 
 1. prints whether the key variable is set (`"set"` or the not-set text) and never prints the key;
 2. resolves the host, invalidates the cache entry and calls
@@ -318,16 +322,17 @@ outside the adapters; a third vendor edits each place.
 - **Verification detail.** `provider.py:_policy_check_detail` runs the Sigstore release-bundle check
   for every vendor except NEAR, so a third vendor without a Sigstore bundle records "evidence
   incomplete" in that non-gating field until the function learns the vendor.
-- **Status.** `commands.py:_verification_line` prints a Tinfoil line and a NEAR line
-  (`_tinfoil_verification_line`, `_near_verification_line`); `commands.py:_enclave_line` reads
+- **Status.** `commands_status.py:_verification_line` prints a Tinfoil line and a NEAR line
+  (`_tinfoil_verification_line`, `_near_verification_line`); `commands_status.py:_enclave_line` reads
   `rt.adapter` (Tinfoil) only.
-- **Setup and replay.** `commands.py:register_cli` (`--vendor` choices), `commands.py:cli_setup`,
+- **Setup and replay.** `commands.py:register_cli` (`--vendor` choices), `commands_setup.py:cli_setup`,
   `cli_setup_near`, `config_block`, `near_config_block`, `attest_near_models`;
   `commands.py:HELP_LINES` and `commands.py:TERMINAL_ONLY` (the setup text names `[--vendor near]`);
-  `commands.py:TINFOIL_DOCUMENTED_MODELS` and `tinfoil_model_note`; `commands.py:DEFAULT_NEAR_MODEL`,
-  `DEFAULT_NEAR_VISION_MODEL` and `near_model_failure`. `commands.py:cli_replay` falls back to the
-  Tinfoil replay for any schema that is not NEAR's, labels a row's vendor `tinfoil` when neither the
-  row nor the evidence names one, and `DEFAULT_EXPECTED_REPO` is Tinfoil's router repository.
+  `commands_setup.py:TINFOIL_DOCUMENTED_MODELS` and `tinfoil_model_note`;
+  `commands_setup.py:DEFAULT_NEAR_MODEL`, `DEFAULT_NEAR_VISION_MODEL` and `near_model_failure`.
+  `commands_replay.py:cli_replay` falls back to the Tinfoil replay for any schema that is not NEAR's,
+  labels a row's vendor `tinfoil` when neither the row nor the evidence names one, and
+  `DEFAULT_EXPECTED_REPO` is Tinfoil's router repository.
 - **Receipts.** `receipts.py:_near_sends`, `NEAR_CLOSING` and `NEAR_ENCRYPTION_NOTE` render the
   signed-response section for NEAR rows only; `receipts.py:verify_chain` checks those constants.
   `CLOSING_PARAGRAPH` speaks of a router, a release tag and an HPKE key, which is Tinfoil's shape.
