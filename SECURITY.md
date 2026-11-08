@@ -32,7 +32,7 @@ Out of scope, with where to report instead:
 
 ## Threat model in brief
 
-The [guide's threat model](docs/GUIDE.md#threat-model) states the full model. In brief:
+The [guide's threat model](docs/GUIDE.md#threat-model) states the full model.
 
 - **The trust boundary is the whole Hermes process.** Another plugin in the same process can patch
   this plugin, register its own middleware or write ledger rows that look like this plugin's.
@@ -57,8 +57,8 @@ The [guide's threat model](docs/GUIDE.md#threat-model) states the full model. In
   prompt for a pin or a tool grant by some routes, such as a nested chat the agent starts. The ledger records
   every approval with its surface.
   ([LIMITATIONS 15](docs/LIMITATIONS.md#15-an-agent-with-a-terminal-can-reach-the-approval-prompt))
-- **Side calls are recorded, not stopped.** Hermes' auxiliary calls do not pass through the
-  middleware the plugin uses, so one that leaves the tier mid-turn is recorded as a breach.
+- **Side calls are recorded, not stopped.** Hermes' side calls do not pass through the
+  middleware the plugin uses, so a side call that leaves the tier mid-turn is recorded as a breach.
   ([LIMITATIONS 1](docs/LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution))
 
 ## How the code handles keys
@@ -72,7 +72,7 @@ The plugin's code keeps these rules. A change that breaks one is a vulnerability
 - **Presence checks never read the value out.** `OPENROUTER_API_KEY` and `NOUS_API_KEY` are checked
   only for whether each variable is set, through the same secret scope. `preflight.py:key_state`
   reads the secret scope and, for presence only, a route's `api_key` in `config.yaml`; the function
-  returns "set", "not set" or "not readable in this scope", never the value or its length.
+  returns "set", "not set" or "not readable in this scope" and never returns the value or its length.
 - **Keys are never logged or stored.** No log line, ledger row, receipt or pins file carries a key.
   The ledger rejects rows whose detail carries conversation-shaped keys (`ledger.py:FORBIDDEN_DETAIL_KEYS`),
   and the preflight table redacts secret-looking config values (`preflight.py:redact_value`).
