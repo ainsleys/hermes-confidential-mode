@@ -16,7 +16,7 @@ from tools import approval, approval_context
 
 from confidential_mode.gate_tools import (
     ASK_EACH_CALL, ASK_ONCE_PER_LOCK, ApprovalDecisions, LockGrants, ask_mode_from, build_allowlist,
-    build_post_approval_response, build_pre_tool_call, build_tool_execution,
+    _MISSING, build_post_approval_response, build_pre_tool_call, build_tool_execution, grant_scope,
 )
 from confidential_mode.ledger import Ledger
 from confidential_mode.tiers import Tier
@@ -154,6 +154,38 @@ def test_a_grant_covers_only_the_conversation_that_answered(gate):
     assert len(gate.prompts) == 3 and len(gate.ran) == 5
     granted = [e for e in gate.rows("tool_allowed") if e.decision == "lock_grant"]
     assert len(granted) == 2 and len({e.detail["grant_row"] for e in granted}) == 1
+
+
+def test_a_caller_with_no_session_key_and_no_session_id_is_asked_every_call(gate):
+    """fix-pass-3 item 6: with both the approval session key and the session id empty, the scope names no
+    conversation. Every such caller used to share one grant; now none is made and each call asks."""
+    gate.monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+    gate.cli("once")
+    blank = approval_context.set_current_session_key("")
+    try:
+        assert grant_scope("") == ("", "")
+        gate.call(session_id="")
+        gate.call(session_id="")
+    finally:
+        approval_context.reset_current_session_key(blank)
+    assert len(gate.prompts) == 2 and len(gate.ran) == 2, "an empty scope was granted"
+    assert gate.grants.names("lock-1") == []
+    assert [e.decision for e in gate.rows("tool_allowed")] == ["once", "once"]
+    gate.call()                                     # a named conversation still gets its grant
+    gate.call()
+    assert len(gate.prompts) == 3 and len(gate.ran) == 4
+
+
+def test_lock_grants_never_store_or_match_an_empty_scope():
+    grants = LockGrants()
+    for scope in [("", ""), None, ("only-one",), (None, None), ("", None)]:
+        grants.grant("lock-1", scope, OFF, 7)
+        assert grants.get("lock-1", scope, OFF) is _MISSING
+    assert grants.names("lock-1") == []
+    grants.grant("lock-1", ("", "s"), OFF, 8)
+    grants.grant("lock-1", ("k", ""), OFF, 9)
+    assert grants.get("lock-1", ("", "s"), OFF) == 8 and grants.get("lock-1", ("k", ""), OFF) == 9
+    assert grants.get("lock-1", ("", ""), OFF) is _MISSING
 
 
 def test_the_grant_ends_with_the_lock(gate):

@@ -989,7 +989,8 @@ def grant_scope(session_id: str = "") -> tuple[str, str]:
     """The conversation a lock grant belongs to: Hermes' approval session key (the key Hermes' own "session"
     answer is stored under; a gateway chat, a CLI session) and the agent's session id (a subagent has its own).
     A grant is never wider than Hermes' session answer. Any error reading the key: an empty key, so the grant
-    still needs the same session id."""
+    still needs the same session id. Both empty names no conversation: LockGrants makes no grant for that
+    scope, so such a caller is asked on every call instead of sharing one grant with every other such caller."""
     try:
         from tools.approval_context import get_current_session_key
         key = get_current_session_key("")
@@ -1006,26 +1007,40 @@ class LockGrants:
     the conversation that answered: another chat, user or subagent asks again. A grant ends at unlock; a revoke
     drops it. In memory, per process: a restart asks again. The gate never consults a grant while Hermes'
     approvals are bypassed (yolo, approvals off) or nobody can be asked (one-shot, cron, unattended
-    platforms): those keep refusing."""
+    platforms): those keep refusing. A scope with neither a session key nor a session id names no
+    conversation, so it is never granted and never matches: that caller is asked on every call."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._grants: dict[tuple[str, tuple[str, str], str], Any] = {}
 
+    @staticmethod
+    def _scope(scope: Any) -> Optional[tuple[str, str]]:
+        """The scope as a key, or None when it names no conversation (both parts empty) or is malformed."""
+        try:
+            key, sid = scope
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(key, str) or not isinstance(sid, str) or not (key or sid):
+            return None
+        return (key, sid)
+
     def grant(self, lock_id: str, scope: tuple[str, str], tool: str, row_id: Any) -> None:
-        if not lock_id or not isinstance(tool, str) or not tool:
+        scope = self._scope(scope)
+        if not lock_id or scope is None or not isinstance(tool, str) or not tool:
             return
         with self._lock:
             for key in [k for k in self._grants if k[0] != lock_id]:
                 del self._grants[key]          # grants of an earlier lock end with that lock
-            self._grants[(lock_id, tuple(scope), tool)] = row_id
+            self._grants[(lock_id, scope, tool)] = row_id
 
     def get(self, lock_id: str, scope: tuple[str, str], tool: str) -> Any:
         """The answering row id, or _MISSING when this conversation has no grant for the tool in this lock."""
-        if not lock_id:
+        scope = self._scope(scope)
+        if not lock_id or scope is None:
             return _MISSING
         with self._lock:
-            return self._grants.get((lock_id, tuple(scope), tool), _MISSING)
+            return self._grants.get((lock_id, scope, tool), _MISSING)
 
     def drop(self, tools: Optional[set] = None) -> list[str]:
         with self._lock:

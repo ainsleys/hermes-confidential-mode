@@ -602,7 +602,8 @@ runs only on exactly `once`, `session` or `always`; any other answer is refused 
 - `once` runs the tool and grants that tool for the rest of this lock, in this conversation only. The
   conversation is Hermes' approval session key (one gateway chat, one CLI session) together with the
   agent's session id, so another chat, another user and a subagent each ask again; the grant is never
-  wider than Hermes' own `session` answer. The grant is the plugin's own, not
+  wider than Hermes' own `session` answer. A call that carries neither a session key nor a session id
+  names no conversation, so the plugin makes no grant for that call and asks on every call. The grant is the plugin's own, not
   Hermes': Hermes treats `once` as one call, and the plugin keeps the grant beside the lock. The grant
   records the lock and the id of the ledger row that recorded your answer. Each later call to that
   tool runs without a prompt and writes a `tool_allowed` row with decision `lock_grant` and
