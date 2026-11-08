@@ -1145,13 +1145,16 @@ class NearAdapter:
                 gone.append(at)
                 self._inflight.pop(id(at), None)
             # A finalizer's release() can run on this thread while the list is read (a collection under the
-            # RLock), so the list is filtered by identity at the end, never restored from a copy (review L5).
+            # RLock) and pop an entry, so the list is read from a copy and changed in place, one entry at a time,
+            # never rebuilt from a read of the live list (review L5, re-review P1).
             closed = [(lp, at) for lp, at in list(self._retired_async) if lp.is_closed()]
-            for _, at in closed:
-                gone.append(at)
-                self._inflight.pop(id(at), None)
-            drop = {id(at) for _, at in closed}
-            self._retired_async = [e for e in self._retired_async if id(e[1]) not in drop]
+            for entry in closed:
+                gone.append(entry[1])
+                self._inflight.pop(id(entry[1]), None)
+                try:
+                    self._retired_async.remove(entry)
+                except ValueError:      # a release already took it out
+                    pass
         for at in gone:
             _close_pool_sockets(at)
         _sweep_closed_loops(self._async_closing)

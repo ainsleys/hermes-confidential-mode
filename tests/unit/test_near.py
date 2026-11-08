@@ -622,3 +622,38 @@ def test_a_release_during_pruning_is_not_undone(world, tmp_path):
     for p in (released, dead_pool):
         p.sock.close()
         p.close_peer()
+
+
+def test_a_release_during_pruning_never_drops_a_live_entry_unclosed(world, tmp_path):
+    """Re-review P1: a release that pops an entry while the prune reads the list must not make the prune skip
+    and drop another live entry, which would then never have its close scheduled."""
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    live = asyncio.new_event_loop()
+    dead = asyncio.new_event_loop()
+    dead.close()
+    first, second, dead_pool = _SocketPool(), _SocketPool(), _SocketPool()
+
+    class Probe(list):
+        """Iterates the live list by index, as a list iterator does; on the second read, the first entry's
+        release runs right after that entry is read, so a later entry shifts under the iterator."""
+        reads = 0
+
+        def __iter__(inner):
+            Probe.reads += 1
+            fire = Probe.reads == 2
+            i = 0
+            while i < list.__len__(inner):
+                entry = list.__getitem__(inner, i)
+                yield entry
+                if fire and entry == (live, first):
+                    fire = False
+                    list.remove(inner, entry)
+                i += 1
+    ad._retired_async = Probe([(live, first), (live, second), (dead, dead_pool)])
+    ad._prune_closed_loops()
+    assert second in [p for _, p in list.__iter__(ad._retired_async)]   # still listed: its last release closes it
+    assert dead_pool.sock.fileno() == -1
+    live.close()
+    for p in (first, second, dead_pool):
+        p.sock.close()
+        p.close_peer()
