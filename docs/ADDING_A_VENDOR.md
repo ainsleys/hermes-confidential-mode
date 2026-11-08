@@ -1,12 +1,12 @@
 # Adding an attested vendor
 
-This guide describes what a new attested vendor needs: an adapter in `confidential_mode/verify/`, a
+A new attested vendor needs an adapter in `confidential_mode/verify/`, a
 provider profile, pins, a replay module, setup, tests and documentation. Tinfoil
 (`verify/tinfoil.py`) and NEAR AI Cloud (`verify/near.py`) are the two existing adapters, and every
 rule below is read from their code. The last section, "Known coupling", lists the places where Tinfoil
 or NEAR is named outside the adapters, so a third vendor also needs edits there.
 
-Paths are relative to `confidential_mode/` unless the path starts with `tests/`, `docs/` or name a file at
+Paths are relative to `confidential_mode/` unless the path starts with `tests/`, `docs/` or names a file at
 the repository root (`__init__.py`, `plugin.yaml`, `pyproject.toml`, `catalog/`).
 [INTERFACES.md](INTERFACES.md) is the developer contract. Its Amendments 5, 5.1, 5.2, 7 and 9 hold the
 contract entries for the NEAR adapter, the nearest model for a third adapter's contract.
@@ -231,7 +231,7 @@ string must be distinct and registered there.
 `hermes confidential setup` dispatches on `--vendor` (`commands.py:register_cli`, choices
 `tinfoil` and `near`; `commands.py:cli_setup`). A vendor's setup function:
 
-1. prints whether the key variable is set (`"set"` or the not-set text), never the key;
+1. prints whether the key variable is set (`"set"` or the not-set text) and never prints the key;
 2. resolves the host, invalidates the cache entry and calls
    `verification_cache.ensure(<profile>, wait_seconds=INTERACTIVE_VERIFY_WAIT_SECONDS)`;
 3. prints the fingerprints, stages the result when no pin matches (`rt.pins.stage`) and asks with
@@ -286,7 +286,7 @@ The suite runs from a Hermes checkout as [RUNNING_TESTS.md](RUNNING_TESTS.md) de
 ## Known coupling
 
 The adapter protocol does not carry every vendor difference. These places name Tinfoil or NEAR
-outside the adapters; a third vendor edits each one.
+outside the adapters; a third vendor edits each place.
 
 - **Profile lists.** `locking.py:ATTESTED_PROFILES`, `locking.py:PROFILE_NAME`,
   `locking.py:NEAR_PROFILE_NAME`, `locking.py:VENDOR_NAMES` and `provider.py:ATTESTED_PROFILES` (the
