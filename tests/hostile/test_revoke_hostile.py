@@ -215,3 +215,27 @@ def test_the_ledger_reads_only_tool_rows_of_the_kinds_asked(plugin):
     led.append({"kind": "tool_refused", "purpose": "tool:web_search", "session_id": "s"})
     led.append({"kind": "lock", "purpose": "tool:odd", "session_id": "s"})
     assert [e.kind for e in led.tool_rows(("tool_asked", "tool_allowed", "grant_revoked"))] == ["tool_asked"]
+
+
+def test_a_revoke_reads_the_ledger_only_from_the_last_key_moving_revoke(plugin, monkeypatch):
+    """Re-review L8-scan: rows before the latest key-moving revoke covering the tool are never read again."""
+    rv = _sub(plugin, "revoke")
+    led = plugin.rt.ledger
+    for _ in range(5):
+        led.append({"kind": "tool_asked", "purpose": "tool:web_search", "session_id": "s"})
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    out = plugin.slash("revoke web_search")                  # asks exist: recorded, the key moves
+    assert "Nothing was recorded" not in out, out
+    cut = led.last_key_moving_revoke(["tool:*", "tool:web_search"])
+    assert cut and cut == _grant_rows(plugin)[-1].id
+    seen = []
+    real = led.tool_rows
+    monkeypatch.setattr(led, "tool_rows", lambda kinds, since_id=0, limit=1000: seen.append(since_id)
+                        or real(kinds, since_id, limit))
+    assert rv.granted_since_last_revoke(led, {"web_search"}) == set()
+    assert seen == [cut]
+    assert plugin.slash("revoke web_search").endswith("Nothing was recorded.")
+    led.append({"kind": "tool_asked", "purpose": "tool:web_search", "session_id": "s"})
+    assert rv.granted_since_last_revoke(led, {"web_search"}) == {"web_search"}
+    seen.clear()
+    assert rv.granted_since_last_revoke(led, None) == {"web_search"} and seen == [0]   # no `*` revoke yet

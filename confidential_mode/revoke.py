@@ -412,7 +412,13 @@ def granted_since_last_revoke(ledger: Any, tools: Optional[set[str]]) -> Optiona
     touched: dict[str, int] = {}
     try:
         read = getattr(ledger, "tool_rows", None)
-        last = 0
+        start = getattr(ledger, "last_key_moving_revoke", None)
+        # Re-review L8-scan: rows before the latest key-moving revoke that covers every tool asked about can
+        # never count, so the read starts there (one tool: its own or the `*` revoke; every tool: the `*` one).
+        purposes = [f"tool:{ALL}"] + ([f"tool:{t}" for t in sorted(tools)] if tools is not None else [])
+        last = int(start(purposes)) if callable(start) and (tools is None or len(tools) == 1) else 0
+        if last:
+            cut = {p[len("tool:"):]: last for p in purposes}
         while True:
             rows = read(_GRANT_TRACE_KINDS, last) if callable(read) else ledger.tail(last)
             for ev in rows:

@@ -595,6 +595,30 @@ class Ledger:
         return self._rows(f"SELECT {', '.join(_COLUMNS)} FROM events WHERE id > ? AND kind IN ({marks}) "
                           "AND purpose LIKE 'tool:%' ORDER BY id LIMIT ?", (int(since_id), *kinds, int(limit)))
 
+    def last_key_moving_revoke(self, purposes: Iterable[str]) -> int:
+        """The id of the latest ``grant_revoked`` row for one of ``purposes`` whose detail says the rule key
+        moved, or 0 (a revoke starts its ledger read there; re-review L8-scan). Reads newest first."""
+        purposes = [str(p) for p in purposes]
+        if not purposes:
+            return 0
+        marks = ", ".join("?" for _ in purposes)
+        last = None
+        while True:
+            bound = "" if last is None else "AND id < ? "
+            with self._lock:
+                rows = self._db().execute(
+                    f"SELECT id, detail FROM events WHERE kind = 'grant_revoked' AND purpose IN ({marks}) {bound}"
+                    "ORDER BY id DESC LIMIT 200", (*purposes, *([] if last is None else [last]))).fetchall()
+            for row_id, detail in rows:
+                try:
+                    if (json.loads(detail or "{}") or {}).get("rule_key_rotated"):
+                        return int(row_id)
+                except ValueError:
+                    continue
+            if len(rows) < 200:
+                return 0
+            last = rows[-1][0]
+
     def last_id_before(self, kind: str, before_id: int) -> int | None:
         """The id of the latest event of ``kind`` with id < ``before_id``, or None (receipts bound their read)."""
         with self._lock:
