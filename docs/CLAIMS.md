@@ -276,6 +276,7 @@ during a lock; the class follows the tool's data flow (docs/TOOL_CLASSES.md).**
   on an exact `once`, `session` or `always`.
 - Tests: `tests/unit/test_gate_tools.py::test_the_docs_table_equals_the_code_table`,
   `tests/unit/test_gate_tools.py::test_the_on_host_set_is_the_on_host_rows_of_the_table`,
+  `tests/unit/test_gate_tools.py::test_on_host_set_is_the_on_host_class_of_the_table`,
   `tests/seam/test_gate_tools_seam.py::test_every_builtin_tool_registered_at_the_pinned_hermes_has_a_data_flow_row`,
   `tests/unit/test_gate_tools.py::test_on_host_name_overridden_by_plugin_is_not_on_host`,
   `tests/seam/test_register.py::test_locked_web_search_asks_and_runs_only_on_exact_once`.

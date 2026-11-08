@@ -71,7 +71,7 @@ grant) and `build_post_approval_response` (the observer that records each answer
 
 **`gate_tools_classify.py`**. `classify_tool` gives each registered tool its `Route` (on-host, ask,
 delegate, block-cron, block-mcp-url) from its name, toolset and `Origin`; `BUILTIN_TOOL_CLASSES` is the
-data-flow class (on-host, off-host, ask) of every built-in tool at Hermes 84a0301, the same table as
+data-flow class (on-host, off-host, unsettled) of every built-in tool at Hermes 84a0301, the same table as
 [TOOL_CLASSES.md](TOOL_CLASSES.md), and `ON_HOST_TOOLS` is its on-host rows. The `_default_*` readers find
 MCP server configs and plugin tool names. Imports nothing at load; lazy: `hermes_compat`, `tiers`.
 Amendments 16, 17, and gate_tools.py's.
@@ -276,7 +276,9 @@ it was verified at. Imports nothing. Amendment 15.
 
 **`atomicwrite.py`**. `write_atomic(path, data)`: the one durable write for every state file (a temporary
 file in the target's directory, fsync, `os.replace`, then `fsync_directory`), used by `pins`, `state`,
-`gate_tools_allowlist`, `revoke`, `review`, `ledger` and `verify.tinfoil`. Imports nothing.
+`gate_tools_allowlist`, `revoke`, `review`, `ledger` and `verify.tinfoil`. Two limits: on macOS `os.fsync`
+does not issue `F_FULLFSYNC`, so the write reaches the drive's cache and not always the platter; and a parent
+directory `write_atomic` creates is not itself fsynced. Imports nothing.
 
 **`filelock.py`**. `exclusive(path)`: a thread lock plus a bounded `flock` on `<file>.lock`, raising
 `LockBusy` or `LockUnusable` instead of waiting. Imports nothing. Amendments 10, 12.

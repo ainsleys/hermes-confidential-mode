@@ -733,6 +733,8 @@ def _pre_gateway_dispatch(rt: Runtime):
                    "decision": "runtime_switch" if resolved else "command_unresolved",
                    "surface": "gateway", "detail": {"command": canonical, "resolved": resolved}}
         except Exception as exc:  # noqa: BLE001
+            # Reached only when a membership test above raises; it does not exempt UNRESOLVED_SAFE_COMMANDS,
+            # so /confidential off is refused here too and the terminal unlock is the way out.
             if not locked_or_unreadable():
                 return None
             resolved = canonical == name and resolved

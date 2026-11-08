@@ -35,10 +35,12 @@ approved; `on-host-only` allows only your machine. While locked:
   model cannot read the text. (On NEAR the gateway still sees images, the model id, settings, headers, sizes
   and timing, and a gateway that swapped the reply key would be caught only afterwards.)
 - The plugin asks you the first time each tool it does not class as on-host runs during a lock. The
-  class follows where the tool's data goes: 36 of Hermes' 73 built-in tools keep their data on this machine
-  (shell, code, files, skills, memory, todo, clarify, session search, the kanban board and the Desktop
-  panes that read or arrange the app) and run without a prompt; every tool that sends data off the machine
-  asks, and so does every tool whose data flow the audit could not settle (docs/TOOL_CLASSES.md). An
+  class follows where the tool's own code sends the tool's data: 25 of Hermes' 73 built-in tools have no
+  network path in their own code (skills, memory, todo, clarify, session search, the kanban reads, the
+  Desktop panes that read or arrange the app) or are the shell, code and file tools, which run what the
+  model writes and are not inspected; those 25 run without a prompt. Every tool that sends data off the
+  machine or hands it to another agent asks, and so does every tool whose data flow cannot be settled from
+  Hermes' source (docs/TOOL_CLASSES.md). An
   allow lasts until you unlock, in that conversation only, so another chat, user or subagent is
   asked again (`confidential.tools.ask: each_call` asks on every call instead). When nobody can
   answer (yolo, approvals off, cron, one-shot runs), the tool is blocked. Tool servers on

@@ -90,17 +90,15 @@ def allowlist(**kw):
 # allowlist
 # --------------------------------------------------------------------------------------------------
 
-def test_on_host_set_is_exactly_the_contract():
-    """The on-host set is the on-host class of docs/TOOL_CLASSES.md (issue #1): the original contract's tools
-    except skill_view, plus the Desktop pane, kanban and other tools whose data stays on this machine."""
+def test_on_host_set_is_the_on_host_class_of_the_table():
+    """The on-host set is the on-host class of docs/TOOL_CLASSES.md (issue #1): the original contract's 14
+    tools, plus the Desktop pane tools that read or arrange the app, the kanban reads that write nothing and
+    yb_search_sticker."""
     assert ON_HOST_TOOLS == {
         "terminal", "process_manage", "execute_code", "read_file", "write_file", "patch", "search_files",
-        "skills_list", "skill_manage", "todo_list", "memory", "clarify", "session_search",
-        "annotate_preview", "close_terminal", "focus_pane", "gui_tour", "react_to_message", "read_terminal",
-        "read_window_below", "set_theme", "show_tip", "desktop_project",
-        "kanban_attach", "kanban_attachments", "kanban_block", "kanban_comment", "kanban_create", "kanban_heartbeat",
-        "kanban_link", "kanban_list", "kanban_request_changes", "kanban_schedule", "kanban_show", "kanban_unblock",
-        "yb_search_sticker"}
+        "skills_list", "skill_view", "skill_manage", "todo_list", "memory", "clarify", "session_search",
+        "close_terminal", "focus_pane", "react_to_message", "read_terminal", "read_window_below", "set_theme",
+        "show_tip", "kanban_attachments", "kanban_heartbeat", "kanban_show", "yb_search_sticker"}
     al = allowlist()
     assert set(al.on_host) - {"lh_query", "on_host_query"} == ON_HOST_TOOLS
 
@@ -142,7 +140,7 @@ def test_on_host_name_overridden_by_plugin_is_not_on_host():
 def test_format_allowlist_lists_every_bucket():
     al = allowlist()
     text = format_allowlist(al)
-    assert "on-host (runs without asking): 38" in text     # 36 on-host built-ins, a stdio and a loopback MCP server
+    assert "on-host (runs without asking): 27" in text     # 25 on-host built-ins, a stdio and a loopback MCP server
     assert "blocked (MCP server URL off-tier or unreadable): 5" in text
     assert "blocked (scheduled jobs): 1" in text
     assert "remote_query  [mcp-remote; mcp; server=remote, transport=url, host=mcp.example.com]" in text
@@ -950,11 +948,13 @@ def test_the_on_host_set_is_the_on_host_rows_of_the_table():
     assert {"terminal", "process_manage", "execute_code", "read_file", "write_file", "patch",
             "search_files"} <= ON_HOST_TOOLS
     # tools whose data stays on this machine run without a prompt
-    assert {"kanban_list", "kanban_create", "read_terminal", "set_theme", "desktop_project", "todo_list",
+    assert {"kanban_show", "kanban_attachments", "read_terminal", "set_theme", "todo_list", "skill_view",
             "yb_search_sticker"} <= ON_HOST_TOOLS
-    # tools whose data leaves, and tools the audit could not settle, ask
-    assert {"web_search", "desktop_preview", "drive_preview", "kanban_attach_url", "skill_view",
-            "computer_use", "text_to_speech"}.isdisjoint(ON_HOST_TOOLS)
+    # tools whose data leaves (a kanban write reaches the dispatcher's workers; a tour or an annotation reaches
+    # the previewed page), and tools whose data flow is unsettled, ask
+    assert {"web_search", "desktop_preview", "drive_preview", "kanban_attach_url", "kanban_create", "kanban_list",
+            "kanban_comment", "gui_tour", "annotate_preview", "desktop_project", "computer_use",
+            "text_to_speech"}.isdisjoint(ON_HOST_TOOLS)
 
 
 def test_each_route_names_the_data_class_it_came_from():
@@ -973,4 +973,6 @@ def test_each_route_names_the_data_class_it_came_from():
     unknown = al.get("brand_new_tool")
     assert unknown.route is Route.ASK and unknown.data_class == "unknown"
     assert "not audited" in unknown.reason
-    assert "off-host" in format_allowlist(al) and "unsettled" in format_allowlist(al) and "not audited" in format_allowlist(al)
+    printed = format_allowlist(al)
+    assert "off-host" in printed and "unsettled" in printed and "not audited" in printed
+    assert "  computer_use  [x; builtin; unsettled]" in printed and "  web_search  [x; builtin; off-host]" in printed

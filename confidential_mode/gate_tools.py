@@ -78,10 +78,17 @@ from .gate_tools_calls import (
     size_text as size_text,
 )
 from .gate_tools_classify import (
+    BUILTIN_TOOL_CLASSES as BUILTIN_TOOL_CLASSES,
+    CLASS_REASONS as CLASS_REASONS,
     CRON_TOOL as CRON_TOOL,
+    DATA_CLASSES as DATA_CLASSES,
     DELEGATE_TOOL as DELEGATE_TOOL,
     MODE_TOOLS as MODE_TOOLS,
+    OFF_HOST as OFF_HOST,
+    ON_HOST as ON_HOST,
     ON_HOST_TOOLS as ON_HOST_TOOLS,
+    UNKNOWN as UNKNOWN,
+    UNSETTLED as UNSETTLED,
     Origin as Origin,
     Route as Route,
     ToolInfo as ToolInfo,

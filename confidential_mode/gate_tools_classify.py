@@ -1,7 +1,7 @@
 """Tool gate, classification: the route each registered tool takes while locked.
 
 ``classify_tool`` gives a tool its ``Route`` from its name, toolset and origin (built-in, plugin or MCP):
-``BUILTIN_TOOL_CLASSES`` classes every built-in by data flow (on-host, off-host, ask; issue #1); the on-host
+``BUILTIN_TOOL_CLASSES`` classes every built-in by data flow (on-host, off-host, unsettled; issue #1); the on-host
 rows run, ``cronjob_manage`` and MCP servers whose URL host is off-tier are blocked, ``delegate_task`` is
 checked per call, and everything else (off-host, unsettled, not audited, plugin tools) asks. The
 ``_default_*`` readers find MCP server configs and plugin tool names through hermes_compat.py.
@@ -15,32 +15,36 @@ from enum import Enum
 from typing import Any
 
 # Data-flow classes of Hermes' built-in tools (issue #1; docs/TOOL_CLASSES.md holds the same table with the
-# evidence for each row). A tool is on-host only when its code makes no network call and launches nothing that
-# does; a tool whose data leaves this machine is off-host; a tool the audit could not settle from Hermes'
-# source at 84a0301 is ask. Off-host and ask tools both take the ASK route; the class is kept on the ToolInfo so
-# the lock reply and the receipt can name it. Shell, code execution and the file tools keep the on-host class
-# of the original contract (their data stays on the terminal backend, which the preflight requires to be local).
+# evidence for each row). A tool is on-host only when its own code makes no network call and launches nothing
+# that does, other than installing a declared dependency from a package index; a tool whose data leaves this
+# machine, or is handed to another agent, is off-host; a tool whose data flow cannot be settled from Hermes'
+# source at 84a0301 is unsettled. Off-host and unsettled tools both take the ASK route; the class is kept on the
+# ToolInfo so the lock reply and the receipt can name it. Shell, code execution and the file tools keep the
+# on-host class of the original contract: they run what the model writes and are not inspected, and the
+# preflight requires the terminal backend to be local.
 ON_HOST = "on-host"
 OFF_HOST = "off-host"
-UNSETTLED = "ask"
+UNSETTLED = "unsettled"
 DATA_CLASSES = (ON_HOST, OFF_HOST, UNSETTLED)
 BUILTIN_TOOL_CLASSES: dict[str, str] = {
     # shell, code execution, files
     "terminal": ON_HOST, "process_manage": ON_HOST, "execute_code": ON_HOST,
     "read_file": ON_HOST, "write_file": ON_HOST, "patch": ON_HOST, "search_files": ON_HOST,
     # skills, memory, todo, clarify, session search
-    "skills_list": ON_HOST, "skill_view": UNSETTLED, "skill_manage": ON_HOST, "todo_list": ON_HOST,
+    "skills_list": ON_HOST, "skill_view": ON_HOST, "skill_manage": ON_HOST, "todo_list": ON_HOST,
     "memory": ON_HOST, "clarify": ON_HOST, "session_search": ON_HOST,
-    # the Desktop app's panes
-    "annotate_preview": ON_HOST, "close_terminal": ON_HOST, "desktop_preview": OFF_HOST, "drive_preview": OFF_HOST,
-    "focus_pane": ON_HOST, "gui_tour": ON_HOST, "react_to_message": ON_HOST, "read_terminal": ON_HOST,
-    "read_window_below": ON_HOST, "set_theme": ON_HOST, "show_tip": ON_HOST, "desktop_project": ON_HOST,
-    "computer_use": UNSETTLED, "setup_beat": OFF_HOST,
-    # the kanban board
-    "kanban_attach": ON_HOST, "kanban_attach_url": OFF_HOST, "kanban_attachments": ON_HOST, "kanban_block": ON_HOST,
-    "kanban_comment": ON_HOST, "kanban_complete": UNSETTLED, "kanban_create": ON_HOST, "kanban_heartbeat": ON_HOST,
-    "kanban_link": ON_HOST, "kanban_list": ON_HOST, "kanban_request_changes": ON_HOST,
-    "kanban_request_review": UNSETTLED, "kanban_schedule": ON_HOST, "kanban_show": ON_HOST, "kanban_unblock": ON_HOST,
+    # the Desktop app's panes (annotate_preview and gui_tour write into the previewed page)
+    "annotate_preview": OFF_HOST, "close_terminal": ON_HOST, "desktop_preview": OFF_HOST, "drive_preview": OFF_HOST,
+    "focus_pane": ON_HOST, "gui_tour": OFF_HOST, "react_to_message": ON_HOST, "read_terminal": ON_HOST,
+    "read_window_below": ON_HOST, "set_theme": ON_HOST, "show_tip": ON_HOST, "desktop_project": UNSETTLED,
+    "computer_use": UNSETTLED,
+    # onboarding
+    "setup_beat": OFF_HOST,
+    # the kanban board: a write to the board hands text to the workers the gateway dispatcher spawns
+    "kanban_attach": OFF_HOST, "kanban_attach_url": OFF_HOST, "kanban_attachments": ON_HOST, "kanban_block": OFF_HOST,
+    "kanban_comment": OFF_HOST, "kanban_complete": OFF_HOST, "kanban_create": OFF_HOST, "kanban_heartbeat": ON_HOST,
+    "kanban_link": OFF_HOST, "kanban_list": OFF_HOST, "kanban_request_changes": OFF_HOST,
+    "kanban_request_review": OFF_HOST, "kanban_schedule": OFF_HOST, "kanban_show": ON_HOST, "kanban_unblock": OFF_HOST,
     # web, browser, media, messaging, connectors
     "browser_cdp": OFF_HOST, "browser_dialog": OFF_HOST, "browser_exec": OFF_HOST, "browser_vault": OFF_HOST,
     "web_search": OFF_HOST, "web_extract": OFF_HOST, "x_search": OFF_HOST,
@@ -57,11 +61,11 @@ BUILTIN_TOOL_CLASSES: dict[str, str] = {
 }
 #: The built-in tools that run without a prompt while locked: the on-host rows of the table.
 ON_HOST_TOOLS: frozenset[str] = frozenset(n for n, c in BUILTIN_TOOL_CLASSES.items() if c == ON_HOST)
-UNKNOWN = "unknown"   # a built-in tool the table does not name: a Hermes change the audit has not seen
+UNKNOWN = "unknown"   # a built-in tool the table does not name
 CLASS_REASONS = {
     OFF_HOST: "off-host: the tool's data leaves this machine (docs/TOOL_CLASSES.md)",
-    UNSETTLED: "unsettled: the audit could not settle the tool's data flow from Hermes' source (docs/TOOL_CLASSES.md)",
-    UNKNOWN: "not audited: Hermes 84a0301's table has no row for this tool",
+    UNSETTLED: "unsettled: the tool's data flow cannot be settled from Hermes' source (docs/TOOL_CLASSES.md)",
+    UNKNOWN: "not audited: the table for Hermes 84a0301 has no row for this tool",
 }
 CRON_TOOL = "cronjob_manage"
 DELEGATE_TOOL = "delegate_task"
