@@ -585,6 +585,16 @@ class Ledger:
         return self._rows(f"SELECT {', '.join(_COLUMNS)} FROM events WHERE id > ? ORDER BY id LIMIT ?",
                           (int(since_id), int(limit)))
 
+    def tool_rows(self, kinds: Iterable[str], since_id: int = 0, limit: int = 1000) -> list[LedgerEvent]:
+        """Events of ``kinds`` whose purpose is ``tool:<name>``, id > since_id, oldest first (a revoke reads
+        only these; Amendment 14)."""
+        kinds = [str(k) for k in kinds]
+        if not kinds:
+            return []
+        marks = ", ".join("?" for _ in kinds)
+        return self._rows(f"SELECT {', '.join(_COLUMNS)} FROM events WHERE id > ? AND kind IN ({marks}) "
+                          "AND purpose LIKE 'tool:%' ORDER BY id LIMIT ?", (int(since_id), *kinds, int(limit)))
+
     def last_id_before(self, kind: str, before_id: int) -> int | None:
         """The id of the latest event of ``kind`` with id < ``before_id``, or None (receipts bound their read)."""
         with self._lock:

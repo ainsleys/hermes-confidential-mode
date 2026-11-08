@@ -192,3 +192,26 @@ def test_a_held_pins_lock_raises_instead_of_hanging(plugin, monkeypatch):
     finally:
         fh.close()
     pins.clear_pending()                                # free again: works
+
+
+def test_a_lost_answer_row_does_not_let_a_session_grant_outlive_the_revoke(plugin):
+    """Review SF1, on the real ledger: Hermes holds a session approval under the rule key, and neither answer
+    row reached the ledger. The revoke records and moves the key; the approval stops counting."""
+    from tools import approval
+    from tests.seam.test_register import SK
+    rv = _sub(plugin, "revoke")
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    approval.approve_session(SK, "plugin_rule:" + rv.rule_key(plugin.rt.revocations, "web_search"))
+    out = plugin.slash("revoke web_search")
+    assert "Nothing was recorded" not in out, out
+    assert not approval.is_approved(SK, "plugin_rule:" + rv.rule_key(plugin.rt.revocations, "web_search"))
+    assert len(_grant_rows(plugin)) == 1
+
+
+def test_the_ledger_reads_only_tool_rows_of_the_kinds_asked(plugin):
+    led = plugin.rt.ledger
+    led.append({"kind": "tool_asked", "purpose": "tool:web_search", "session_id": "s"})
+    led.append({"kind": "send_observed", "purpose": "main", "session_id": "s"})
+    led.append({"kind": "tool_refused", "purpose": "tool:web_search", "session_id": "s"})
+    led.append({"kind": "lock", "purpose": "tool:odd", "session_id": "s"})
+    assert [e.kind for e in led.tool_rows(("tool_asked", "tool_allowed", "grant_revoked"))] == ["tool_asked"]

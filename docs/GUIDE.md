@@ -684,8 +684,11 @@ the next call asks again.
 
 Any other `command_allowlist` entry was written by you or another plugin, so a revoke leaves it alone
 and names it in the reply. A revoke for a tool confidential mode has granted nothing since the last
-revoke (no `allow`, no answer to its prompt in any process, which the ledger shows, and no entry in
-either file) says so and records nothing: no `grant_revoked` row and no record in
+revoke says so and records nothing. "Nothing" means: no `allow`; no prompt for the tool in any process
+since the last revoke, which the ledger shows (every prompt is ledgered before the prompt is shown, and the
+gate refuses the call when that row cannot be written); no `session` or `always` approval Hermes holds
+in this process under the current approval key; and no entry in `allowlist.yaml` or
+`command_allowlist`. Such a revoke writes no `grant_revoked` row and no record in
 `grants_revoked.json`. Every other revoke writes a `grant_revoked` row with the tool, the surface and
 the lock's identity. The prefix
 `plugin_rule:confidential-mode:tool:` is a convention Hermes doesn't reserve; a revoke removes any

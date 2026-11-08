@@ -161,18 +161,30 @@ def _pin_lines(rt: Any) -> list[str]:
     return lines
 
 
+def hermes_approval_keys(session_key: Optional[str] = None) -> tuple[set, set]:
+    """(Hermes' permanent approval keys, its session approval keys for ``session_key``, or for every session
+    when None). Read-only, under Hermes' own lock; raises when Hermes' tables cannot be read."""
+    from tools import approval
+    with approval._lock:
+        permanent = set(approval._permanent_set())
+        if session_key is None:
+            session: set = set()
+            for held in approval._session_approved.values():
+                session |= set(held)
+        else:
+            session = set(approval._session_approved.get(session_key, set()))
+    return permanent, session
+
+
 def remembered_grants(session_key: str = "", current_key=None) -> list[str]:
     """Hermes-held session/always grants under OUR rule keys (Amendment 2), as 'tool (scope)'. Read-only.
     ``current_key(tool)``: the rule key the gate asks under now (Amendment 13); a grant under an older key
     matches nothing the plugin asks for and is not listed."""
     out: list[str] = []
     try:
-        from tools import approval
         from .gate_tools import parse_pattern_key, rule_key_for
         current = current_key or rule_key_for
-        with approval._lock:
-            session = set(approval._session_approved.get(session_key, set())) if session_key else set()
-            permanent = set(approval._permanent_set())
+        permanent, session = hermes_approval_keys(session_key)    # "" names no session: none of its keys
         for keys, scope in ((permanent, "always"), (session, "session")):
             for key in sorted(k for k in keys if isinstance(k, str)):
                 parsed = parse_pattern_key(key)

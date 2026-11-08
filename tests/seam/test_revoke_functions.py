@@ -17,11 +17,27 @@ LOCK_ID = lock_id_from(100.0, "fp")
 
 
 class FakeLedger:
+    """Rows in memory, read back like the real ledger (tail and tool_rows), so a revoke's ledger check runs."""
+
     def __init__(self):
         self.rows = []
 
     def append(self, row):
-        self.rows.append(row)
+        self.rows.append(dict(row))
+        return len(self.rows)
+
+    def _events(self, since_id):
+        from types import SimpleNamespace
+        return [SimpleNamespace(id=i, **{k: r.get(k) for k in ("kind", "purpose", "decision")},
+                                detail=r.get("detail") or {})
+                for i, r in enumerate(self.rows, 1) if i > since_id]
+
+    def tail(self, since_id=0, limit=1000):
+        return self._events(since_id)[:limit]
+
+    def tool_rows(self, kinds, since_id=0, limit=1000):
+        return [e for e in self._events(since_id) if e.kind in kinds
+                and str(e.purpose or "").startswith("tool:")][:limit]
 
 
 @pytest.fixture
@@ -104,6 +120,29 @@ def test_a_session_only_grant_is_withdrawn_without_touching_hermes_tables(world)
     assert _decide(world.al, world.watcher).decision == "remembered"
 
 
+def test_a_session_grant_whose_answer_row_was_lost_still_ends(world):
+    """Review SF1: Hermes holds a session approval under the plugin's rule key and the ledger has no tool_allowed
+    row (the answer's append failed). The revoke still records, the key moves, and the approval stops counting."""
+    world.approval.approve_session(SK, "plugin_rule:" + rv.rule_key(world.watcher, "web_search"))
+    assert rv.granted_since_last_revoke(world.rt.ledger, {"web_search"}) == set()     # nothing in the ledger
+    status, msg = rv.revoke(world.rt, "web_search", surface="cli")
+    assert status == rv.NOTHING and "Nothing was recorded" not in msg and "no longer applies" in msg, msg
+    assert not world.approval.is_approved(SK, "plugin_rule:" + rv.rule_key(world.watcher, "web_search"))
+    assert [r["kind"] for r in world.rt.ledger.rows] == ["grant_revoked"]
+
+
+def test_an_ask_without_an_answer_row_counts_as_a_possible_grant(world):
+    """Another process asked (its tool_asked row is in the ledger) and the answer's row was lost: the revoke
+    records, so that process's grant ends; after it, nothing asked since: nothing recorded."""
+    world.rt.ledger.append({"kind": "tool_asked", "purpose": "tool:web_search", "decision": "ask"})
+    assert rv.granted_since_last_revoke(world.rt.ledger, {"web_search"}) == {"web_search"}
+    status, msg = rv.revoke(world.rt, "web_search", surface="cli")
+    assert "Nothing was recorded" not in msg and world.rt.ledger.rows[-1]["kind"] == "grant_revoked", msg
+    assert rv.granted_since_last_revoke(world.rt.ledger, {"web_search"}) == set()
+    status, msg = rv.revoke(world.rt, "web_search", surface="cli")
+    assert status == rv.NOTHING and "Nothing was recorded" in msg and len(world.rt.ledger.rows) == 2
+
+
 def test_the_config_write_changes_nothing_but_the_plugin_entries(world):
     """Amendment 13: the revoke's config.yaml write removes the plugin's own rule-key entries, both key forms,
     and leaves every other key, value, comment and env reference as it was (no merged defaults written back)."""
@@ -132,6 +171,8 @@ def test_revoke_all_keeps_foreign_entries(world):
 
 
 def test_a_revoke_that_finds_nothing_still_records_for_running_gateways(world):
+    # A gateway asked (and may hold the answer only in memory): this process finds nothing, but records.
+    world.rt.ledger.append({"kind": "tool_asked", "purpose": "tool:web_search", "decision": "ask"})
     before = world.cfg.read_bytes(), world.path.read_bytes()
     status, msg = rv.revoke(world.rt, "web_search", surface="cli")
     assert status == rv.NOTHING and msg.startswith("Nothing to revoke for web_search in this process")

@@ -397,17 +397,24 @@ def _drop_lock_grants(rt: Any, tools: Optional[set[str]]) -> list[str]:
         return []
 
 
+_GRANT_TRACE_KINDS = ("grant_revoked", "tool_asked", "tool_allowed")
+
+
 def granted_since_last_revoke(ledger: Any, tools: Optional[set[str]]) -> Optional[set[str]]:
-    """The tools (of ``tools``, or any tool when None) with a ``tool_allowed`` ledger row after the latest
-    revoke that moved their rule key (Amendment 14). A grant only ever starts with an answer the plugin
-    ledgers, in whichever process asked, so an empty set means confidential mode holds nothing to revoke.
-    None when the ledger cannot be read (the caller then revokes as before)."""
+    """The tools (of ``tools``, or any tool when None) that may hold a grant: a ``tool_asked`` or
+    ``tool_allowed`` ledger row after the latest revoke that moved their rule key (Amendment 14). Every grant
+    starts with an ask of the plugin's own prompt, and the gate refuses the call when that ask's
+    ``tool_asked`` row cannot be written (the hook and the middleware both let a failed append become a
+    refusal), so an ask stands in for an answer row that was lost. An empty set means confidential mode
+    asked nothing and granted nothing since the last revoke. None when the ledger cannot be read (the
+    caller then revokes as before)."""
     cut: dict[str, int] = {}
-    allowed: dict[str, int] = {}
+    touched: dict[str, int] = {}
     try:
+        read = getattr(ledger, "tool_rows", None)
         last = 0
         while True:
-            rows = ledger.tail(last)
+            rows = read(_GRANT_TRACE_KINDS, last) if callable(read) else ledger.tail(last)
             for ev in rows:
                 purpose = str(getattr(ev, "purpose", "") or "")
                 if not purpose.startswith("tool:"):
@@ -415,15 +422,37 @@ def granted_since_last_revoke(ledger: Any, tools: Optional[set[str]]) -> Optiona
                 name = purpose[len("tool:"):]
                 if ev.kind == "grant_revoked" and (getattr(ev, "detail", None) or {}).get("rule_key_rotated"):
                     cut[name] = ev.id
-                elif ev.kind == "tool_allowed":
-                    allowed[name] = ev.id
+                elif ev.kind in ("tool_asked", "tool_allowed"):
+                    touched[name] = ev.id
             if len(rows) < 1000:
                 break
             last = rows[-1].id
     except Exception:  # noqa: BLE001
         return None
     every = cut.get(ALL, 0)
-    return {t for t, row in allowed.items() if (tools is None or t in tools) and row > max(cut.get(t, 0), every)}
+    return {t for t, row in touched.items() if (tools is None or t in tools) and row > max(cut.get(t, 0), every)}
+
+
+def hermes_holds_grant(rt: Any, tools: Optional[set[str]]) -> bool:
+    """Whether Hermes holds, in this process, a session or always approval under the rule key the gate asks
+    under now for one of ``tools`` (any tool when None), in any approval session. Read-only; True when
+    Hermes' tables cannot be read (the caller then revokes as before)."""
+    try:
+        from .commands import hermes_approval_keys
+        from .gate_tools import parse_pattern_key
+        watcher = getattr(rt, "revocations", None)
+        permanent, session = hermes_approval_keys(None)
+        for key in permanent | session:
+            if not isinstance(key, str) or not key.startswith("plugin_rule:"):
+                continue
+            parsed = parse_pattern_key(key)
+            if parsed is None or (tools is not None and parsed[0] not in tools):
+                continue
+            if key == f"plugin_rule:{rule_key(watcher, parsed[0])}":
+                return True
+        return False
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id: str = "",
@@ -473,11 +502,11 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
     if not (from_allowlist or from_cache or from_lock_grants or from_hermes or errors or config_error):
         # Amendment 14: nothing was granted since the last revoke, so nothing is recorded and no key moves.
         granted = granted_since_last_revoke(getattr(rt, "ledger", None), tools)
-        if granted == set():
+        if granted == set() and not hermes_holds_grant(rt, tools):
             whom = f" for {tool}: confidential mode has not granted {tool}" if tools else \
                 ": confidential mode has granted no tool"
-            return NOTHING, (f"Nothing to revoke{whom} since the last revoke (no allow, no answer to a prompt, "
-                             "no allowlist or command_allowlist entry). Nothing was recorded."
+            return NOTHING, (f"Nothing to revoke{whom} since the last revoke (no allow, no prompt asked, no "
+                             "allowlist or command_allowlist entry). Nothing was recorded."
                              + left_alone_text(foreign))
     rotated = False
     try:
