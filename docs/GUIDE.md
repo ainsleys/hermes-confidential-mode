@@ -26,8 +26,8 @@ with a short "Limits" note; [LIMITATIONS.md](LIMITATIONS.md) is the complete lis
 
 ## The problem
 
-A Hermes turn can carry your conversation off the machine along six roads. Picking a verified
-provider for the main chat covers the first road and nothing else.
+A Hermes turn can carry your conversation off the machine along six routes. Picking a verified
+provider for the main chat covers the first route and nothing else.
 
 1. **The main model call.** Every turn sends the conversation to the provider in `model.provider`.
 2. **Fallbacks.** When the main provider answers with a rate limit (429), a server error (5xx) or an
@@ -49,7 +49,7 @@ provider for the main chat covers the first road and nothing else.
    execution and the file tools run on that other machine.
 5. **The memory provider.** A hosted memory service receives context on every turn.
 6. **The messaging platform.** Telegram, Discord and the other messaging platforms see your messages
-   before Hermes does. No plugin can close this road.
+   before Hermes does. No plugin can close this route.
 
 ![Figure 1. With a verified provider alone, the main chat is verified and five other routes carry
 text to hosts nobody checks.](images/routes-figure-1-verified-provider-alone.svg)
@@ -59,7 +59,7 @@ text to hosts nobody checks.](images/routes-figure-1-verified-provider-alone.svg
 The plugin does four things for a Hermes profile.
 
 1. **It shows you every route.** It logs every model call Hermes makes, with the host and the byte
-   count, never the text. The log is a file on this machine, and you can watch it live before you
+   count; the log never holds the text. The log is a file on this machine, and you can watch it live before you
    lock anything ([Look before you lock](#look-before-you-lock)).
 2. **It locks the profile to one tier.** The `on-host-only` tier accepts loopback and hosts you list.
    The `attested` tier accepts a Tinfoil enclave, or NEAR AI Cloud's gateway and models, whose build
@@ -67,7 +67,7 @@ The plugin does four things for a Hermes profile.
    call, delegation, text to speech, MCP servers, fallbacks, memory and the terminal backend. If any
    route leads off-tier, the lock is refused and the plugin names the key to change ([Tiers](#tiers),
    [Locking](#locking)).
-3. **While locked, it guards four of the five other roads.** Side calls must resolve to the tier and
+3. **While locked, it guards four of the five other routes.** Side calls must resolve to the tier and
    are rechecked every turn. Fallbacks are refused, and a failed request ends the turn. Tools outside the
    on-host list ask you the first time each runs during a lock. Memory must be the
    built-in store. Shell and code execution stay open.
@@ -315,7 +315,7 @@ that verification later, offline, from the evidence alone.
 
 > **Read this first.** If Hermes runs on someone else's machine, such as a cloud agent service or a
 > rented VPS, that machine's operator can read every prompt before anything in this plugin applies.
-> The plugin controls the road out of the Hermes process. The plugin doesn't protect the process itself.
+> The plugin controls the routes out of the Hermes process. The plugin doesn't protect the process itself.
 >
 > **What it defends against**
 >
@@ -398,8 +398,8 @@ locking counts as a config change.
 passes. Hermes' fall-through to OpenRouter or Nous runs only when the main provider is unset or
 `auto` (`agent/auxiliary_client.py:4529-4541`), which the lock refuses. `check` names the side calls
 left on `auto` when an OpenRouter or Nous credential is readable, and `hermes confidential setup`
-pins every side call. Vision must name its own provider or base URL, because `auto` vision can walk
-to hosted providers.
+pins every side call. Vision must name its own provider or base URL, because `auto` vision can fall
+through to hosted providers.
 
 Hermes' built-in on-host provider profiles (ollama, lmstudio and llama-cpp) report no base URL at
 84a0301, so set `model.base_url` yourself and give `auxiliary.vision` a base URL too. This config
@@ -494,8 +494,8 @@ hermes confidential watch
 
 `watch` streams the ledger: one row per send, with its purpose, host and size. A `verify_fail` row
 also shows its reason, such as `verify_fail: <model>: attestation unavailable (HTTP 503 from NEAR)`.
-On an unlocked install
-it tends to surprise people:
+On an unlocked install, the stream can show side calls going to hosts other than the main chat's,
+such as compression to DeepInfra here:
 
 ```
 TIME      SESSION       PURPOSE                   HOST                            BYTES     VERDICT/DECISION
@@ -849,7 +849,7 @@ restart can land on the other platform and ask again. Two ways to stop this:
   hardware-measurements check passed. In tinfoil 0.14.2 that check exists only for Intel TDX, so only
   a switch to a TDX router is approved this way, recorded with the decision `auto_platform_only`.
 
-**Limits.** The first pin is trust on first use. The consent record raises the bar but isn't a wall:
+**Limits.** The first pin is trust on first use. The consent record makes a forged pin harder but doesn't prevent one:
 any process running as your user can write a matching ledger row. An agent with a terminal can still
 reach the approval prompt by some routes, such as a nested chat attached through the gateway; treat a
 pin approved during an agent session as the agent's unless you remember answering
@@ -903,11 +903,11 @@ of the exact response bytes, then fetches NEAR's signature for that completion, 
 `confidential.near.signature_wait_seconds` (5), and writes one `send_signed` row. NEAR signs with one
 of two keys:
 
-- **`provider_tee`:** the model server's CVM signs `<model id>:<request digest>:<response digest>`,
-  showing that a holder of the signing key a verified model CVM's quote binds signed these bytes for
-  this model; every instance of the model shares that key, approved or not.
-- **`gateway`:** the gateway's CVM signs `<request digest>:<response digest>`, proving the gateway
-  sent these bytes and nothing about which model produced them.
+- **`provider_tee`:** the model server's CVM signs `<model id>:<request digest>:<response digest>`.
+  The signature shows that a holder of the signing key a verified model CVM's quote binds signed these
+  bytes for this model; every instance of the model shares that key, approved or not.
+- **`gateway`:** the gateway's CVM signs `<request digest>:<response digest>`. The signature proves
+  the gateway sent these bytes and says nothing about which model produced them.
 
 The gateway signs with its own key whenever it changes the bytes, which includes every streamed
 response, so main calls go to NEAR unstreamed (`confidential.near.streaming`, default false). With
@@ -947,7 +947,7 @@ What this establishes:
 - That a request was encrypted is the plugin's own report, marked "plugin self-report" in the receipt.
   The signature, which covers the ciphertext digests, can be re-checked by anyone.
 
-Refused before sending: streaming; every NEAR API other than chat completions, and any `api_mode`
+The plugin refuses these before sending: streaming; every NEAR API other than chat completions, and any `api_mode`
 other than chat completions on an attested-near route (the lock is refused); any top-level request key
 that would carry text in plaintext; and any setting whose value is a list or mapping, such as
 `logit_bias` or an `extra_body` entry, because token ids could encode text. Three structured settings
@@ -964,7 +964,7 @@ disclose`), the plugin encrypts every text part of a message (`text` or `input_t
 and sends each image part in plaintext. An image part is `image_url` or `input_image` holding an inline
 raster `data:image/...;base64,` URI (png, jpeg, gif, webp, bmp or tiff; SVG is refused), with an
 optional `detail` of `low`, `high` or `auto`. Any other part type, a remote image URL or an extra field
-on an image part is refused before sending, with the part type named. So NEAR's gateway reads each
+on an image part is refused before sending, with the part type named. NEAR's gateway therefore reads each
 image you send, while the text around it stays encrypted and the reply is still signed with
 `provider_tee`.
 
@@ -1027,7 +1027,7 @@ approved. A kept file that doesn't parse blocks approval of that entry for good.
 
 A verification passes when every CVM it reports matches an approved entry. A CVM that matches none
 becomes a pending entry, and the tier refuses until you run `/confidential pins approve`, which goes
-through every pending batch, oldest first, showing all pending entries of one identity and the whole
+through every pending batch, oldest first, and shows all pending entries of one identity and the whole
 approved set. Approving adds entries and never removes one, so the set grows as you meet more
 configurations. An entry no verification has matched for 20 verifications is flagged in the prompt;
 `hermes confidential pins retire <fingerprint>` removes it, given 8 or more hex digits of its code or
@@ -1089,7 +1089,7 @@ current session. A full example is in [examples/receipt-2026-11-06.txt](examples
 In order: a header; the trust roots used; the verification events, each with the raw attestation
 evidence it captured; the sends; the refusals; the questions asked and the answers given; the
 breaches; the context compactions; and the fixed closing paragraphs. Rows that describe the whole
-profile (locks, unlocks, verifications, pin events) are included when they fall in the locked period
+profile (locks, unlocks, verifications, pin events) are included when they fall in the lock period
 the session belongs to. A background verification the pins didn't accept is marked "NOT ACCEPTED" and
 never counted for a send. A row marked "unverified entry" has no evidence, or an incomplete capture,
 and shows nothing.
@@ -1271,7 +1271,7 @@ metadata trail, and it grows without limit
 
 ## Fewer hosted parties without locking
 
-If you won't lock, four config changes still cut the number of vendors on the leak map. You make them
+If you won't lock, four config changes still cut the number of vendors that see your conversation. You make them
 yourself; the plugin doesn't apply them. Each remaining vendor still sees your conversation in
 plaintext. None of the four has been evaluated for its effect on compression summaries, titles or
 vision answers, so run `hermes confidential watch` before and after to see what moved.
