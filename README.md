@@ -3,14 +3,14 @@
 
 [![tests](https://github.com/ainsleys/hermes-confidential-mode/actions/workflows/tests.yml/badge.svg)](https://github.com/ainsleys/hermes-confidential-mode/actions/workflows/tests.yml)
 
-Hermes cannot verify a confidential-compute provider on its own. Hermes Confidential Mode makes it checkable:
-it verifies the enclave, pins its build, keeps every model call and fallback inside it, encrypts what
+Hermes cannot verify a confidential-compute provider on its own. Hermes Confidential Mode makes the provider checkable:
+it verifies the enclave, pins its build, keeps every model call and fallback inside the enclave, encrypts what
 leaves, and writes a receipt anyone can replay.
 
 **What Hermes does today.** Point Hermes at Tinfoil or NEAR AI Cloud and you get an ordinary HTTPS
-connection to a URL and the vendor's word. No hardware report is checked, no build is pinned, the
-vendor's encrypted transport is not used, and no reply signature is verified. Hermes also makes more
-model calls than the one you see, for titles, compression, images and more. Those side calls follow
+connection to a URL and the vendor's word. Hermes checks no hardware report, pins no build, does not
+use the vendor's encrypted transport and verifies no reply signature. Hermes also makes more
+model calls than the call you see, for titles, compression, images and more. Those side calls follow
 your main provider, but two routes can leave it: an image sent while the vision route is on `auto`,
 which Hermes may hand to OpenRouter or Nous if you hold a key for them, and any provider you list under
 `fallback_providers`. Tools such as web search pass parts of what you wrote on to outside sites.
@@ -25,16 +25,17 @@ approved; `on-host-only` allows only your machine. While locked:
 - The enclave is re-verified whenever its last verification is more than five minutes old, and a
   changed enclave build is refused on every turn until you approve the new build. On both vendors
   every inference connection is pinned to the TLS key of the verified report the plugin accepted,
-  inside the handshake and before any byte of the request (headers and API key included) leaves; a
-  connection with another certificate is refused, recorded and triggers a re-verification. The
-  attestation fetch itself is not pinned: what it returns is checked by its signatures.
+  inside the handshake and before any byte of the request (headers and API key included) leaves. A
+  connection with another certificate is refused and recorded, and triggers a re-verification. The
+  attestation fetch itself is not pinned; the plugin verifies the signatures on the attestation the
+  fetch returns.
 - On the attested tier your text is encrypted to the enclave's key before it leaves your machine:
   Tinfoil through the vendor's encrypted transport, NEAR with every message, tool definition and tool
   call encrypted to the model's key and every reply signed by it. The gateway between you and the
-  model cannot read the text. (On NEAR it still sees images, the model id, settings, headers, sizes
+  model cannot read the text. (On NEAR the gateway still sees images, the model id, settings, headers, sizes
   and timing, and a gateway that swapped the reply key would be caught only afterwards.)
 - The plugin asks you the first time each tool outside its on-host list runs during a lock. That list
-  is 14 tools (shell, code, files, skills, memory, todo and a few more), so every tool that could send
+  is 14 tools (shell, code, files, skills, memory, todo, clarify and session search), so every tool that could send
   data off the machine asks, and so do some local ones such as Desktop pane and kanban tools. An
   allow lasts until you unlock, in that conversation only, so another chat, user or subagent is
   asked again (`confidential.tools.ask: each_call` asks on every call instead). When nobody can
@@ -46,18 +47,18 @@ approved; `on-host-only` allows only your machine. While locked:
   streams the calls live.
 
 **The receipt.** When you want, you render a receipt for the current session or any past one. It is
-built from the plugin's log: every model call, the lock period, the enclave build that was verified,
+built from the plugin's ledger: every model call, the lock period, the enclave build that was verified,
 and the raw hardware evidence captured at each verification. The receipt comes as readable text or as
-JSON that carries the evidence; the evidence is signed by the enclave's hardware and the vendor, and on
-NEAR each reply carries the enclave's signature over the exact bytes, so anyone can re-check the JSON
-form offline with `hermes confidential replay`.
+JSON that carries the evidence. The enclave's hardware and the vendor sign the evidence, and on NEAR
+each reply carries the enclave's signature over the exact bytes, so anyone can re-check the JSON form
+offline with `hermes confidential replay`.
 
-**Three limits before you rely on this.** The attested tier admits only models the two vendors serve
+**Four limits before you rely on this.** The attested tier admits only models the two vendors serve
 inside enclaves; those are open-weight models such as the Qwen, DeepSeek, Llama and gpt-oss families,
 so a hosted frontier model cannot be in the tier. Because fallbacks are refused while locked, a vendor
 outage ends the turn instead of routing elsewhere. The agent can still run shell commands and code, and the plugin
 does not look inside them, so a command such as `curl` could send text anywhere; every receipt says
-so. And the receipt itself is written by the plugin on your machine, so someone else can trust only
+so. The receipt itself is written by the plugin on your machine, so someone else can trust only
 its signed evidence.
 
 ![Figure 2. With the plugin, shown for Tinfoil: preflight checks every configured route, side calls
@@ -86,8 +87,8 @@ hermes confidential status | grep '^Plugin:'
   "'confidential' is not a hermes command".
 - **Enable can take a few minutes.** It downloads `tinfoil`, `pynacl`, `sigstore` and the packages
   they need into Hermes' environment, and meanwhile Hermes prints only "Resolving Python
-  dependencies" and "Installing Python dependencies". A quiet terminal doesn't mean it has hung. Set
-  `HERMES_VERBOSE=1` to watch the installer.
+  dependencies" and "Installing Python dependencies". A quiet terminal doesn't mean the enable step has
+  hung. Set `HERMES_VERBOSE=1` to watch the installer.
 - **Check which commit is installed.** The last command prints a line such as
   `Plugin: confidential-mode 0.1.0 (commit 3c20cf4a1b2c (git checkout))`, the commit the installed
   copy's `.git` names. Compare that commit with the commit you meant to install. The check does not
@@ -96,12 +97,12 @@ hermes confidential status | grep '^Plugin:'
   through `model.api_key`. The plugin reads keys only through Hermes' secret scope, so a key added only
   with `hermes auth` reads as not set. The lock and `check` refuse while the key is missing. They
   show one of three states, "set", "not set" or "not readable in this scope" (a multiplexed gateway
-  with no profile scope), never the key.
+  with no profile scope), and never show the key itself.
 - **Data files.** The plugin keeps the ledger in `<hermes home>/plugin-data/confidential-mode/` and the
   lock, pins and tool grants in `<hermes home>/plugin-data/agent-plugin-confidential-mode-<hash>/`,
   each file mode 0600. `hermes confidential status` prints both paths.
 - Leave `plugins.isolation` at its default, `in_process`; under host isolation the lock is refused.
-- Running Hermes from a source checkout with `uv run --no-sync`? The enable step doesn't run there, so
+- If you run Hermes from a source checkout with `uv run --no-sync`, the enable step doesn't run, so
   install `pynacl` yourself ([docs/RUNNING_TESTS.md](docs/RUNNING_TESTS.md)).
 
 [Install in detail](docs/GUIDE.md#install-in-detail) covers start-up output, data files and upgrading.
@@ -219,8 +220,8 @@ Add `--json` for the hash-chained form, and replay its evidence offline with
 
 ## Limits
 
-The ones you're most likely to hit. [docs/LIMITATIONS.md](docs/LIMITATIONS.md) has the full list and
-the change that would close each.
+You're most likely to hit the limits below. [docs/LIMITATIONS.md](docs/LIMITATIONS.md) has the full
+list and the change that would close each limit.
 
 - **Shell and code execution aren't inspected.** `terminal`, `execute_code` and `process_manage` run
   on this host while locked, and the plugin does not look inside shell commands or code, so a command
@@ -291,8 +292,8 @@ except where noted.
 
 Five contributors tried to add confidential inference to Hermes core before this plugin. The
 maintainers closed four of the pull requests under the policy that provider integrations arrive as
-plugins, and closed the first, #7045, as too large for core with a hard Tinfoil dependency, adding that
-they would revisit enclave inference if users asked for it. Their designs and findings shaped this one,
+plugins, and closed the first, #7045, as too large for core with a hard Tinfoil dependency; they said
+they would revisit enclave inference if users asked for it. Their designs and findings shaped this plugin,
 and the guide's
 [comparison chapter](docs/GUIDE.md#comparison-with-earlier-approaches) sets each against what the
 plugin does now.
