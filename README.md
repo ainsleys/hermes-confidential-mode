@@ -111,7 +111,29 @@ Preflight: run /confidential check <tier>
 
 `hermes confidential watch` streams each model call's purpose, host and size, locked or not.
 
-**2. Verify the vendor and approve the first pin.** Setup verifies the enclave, shows its
+**2. Try it without a key.** The `on-host-only` tier needs no vendor key: every model call must stay
+on this machine. With a local model server such as Ollama on port 11434, add this to `config.yaml`,
+using model names your server has:
+
+```yaml
+model: {provider: custom, base_url: http://127.0.0.1:11434/v1, default: llama3}
+auxiliary:
+  vision: {provider: custom, base_url: http://127.0.0.1:11434/v1, model: llava}
+```
+
+Then lock, have one turn, and read its receipt:
+
+```
+$ hermes confidential on on-host-only
+Locked to this machine (on-host-only), custom/llama3 at 127.0.0.1.
+…
+$ hermes                       # ask one question, then, in the chat:
+/confidential receipts
+```
+
+`hermes confidential off` unlocks. The steps below set up the `attested` tier with Tinfoil.
+
+**3. Verify the vendor and approve the first pin.** Setup verifies the enclave, shows its
 fingerprints, asks you to approve them, and prints a config block to merge into `config.yaml`. It
 never writes your config.
 
@@ -125,7 +147,7 @@ Then run `hermes confidential check --tier attested` and `/confidential on attes
 
 For NEAR AI Cloud, use `--vendor near --model Qwen/Qwen3.8-27B`.
 
-**3. Lock.** The preflight checks every route in your config first. If any would leave the tier, the
+**4. Lock.** The preflight checks every route in your config first. If any would leave the tier, the
 lock is refused with a table naming each key to change. Once locked, each off-host tool asks you
 the first time that tool would send data off the machine, on both tiers.
 
@@ -136,7 +158,7 @@ Off-host tools ask the first time per lock in each conversation. Shell and code 
 Details: hermes confidential status --verbose; docs/LIMITATIONS.md
 ```
 
-**4. Have a conversation.** Start `hermes` and ask something that needs the web. The first time each
+**5. Have a conversation.** Start `hermes` and ask something that needs the web. The first time each
 tool wants to send data off the machine, Hermes' approval panel shows the plugin's line:
 
 ```
@@ -158,7 +180,7 @@ Under yolo, approvals off, cron jobs and one-shot runs nobody can answer, so the
 after an Allow once. Hermes titles this panel "Dangerous Command" for every plugin approval, and the
 plugin can't change that title.
 
-**5. Read the receipt.** Receipts are rendered on demand, for the current session or any past one. In
+**6. Read the receipt.** Receipts are rendered on demand, for the current session or any past one. In
 the chat, `/confidential receipts` renders the current session; from a terminal, pass any session id:
 
 ```
