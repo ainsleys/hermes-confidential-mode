@@ -1,9 +1,9 @@
 # Claim index
 
 This index lists every claim on the [README](../README.md)'s first screen (the tagline, "What Hermes
-does today", "What the plugin does", the Figure 1 and Figure 2 captions, "The receipt" and "Four limits") and every
-row of its Commands table: 54 entries. Each entry gives the claim in one sentence, the code that
-enforces the claim, the tests that prove the claim, and the section of
+does today", "What the plugin does", the captions of Figures 1 and 2, "The receipt" and "Four
+limits") and every row of its Commands table: 54 entries. Each entry gives the claim in one
+sentence, the code that enforces the claim, the tests that prove the claim, and the section of
 [LIMITATIONS.md](LIMITATIONS.md) that bounds the claim.
 
 - **Code** is `file:function`, with paths from the repository root. `__init__.py` is the plugin's
@@ -334,24 +334,28 @@ lock's refusal, ask and allow counts; `receipts` shows where each call went.**
   `tests/seam/test_commands.py::test_cli_status_check_watch`.
 - Bound: [9](LIMITATIONS.md#9-what-the-network-still-sees-and-what-the-receipt-leaks).
 
-## Figure captions
+## README figure captions
 
-**F1. Figure 1: on the attested tier, one model call runs in six steps: the plugin verifies the
-enclave's report against the build the user approved, pins the connection to the report's TLS key
-before any byte leaves, encrypts the body, checks the reply's signature on NEAR before releasing the
-reply, writes a ledger row without the text, and renders a receipt anyone can replay offline.
-Figure 2: while a profile is locked, main chat and side calls go only to the verified enclave,
+**F1. README Figure 1 (attested send): on the attested tier, one model call runs in six steps: the
+plugin verifies the enclave's report against the build the user approved, pins the connection to the
+report's TLS key before any byte leaves (on NEAR the pinned connection ends at the attested gateway),
+encrypts the text (Tinfoil encrypts the whole body through the vendor's transport), checks the reply's
+signature on NEAR before releasing the reply, writes a ledger row with the size and never the text,
+and renders a receipt anyone can replay offline. README Figure 2 (what the lock covers, also GUIDE
+Figure 2): while a profile is locked, main chat and side calls go only to the verified enclave,
 fallback is refused, tools outside the on-host list ask once per lock in each conversation, memory
-must be the built-in store, and shell, code and command MCP servers stay open on this host.**
-Figure 1: T1 and T2 (verified against the approved build), P7 (pinned before any byte), P9 (the
-fetch drawn unpinned), P10 and P11 (encrypted body; the NEAR reply released only after its
-signature verifies), P12 (the gateway note), P17 (the ledger row) and R5 (offline replay) cover every
-part. Figure 2: P1 (enclave only; a stray side call recorded), P2 and P3 (the preflight, at lock and
-every turn), P4 and L2 (fallback refused; a failed request ends the turn), P13 to P15 (ask once per
-lock in each conversation; blocked under yolo and unattended runs) and L3 (shell and code open,
-unproven in the receipt) cover every part except memory, command MCP servers and the ledger rows for
-tool answers.
-- Code: memory: `preflight.py:run_preflight` (`memory.provider` must be on-host or the built-in);
+must be the built-in store or none, and shell, code and command MCP servers stay open on this host.**
+README Figure 1: T1 and T2 (verified against the approved build), P7 (pinned before any byte; on
+NEAR to the certificate the gateway's quote binds), P9 (the fetch drawn unpinned), P10 and P11 (the
+text encrypted; Tinfoil's transport seals the body; the NEAR reply released only after its signature
+verifies), P12 (the gateway note), P17 (the ledger row) and R5 (offline replay) cover every part.
+README Figure 2: P1 (enclave only; a stray side call recorded), P2 and P3 (the preflight, at lock
+and every turn), P4 and L2 (fallback refused; a failed request ends the turn), P13 to P15 (ask once
+per lock in each conversation; blocked under yolo, approvals off and unattended runs) and L3 (shell
+and code open, unproven in the receipt) cover every part except memory, command MCP servers and the
+ledger rows for tool answers.
+- Code: memory: `preflight.py:run_preflight` (`memory.provider` must be empty, `builtin`,
+  `built-in`, `local` or `none`, `preflight.py:_ON_HOST_MEMORY`);
   command MCP servers: `gate_tools.py:classify_tool` (a `command:` server is on-host, a `url:` server
   off-tier is blocked); tool answers: `gate_tools.py:build_post_approval_response` (`tool_allowed`
   and `tool_refused` rows).
