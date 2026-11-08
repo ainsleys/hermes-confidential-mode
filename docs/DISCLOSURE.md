@@ -368,10 +368,12 @@ Rule 9 of the Hermes plugin catalog (`plugin-catalog/README.md` in Hermes) says 
 Hermes only through public surfaces and must not replace, wrap or rebind core functions, methods,
 module attributes or private dicts in place; `hermes plugins validate` warns on each import of an
 undocumented core module. Every import below is lazy, which means it happens inside a function, not
-when the plugin loads.
+when the plugin loads, with one exception: `hermes_yaml` is imported when the plugin's `pins` module loads.
 
-Every import of an undocumented core module is in one file, `confidential_mode/hermes_compat.py`. Each
-name there has its own accessor function, whose docstring names the Hermes symbol, the Hermes commit it
+Every import of an undocumented core module is in one file, `confidential_mode/hermes_compat.py`, and so
+are the three private attributes the plugin reads on Hermes objects: an MCP server's `_config`, a terminal
+environment's `_hermes_backend_name` and the plugin manager's `_plugin_tool_names`. Each name there has its
+own accessor function, whose docstring names the Hermes symbol, the Hermes commit it
 was checked against (84a0301), what the plugin uses it for, and what the plugin does when the symbol is
 missing. A Hermes release that moves or renames one of these names breaks that file only. The other
 modules import only the documented plugin surface directly: `tools.registry`, `agent.secret_scope`,
@@ -381,20 +383,20 @@ module.
 
 | Module | Names | Why |
 |---|---|---|
-| `tools.approval` | `request_tool_approval`, `is_approved`, `_yolo_active`, `_presence`, and, in `/confidential status` and `pins`, `_lock`, `_session_approved`, `_permanent_set` (read only) | To ask before an off-host tool call. To detect bypass states that would approve a call without asking. To list the remembered grants stored under the plugin's own rule key. |
+| `tools.approval` | `request_tool_approval`, `is_approved`, `_yolo_active`, `_presence`, and, in `/confidential status` and `revoke`, `_lock`, `_session_approved`, `_permanent_set` (read only) | To ask before an off-host tool call. To detect bypass states that would approve a call without asking. To list the remembered grants stored under the plugin's own rule key. |
 | `tools.approval_context` | `get_current_session_key`, `set_current_observability_context`, `reset_current_observability_context`, `_get_approval_mode` | To get the session key for remembered grants and for the conversation a once-per-lock grant covers. To tie an approval answer to its tool call. To detect `approvals.mode: off`. |
 | `tools.registry` | `registry`, `discover_builtin_tools` | To build the tool allowlist at lock, and to record each tool's handler identity. A lock from the `hermes confidential` command line first loads the built-in tools, as a chat process would. |
 | `agent.error_classifier` | `_CONTEXT_OVERFLOW_PATTERNS` | To recognise a NEAR context-length error, so that Hermes can compress the context as it would for any provider. |
 | `agent.auxiliary_client` | `_RUNTIME_MAIN_CONTEXT`, `_RELAY_AUX_CALL_CONTEXT` | To read the live main runtime on each locked turn. Auxiliary tasks set to `auto` follow the live runtime, not the config. The second name gives a NEAR auxiliary send its purpose (`aux:<task>`) and session in the ledger. Without it, such a send takes the purpose and session of the turn around it, or reads "unattributed" with an empty session. |
 | `agent.secret_scope` | `get_secret` | To resolve `TINFOIL_API_KEY` and `NEAR_AI_API_KEY` for the active profile, and to check whether `OPENROUTER_API_KEY` or `NOUS_API_KEY` is set. |
 | `hermes_cli.env_loader` (in `scripts/near_first_contact.py` only) | `load_hermes_dotenv` | To load the `HERMES_HOME` env file before the script reads `NEAR_AI_API_KEY` through `get_secret`, as `hermes` does at start-up. Hermes' loader (84a0301): can rewrite `<HERMES_HOME>/.env` in place (a UTF-16 file becomes UTF-8, NUL characters are stripped, malformed lines are normalised); loads every variable the env file sets into the script's process environment, overriding exported values, and removes exported provider-selection variables Hermes manages that the env file does not set; loads `<HERMES_HOME>/.op.env`, without overriding, when that file exists and `OP_SERVICE_ACCOUNT_TOKEN` is unset; when the install has an administrator-managed scope with its own `.env`, rewrites that file the same way and loads it last, overriding every other value; writes `config.yaml`'s `terminal.*` settings into the process environment; publishes the deployment names into the environment and boots the config backend the home selects (a remote backend fetches the home's config); queries no external secret source (`load_external_secrets=False`); and does nothing at all in safe-worker mode. Every change to the environment ends with the process. The script itself never writes any of these files. |
-| `tools.terminal_tool`, `tools.terminal_tool_lifecycle`, `tools.terminal_scope` | `_get_env_config`, `_active_environments`, `_env_lock`, `get_active_env`, and `terminal_env` as a fallback | To read the terminal backend a terminal, code or file tool call would run on, the way Hermes' tools resolve it, and the backend of the environment Hermes has cached for the task. The plugin blocks the call, and refuses to lock, unless both are `local`. |
+| `tools.terminal_tool`, `tools.terminal_tool_lifecycle`, `tools.terminal_scope` | `_get_env_config`, `_active_environments`, `_env_lock`, `get_active_env`, `terminal_env` as a fallback, and a cached environment's `_hermes_backend_name` (read only) | To read the terminal backend a terminal, code or file tool call would run on, the way Hermes' tools resolve it, and the backend of the environment Hermes has cached for the task. The plugin blocks the call, and refuses to lock, unless both are `local`. |
 | `hermes_cli.commands` | `resolve_command` | To recognise `/model` and `/moa`, and their aliases, in `pre_gateway_dispatch`. |
-| `tools.mcp_tool`, `tools.mcp_tool_config`, `tools.mcp_tool_scope` | `_lock`, `_servers`, `_mcp_tool_server_names` (read only), `_load_mcp_config`, `_key_name` | To map an MCP tool to its server, and to read whether that server is a URL or an on-host command. |
+| `tools.mcp_tool`, `tools.mcp_tool_config`, `tools.mcp_tool_scope` | `_lock`, `_servers`, `_mcp_tool_server_names` and a live server's `_config` (read only), `_load_mcp_config`, `_key_name` | To map an MCP tool to its server, and to read whether that server is a URL or an on-host command. |
 | `tools.delegate_tool_config` | `_load_config` | To read the delegation backend and route keys for `delegate_task`. |
 | `providers`, `providers.base` | `register_provider`, `get_provider_profile`, `ProviderProfile` | To register `attested-tinfoil` and `attested-near`, and to check at lock time that the locked profile is visible in the process. |
 | `hermes_cli.config`, `hermes_cli.config_defaults` | `load_config_readonly`, `load_config`, `read_raw_config`, `save_config`, `DEFAULT_CONFIG` | To read the config, and to list the built-in auxiliary tasks. A revoke uses `read_raw_config`, `save_config` and `load_config` (to confirm) to remove the plugin's own `command_allowlist` entries and nothing else. |
-| `hermes_cli.plugins` | `get_plugin_manager`, `get_plugin_auxiliary_tasks` | To tell plugin tools from built-in tools, and to include plugin-registered auxiliary tasks in the preflight. |
+| `hermes_cli.plugins` | `get_plugin_manager` (and the manager's `_plugin_tool_names`, read only), `get_plugin_auxiliary_tasks` | To tell plugin tools from built-in tools, and to include plugin-registered auxiliary tasks in the preflight. |
 | `plugins.plugin_storage` | `plugin_db`, `plugin_data_dir` | To open the ledger database. |
 | `hermes_yaml` | | To read and write `pins.yaml` and `allowlist.yaml`. |
 | `tools.*` built-in tool modules named in `allowlist.yaml` | (the module) | A lock rebuilt in a `hermes confidential` command-line process imports the tool modules the lock recorded, so their tools register. The names come from the lock file, so the validator does not count these imports. |
