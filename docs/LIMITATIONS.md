@@ -1,7 +1,7 @@
 <!-- PLUGIN_NAME: confidential-mode  (final catalog slug; the prose name is Hermes Confidential Mode) -->
 # Hermes Confidential Mode: limitations, as an upstream roadmap
 
-Every gap in this document is a place where a plugin cannot close a road on its own. A "road" here
+Every gap in this document is a place where a plugin cannot close a route on its own. A "route" here
 means a way for your conversation, or data about it, to leave the machine.
 
 Each numbered section says four things:
@@ -20,7 +20,7 @@ The last section, "Smaller gaps, disclosed", lists gaps that need no section of 
 
 ## Terms used here
 
-The [guide's glossary](GUIDE.md#glossary) defines every term. The ones this document relies on most
+The [guide's glossary](GUIDE.md#glossary) defines every term. The terms this document relies on most
 are repeated here.
 
 **Hermes** is an agent harness: the program that runs the loop around a language model, sends it
@@ -82,7 +82,7 @@ Hermes does offer two auxiliary hooks, `pre_auxiliary_call` and `post_auxiliary_
 (`agent/auxiliary_hooks.py:210-240`). Both are observers. Hermes ignores their return value. If one
 of them fails, Hermes logs the failure and carries on.
 
-**What the plugin does today.** The plugin works on four fronts.
+**What the plugin does today.** The plugin acts at four points.
 
 1. **At lock time.** It refuses to lock unless every auxiliary task resolves in-tier. That covers the
    built-in tasks, 19 at 84a0301, read from `DEFAULT_CONFIG["auxiliary"]`. It also covers every task
@@ -111,9 +111,9 @@ calls on `auto` and the credential that would matter. A credential held only in 
 or a Nous sign-in through `hermes auth`, is not checked: the plugin reads no credential store, and
 Hermes has no public call that reports a sign-in without refreshing it. `hermes confidential setup` pins every side call anyway.
 
-An auxiliary call can still go off-tier in three situations. The first is between turns after a
-`/model` switch on the CLI. The second is in the middle of a turn. The third is when Hermes skips the
-per-turn check. The plugin cannot stop the bytes in any of them.
+An auxiliary call can still go off-tier in three situations: between turns after a `/model` switch
+on the CLI, in the middle of a turn, and when Hermes skips the per-turn check. The plugin cannot stop
+the bytes in any of them.
 
 **The core change that would close it.** Run each auxiliary provider attempt through
 `run_llm_execution_middleware`, with the task named in the context (`purpose="aux:<task>"`).
@@ -150,8 +150,8 @@ The plugin also guards the timeout itself, in three steps.
 3. If someone edits the timeout after locking, the fingerprint changes. The `llm_execution` gate
    then refuses the main call.
 
-One case remains. A title-generation call can run before the main call in a turn whose hook was
-skipped. Such a call is only recorded in the ledger, not refused.
+One case remains: a title-generation call can run before the main call in a turn whose hook was
+skipped, and such a call is only recorded in the ledger, not refused.
 
 ## 2. The CLI approve directive grants on any answer except "deny"
 
@@ -162,7 +162,7 @@ the exact string `"deny"`. `None`, an empty string, `"d"`, `"Deny"` and `"yes"` 
 The hook cannot veto the call after the prompt. The prompt's header is hard-coded as "DANGEROUS
 COMMAND".
 
-There is a second part to this gap. Under yolo mode, `approvals.mode: off`, and the cron, unattended
+The gap has a second part: under yolo mode, `approvals.mode: off`, and the cron, unattended
 and single-query approval modes, Hermes approves the call without asking anyone. In those modes it
 also does not fire the hook (`tools/approval.py:1071-1113`).
 
@@ -213,7 +213,7 @@ lock is also refused while Hermes holds a cached terminal environment on a non-l
 tool gate checks again on each call to one of the seven tools: the resolved backend and the
 environment cached for the call's task must both be `local`, or the call is blocked.
 
-One window remains. Hermes can create a new environment for a task between the plugin's per-call
+One window remains: Hermes can create a new environment for a task between the plugin's per-call
 check and the tool's own start, if the backend changed in that instant. The next call is then
 blocked, because the cached environment is no longer local. Only that one call runs on the other
 backend.
@@ -263,9 +263,8 @@ on a locked profile at all. This would not depend on plugin code being loaded.
 
 ## 6. The trust boundary is the whole Hermes process
 
-**The gap.** Other plugins in the same process share the Python interpreter with this one. They can
-register their own middleware. They can read this plugin's `ctx.state`. They can register a provider.
-They can patch anything.
+**The gap.** Other plugins in the same process share the Python interpreter with this plugin. They can
+register their own middleware or a provider, read this plugin's `ctx.state`, and patch anything.
 
 A policy plugin cannot require a particular order of middleware between plugins.
 
@@ -336,7 +335,7 @@ and signed responses.
 
 ## 9. What the network still sees, and what the receipt leaks
 
-**The gap.** Suppose every road above is closed. The following remain.
+**The gap.** Even with every route above closed, the following remain.
 
 - **Where TLS ends, and what is visible anyway.** TLS is the encryption HTTPS uses. The plugin
   drives the tinfoil SDK in its `ehbp` transport mode. In that mode the SDK encrypts each request
@@ -348,8 +347,8 @@ and signed responses.
   checked its build and pins), inside the handshake and before any request byte (headers and the
   `Authorization` header included) is written. The same holds for the transports the SDK rebuilds after a key rotation. A certificate
   with another key closes the connection, fails the request, writes a `verify_fail` row
-  (`reason_code: tls_pin_mismatch`) and asks for a re-verification, at most once per 30 seconds. So a
-  TLS intermediary that the WebPKI accepts can no longer read the headers or the API key; the
+  (`reason_code: tls_pin_mismatch`) and asks for a re-verification, at most once per 30 seconds. A TLS
+  intermediary that the WebPKI accepts therefore can no longer read the headers or the API key; the
   connection is refused instead.
 
   Before each verification is accepted, the plugin's TLS probe (`confidential.tinfoil.tls_probe`)
@@ -398,7 +397,7 @@ but it is out of scope here.
 `GET .../models` with your API key, on its default transport, before any plugin seam runs
 (`agent/model_metadata.py:898` and `:1026`).
 
-No conversation text is sent. The plugin refuses the turn itself. The request has gone out by then.
+No conversation text is sent, and the plugin refuses the turn that follows, but the probe request has gone out by then.
 
 The test `tests/hostile/test_integrated_hostile.py::test_leak_live_off_tier_runtime_hits_hermes_default_transport`
 marks this as a disclosed Hermes gap. It is marked as an expected failure (xfail).
@@ -456,7 +455,7 @@ as titles and compression, to an on-host model.
 **Why it exists.** The `on-host-only` rule refuses the enclave, and the `attested` rule refuses the
 on-host host (`confidential_mode/tiers.py`). This is a limit of the plugin, not of Hermes.
 
-One consequence concerns vision on NEAR. Images sent to NEAR leave in plaintext to its gateway
+One consequence concerns vision on NEAR: images sent to NEAR leave in plaintext to its gateway
 (section 14). A user who wants images to stay on this host would choose an on-host vision model, and
 only a mixed tier would accept it.
 
@@ -495,8 +494,8 @@ A `gateway` signature is made inside the gateway's CVM over `<request hash>:<res
   virtual machine. The plugin checks that attestation, and a pass establishes three things. A TD of this
   instance reported this actions log for this nonce. The log's hash is bound in a hardware quote. The per-service
   deployment map the plugin derives from the log is what the operator's own tooling reported. A pass
-  does not establish that the docker-compose files deployed after launch are measured. A pass does not
-  establish that the reported services are the ones running. Two facts stand in the way.
+  does not establish that the docker-compose files deployed after launch are measured, or that the
+  reported services are the ones running. Two facts stand in the way.
   - The log reports a compose-manager other than the measured one. The measured docker-compose names
     one compose-manager image. The measured docker-compose also starts a launcher service that can
     replace that image after boot.
@@ -530,7 +529,7 @@ A `gateway` signature is made inside the gateway's CVM over `<request hash>:<res
   longer matches. Either way the plugin withholds the reply and records the send as unverified. By then
   the gateway has read the reply, and any part of the request the model repeated in it.
 - **Encryption names a key, not an instance.** The plugin encrypts each request to the model key that it
-  verified in the attestation report. Every instance of that model shares that key, approved or not. So
+  verified in the attestation report. Every instance of that model shares that key, approved or not, so
   the encryption does not establish that only an approved instance could read the request.
 - **"Encrypted" is the plugin's own report.** The ledger and the receipt say which fields left as
   ciphertext. A third party can check the signature, and the signature covers the digests of the
@@ -587,7 +586,7 @@ verification pages, read 2026-11-07). They are not Hermes gaps.
   verification passes.
 - The model key is not part of a pin. The review bundle shows the verified signing address, old and
   new, for the reviewer. Within one Hermes process, a re-verification that reports a different model
-  key is refused. So when NEAR rotates a model key, NEAR requests are refused until Hermes restarts.
+  key is refused, so when NEAR rotates a model key, NEAR requests are refused until Hermes restarts.
   The restart accepts the new key without a prompt.
 - Settings whose value is a mapping, such as `extra_body` entries, leave this host in plaintext. While
   encryption is on, the plugin lets three structured settings pass, each checked by shape, and refuses
@@ -671,7 +670,7 @@ pin prompt instead of a refusal until restart.
 prompt. The command `hermes confidential pins approve` asks that question on the terminal it runs in.
 A chat surface asks it in its own way; in Hermes' interactive CLI that is the clarify panel. Hermes'
 `terminal` tool can run a command under a pseudo-terminal, which is a terminal that a program drives,
-and `process_manage` can type into it. So an agent could run the approve command, or start a nested
+and `process_manage` can type into it. An agent could therefore run the approve command, or start a nested
 `hermes` chat and type `/confidential pins approve` into it, and answer the prompt itself. A pin bundle
 handed to an agent for review is vendor text, and vendor text can try to make the agent do exactly
 that.
@@ -699,7 +698,7 @@ without a prompt until unlock. Other conversations, users and subagents still as
 `tool_allowed` row records its surface, and each later call's `lock_grant` row names the answering
 row in `grant_row`. Set `confidential.tools.ask: each_call` to make every answer cover one call.
 
-The details:
+The details of the tool gate, the tool marker and the routes that stay open:
 
 - The tool gate reads the arguments of `terminal` calls as shell commands, `execute_code` calls as
   Python, and `process_manage` input as both. Before it splits shell text, it joins a backslash at a
@@ -765,8 +764,8 @@ The details:
   marker (the person's own surface there) is asked. A refused prompt writes a `pin_denied` or
   `tool_refused` row with the decision `self_approval`.
 - In Hermes 84a0301 a chat client attached to the gateway has its slash commands run by the gateway
-  process itself, which carries its own marker. So a nested chat that a tool started can answer
-  through the gateway.
+  process itself, which carries its own marker, so a nested chat that a tool started can
+  answer through the gateway.
 - An agent in another profile that does not load this plugin has no marker, and this profile's tool
   gate does not see its calls. It can run the approve command for this profile under a
   pseudo-terminal and answer it.
@@ -804,7 +803,7 @@ title itself always reads "Dangerous Command".
 
 ## Smaller gaps, disclosed
 
-Each item below is a smaller gap. Each one is stated in full.
+Each item below states a smaller gap in full.
 
 - **Persistence-disabled agents skip `pre_llm_call`.** Hermes skips `pre_llm_call` for agents with
   persistence disabled (`agent/turn_context.py:858`), such as the background review agent. The
@@ -885,9 +884,9 @@ Each item below is a smaller gap. Each one is stated in full.
 
 - **The ledger grows without limit.** The plugin never deletes ledger rows. On the attested tier a
   `verify_ok` row with its evidence is written about every `confidential.verify_ttl_seconds` minus
-  `confidential.verify_refresh_lead_seconds` (four minutes by default) while sends continue. That is about 15 KB for Tinfoil. For NEAR it is about 20 KB in the row plus about 120 KB
+  `confidential.verify_refresh_lead_seconds` (four minutes by default) while sends continue. Each such row is about 15 KB for Tinfoil. For NEAR it is about 20 KB in the row plus about 120 KB
   of evidence files in `evidence/blobs/` beside the ledger, for one model. An evidence file stays
-  while any row names it. That is a few megabytes to tens of megabytes
+  while any row names it. Those verification rows and their evidence files add a few megabytes to tens of megabytes
   a day. A receipt reads the ledger from the last unlock before its session. A profile
   that has never been unlocked therefore still reads from the start of the ledger, and rendering
   slows as the file grows. To start a new
