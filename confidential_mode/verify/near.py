@@ -818,6 +818,10 @@ class NearAdapter:
         self._inflight: dict[int, int] = {}            # id(send pool) -> requests in flight on it
         self._retired: list[httpx.BaseTransport] = []  # dropped pools waiting for their last request
         self._async_transports: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncBaseTransport]] = {}
+        # Dropped async pools waiting for their last request, each with the loop it was made on (an async pool
+        # is closed on its own loop), and the close tasks still running (kept so they are not collected).
+        self._retired_async: list[tuple[asyncio.AbstractEventLoop, httpx.AsyncBaseTransport]] = []
+        self._async_closing: set = set()
         self._accepted: VerificationResult | None = None
         self._appraisal: Appraisal | None = None
         self.verified_mono: float | None = None
@@ -925,17 +929,51 @@ class NearAdapter:
         return t, release
 
     def _drop_send_pools(self) -> None:
-        """A newly accepted TLS fingerprint, a 421 or a pin mismatch: new requests get a fresh pool; the old
-        one is closed once the requests other threads still have in flight on it have finished."""
+        """A newly accepted TLS fingerprint, a 421 or a pin mismatch: new requests get a fresh pool; each old
+        pool (the sync pool and every loop's async pool) is closed once the requests still in flight on it
+        have finished, so its sockets do not linger. An async pool is closed on the loop it was made on."""
+        close_async = []
         with self._lock:
             t, self._sync_transport = self._sync_transport, None
+            for loop, at in self._async_transports.values():
+                if self._inflight.get(id(at), 0) > 0:
+                    self._retired_async.append((loop, at))
+                else:
+                    close_async.append((loop, at))
             self._async_transports.clear()
-            if t is None:
-                return
-            if self._inflight.get(id(t), 0) > 0:
+            if t is not None and self._inflight.get(id(t), 0) > 0:
                 self._retired.append(t)
+                t = None
+        for loop, at in close_async:
+            _aclose_on_loop(loop, at, self._async_closing)
+        if t is not None:
+            _close_quietly(t)
+
+    def _acquire_async(self) -> tuple[httpx.AsyncBaseTransport, Callable[[], None]]:
+        """Caller holds the adapter lock. The running loop's send pool, counted as in use until the returned
+        release() is called (once); a pool dropped meanwhile is closed by the last release."""
+        t = self._async_pool()
+        self._inflight[id(t)] = self._inflight.get(id(t), 0) + 1
+        done = [False]
+
+        def release() -> None:
+            if done[0]:
                 return
-        _close_quietly(t)
+            done[0] = True
+            close = None
+            with self._lock:
+                n = self._inflight.get(id(t), 0) - 1
+                if n > 0:
+                    self._inflight[id(t)] = n
+                else:
+                    self._inflight.pop(id(t), None)
+                    for i, (loop, r) in enumerate(self._retired_async):
+                        if r is t:
+                            close = self._retired_async.pop(i)
+                            break
+            if close is not None:
+                _aclose_on_loop(close[0], close[1], self._async_closing)
+        return t, release
 
     def _get(self, client: httpx.Client, path: str, params: dict, headers: dict | None = None):
         url = f"{self._base_url}/{path}"
@@ -1110,7 +1148,11 @@ class NearAdapter:
             self.closed = True
             ts = [self._sync_transport, self._attest_transport]
             self._sync_transport = self._attest_transport = None
+            pools = list(self._async_transports.values()) + self._retired_async
             self._async_transports.clear()
+            self._retired_async = []
+        for loop, at in pools:
+            _aclose_on_loop(loop, at, self._async_closing)
         for t in ts:
             if t is None:
                 continue
@@ -1442,6 +1484,54 @@ def _close_quietly(t) -> None:
         t.close()
     except Exception:
         pass
+
+
+def _aclose_on_loop(loop: asyncio.AbstractEventLoop, t: Any, keep: set) -> None:
+    """Close an async pool on the loop it was made on, so its sockets close: a task when that loop is the
+    running one, else scheduled onto it from this thread. A closed loop can run nothing; the reference is
+    dropped. ``keep`` holds the pending close until it finishes. Never raises."""
+    aclose = getattr(t, "aclose", None)
+    if not callable(aclose):
+        return
+
+    def done(fut) -> None:
+        keep.discard(fut)
+        try:
+            fut.exception()
+        except BaseException:  # noqa: BLE001 - a cancelled close; nothing to report
+            pass
+    try:
+        if loop.is_closed():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            fut = loop.create_task(aclose())
+        else:
+            fut = asyncio.run_coroutine_threadsafe(aclose(), loop)
+        keep.add(fut)
+        fut.add_done_callback(done)
+    except Exception:  # noqa: BLE001
+        logger.debug("confidential-mode: could not schedule closing a NEAR async pool", exc_info=True)
+
+
+class _AsyncReleasing(httpx.AsyncByteStream):
+    """An async response body that releases its send pool when closed."""
+
+    def __init__(self, inner, release):
+        self._inner, self._release = inner, release
+
+    async def __aiter__(self):
+        async for chunk in self._inner:
+            yield chunk
+
+    async def aclose(self):
+        try:
+            await self._inner.aclose()
+        finally:
+            self._release()
 
 
 class _NonClosing(httpx.BaseTransport):
@@ -1896,11 +1986,11 @@ class _AsyncView(httpx.AsyncBaseTransport):
         try:
             with a._lock:                # the hold re-check and the pool choice under one lock (S09)
                 a._check_current(ex)
-                pool = a._async_pool()
+                pool, release = a._acquire_async()
         except VerifyError as exc:
             raise _refuse(a, exc, "before_send", ex=ex, request=request) from exc
         try:
-            response = await pool.handle_async_request(ex.request if ex is not None else request)
+            response = await self._send(pool, release, ex.request if ex is not None else request)
         except BaseException as exc:
             refusal = _send_failed(a, ex, exc) if ex is not None else None
             if refusal is None and any(isinstance(e, TLSPinMismatch) for e in _chain(exc)):
@@ -1911,7 +2001,11 @@ class _AsyncView(httpx.AsyncBaseTransport):
             raise
         if ex is None:
             return response
-        ex.on_response(response)
+        try:
+            ex.on_response(response)
+        except BaseException:
+            release()            # the body is never read, so its close never releases the pool
+            raise
         bound = _signature_step_bound(a)
 
         async def finish(reason=None):
@@ -1964,6 +2058,21 @@ class _AsyncView(httpx.AsyncBaseTransport):
                 finally:
                     await finish(None if ex.completed else "closed before its end")
         response.stream = _Hashing()
+        return response
+
+    @staticmethod
+    async def _send(pool, release, request: httpx.Request) -> httpx.Response:
+        """One request on ``pool``; the pool counts as in use until the upstream response is closed (or the
+        send fails), so a pool dropped meanwhile is closed only after its last request."""
+        try:
+            response = await pool.handle_async_request(request)
+        except BaseException:
+            release()
+            raise
+        if getattr(response, "is_closed", False):
+            release()
+        else:
+            response.stream = _AsyncReleasing(response.stream, release)
         return response
 
     async def aclose(self) -> None:

@@ -264,6 +264,103 @@ def test_async_send_is_signed_and_verified(world, tmp_path):
     assert rows[0]["verdict"] == "verified"
 
 
+class _ClosingPool(httpx.MockTransport):
+    """A mock async pool that records the loop it was closed on."""
+
+    def __init__(self, handler):
+        super().__init__(handler)
+        self.closed_on: list = []
+
+    async def aclose(self) -> None:
+        self.closed_on.append(asyncio.get_running_loop())
+
+
+def _pools(world, ad):
+    made: list[_ClosingPool] = []
+
+    def factory():
+        made.append(_ClosingPool(lambda r: world.handler(r)))
+        return made[-1]
+    ad._async_transport_factory = factory
+    return made
+
+
+async def _settle():
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+def test_a_dropped_async_pool_is_closed_on_its_loop(world, tmp_path):
+    """fix-pass-3 item 3: _drop_send_pools used to clear the async pools without closing them, so their
+    sockets lingered. Dropped on the loop's own thread, and from another thread while the loop runs."""
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    made = _pools(world, ad)
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        c = openai.AsyncOpenAI(api_key="sk-near-test", base_url=BASE, http_client=ad.async_http_for_loop(),
+                               max_retries=0)
+        await c.chat.completions.create(model=MODEL, messages=MSG)
+        ad._drop_send_pools()                                  # on the loop's thread
+        await _settle()
+        assert made[0].closed_on == [loop]
+        await c.chat.completions.create(model=MODEL, messages=MSG)
+        assert len(made) == 2                                  # a fresh pool for the next send
+        await loop.run_in_executor(None, ad._drop_send_pools)  # from another thread
+        await _settle()
+        assert made[1].closed_on == [loop]
+        assert ad._async_transports == {} and ad._retired_async == [] and ad._inflight == {}
+    asyncio.run(go())
+    assert ad._async_closing == set()
+
+
+def test_an_async_pool_dropped_mid_stream_closes_after_its_last_request(world, tmp_path):
+    ad, _, rows = _accepted(world, tmp_path, encrypt=False)
+    made = _pools(world, ad)
+
+    async def go():
+        c = openai.AsyncOpenAI(api_key="sk-near-test", base_url=BASE, http_client=ad.async_http_for_loop(),
+                               max_retries=0)
+        s = await c.chat.completions.create(model=MODEL, messages=MSG, stream=True)
+        ad._drop_send_pools()
+        await _settle()
+        assert made[0].closed_on == [] and [p for _, p in ad._retired_async] == [made[0]]
+        async for _ in s:
+            pass
+        await _settle()
+        assert made[0].closed_on == [asyncio.get_running_loop()]
+        assert ad._retired_async == [] and ad._inflight == {}
+    asyncio.run(go())
+    assert [r["decision"] for r in rows] == ["gateway"]   # the in-flight stream finished its signature step
+
+
+def test_closing_the_adapter_closes_its_async_pools(world, tmp_path):
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    made = _pools(world, ad)
+
+    async def go():
+        c = openai.AsyncOpenAI(api_key="sk-near-test", base_url=BASE, http_client=ad.async_http_for_loop(),
+                               max_retries=0)
+        await c.chat.completions.create(model=MODEL, messages=MSG)
+        ad.close()
+        await _settle()
+        assert made[0].closed_on == [asyncio.get_running_loop()]
+    asyncio.run(go())
+
+
+def test_a_pool_whose_loop_has_closed_is_dropped_without_error(world, tmp_path):
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    made = _pools(world, ad)
+
+    async def go():
+        c = openai.AsyncOpenAI(api_key="sk-near-test", base_url=BASE, http_client=ad.async_http_for_loop(),
+                               max_retries=0)
+        await c.chat.completions.create(model=MODEL, messages=MSG)
+    asyncio.run(go())
+    ad._drop_send_pools()                           # its loop is closed: nothing can run there, nothing raises
+    assert made[0].closed_on == [] and ad._async_transports == {} and ad._async_closing == set()
+
+
 # ── appraisal and replay ─────────────────────────────────────────────────────────────────────────
 
 def test_replay_recomputes_the_same_result_offline_and_detects_tampering(world, tmp_path):
