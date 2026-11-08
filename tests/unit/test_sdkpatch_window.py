@@ -49,6 +49,7 @@ def test_another_thread_inside_the_window_runs_the_original():
     assert mod.f is not original
     release.set()
     t.join(5)
+    assert not t.is_alive()
     assert results == {"holder": 200, "other": 2}
     assert mod.f is original
 
@@ -168,9 +169,11 @@ def test_two_threads_verifying_at_once_each_capture_their_own_evidence(sdk):
     assert _sdkpatch._windows and len(_sdkpatch.installed_now()) >= 3
     a_go.set()
     ta.join(5)
+    assert not ta.is_alive()
     assert len(_sdkpatch.installed_now()) >= 3      # b's window is still open: the wrappers stay
     b_go.set()
     tb.join(5)
+    assert not tb.is_alive()
     assert ea == [] and eb == []
     _evidence_of("a.example", out_a["sink"])
     _evidence_of("b.example", out_b["sink"])
@@ -190,6 +193,7 @@ def test_a_verify_during_a_background_refresh(sdk):
     assert len(_sdkpatch.installed_now()) >= 3      # the refresh's window is still open
     go.set()
     tr.join(5)
+    assert not tr.is_alive()
     assert er == []
     _evidence_of("refresh.example", out_r["sink"])
     _restored(sdk)
@@ -208,6 +212,7 @@ def test_an_exception_inside_the_window_restores_the_wrappers_and_keeps_the_othe
     assert len(_sdkpatch.installed_now()) >= 3       # the refresh's window keeps the wrappers
     go.set()
     tr.join(5)
+    assert not tr.is_alive()
     assert er == []
     _evidence_of("ok.example", out_r["sink"])
     _restored(sdk)
@@ -225,4 +230,70 @@ def test_a_capture_recorder_that_fails_records_the_error_and_the_verify_goes_on(
     sink = out["sink"]
     assert "attestation" not in sink and sink["capture_errors"][0].startswith("attestation: AttributeError")
     assert sink["sigstore_bundle"] == "bundle-of-repo-odd.example"
+    _restored(sdk)
+
+
+# ── fix-pass-3 review finding 7: the adapter's own verify path and the SDK's own verify ─────────────────
+
+class _StopDoc(_Doc):
+    """What the faked fetch_attestation returns to the SDK's real SecureClient.verify: its verify() records
+    the sink the capture hook filled for this thread, then stops the SDK before any cryptography."""
+    seen: dict = {}
+
+    def verify(self):
+        sink = _sdkpatch.current_sink()
+        _StopDoc.seen[threading.current_thread().name] = dict(sink) if sink is not None else None
+        raise RuntimeError("stop after the capture")
+
+
+def _sdk_client(host):
+    """The SDK's own SecureClient, its real verify() method, without its network constructor."""
+    from tinfoil.client import SecureClient
+    sc = object.__new__(SecureClient)
+    sc.attestation_bundle_url, sc.repo, sc.enclave, sc.measurement = None, f"repo-{host}", host, None
+    return sc
+
+
+def _adapter_verify(tmp_path, host):
+    from confidential_mode.verify.tinfoil import TinfoilAdapter
+    ad = TinfoilAdapter(data_dir=tmp_path / host, enclave=host, tls_probe=False)
+    with pytest.raises(RuntimeError, match="stop after the capture"):
+        ad._guarded_verify(_sdk_client(host))     # the adapter's path: counters, SDK lock, window, SDK verify
+    return ad
+
+
+def test_the_adapter_verify_path_captures_through_the_sdk_s_own_verify(sdk, monkeypatch, tmp_path):
+    from tinfoil import client as tf_client
+    monkeypatch.setattr(tf_client, "fetch_attestation", lambda host: _StopDoc(f"body-of-{host}"))
+    sdk["fakes"][(tf_client, "fetch_attestation")] = tf_client.fetch_attestation
+    _StopDoc.seen.clear()
+    ad = _adapter_verify(tmp_path, "adapter.example")
+    assert ad.attestation_count == 1
+    seen = _StopDoc.seen[threading.current_thread().name]
+    assert seen["attestation"] == {"format": "fake-format", "body": "body-of-adapter.example"}
+    _restored(sdk)
+
+
+def test_two_adapters_verifying_at_once_through_the_sdk_capture_their_own(sdk, monkeypatch, tmp_path):
+    from tinfoil import client as tf_client
+    held, go = threading.Event(), threading.Event()
+
+    def fetch(host):
+        if threading.current_thread().name == "adapter-a":
+            held.set()
+            assert go.wait(5)
+        return _StopDoc(f"body-of-{host}")
+    monkeypatch.setattr(tf_client, "fetch_attestation", fetch)
+    sdk["fakes"][(tf_client, "fetch_attestation")] = fetch
+    _StopDoc.seen.clear()
+    ta, ea = _run("adapter-a", _adapter_verify, tmp_path, "a.example")
+    assert held.wait(5)
+    assert len(_sdkpatch.installed_now()) >= 3          # a's window is open
+    _adapter_verify(tmp_path, "b.example")              # b opens and closes its own window meanwhile
+    assert len(_sdkpatch.installed_now()) >= 3          # a's window keeps the wrappers
+    go.set()
+    ta.join(5)
+    assert not ta.is_alive() and ea == []
+    assert _StopDoc.seen["adapter-a"]["attestation"]["body"] == "body-of-a.example"
+    assert _StopDoc.seen[threading.current_thread().name]["attestation"]["body"] == "body-of-b.example"
     _restored(sdk)
