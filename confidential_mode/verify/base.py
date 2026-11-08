@@ -16,7 +16,7 @@ def http_next_step(status: int, subject_kind: str = "model") -> str:
     if status == 404:
         return f"check the {subject_kind} id; the vendor does not serve an attestation for it"
     if status in (401, 403):
-        return "attestation is public, so this answer is the vendor's; try again later"
+        return "the endpoint is public, so the refusal is the server's; try again later"
     return "try again in a few minutes"
 
 
@@ -26,25 +26,63 @@ class VendorHTTPError(VerifyError):
     "<subject>: attestation unavailable (HTTP 503 from NEAR); try again in a few minutes"."""
 
     def __init__(self, *, vendor: str, subject: str, status: int, path: str = "", next_step: str = "",
-                 subject_kind: str = "model"):
+                 subject_kind: str = "model", what: str = "attestation"):
         self.vendor, self.subject, self.status, self.path = vendor, subject, int(status), path
-        self.subject_kind = subject_kind
+        self.subject_kind, self.what = subject_kind, what
         self.next_step = next_step or http_next_step(self.status, subject_kind)
-        super().__init__(f"{subject}: attestation unavailable (HTTP {self.status} from {vendor}); {self.next_step}")
+        super().__init__(f"{subject}: {what} unavailable (HTTP {self.status} from {vendor}); {self.next_step}")
 
 
-def http_status_in(exc: BaseException | None) -> int | None:
-    """The HTTP status carried anywhere in ``exc``'s chain (``status_code``, or ``response.status_code``,
-    as requests and httpx raise them), or None."""
+def http_error_in(exc: BaseException | None) -> tuple[int, str] | None:
+    """(HTTP status, URL) carried anywhere in ``exc``'s chain, or None. Reads ``status_code`` and
+    ``response.status_code`` / ``response.url`` (requests, httpx) and ``code`` / ``url`` (urllib's
+    HTTPError). The URL is "" when the error does not carry one."""
     seen = 0
     while exc is not None and seen < 10:
-        for holder in (exc, getattr(exc, "response", None)):
+        response = getattr(exc, "response", None)
+        for holder in (exc, response):
             code = getattr(holder, "status_code", None)
             if isinstance(code, int) and 100 <= code <= 599:
-                return code
+                return code, _url_of(holder) or _url_of(response)
+        code = getattr(exc, "code", None)
+        if isinstance(code, int) and 100 <= code <= 599 and hasattr(exc, "geturl"):
+            return code, str(getattr(exc, "url", "") or getattr(exc, "filename", "") or "")
         exc = exc.__cause__ or exc.__context__
         seen += 1
     return None
+
+
+def _url_of(obj: Any) -> str:
+    """``obj.url`` as text, or "" (httpx raises when a response has no request)."""
+    try:
+        return str(getattr(obj, "url", "") or "")
+    except Exception:
+        return ""
+
+
+def http_status_in(exc: BaseException | None) -> int | None:
+    """The HTTP status carried anywhere in ``exc``'s chain, or None."""
+    got = http_error_in(exc)
+    return got[0] if got else None
+
+
+def http_source(url: str, router_host: str = "") -> tuple[str, str]:
+    """(who answered, what was fetched) for a URL the Tinfoil SDK requested during a verification (review
+    SF3): the router itself, Tinfoil's GitHub and AMD key proxies, Intel's provisioning service, GitHub, or
+    the bare host when none of these."""
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).hostname or "").lower() if url else ""
+    if not host or (router_host and host == router_host.lower()):
+        return "Tinfoil", "attestation"
+    if host == "github-proxy.tinfoil.sh" or host.endswith("github.com") or host.endswith("githubusercontent.com"):
+        return ("Tinfoil's GitHub proxy" if host.endswith("tinfoil.sh") else "GitHub"), "release and Sigstore check"
+    if host == "kds-proxy.tinfoil.sh":
+        return "Tinfoil's AMD key proxy", "AMD certificate fetch"
+    if host.endswith("trustedservices.intel.com") or host.endswith("intel.com"):
+        return "Intel PCS", "Intel TDX collateral fetch"
+    if host.endswith("tinfoil.sh"):
+        return f"Tinfoil's {host}", "attestation"
+    return host, "attestation"
 
 
 @dataclass(frozen=True)
