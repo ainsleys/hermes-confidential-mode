@@ -20,18 +20,25 @@ NEAR_AI_API_KEY when the env file does not set it. A key held only in Hermes' cr
 (`hermes auth`) is not read. The key is only ever sent as the Authorization header to the configured
 base URL. It is not printed, logged or written to --out.
 
-Hermes' loader does more than read the env file, the same as when `hermes` starts:
-  - It can rewrite <HERMES_HOME>/.env: an env file saved as UTF-16 is rewritten as UTF-8, NUL characters
-    are stripped, and lines Hermes considers malformed are normalised in place. The script itself never
+Hermes' loader does more than read the env file, the same as when `hermes` starts
+(hermes_cli/env_loader.py load_hermes_dotenv at Hermes 84a0301):
+  - It can rewrite <HERMES_HOME>/.env in place: an env file saved as UTF-16 is rewritten as UTF-8, NUL
+    characters are stripped, and lines Hermes considers malformed are normalised. The script itself never
     writes the file.
-  - It also loads <HERMES_HOME>/.op.env (a 1Password service account token) into this process's
-    environment when that file exists and OP_SERVICE_ACCOUNT_TOKEN is not already set. With
-    load_external_secrets=False, Hermes' external secret sources (1Password among them) are not queried.
-  - It loads every variable the env file sets, not only NEAR_AI_API_KEY, into this process's
-    environment, and removes exported provider-selection variables Hermes manages that the env file does
-    not set. That environment ends with the process.
-  - It boots the config backend the home selects; a home set up with a remote config backend has its
-    config fetched from that backend, as at `hermes` start-up.
+  - It loads every variable the env file sets, not only NEAR_AI_API_KEY, into this process's environment,
+    overriding exported values, and removes exported provider-selection variables Hermes manages that the
+    env file does not set.
+  - It loads <HERMES_HOME>/.op.env (a 1Password service account token) into this process's environment,
+    without overriding, when that file exists and OP_SERVICE_ACCOUNT_TOKEN is not already set.
+  - When the install has an administrator-managed scope with its own .env, it rewrites that file in the
+    same way and loads it last, overriding every other value.
+  - It writes config.yaml's terminal.* settings into this process's environment.
+  - It publishes the deployment names into this process's environment and boots the config backend the
+    home selects; a home set up with a remote config backend has its config fetched from that backend.
+  - With load_external_secrets=False, Hermes' external secret sources (1Password among them) are not
+    queried.
+  - In safe-worker mode it does nothing at all.
+  Every change to the environment ends with the process.
 Run with HERMES_HOME pointing at a home you are willing to have Hermes touch in these ways.
 
 Run it in Hermes' environment (it needs tinfoil 0.14.2 for the TDX quote check), for example:
