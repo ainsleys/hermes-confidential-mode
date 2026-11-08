@@ -42,14 +42,14 @@ provides all of the following.
 | `vendor: str` | Lower-case vendor name. Written into every `VerificationResult`, pin and ledger row. |
 | `enclave_host` (property) | The resolved host, or `""` while unresolved. Never touches the network. |
 | `base_url` (property) | `https://<host>/v1`, or an unroutable `.invalid` placeholder while unresolved (`verify/tinfoil.py:PLACEHOLDER_BASE_URL`). `provider.py:_sync_profile_base_url` copies the resolved value into the profile after each verification, and `tiers.py:AttestedPredicate` compares a call's host with that value. |
-| `resolve_enclave_host()` | Resolves the host once (config first, then vendor discovery) and returns it; raises `VerifyError`. Called from `verify()` or a setup command, never from `register(ctx)`. |
+| `resolve_enclave_host()` | Resolves the host once (config first, then vendor discovery) and returns the host; raises `VerifyError`. Called from `verify()` or a setup command, never from `register(ctx)`. |
 
 ### Verification
 
 | Member | Contract |
 |---|---|
 | `prepare_verification() -> PreparedVerification` | Captures and checks one verification over the network and publishes nothing: no pool swap, no change to the accepted result. Raises `VerifyError` (or `VendorHTTPError` when a vendor endpoint answered with an HTTP error) on any failure; never returns a partial result. Holds no lock that a send takes. |
-| `commit_verification(prepared, *, hold: bool) -> VerificationResult` | Publishes a prepared verification under the adapter lock: the accepted result, and any pool or key it carries. With `hold=True` the transport is held before the result is published. Raises `VerifyError` when the adapter is closed or the prepared result no longer applies (NEAR: a model signing key changed). |
+| `commit_verification(prepared, *, hold: bool) -> VerificationResult` | Publishes a prepared verification under the adapter lock: the accepted result, and any pool or key the prepared verification carries. With `hold=True` the transport is held before the result is published. Raises `VerifyError` when the adapter is closed or the prepared result no longer applies (NEAR: a model signing key changed). |
 | `verify() -> VerificationResult` | `commit_verification(prepare_verification(), hold=<hold until accepted>)`. The inline path. |
 | `hold(reason)`, `release()`, `held_reason` | A held transport refuses every send in every view (`_check_not_held`). The cache holds on a failure, a pin mismatch or a missing consent row, and releases after the pins match. |
 | `last_result`, `verified_mono` | The accepted result and its `time.monotonic()` time. `VerificationCache._adopt_adapter_result` adopts a result a setup command produced by calling the adapter directly. |
@@ -85,15 +85,15 @@ Its keys:
   `receipts.py:verify_facts` and `receipts.py:_send_coverage` read these. A vendor with several CVMs
   adds `claims.cvms` (see "Pins").
 - `blobs` (optional): large strings keyed by their SHA-256. `ledger.py:externalize_evidence` moves
-  them to `<data dir>/evidence/blobs/` and keeps `blob_refs` in the row; `receipts.py:_evidence_item`
-  joins them back. A blob is at most 8 MB (`ledger.py:MAX_BLOB_BYTES`).
+  the blobs to `<data dir>/evidence/blobs/` and keeps `blob_refs` in the row; `receipts.py:_evidence_item`
+  joins the blobs back. A blob is at most 8 MB (`ledger.py:MAX_BLOB_BYTES`).
 
 Two ledger rules bind the evidence. The row detail, evidence included, must fit
 `ledger.py:MAX_DETAIL_BYTES` (256 KB) once blobs are moved out. No key anywhere in the detail may be
 one of `ledger.py:FORBIDDEN_DETAIL_KEYS` (`messages`, `prompt`, `prompts`, `request`, `input`,
 `instructions`, `system`, `content`, `contents`); rename such keys from a vendor report before storing
 them. A `verify_ok` row that cannot be written refuses the verification (`REASON_VERIFY_ROW_LOST`), so
-either rule, broken, makes the vendor unusable rather than unrecorded.
+breaking either rule makes the vendor unusable rather than unrecorded.
 
 ### Transport views and the TLS pin per send
 
@@ -112,12 +112,12 @@ running event loop, `openai.AsyncOpenAI(http_client=adapter.async_http_for_loop(
 - on `TLSPinMismatch`, call `mark_stale` and write the row described below.
 
 The attestation fetch uses a separate, unpinned pool (`NearAdapter._attest_pool`), because the
-certificate it sees is what the evidence is checked against. Attestation requests carry no API key.
+certificate that pool sees is what the evidence is checked against. Attestation requests carry no API key.
 
 ### Ledger rows the adapter writes
 
 The cache sets `adapter.event_sink` (a callable taking one row dict; `provider` is filled in) and
-writes `verify_ok`, `verify_fail` and `pin_staged` itself for every verification it runs. The adapter
+writes `verify_ok`, `verify_fail` and `pin_staged` itself for every verification the cache runs. The adapter
 writes through `event_sink` only what the cache cannot see:
 
 | Row | When | Detail the adapter supplies |
@@ -139,7 +139,7 @@ fields in `gate_llm.py:SEND_RECORD_FIELDS` (`hpke_key_used`, `encrypted`, `respo
 
 `provider.py:VerificationCache._wire_adapter_sink` sets these attributes when they exist:
 `event_sink`, `on_close` (stops the background refresh), `on_stale` (invalidates the cache entry, so
-the next call verifies inline). Optional members the rest of the plugin reads when present:
+the next call verifies inline). Optional members other modules read when present:
 `observe_key(host, tls_fp, hpke)` (first-seen record per key pair, Tinfoil),
 `record_refusal(exc, stage=...)` (NEAR; otherwise the cache writes provider-gate refusals itself),
 `provider_name`, `encryption_ready()`, `encrypt`, `require_tls_binding` and `image_parts` (read by the
@@ -183,7 +183,7 @@ batch and a verification count.
 - **Identity.** `router_repo` is the identity a pin is keyed by. Choose a string that changes whenever
   the set of things being trusted changes (NEAR: `identity_for(host, models)`).
 - **Whole-result entries.** A vendor whose result is one enclave gets one entry with
-  `cvm_role: router` and the result's two fingerprints, byte for byte. `set_match` matches it against
+  `cvm_role: router` and the result's two fingerprints, byte for byte. `set_match` matches the entry against
   the whole result. Approval replaces the set (`VENDOR_POLICY[vendor]["concurrent"]` False, the
   default for an unknown vendor).
 - **Per-CVM entries.** A vendor with several CVMs reports `evidence.claims.cvms`, one dict per CVM
@@ -207,7 +207,7 @@ and `verify/replay_near.py`:
   `enclave_fingerprint`, `release_tag`, `as_of`, `sdk_version`, `repo`, `enclave_host_asserted`,
   `platform`, `captured_at_asserted`, `not_established` and, for per-CVM vendors, `cvms`.
   `commands.py:_call_replay` passes only the keyword arguments the function accepts and reports the
-  identity checks it cannot pass.
+  identity checks that function cannot take.
 - The checks are the same functions the live verification ran (NEAR: `appraise` in both), with every
   clock pinned to `as_of`, which defaults to the capture time.
 - Every network library raises inside the replaying thread (`verify/replay.py:_network_ban`).
@@ -227,7 +227,7 @@ string must be distinct and registered there.
    `verification_cache.ensure(<profile>, wait_seconds=INTERACTIVE_VERIFY_WAIT_SECONDS)`;
 3. prints the fingerprints, stages the result when no pin matches (`rt.pins.stage`) and asks with
    `consent.approve_pending_pin(TerminalAsker(), ...)`;
-4. prints a config block to merge into `config.yaml` (it never writes the config);
+4. prints a config block to merge into `config.yaml` (setup never writes the config);
 5. prints `setup_next_steps(rt, vendor=..., key_env=..., ...)`.
 
 ## Tests
@@ -239,10 +239,10 @@ a key). A new vendor brings:
 
 - **A real capture** under `tests/fixtures/<vendor>_real_capture/`: the vendor's public attestation
   responses, as returned, with a `_note` naming where and when each was captured. Tests replay the
-  capture with `as_of` pinned to the capture time, so they keep passing after certificates and tokens
+  capture with `as_of` pinned to the capture time, so the tests keep passing after certificates and tokens
   expire (`tests/unit/test_near_real_capture.py`, `tests/unit/test_real_capture.py`).
 - **A synthetic world** that serves the vendor's endpoints through `httpx.MockTransport` and signs
-  with keys it generates, faking only the hardware quote (`tests/near_world.py:NearWorld`,
+  with keys the world generates, faking only the hardware quote (`tests/near_world.py:NearWorld`,
   `NearWorld.adapter(tmp_path)`). `NearAdapter` takes `transport_factory`, `send_transport_factory`,
   `quote_verifier`, `ita_roots`, `clock` and `sleep` arguments so the world can be injected;
   `TinfoilAdapter` takes `router_discovery` and `tls_base_context`. A new adapter takes the same kind of
@@ -260,7 +260,7 @@ The suite runs from a Hermes checkout as [RUNNING_TESTS.md](RUNNING_TESTS.md) de
 ## Documentation to update
 
 - [LIMITATIONS.md](LIMITATIONS.md): a numbered section for the vendor, in the four-part form (the gap,
-  why it exists, what the plugin does, the change that would close it), like section 14 for NEAR.
+  why the gap exists, what the plugin does, the change that would close the gap), like section 14 for NEAR.
 - [DISCLOSURE.md](DISCLOSURE.md): the hosts contacted ("Which hosts it contacts", "When it verifies
   again"), the files written ("What it writes in its own data"), the threads started ("Processes and
   threads"), the credential ("Credentials", "Environment variables"), and the private core import

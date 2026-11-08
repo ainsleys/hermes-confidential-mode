@@ -1,8 +1,8 @@
 # Claim index
 
 This index lists every claim on the [README](../README.md)'s first screen and every row of its
-Commands table. Each entry gives the claim in one sentence, the code that enforces it, the tests that
-prove it, and the section of [LIMITATIONS.md](LIMITATIONS.md) that bounds it.
+Commands table. Each entry gives the claim in one sentence, the code that enforces the claim, the tests that
+prove the claim, and the section of [LIMITATIONS.md](LIMITATIONS.md) that bounds the claim.
 
 - **Code** is `file:function`, with paths from the repository root. `__init__.py` is the plugin's
   root module (`register(ctx)` and the hooks); every other path is under `confidential_mode/`.
@@ -13,7 +13,7 @@ prove it, and the section of [LIMITATIONS.md](LIMITATIONS.md) that bounds it.
 
 ## UNTRACED
 
-These claims, or parts of claims, have no code or test that establishes them as worded. Each one is
+These claims, or parts of claims, have no code or test that establishes them as worded. Each claim is
 fixed by changing the README wording or by adding the code and test named.
 
 1. **P18, "`hermes confidential status` shows where calls have gone."** `status_text` prints the
@@ -143,7 +143,7 @@ mid-turn is recorded, not stopped.**
 **P6. A changed enclave build is refused on every turn until the user approves the new build.**
 - Code: `provider.py:VerificationCache.ensure` and `VerificationCache._stage` (`REASON_PIN_MISMATCH`,
   adapter held); `gate_llm.py:LlmGate.handle` (`TEXT_PIN_CHANGED`, reason code `pin_mismatch`);
-  `provider.py:BackgroundRefresh.attempt` (an unaccepted result is staged, never committed). The one
+  `provider.py:BackgroundRefresh.attempt` (an unaccepted result is staged, never committed). The single
   exception is `provider.py:_auto_apply`: Tinfoil only, same code fingerprint, opt-in
   `confidential.pins.auto_approve_platform_only`.
 - Tests: `tests/seam/test_gate_llm.py::test_attested_mismatch_refused_with_staged_pin_message`,
@@ -406,8 +406,8 @@ Every verb goes through `commands.py:handle_slash`; the terminal form goes throu
   `tests/seam/test_commands.py::test_receipt_states_the_configured_ttl_and_status_shows_the_plugin_commit`.
 - Bound: none.
 
-**K4. `check [tier] [--verbose]` prints the preflight table; with no tier, it names the tier it
-picks and why.**
+**K4. `check [tier] [--verbose]` prints the preflight table; with no tier, the command names the tier
+`check` picks and why.**
 - Code: `commands.py:check_result`, `commands.py:default_check_tier`; `locking.py:run_tier_preflight`;
   `preflight.py:format_report`.
 - Tests: `tests/seam/test_commands.py::test_check_prints_the_preflight_table`,
@@ -415,7 +415,7 @@ picks and why.**
   `tests/seam/test_ux_pass_1.py::test_check_exits_1_on_fail_and_0_on_pass`.
 - Bound: [10](LIMITATIONS.md#10-start-up-model-list-probe-on-a-drifted-runtime).
 
-**K5. `setup` runs in a terminal only: it verifies the vendor, asks for the first pin and prints a
+**K5. `setup` runs in a terminal only: setup verifies the vendor, asks for the first pin and prints a
 config block.**
 - Code: `commands.py:cli_setup`, `commands.py:cli_setup_near`, `commands.py:config_block`,
   `commands.py:near_config_block`, `commands.py:setup_next_steps`; `commands.py:TERMINAL_ONLY`.
