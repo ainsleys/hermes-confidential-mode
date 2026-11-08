@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .atomicwrite import write_atomic
+
 PLUGIN_STORAGE_NAME = "confidential-mode"
 LEDGER_FILENAME = "ledger.sqlite"
 
@@ -218,28 +220,9 @@ class BlobStore:
             except OSError:
                 pass
             return False
-        self.root.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{blob_id}.{os.getpid()}.{threading.get_ident()}.tmp")
-        try:
-            # Mode 0600 from creation, like every plugin data file (ux-pass-1 item 8).
-            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as fh:
-                fh.write(data)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, path)
-        finally:
-            try:
-                tmp.unlink()
-            except FileNotFoundError:
-                pass
-        try:
-            fd = os.open(self.root, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        except OSError:
-            pass
+        # Mode 0600 from creation, like every plugin data file (ux-pass-1 item 8); fsync of the file, the
+        # rename, then fsync of the directory (atomicwrite.py).
+        write_atomic(path, data)
         return True
 
     def delete(self, blob_id: str) -> None:

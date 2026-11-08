@@ -50,8 +50,8 @@ state under the transition lock; `unlock(...)` clears it and prints the lock per
 
 **`state.py`**. `ConfidentialState`, strict accessors over `ctx.state` for the frozen keys (`locked`,
 `locked_tier`, `locked_since`, `config_fingerprint`, `breached_sessions`); a malformed value raises
-`StateError`, so the gates fail closed. `InMemoryState` is the test stand-in. Imports `tiers`; lazy:
-`filelock`. Contract: "Shared types (frozen)"; Amendments 6, 12.
+`StateError`, so the gates fail closed. `InMemoryState` is the test stand-in. Imports `atomicwrite`, `tiers`;
+lazy: `filelock`. Contract: "Shared types (frozen)"; Amendments 6, 12.
 
 ## The gates
 
@@ -78,7 +78,7 @@ nothing at load; lazy: `hermes_compat`, `tiers`. Amendment 16, and gate_tools.py
 records each entry's route and handler identity, persists the set to `allowlist.yaml`, adds the tools a
 person allowed (`Allowlist.add`, `Allowlist.persist`) and treats a tool whose handler or toolset changed
 as unclassified. `ensure_tools_for_lock` loads the tool modules first; `format_allowlist` prints the
-lists; `lock_id_for` names the lock a grant belongs to. Imports `gate_tools_classify`; lazy:
+lists; `lock_id_for` names the lock a grant belongs to. Imports `atomicwrite`, `gate_tools_classify`; lazy:
 `hermes_compat`, `revoke`. Amendment 16, and gate_tools.py's.
 
 **`gate_tools_hermes.py`**. The gate's view of Hermes' approval state: the rule keys it asks under
@@ -136,8 +136,10 @@ its own rows. Imports nothing at load; lazy: `hermes_compat`. Amendments 5, 5.1,
 
 **`verify/tinfoil.py`**. `TinfoilAdapter`, the Tinfoil adapter on SDK 0.14.2: one `SecureClient` per
 profile, verification through the SDK's default path with the evidence captured (`prepare_verification`,
-`commit_verification`), the pinned EHBP transports (`pinned_ehbp_sync_transport`), the TLS pin and its
-failure path. Imports `verify._sdkpatch`, `verify.base`; lazy: `sendctx`, `verify.near_transport`.
+`commit_verification`), the pinned EHBP transports (`pinned_ehbp_sync_transport`, each with the guard that
+turns a plaintext HTTP error reply into a `VendorHTTPError`), the TLS pin and its failure path, and
+`parse_usage_metrics` for the router's token counts. Imports `atomicwrite`, `verify._sdkpatch`, `verify.base`;
+lazy: `sendctx`, `verify.near_transport`.
 Contract: "W2"; Amendments 6, 13, 14.
 
 **`verify/_sdkpatch.py`**. Thread-scoped overrides of tinfoil SDK internals for evidence capture and
@@ -190,7 +192,7 @@ turns a failure into a recorded `NearRefusal`. Imports `verify.base`, `verify.ne
 
 **`pins.py`**. `PinStore` over `pins.yaml` version 3: per vendor and identity an approved set of per-CVM
 entries and a pending set. `match`, `stage`, `pending`, `apply` (only consent.py and the platform-only
-policy call it) and `retire`. Imports `hermes_compat`, `verify.base`; lazy: `filelock`, `review`.
+policy call it) and `retire`. Imports `atomicwrite`, `hermes_compat`, `verify.base`; lazy: `filelock`, `review`.
 Contract: "W2"; Amendments 3, 7, 9, 10, 11, 13.
 
 **`consent.py`**. A person's consent outside a turn, through `ctx.ask_choice` only: `approve_pending_pin`
@@ -200,19 +202,19 @@ Both are sync, refuse on an event loop, and record every answer. Imports `gate_t
 
 **`review.py`**. The pin review bundle (`hermes confidential pins review`): `build_bundle` lists every
 pending entry with its components, the compose files fetched by content hash (`fetch_compose`) and the
-diffs from the approved entries; `cli_review` prints it. Imports nothing at load; lazy: `hermes_compat`,
+diffs from the approved entries; `cli_review` prints it. Imports `atomicwrite`; lazy: `hermes_compat`,
 `pins`, `verify.near_checks`. Amendments 5.1, 5.2, 7, 13, 14.
 
 **`revoke.py`**. `revoke(rt, tool)` withdraws the plugin's tool grants from `allowlist.yaml`, Hermes'
 `command_allowlist` and the lock grants, and records a revocation that moves the gate to a new rule key;
-`RevocationWatcher` lets a running gateway see a revoke made in another process. Imports nothing at load;
+`RevocationWatcher` lets a running gateway see a revoke made in another process. Imports `atomicwrite`;
 lazy: `commands_pins`, `filelock`, `gate_tools`. Amendments 10, 13, 14, 15.
 
 ## Ledger, receipts and watch
 
 **`ledger.py`**. The append-only SQLite ledger: `Ledger.append` validates each event (the kinds in
 `KINDS`, no conversation-shaped key in `FORBIDDEN_DETAIL_KEYS`), `externalize_evidence` moves evidence
-blobs to files, and `tail`, `session` and the row queries feed receipts and watch. Imports nothing.
+blobs to files, and `tail`, `session` and the row queries feed receipts and watch. Imports `atomicwrite`.
 Contract: "Shared types (frozen)"; Amendments 2, 3, 4, 5, 5.2, 6, 7, 9, 10, 11, 12, 13, 14.
 
 **`receipts.py`**. A session's receipt from ledger rows: `build_receipt` collects the rows and sections,
@@ -270,6 +272,10 @@ Imports `locking`; lazy: `consent`, `selfapproval`. Amendment 16, and commands.p
 **`hermes_compat.py`**. Every import of a private Hermes name, one accessor each, with the Hermes commit
 it was verified at. Imports nothing. Amendment 15.
 
+**`atomicwrite.py`**. `write_atomic(path, data)`: the one durable write for every state file (a temporary
+file in the target's directory, fsync, `os.replace`, then `fsync_directory`), used by `pins`, `state`,
+`gate_tools_allowlist`, `revoke`, `review`, `ledger` and `verify.tinfoil`. Imports nothing.
+
 **`filelock.py`**. `exclusive(path)`: a thread lock plus a bounded `flock` on `<file>.lock`, raising
 `LockBusy` or `LockUnusable` instead of waiting. Imports nothing. Amendments 10, 12.
 
@@ -293,6 +299,7 @@ above, so neither appears here. A module that nothing imports at load starts its
       commands_common
         locking
           ledger
+            atomicwrite
           preflight
             tiers
           tiers
@@ -312,10 +319,12 @@ above, so neither appears here. A module that nothing imports at load starts its
         tiers
       locking (see above)
       revoke
+        atomicwrite
       tiers
     consent
       gate_tools
         gate_tools_allowlist
+          atomicwrite
           gate_tools_classify
         gate_tools_calls
         gate_tools_classify
@@ -330,20 +339,22 @@ above, so neither appears here. A module that nothing imports at load starts its
         selfapproval
     locking (see above)
     gate_llm
-      ledger
+      ledger (see above)
       state
+        atomicwrite
         tiers
       tiers
     provider
       client
       pins
+        atomicwrite
         hermes_compat
         verify.base
       tiers
       verify.base
     receipts
       _version
-      ledger
+      ledger (see above)
     verify.replay_near
       verify.near
         sendctx
@@ -371,9 +382,11 @@ above, so neither appears here. A module that nothing imports at load starts its
     filelock
     progress
     review
+      atomicwrite
     selfscan
     verify.near_e2ee
     verify.tinfoil
+      atomicwrite
       verify._sdkpatch
       verify.base
     watch

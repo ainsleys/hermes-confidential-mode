@@ -11,11 +11,12 @@ import hashlib
 import json
 import os
 import re
-import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC
 from pathlib import Path
 from typing import Any, cast
+
+from .atomicwrite import write_atomic
 
 # The brief's rules come before any vendor text, and they are fixed: the bundle never lets vendor text
 # change them.
@@ -123,25 +124,11 @@ def cached_compose(cdir: Path | None, sha256: str | None) -> str | None:
 
 
 def store_compose(cdir: Path, sha256: str, data: bytes) -> None:
-    """Write ``data`` as <cdir>/<sha256>.yaml (atomic, 0600). Raises ValueError when it is not that hash."""
+    """Write ``data`` as <cdir>/<sha256>.yaml (atomicwrite.py: atomic, durable, 0600). Raises ValueError when it is
+    not that hash."""
     if hashlib.sha256(data).hexdigest() != sha256:
         raise ValueError("the text does not hash to the log's file_sha256")
-    cdir = Path(cdir)
-    cdir.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=f".{sha256[:12]}.", suffix=".tmp", dir=str(cdir))
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, cdir / f"{sha256}.yaml")
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_atomic(Path(cdir) / f"{sha256}.yaml", data)
 
 
 NO_FETCH_ENV = "CONFIDENTIAL_MODE_NO_FETCH"   # set (to anything) to keep the plugin from fetching from GitHub

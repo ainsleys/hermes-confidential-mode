@@ -10,7 +10,6 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
-import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -18,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from .atomicwrite import write_atomic
 from .gate_tools_classify import (
     Origin,
     Route,
@@ -142,19 +142,7 @@ class Allowlist:
         data = {"version": 2, "lock_id": self.lock_id, "tools": tools, "allowed": added}
         target.parent.mkdir(parents=True, exist_ok=True)
         # Mode 0600 like pins.yaml (review finding 18): an "allowed" entry lifts the ask prompt for a tool.
-        import tempfile
-        fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps(data, indent=2) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, target)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        write_atomic(target, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
 
     @classmethod
     def load_persisted(cls, path: Path | None, registry: Any, *, lock_id: str, predicate: Any = None,

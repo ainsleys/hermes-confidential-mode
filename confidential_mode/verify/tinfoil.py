@@ -91,10 +91,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import secrets
-import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -104,6 +102,7 @@ from typing import Any
 
 import httpx
 
+from ..atomicwrite import write_atomic
 from . import _sdkpatch
 from .base import (
     PreparedVerification,
@@ -146,22 +145,8 @@ def load_or_create_user_cache_secret(data_dir: Path) -> str:
             return value
     except FileNotFoundError:
         pass
-    data_dir.mkdir(parents=True, exist_ok=True)
     value = secrets.token_hex(32)
-    fd, tmp = tempfile.mkstemp(prefix=f".{USER_CACHE_SECRET_FILE}.", dir=str(data_dir))
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(value)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_atomic(path, value.encode("utf-8"))
     return value
 
 
@@ -520,11 +505,7 @@ class TinfoilAdapter:
             if new:
                 seen[key] = _iso_now()
                 try:
-                    self.data_dir.mkdir(parents=True, exist_ok=True)
-                    fd, tmp = tempfile.mkstemp(prefix=".key-observations.", dir=str(self.data_dir))
-                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                        _json.dump(seen, fh, sort_keys=True)
-                    os.replace(tmp, path)
+                    write_atomic(path, _json.dumps(seen, sort_keys=True).encode("utf-8"))
                 except OSError:
                     pass
             others = sum(1 for k in seen if k.startswith(f"{host}|") and k != key)
@@ -1282,20 +1263,7 @@ def store_trust_root(trust_root_dir: Path, data: bytes) -> tuple[str, Path]:
     trust_root_dir = Path(trust_root_dir)
     path = trust_root_dir / f"{digest}.json"
     if not path.exists():
-        trust_root_dir.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".trusted_root.", dir=str(trust_root_dir))
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, path)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        write_atomic(path, data)
     return digest, path
 
 

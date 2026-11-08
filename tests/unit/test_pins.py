@@ -131,7 +131,7 @@ def test_save_is_atomic_temp_then_replace(tmp_path, monkeypatch):
         seen.append((Path(src).parent, Path(src).name, Path(dst)))
         assert Path(dst).read_text() == before  # target untouched until the rename
         return real_replace(src, dst)
-    monkeypatch.setattr(pins_mod.os, "replace", recording_replace)
+    monkeypatch.setattr(os, "replace", recording_replace)   # pins writes through atomicwrite.write_atomic
     store.stage(_result(code="c2"))
     (src_dir, src_name, dst), = seen
     assert src_dir == tmp_path and src_name.startswith(".pins.yaml.") and dst == path
@@ -139,7 +139,7 @@ def test_save_is_atomic_temp_then_replace(tmp_path, monkeypatch):
     # A failure mid-write leaves the old file intact and no temp files behind.
     def boom(src, dst):
         raise OSError("disk full")
-    monkeypatch.setattr(pins_mod.os, "replace", boom)
+    monkeypatch.setattr(os, "replace", boom)
     after_stage = path.read_text()
     with pytest.raises(OSError):
         store.stage(_result(code="c3"))

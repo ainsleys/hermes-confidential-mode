@@ -36,12 +36,13 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, cast
+
+from .atomicwrite import write_atomic
 
 REVOCATIONS_FILE = "grants_revoked.json"
 MAX_RECORDS = 200
@@ -96,19 +97,8 @@ def allowed_on_disk(path: Any, lock_id: str) -> set[str] | None:
 
 
 def _atomic_write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, indent=2) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    """grants_revoked.json: the shared durable write (atomicwrite.py; issue #37)."""
+    write_atomic(path, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
 
 
 def _read_json(path: Path | None) -> Any:

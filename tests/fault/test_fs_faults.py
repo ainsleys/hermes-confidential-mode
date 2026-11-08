@@ -830,3 +830,81 @@ def test_a_damaged_revocation_file_never_breaks_a_gate_decision(plugin, damage):
     ran.clear()
     mw(tool_name="cronjob_manage", args={}, next_call=lambda a: ran.append(a), session_id="s1", tool_call_id="c2")
     assert ran == []                                       # a hard block still blocks
+
+
+# ── issue #37: every state-file write fsyncs the directory after the rename ─────────────────────────────────
+
+def _state_writers(tmp_path):
+    """Every state-file writer, as (name, target directory, call)."""
+    import hashlib
+
+    from confidential_mode import pins as pins_mod, review, revoke, state
+    from confidential_mode.gate_tools_allowlist import Allowlist
+    from confidential_mode.ledger import BlobStore
+    from confidential_mode.verify import tinfoil
+    compose = b"services: {}\n"
+    sha = hashlib.sha256(compose).hexdigest()
+    bid, ev = _blob_evidence()
+    garbage = tmp_path / "state" / "state.json"
+    garbage.parent.mkdir()
+    garbage.write_text("{not json")
+    ad = tinfoil.TinfoilAdapter(data_dir=tmp_path / "tf", enclave="h.example", tls_probe=False)
+    return [
+        ("pins.yaml", tmp_path / "p", lambda: pins_mod._write_atomic(tmp_path / "p" / "pins.yaml", b"version: 3\n")),
+        ("state.json", garbage.parent, lambda: state._replace_unparseable(garbage, {"locked": False})),
+        ("allowlist.yaml", tmp_path / "a", lambda: Allowlist(tools={}).persist(tmp_path / "a" / "allowlist.yaml")),
+        ("grants_revoked.json", tmp_path / "r",
+         lambda: revoke._atomic_write_json(tmp_path / "r" / "grants_revoked.json", {"version": 2})),
+        ("compose file", tmp_path / "c", lambda: review.store_compose(tmp_path / "c", sha, compose)),
+        ("evidence blob", tmp_path / "b", lambda: BlobStore(tmp_path / "b").put(bid, ev["blobs"][bid])),
+        ("tinfoil cache secret", tmp_path / "tf", lambda: tinfoil.load_or_create_user_cache_secret(tmp_path / "tf")),
+        ("trust root", tmp_path / "tr", lambda: tinfoil.store_trust_root(tmp_path / "tr", b"{}")),
+        ("key observations", tmp_path / "tf", lambda: ad.observe_key("h.example", "t1", "k1")),
+    ]
+
+
+@pytest.mark.parametrize("which", range(9))
+def test_every_state_file_writer_fsyncs_the_directory_after_the_rename(tmp_path, monkeypatch, which):
+    """Issue #37: POSIX makes a rename durable only once the directory is fsynced. Each writer fsyncs the file,
+    renames it into place, then fsyncs the target's directory."""
+    import stat
+    name, directory, write = _state_writers(tmp_path)[which]
+    events: list = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        st = os.fstat(fd)
+        events.append(("fsync", "dir" if stat.S_ISDIR(st.st_mode) else "file", (st.st_dev, st.st_ino)))
+        return real_fsync(fd)
+
+    def replace(src, dst, *a, **k):
+        events.append(("replace", os.fspath(dst), None))
+        return real_replace(src, dst, *a, **k)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    write()
+    kinds = [e[:2] for e in events]
+    assert ("replace", ) in [k[:1] for k in kinds], f"{name}: no rename recorded"
+    last_replace = max(i for i, e in enumerate(events) if e[0] == "replace")
+    target_dir = os.stat(directory)
+    assert ("fsync", "file") in kinds[:last_replace], f"{name}: the file was not fsynced before the rename"
+    dir_syncs = [e for e in events[last_replace + 1:] if e[0] == "fsync" and e[1] == "dir"]
+    assert dir_syncs, f"{name}: the directory was not fsynced after the rename: {events}"
+    assert (target_dir.st_dev, target_dir.st_ino) in [e[2] for e in dir_syncs], f"{name}: another directory was fsynced"
+
+
+def test_the_state_writers_share_one_atomic_write(tmp_path, monkeypatch):
+    """One implementation: every writer goes through atomicwrite.write_atomic, the only caller of
+    atomicwrite.fsync_directory."""
+    from confidential_mode import atomicwrite
+    calls: list = []
+    real = atomicwrite.fsync_directory
+
+    def spy(directory):
+        calls.append(os.fspath(directory))
+        return real(directory)
+    monkeypatch.setattr(atomicwrite, "fsync_directory", spy)
+    writers = _state_writers(tmp_path)
+    for _name, _directory, write in writers:
+        write()
+    assert len(calls) == len(writers), calls

@@ -12,15 +12,14 @@ instead of guessing whether the profile is locked.
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
+from .atomicwrite import write_atomic
 from .tiers import Tier
 
 KEY_LOCKED = "locked"
@@ -46,7 +45,7 @@ def _replace_unparseable(path: Path, data: dict) -> bool:
     Holds the sibling ``.<name>.lock`` flock Hermes' PluginState takes, so a concurrent Hermes write is not
     interleaved; re-checks under that lock, and returns False (nothing written) when the file parses (another
     process repaired it, or the failure was something else) or is not a regular file. Atomic: a temp file,
-    fsync, then os.replace, mode 0600."""
+    fsync, then os.replace, then an fsync of the directory (atomicwrite.py), mode 0600."""
     from .filelock import LockBusy, exclusive
     if not path.is_file() or _parses(path):
         return False
@@ -54,18 +53,7 @@ def _replace_unparseable(path: Path, data: dict) -> bool:
         with exclusive(path.with_name(f".{path.name}.lock")):
             if not path.is_file() or _parses(path):
                 return False
-            fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-            try:
-                os.fchmod(fd, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    fh.write(json.dumps(data, indent=2))
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(tmp, path)
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    os.unlink(tmp)
-                raise
+            write_atomic(path, json.dumps(data, indent=2).encode("utf-8"))
     except LockBusy:
         return False
     return True

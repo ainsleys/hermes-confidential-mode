@@ -40,8 +40,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
-import tempfile
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
@@ -49,6 +47,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
+from .atomicwrite import write_atomic
 from .hermes_compat import yaml_module
 from .verify.base import VerificationResult
 
@@ -560,21 +559,8 @@ def _to_v3(pf: PinFile) -> dict:
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """pins.yaml and its backup: the shared durable write (atomicwrite.py; issue #37)."""
+    write_atomic(path, data)
 
 
 class PinStore:
