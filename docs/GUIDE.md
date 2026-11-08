@@ -750,7 +750,7 @@ release tag, and asks you on the terminal to Approve or Deny. The choice, its nu
 `n` or `no` in any case counts. Any other answer asks once more and then counts as no answer, which
 pins nothing (on a first run the reply says "no pin approved yet; nothing changed"); every Approve or Deny prompt in a terminal (`pins approve`, `allow`) works the same way.
 On a non-interactive terminal there's no answer and no pin. When a server answers the verification with an
-HTTP error, the reply names the server that answered (Tinfoil, Tinfoil's GitHub or AMD key proxy, or
+HTTP error, the reply names the server that answered (Tinfoil, or Tinfoil's proxy for GitHub, AMD keys or
 Intel PCS), the status and one next step; a failed router discovery says "router discovery". Setup then prints a config block for
 `config.yaml`. Setup never writes your config. Tinfoil offers no model list the plugin can fetch, so
 setup says that setup cannot check the `--model` id and whether the id is one `config.example.yaml` lists;

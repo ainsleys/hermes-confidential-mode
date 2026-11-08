@@ -76,17 +76,28 @@ def test_a_router_503_names_tinfoil_and_the_router(tinfoil_sdk, monkeypatch, tmp
                               "try again in a few minutes")
 
 
-def test_an_intel_pcs_403_names_intel_not_tinfoil(tinfoil_sdk, monkeypatch, tmp_path):
+def test_an_intel_pcs_403_names_the_intel_pcs_proxy(tinfoil_sdk, monkeypatch, tmp_path):
+    """The URL the SDK requests: collateral_tdx._proxy_url of Intel's TCB-info URL."""
+    from tinfoil.attestation import collateral_tdx
+    url = collateral_tdx._proxy_url(f"{collateral_tdx.INTEL_PCS_TDX_BASE_URL}/tcb?fmspc=00806f050000")
+    assert url.startswith("https://tdx-proxy.tinfoil.sh/api.trustedservices.intel.com/")
+
     class Doc:
         def verify(self):
-            raise _http_error(403, "https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc=00")
+            raise _http_error(403, url)
     monkeypatch.setattr(tinfoil_sdk, "fetch_attestation", lambda host: Doc())
     with pytest.raises(VendorHTTPError) as got:
         _adapter(tmp_path).prepare_verification()
-    text = str(got.value)
-    assert text.startswith("Tinfoil router router.example: Intel TDX collateral fetch unavailable (HTTP 403 from "
-                           "Intel PCS)"), text
-    assert "from Tinfoil" not in text and got.value.vendor == "Intel PCS"
+    assert str(got.value).startswith("Tinfoil router router.example: Intel TDX collateral fetch unavailable "
+                                     "(HTTP 403 from Tinfoil's Intel PCS proxy)"), str(got.value)
+
+
+def test_hosts_match_on_a_dot_boundary():
+    from confidential_mode.verify.base import http_source
+    assert http_source("https://api.github.com/x")[0] == "GitHub"
+    assert http_source("https://evilgithub.com/x")[0] == "evilgithub.com"
+    assert http_source("https://eviltinfoil.sh/x")[0] == "eviltinfoil.sh"
+    assert http_source("https://atc.tinfoil.sh/x")[0] == "Tinfoil's atc.tinfoil.sh"
 
 
 def test_a_github_proxy_error_names_the_proxy(tinfoil_sdk, monkeypatch, tmp_path):

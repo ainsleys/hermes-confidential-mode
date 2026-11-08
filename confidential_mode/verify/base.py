@@ -66,21 +66,30 @@ def http_status_in(exc: BaseException | None) -> int | None:
     return got[0] if got else None
 
 
+def _host_is(host: str, name: str) -> bool:
+    """``host`` is ``name`` or a subdomain of it (a "." boundary, never a look-alike such as evilgithub.com)."""
+    return host == name or host.endswith("." + name)
+
+
 def http_source(url: str, router_host: str = "") -> tuple[str, str]:
     """(who answered, what was fetched) for a URL the Tinfoil SDK requested during a verification (review
-    SF3): the router itself, Tinfoil's GitHub and AMD key proxies, Intel's provisioning service, GitHub, or
-    the bare host when none of these."""
+    SF3). tinfoil 0.14.2 sends its GitHub requests through github-proxy.tinfoil.sh (tinfoil/github.py), its AMD
+    key requests through kds-proxy.tinfoil.sh (attestation/verify_sev.py) and every Intel PCS request through
+    tdx-proxy.tinfoil.sh (attestation/collateral_tdx.py ``_proxy_url``); no SDK path requests Intel's hosts
+    directly. Any other host is named as it is."""
     from urllib.parse import urlsplit
     host = (urlsplit(url).hostname or "").lower() if url else ""
     if not host or (router_host and host == router_host.lower()):
         return "Tinfoil", "attestation"
-    if host == "github-proxy.tinfoil.sh" or host.endswith("github.com") or host.endswith("githubusercontent.com"):
-        return ("Tinfoil's GitHub proxy" if host.endswith("tinfoil.sh") else "GitHub"), "release and Sigstore check"
+    if host == "github-proxy.tinfoil.sh":
+        return "Tinfoil's GitHub proxy", "release and Sigstore check"
     if host == "kds-proxy.tinfoil.sh":
         return "Tinfoil's AMD key proxy", "AMD certificate fetch"
-    if host.endswith("trustedservices.intel.com") or host.endswith("intel.com"):
-        return "Intel PCS", "Intel TDX collateral fetch"
-    if host.endswith("tinfoil.sh"):
+    if host == "tdx-proxy.tinfoil.sh":
+        return "Tinfoil's Intel PCS proxy", "Intel TDX collateral fetch"
+    if _host_is(host, "github.com") or _host_is(host, "githubusercontent.com"):
+        return "GitHub", "release and Sigstore check"
+    if _host_is(host, "tinfoil.sh"):
         return f"Tinfoil's {host}", "attestation"
     return host, "attestation"
 
