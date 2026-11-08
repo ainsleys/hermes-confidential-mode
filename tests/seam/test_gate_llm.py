@@ -781,3 +781,40 @@ def test_refusing_client_inside_next_call_becomes_refusal(monkeypatch, manager, 
 def test_mutant_refusing_client_uncaught_is_caught(monkeypatch, manager, tmp_path):
     with pytest.raises(AssertionError):
         check_refusing_client_refused(monkeypatch, manager, tmp_path, MutantUncaughtProviderError)
+
+
+# ---------------------------------------------------------------------------------------------
+# Issue #2: a vendor HTTP error raised inside the attested transport reaches the refusal and the row
+# ---------------------------------------------------------------------------------------------
+
+def vendor_429_inside_connection_error():
+    """What the openai client raises when the pinned transport raised VendorHTTPError: an APIConnectionError
+    whose cause is the vendor error."""
+    import httpx
+    import openai
+
+    from confidential_mode.verify.base import VendorHTTPError
+    req = httpx.Request("POST", "https://inf.example/v1/chat/completions")
+    cause = VendorHTTPError(vendor="Tinfoil", subject="Tinfoil router inf.example", status=429, what="inference",
+                            next_step="the router is rate limiting; try again in a few minutes")
+    err = openai.APIConnectionError(request=req)
+    err.__cause__ = cause
+    return err
+
+
+@pytest.mark.parametrize("api_mode", MODES)
+def test_a_vendor_http_error_inside_the_transport_names_the_status_in_the_refusal_and_the_row(
+        monkeypatch, manager, tmp_path, api_mode):
+    result, rec, agent, env = run_turn(monkeypatch, manager, tmp_path, api_mode, locked=True, tier=Tier.ON_HOST,
+                                       provider_exc=vendor_429_inside_connection_error, fallback=True)
+    assert result["final_response"] == (TEXT_PROVIDER_ERROR + " Tinfoil router inf.example: inference unavailable "
+                                        "(HTTP 429 from Tinfoil); the router is rate limiting; try again in a few "
+                                        "minutes")
+    assert result["completed"] is True and len(rec.all_provider_calls) == 1
+    assert rec.fallback_calls == [] and agent._fallback_index == 0
+    rows = env.ledger.tail(0)
+    assert [r.kind for r in rows] == ["send_observed", "send_refused"]
+    d = rows[1].detail
+    assert d["reason_code"] == "provider_error" and d["status_code"] == 429
+    assert d["error_type"] == "VendorHTTPError"
+    assert d["reason"].startswith("Tinfoil router inf.example: inference unavailable (HTTP 429 from Tinfoil)")

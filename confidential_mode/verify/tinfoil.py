@@ -103,7 +103,15 @@ from typing import Any
 import httpx
 
 from . import _sdkpatch
-from .base import PreparedVerification, VendorHTTPError, VerificationResult, VerifyError, http_error_in, http_source
+from .base import (
+    PreparedVerification,
+    VendorHTTPError,
+    VerificationResult,
+    VerifyError,
+    http_error_in,
+    http_source,
+    inference_next_step,
+)
 
 VENDOR = "tinfoil"
 PROBE_TIMEOUT_SECONDS = 10.0  # the bodiless TLS probe at verification (confidential.tinfoil.tls_probe)
@@ -356,17 +364,23 @@ class TinfoilAdapter:
                                   binds="the verified Tinfoil report", source="Tinfoil")
 
     def pinned_ehbp_sync_transport(self, sc) -> httpx.BaseTransport:
-        """The SDK's _build_ehbp_sync_transport with the pinned inner transport."""
+        """The SDK's _build_ehbp_sync_transport with the pinned inner transport, behind the plaintext-status
+        guard (issue #2)."""
         from ehbp import EHBPTransport
         hpke_public_key = sc._require_hpke_public_key()
-        inner = _mark_pinned(httpx.HTTPTransport(verify=self.pinned_context(sc)))
-        return EHBPTransport.from_public_key_hex(hpke_public_key, inner=inner)
+        return EHBPTransport.from_public_key_hex(hpke_public_key, inner=self._pinned_network_transport(sc, False))
 
     async def pinned_ehbp_async_transport(self, sc) -> httpx.AsyncBaseTransport:
         from ehbp import AsyncEHBPTransport
         hpke_public_key = await asyncio.to_thread(sc._require_hpke_public_key)
-        inner = _mark_pinned(httpx.AsyncHTTPTransport(verify=self.pinned_context(sc)))
-        return AsyncEHBPTransport.from_public_key_hex(hpke_public_key, inner=inner)
+        return AsyncEHBPTransport.from_public_key_hex(hpke_public_key, inner=self._pinned_network_transport(sc, True))
+
+    def _pinned_network_transport(self, sc, is_async: bool):
+        """The network transport under an EHBP layer: an httpx transport pinned to the attested TLS key, inside
+        the guard that turns a plaintext HTTP error reply into a VendorHTTPError (issue #2)."""
+        if is_async:
+            return _AsyncPlaintextStatusGuard(_mark_pinned(httpx.AsyncHTTPTransport(verify=self.pinned_context(sc))))
+        return _PlaintextStatusGuard(_mark_pinned(httpx.HTTPTransport(verify=self.pinned_context(sc))))
 
     def _pin_ehbp_builders(self, sc) -> None:
         """Instance attributes shadow the SDK's EHBP transport builders on this SecureClient only, so the
@@ -392,11 +406,13 @@ class TinfoilAdapter:
         ehbp_cls = AsyncEHBPTransport if is_async else EHBPTransport
         net_cls = httpx.AsyncHTTPTransport if is_async else httpx.HTTPTransport
         pinned = 0
+        guard_cls = _AsyncPlaintextStatusGuard if is_async else _PlaintextStatusGuard
         for t in _transport_chain(getattr(client, "_transport", None)):
             if isinstance(t, ehbp_cls):
                 inner = t._inner
-                if not (isinstance(inner, net_cls) and _is_pinned(inner)):
-                    t._inner = _mark_pinned(net_cls(verify=self.pinned_context(sc)))
+                net = inner._inner if isinstance(inner, guard_cls) else inner
+                if not (isinstance(net, net_cls) and _is_pinned(net)):
+                    t._inner = self._pinned_network_transport(sc, is_async)
                     if not is_async:
                         _close_quietly(inner)
                 pinned += 1
@@ -837,6 +853,56 @@ def _mark_pinned(transport):
 
 def _is_pinned(transport) -> bool:
     return getattr(transport, _PINNED_MARK, False) is True
+
+
+def _plaintext_error(request, response) -> VendorHTTPError | None:
+    """Issue #2: the router answered an encrypted request in plaintext (no response nonce) with an HTTP error.
+    The reply is a rate limit, an outage or a refused key, not a cryptographic failure, so the send fails as a
+    VendorHTTPError naming the status and the router; the body is the router's and is dropped unread. A 2xx
+    without a nonce is left to the EHBP layer, which refuses it (MissingResponseNonceError)."""
+    status = response.status_code
+    if RESPONSE_NONCE_HEADER in response.headers or status // 100 == 2:
+        return None
+    host = request.url.host or "(unknown host)"
+    return VendorHTTPError(vendor="Tinfoil", subject=f"Tinfoil router {host}", status=status, path=request.url.path,
+                           subject_kind="router", what="inference",
+                           next_step=inference_next_step(status, "TINFOIL_API_KEY"))
+
+
+class _PlaintextStatusGuard(httpx.BaseTransport):
+    """Between an EHBP layer and the pinned network transport (sync): see ``_plaintext_error``."""
+
+    def __init__(self, inner: httpx.BaseTransport):
+        self._inner = inner
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        response = self._inner.handle_request(request)
+        err = _plaintext_error(request, response)
+        if err is not None:
+            response.close()
+            raise err
+        return response
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _AsyncPlaintextStatusGuard(httpx.AsyncBaseTransport):
+    """Between an EHBP layer and the pinned network transport (async): see ``_plaintext_error``."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport):
+        self._inner = inner
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self._inner.handle_async_request(request)
+        err = _plaintext_error(request, response)
+        if err is not None:
+            await response.aclose()
+            raise err
+        return response
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
 
 
 def _transport_chain(transport, limit: int = 12):

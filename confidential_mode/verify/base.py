@@ -21,10 +21,22 @@ def http_next_step(status: int, subject_kind: str = "model") -> str:
     return "try again in a few minutes"
 
 
+def inference_next_step(status: int, key_name: str) -> str:
+    """One next step for an inference endpoint that answered ``status`` in plaintext (issue #2)."""
+    if status in (401, 403):
+        return f"check {key_name}"
+    if status == 404:
+        return "check the model id; the router does not serve it"
+    if status == 429:
+        return "the router is rate limiting; try again in a few minutes"
+    return "try again in a few minutes"
+
+
 class VendorHTTPError(VerifyError):
-    """A vendor endpoint answered an attestation request with an HTTP error (Amendment 14). The text names
-    the vendor, the subject (a model id, or the gateway or router host), the HTTP status and one next step:
-    "<subject>: attestation unavailable (HTTP 503 from NEAR); try again in a few minutes"."""
+    """A vendor endpoint answered an attestation request, or an inference request in plaintext, with an HTTP
+    error (Amendment 14; issue #2). The text names the vendor, the subject (a model id, or the gateway or
+    router host), the HTTP status and one next step: "<subject>: attestation unavailable (HTTP 503 from
+    NEAR); try again in a few minutes". The response body is the vendor's and is never part of the text."""
 
     def __init__(self, *, vendor: str, subject: str, status: int, path: str = "", next_step: str = "",
                  subject_kind: str = "model", what: str = "attestation"):
@@ -32,6 +44,24 @@ class VendorHTTPError(VerifyError):
         self.subject_kind, self.what = subject_kind, what
         self.next_step = next_step or http_next_step(self.status, subject_kind)
         super().__init__(f"{subject}: {what} unavailable (HTTP {self.status} from {vendor}); {self.next_step}")
+
+    @property
+    def status_code(self) -> int:
+        """The HTTP status under the name httpx, requests and the openai client use, so ``http_error_in`` and
+        the llm gate's row detail read it."""
+        return self.status
+
+
+def vendor_error_in(exc: BaseException | None) -> VendorHTTPError | None:
+    """The first VendorHTTPError in ``exc``'s cause chain (the openai client wraps a transport error in an
+    APIConnectionError whose cause is the transport's exception), or None."""
+    seen = 0
+    while exc is not None and seen < 10:
+        if isinstance(exc, VendorHTTPError):
+            return exc
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return None
 
 
 def http_error_in(exc: BaseException | None) -> tuple[int, str] | None:

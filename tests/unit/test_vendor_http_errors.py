@@ -122,3 +122,97 @@ def test_router_discovery_says_discovery(tmp_path):
         ad.resolve_enclave_host()
     assert str(got.value) == ("Tinfoil: router discovery unavailable (HTTP 503 from Tinfoil's atc.tinfoil.sh); "
                               "try again in a few minutes")
+
+
+# ── issue #2: a plaintext non-2xx reply through the pinned EHBP transports ─────────────────────────────────
+
+def _hpke_hex() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import x25519
+    key = x25519.X25519PrivateKey.generate().public_key()
+    return key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
+UNTRUSTED_BODY = b'{"error": {"message": "rate limited; echo of messages[0].content=SECRET-PROMPT"}}'
+
+
+def _plaintext_reply(status: int):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers={"content-type": "application/json"}, content=UNTRUSTED_BODY)
+    return handler
+
+
+def _pinned_sync_transport(monkeypatch, tmp_path, status: int):
+    """The adapter's pinned sync EHBP transport with the network transport replaced by a plaintext reply."""
+    from types import SimpleNamespace
+
+    from confidential_mode.verify.tinfoil import TinfoilAdapter
+
+    class _Net(httpx.MockTransport):
+        def __init__(self, verify=None, **_kw):
+            super().__init__(_plaintext_reply(status))
+    monkeypatch.setattr(httpx, "HTTPTransport", _Net)
+    ad = TinfoilAdapter(data_dir=tmp_path / "d", enclave="inf.example", tls_probe=False)
+    return ad.pinned_ehbp_sync_transport(SimpleNamespace(_require_hpke_public_key=_hpke_hex))
+
+
+def _pinned_async_transport(monkeypatch, tmp_path, status: int):
+    import asyncio
+    from types import SimpleNamespace
+
+    from confidential_mode.verify.tinfoil import TinfoilAdapter
+
+    class _Net(httpx.MockTransport):
+        def __init__(self, verify=None, **_kw):
+            super().__init__(_plaintext_reply(status))
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", _Net)
+    ad = TinfoilAdapter(data_dir=tmp_path / "d", enclave="inf.example", tls_probe=False)
+    return asyncio.run(ad.pinned_ehbp_async_transport(SimpleNamespace(_require_hpke_public_key=_hpke_hex)))
+
+
+@pytest.mark.parametrize("status, tail", [
+    (429, "the router is rate limiting; try again in a few minutes"),
+    (503, "try again in a few minutes"),
+    (401, "check TINFOIL_API_KEY"),
+    (404, "check the model id; the router does not serve it"),
+])
+def test_a_plaintext_error_reply_names_the_status_and_the_router_and_never_the_body_sync(
+        monkeypatch, tmp_path, status, tail):
+    """Issue #2: the router answered an encrypted request in plaintext with an HTTP error (a rate limit, an
+    outage, a bad key). The send fails as a VendorHTTPError in the attestation errors' text form; the body is
+    the router's and is never quoted."""
+    t = _pinned_sync_transport(monkeypatch, tmp_path, status)
+    with httpx.Client(transport=t) as c, pytest.raises(VendorHTTPError) as got:
+        c.post("https://inf.example/v1/chat/completions", content=b'{"messages": [{"content": "hi"}]}')
+    assert str(got.value) == f"Tinfoil router inf.example: inference unavailable (HTTP {status} from Tinfoil); {tail}"
+    assert got.value.status == status and got.value.status_code == status
+    assert "SECRET-PROMPT" not in str(got.value) and "SECRET-PROMPT" not in repr(got.value)
+
+
+def test_a_plaintext_error_reply_names_the_status_and_the_router_and_never_the_body_async(monkeypatch, tmp_path):
+    import asyncio
+    t = _pinned_async_transport(monkeypatch, tmp_path, 503)
+
+    async def go():
+        async with httpx.AsyncClient(transport=t) as c:
+            await c.post("https://inf.example/v1/chat/completions", content=b'{"messages": [{"content": "hi"}]}')
+    with pytest.raises(VendorHTTPError) as got:
+        asyncio.run(go())
+    assert str(got.value) == ("Tinfoil router inf.example: inference unavailable (HTTP 503 from Tinfoil); "
+                              "try again in a few minutes")
+    assert "SECRET-PROMPT" not in str(got.value)
+
+
+def test_a_plaintext_2xx_reply_is_still_a_cryptographic_failure(monkeypatch, tmp_path):
+    """A success without a response nonce is not a vendor outage: the EHBP layer refuses it as before."""
+    from ehbp import MissingResponseNonceError
+    t = _pinned_sync_transport(monkeypatch, tmp_path, 200)
+    with httpx.Client(transport=t) as c, pytest.raises(MissingResponseNonceError):
+        c.post("https://inf.example/v1/chat/completions", content=b'{"messages": [{"content": "hi"}]}')
+
+
+def test_a_bodiless_request_passes_a_plaintext_2xx_through(monkeypatch, tmp_path):
+    """The EHBP layer sends a request without a body in plaintext and expects a plaintext reply."""
+    t = _pinned_sync_transport(monkeypatch, tmp_path, 200)
+    with httpx.Client(transport=t) as c:
+        assert c.get("https://inf.example/.well-known/tinfoil-attestation").status_code == 200

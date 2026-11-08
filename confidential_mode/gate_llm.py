@@ -432,7 +432,16 @@ class LlmGate:
             status = getattr(original, "status_code", None)
             if isinstance(status, int):
                 detail["status_code"] = status
-            return self.refuse(dest, context, tier, verdict, TEXT_PROVIDER_ERROR,
+            from .verify.base import vendor_error_in
+            text = TEXT_PROVIDER_ERROR
+            vendor_err = vendor_error_in(exc)
+            if vendor_err is not None:
+                # Issue #2: the attested transport named the vendor's HTTP status itself (a plaintext error reply
+                # to an encrypted request); its text is the plugin's own, never the response body.
+                detail.update(error_type=type(vendor_err).__name__, status_code=vendor_err.status,
+                              reason=str(vendor_err)[:300])
+                text = f"{TEXT_PROVIDER_ERROR} {vendor_err}"
+            return self.refuse(dest, context, tier, verdict, text,
                                reason_code="provider_error", nbytes=nbytes, verdict_label="in_tier",
                                detail=detail)
         observed(response)

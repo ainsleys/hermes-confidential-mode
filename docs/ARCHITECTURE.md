@@ -59,8 +59,8 @@ state under the transition lock; `unlock(...)` clears it and prints the lock per
 passes it on; locked, it classifies the destination and refuses off-tier sends before `next_call`, and
 `LlmGate.guarded_call` turns any provider error into a refusal so Hermes' fallback never arms. The
 refusal builders return the response object each `api_mode` expects. `build_middleware` wraps it so no
-exception escapes. Imports `ledger`, `state`, `tiers`; lazy: `sendctx`. Contract: "W1"; Amendments 3, 4,
-5, 5.1, 6, 9, 11, 13, 14.
+exception escapes. Imports `ledger`, `state`, `tiers`; lazy: `sendctx`, `verify.base`. Contract: "W1"; Amendments 3,
+4, 5, 5.1, 6, 9, 11, 13, 14.
 
 **`gate_tools.py`**. The tool gate's three entry points: `build_pre_tool_call` (the hook that asks or
 blocks), `build_tool_execution` (the middleware that runs a tool only on an exact recorded answer, or a
