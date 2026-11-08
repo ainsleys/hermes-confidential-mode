@@ -847,3 +847,27 @@ def test_setup_says_it_cannot_validate_a_tinfoil_model_id(plugin, capsys):
             "plugin can fetch. not-a-real-model is not one of the ids docs/config.example.yaml lists") in out
     out, _ = _setup_block(plugin, capsys, "--model", "llama3-3-70b")
     assert "llama3-3-70b is one of the ids docs/config.example.yaml lists." in out
+
+
+def test_terminal_commands_print_no_chat_form_unless_the_sentence_is_about_chat(plugin, capsys):
+    """Review L1: the pending-pin line, the pin reasons in check rows, "see /confidential status" and usage
+    strings print the terminal form from `hermes confidential`; a sentence that names the chat keeps its
+    chat form."""
+    commands = _sub(plugin, "commands")
+    assert commands.terminal_text("Pending pin: x; run /confidential pins approve (y)") == \
+        "Pending pin: x; run hermes confidential pins approve (y)"
+    assert commands.terminal_text("Usage: /confidential on <on-host-only|attested>") == \
+        "Usage: hermes confidential on <on-host-only|attested>"
+    keep = "In the chat session, run /confidential allow web_search. Then /confidential off works."
+    assert commands.terminal_text(keep) == ("In the chat session, run /confidential allow web_search. Then "
+                                            "hermes confidential off works.")
+    plugin.rt.pins.stage(_result(plugin))
+    parser, handler = _replay_parser(plugin)
+    assert handler(parser.parse_args(["status"])) == 0
+    out = capsys.readouterr().out
+    import re
+    assert not re.search(r"(?<![\w/])/confidential ", out), out
+    import io
+    buf = io.StringIO()
+    commands.cli_verb(plugin.rt, "pins", argparse.Namespace(pins_action=None), out=buf)
+    assert "run hermes confidential pins approve" in buf.getvalue() and "run /confidential" not in buf.getvalue()

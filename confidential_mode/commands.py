@@ -24,6 +24,7 @@ import importlib
 import io
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -1391,6 +1392,23 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
     return 1 if (failed or signed_failed or not chain_ok) else 0
 
 
+_SLASH = re.compile(r"(?<![\w/])/confidential(?= |$)")
+_SENTENCE = re.compile(r"(?<=[.;])\s+")
+
+
+def terminal_text(text: str) -> str:
+    """A reply printed by a `hermes confidential` command, with each chat command form ``/confidential <verb>``
+    written as ``hermes confidential <verb>``, which the CLI accepts for every verb (review L1). A sentence
+    that names the chat (such as "In the chat session, run /confidential allow ...") keeps its chat form."""
+    out = []
+    for line in str(text).split("\n"):
+        parts = _SENTENCE.split(line)
+        seps = _SENTENCE.findall(line)
+        fixed = [p if "chat" in p.lower() else _SLASH.sub("hermes confidential", p) for p in parts]
+        out.append("".join(f + (seps[i] if i < len(seps) else "") for i, f in enumerate(fixed)))
+    return "\n".join(out)
+
+
 CLI_VERBS = ("on", "off", "receipts", "pins", "allow", "revoke")
 
 
@@ -1419,7 +1437,7 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
                 out.write("Usage: hermes confidential pins retire <fingerprint>\n")
                 return 2
             text = retire_text(rt, args.fingerprint, surface="cli", identity=getattr(args, "identity", None))
-            out.write(text.rstrip() + "\n")
+            out.write(terminal_text(text).rstrip() + "\n")
             return 0 if text.startswith("Retired") else 1
         raw = "pins"
         if pa == "approve":
@@ -1435,7 +1453,7 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
             return 2
         status, text = (_revoke.revoke(rt, None, revoke_all=True, surface="cli") if every
                         else _revoke.revoke(rt, tool, surface="cli"))
-        out.write(text.rstrip() + "\n")
+        out.write(terminal_text(text).rstrip() + "\n")
         return 1 if status == _revoke.FAILED else 0
     else:
         raw, ok_prefix = f"allow {shlex.quote(args.tool)}", ""
@@ -1447,7 +1465,7 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
                             show_report=(action == "on"), terminal=True)
     finally:
         rt.progress = previous
-    out.write(text.rstrip() + "\n")
+    out.write(terminal_text(text).rstrip() + "\n")
     if action == "allow":
         return 0 if text.endswith("added to the allowlist for this lock.") or text.endswith("is already allowed.") else 1
     if ok_prefix:
@@ -1537,7 +1555,7 @@ def register_cli(ctx: Any, rt: Any) -> None:
                     print(f"Two tiers given ({args.tier_name} and --tier {args.tier}); name one.")
                     return 2
                 text, ok = check_result(rt, named, verbose=bool(getattr(args, "verbose", False)), form="terminal")
-                print(text)
+                print(terminal_text(text))
                 return 0 if ok else 1
             if action == "watch":
                 from . import watch
@@ -1545,7 +1563,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
                           interval=getattr(args, "interval", 1.0))
                 return 0
             if action == "status":
-                print(status_text(rt, verbose=bool(getattr(args, "verbose", False)), form="terminal"))
+                print(terminal_text(status_text(rt, verbose=bool(getattr(args, "verbose", False)),
+                                                form="terminal")))
                 return 0
             print("Usage: hermes confidential setup|check|watch|status|on <tier>|off|receipts <session>|"
                   "pins [approve|review|retire <fp>]|allow <tool>|revoke <tool>|revoke --all|replay <receipt.json>")
