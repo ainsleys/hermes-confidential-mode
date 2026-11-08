@@ -457,7 +457,12 @@ hermes confidential check --tier attested
 `check` runs the preflight and prints one row per route: the config key, its value, a verdict, and for
 a failure the exact key to change and the value to write. The auxiliary tasks left to inherit the main
 route share one row per verdict, such as `auxiliary.* (18 tasks)`; `check --verbose` prints one row
-per task. A missing vendor key is the first row. In chat, `/confidential check [tier] [--verbose]`. An
+per task. A missing vendor key is the first row. In chat, `/confidential check [tier] [--verbose]`;
+in a terminal, `hermes confidential check attested` works as well as `--tier attested`. With no
+tier, `check` prints which tier it checks and why: the locked tier, else `attested` when
+`model.provider` is an attested profile, else `on-host-only` when `model.base_url` is on this machine,
+else `attested`. Replies print commands in the form that works where you typed: the
+`hermes confidential ...` form from a terminal command, the `/confidential ...` form in chat. An
 excerpt on a typical OpenRouter setup:
 
 ```

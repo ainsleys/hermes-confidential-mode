@@ -262,7 +262,9 @@ def data_paths_line(rt: Any) -> str:
 
 
 def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = time.time,
-                verbose: bool = False) -> str:
+                verbose: bool = False, form: str = "") -> str:
+    """``form`` "terminal" prints commands in the terminal form (Amendment 14)."""
+    cmd = lambda verb: _locking.command_text(verb, form)  # noqa: E731
     lines: list[str] = []
     locked = tier = None
     try:
@@ -275,7 +277,7 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
             lines.append("Confidential mode: not locked (observing only)")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"Confidential mode: lock state UNREADABLE ({type(exc).__name__}); every send and tool is "
-                     "refused. Run /confidential off to repair it.")
+                     f"refused. Run {cmd('off')} to repair it.")
     try:
         config = rt.load_config()
     except Exception:  # noqa: BLE001
@@ -296,7 +298,7 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
         except Exception as exc:  # noqa: BLE001
             lines.append(f"Preflight: could not run ({type(exc).__name__})")
     else:
-        lines.append("Preflight: run /confidential check <tier>")
+        lines.append(f"Preflight: run {cmd('check <tier>')}")
     try:
         breached = rt.state.breached_sessions()
         since = rt.state.locked_since() if locked else None
@@ -399,18 +401,53 @@ def interactive_attested_ok(rt: Any, wait_seconds: float = INTERACTIVE_VERIFY_WA
     return call
 
 
-def check_text(rt: Any, tier: Optional[str], *, verbose: bool = False) -> str:
-    return check_result(rt, tier, verbose=verbose)[0]
+def check_text(rt: Any, tier: Optional[str], *, verbose: bool = False, form: str = "") -> str:
+    return check_result(rt, tier, verbose=verbose, form=form)[0]
 
 
-def check_result(rt: Any, tier: Optional[str], *, verbose: bool = False) -> tuple[str, bool]:
-    """(the preflight table, whether it passed). `hermes confidential check` exits 1 unless it passed. The
-    table is collapsed unless ``verbose`` (Amendment 14)."""
+def default_check_tier(rt: Any, config: Any) -> tuple[str, str]:
+    """(tier, why) for `check` with no tier (Amendment 14): the locked tier; else attested when the main
+    provider is an attested profile; else on-host-only when the main route is on this machine; else
+    attested, the default."""
     try:
         locked, locked_tier = rt.is_locked()
     except Exception:  # noqa: BLE001
         locked, locked_tier = False, None
-    chosen = tier or (locked_tier.value if locked and locked_tier else Tier.ATTESTED.value)
+    if locked is True and locked_tier:
+        return locked_tier.value, "the tier this profile is locked to"
+    try:
+        provider, _model, base_url = _locking._main_route(config or {})
+    except Exception:  # noqa: BLE001
+        provider, base_url = "", ""
+    provider = str(provider or "").lower()
+    if provider in _locking.ATTESTED_PROFILES:
+        return Tier.ATTESTED.value, f"model.provider is {provider}"
+    try:
+        from .tiers import host_of, is_on_host
+        on_host = bool(base_url) and is_on_host(host_of(base_url), _locking.extra_hosts(config or {}))
+    except Exception:  # noqa: BLE001
+        on_host = False
+    if on_host:
+        return Tier.ON_HOST.value, "model.base_url is on this machine"
+    return Tier.ATTESTED.value, "the default when the config names no attested or on-host main route"
+
+
+def check_result(rt: Any, tier: Optional[str], *, verbose: bool = False, form: str = "") -> tuple[str, bool]:
+    """(the preflight table, whether it passed). `hermes confidential check` exits 1 unless it passed. The
+    table is collapsed unless ``verbose`` (Amendment 14). With no tier, the first line names the tier
+    checked and why."""
+    header = ""
+    if tier:
+        chosen = tier
+    else:
+        try:
+            cfg = rt.load_config()
+        except Exception:  # noqa: BLE001
+            cfg = {}
+        chosen, why = default_check_tier(rt, cfg)
+        other = Tier.ON_HOST.value if chosen == Tier.ATTESTED.value else Tier.ATTESTED.value
+        header = (f"Checking the {chosen} tier ({why}). To check the other tier: "
+                  f"{_locking.command_text('check ' + other, form)}\n")
     try:
         t = Tier(chosen)
     except ValueError:
@@ -425,7 +462,7 @@ def check_result(rt: Any, tier: Optional[str], *, verbose: bool = False) -> tupl
         summary = _pf.auto_summary(report, _pf.auto_chain_readable(lambda p, e: _pf.key_state(p, e, config)))
     except Exception:  # noqa: BLE001
         summary = ""
-    return (f"{text}\n{summary}" if summary else text), report.ok is True
+    return header + (f"{text}\n{summary}" if summary else text), report.ok is True
 
 
 def receipts_text(rt: Any, session: str, *, fmt: str = "text") -> str:
@@ -502,7 +539,7 @@ def watch_text(rt: Any, limit: int = 20) -> str:
 # ── slash command ────────────────────────────────────────────────────────────────────────────────
 
 def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: str = "", platform: str = "",
-                 asker: Any = None, show_report: bool = False) -> str:
+                 asker: Any = None, show_report: bool = False, terminal: bool = False) -> str:
     """One verb of /confidential (and of the mirroring CLI subcommands). ``asker`` is the object whose
     ``ask_choice`` consent uses: ctx (chat surfaces) or a TerminalAsker (CLI)."""
     asker = asker if asker is not None else rt.ctx
@@ -516,12 +553,15 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
     if cmd in TERMINAL_ONLY:
         return TERMINAL_ONLY[cmd]
     sid, skey, surface = session_id or "", session_key or session_id or "", platform or ""
+    form = "terminal" if terminal else ""     # a `hermes confidential` command, not chat (Amendment 14)
+    cmd_for = lambda verb: _locking.command_text(verb, form)  # noqa: E731
     if cmd in ("on", "lock"):
         if len(rest) != 1:
             return "Usage: /confidential on <on-host-only|attested>"
         result = _locking.lock(rest[0], state=rt.state, ledger=rt.ledger, config=rt.load_config(),
                                allowlist_path=rt.allowlist_path, session_id=sid, surface=surface,
-                               attested_ok=interactive_attested_ok(rt), progress=getattr(rt, "progress", None))
+                               attested_ok=interactive_attested_ok(rt), progress=getattr(rt, "progress", None),
+                               command_form=form)
         if result.ok:
             rt.set_allowlist(result.allowlist)
             note = pending_pin_note(rt) if result.tier is Tier.ATTESTED else ""
@@ -542,11 +582,11 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
     if cmd == "status":
         if rest not in ([], ["--verbose"], ["-v"]):
             return "Usage: /confidential status [--verbose]"
-        return status_text(rt, session_key=skey, verbose=bool(rest))
+        return status_text(rt, session_key=skey, verbose=bool(rest), form=form)
     if cmd == "check":
         verbose = any(a in ("--verbose", "-v") for a in rest)
         names = [a for a in rest if a not in ("--verbose", "-v")]
-        return check_text(rt, names[0] if names else None, verbose=verbose)
+        return check_text(rt, names[0] if names else None, verbose=verbose, form=form)
     if cmd == "pins":
         if not rest:
             return pins_text(rt, session_key=skey)
@@ -580,9 +620,9 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
         try:
             locked, _ = rt.is_locked()
         except Exception:  # noqa: BLE001
-            return "Lock state is unreadable; run /confidential off first."
+            return f"Lock state is unreadable; run {cmd_for('off')} first."
         if locked is not True:
-            return "Not locked: every tool runs without asking. Lock first with /confidential on <tier>."
+            return f"Not locked: every tool runs without asking. Lock first with {cmd_for('on <tier>')}."
         from .consent import ConsentContextError, allow_tool
         try:
             return allow_tool(asker, rt.allowlist(), rt.ledger, rest[0], session_key=skey, session_id=sid,
@@ -1326,7 +1366,7 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
     rt.progress = for_cli()        # this command runs in a terminal a person is watching
     try:
         text = handle_slash(rt, raw, session_id="", session_key="cli", platform="cli", asker=asker,
-                            show_report=(action == "on"))
+                            show_report=(action == "on"), terminal=True)
     finally:
         rt.progress = previous
     out.write(text.rstrip() + "\n")
@@ -1354,6 +1394,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
         p.add_argument("--vendor", default="tinfoil", choices=["tinfoil", "near"],
                        help="which attested vendor to set up (default tinfoil)")
         p = sub.add_parser("check", help="run the lock preflight and print the table")
+        p.add_argument("tier_name", nargs="?", default=None, choices=[t.value for t in Tier], metavar="tier",
+                       help="the tier to check (the same as --tier)")
         p.add_argument("--tier", default=None, choices=[t.value for t in Tier])
         p.add_argument("--verbose", "-v", action="store_true",
                        help="one row per auxiliary task, not one row per verdict")
@@ -1411,8 +1453,12 @@ def register_cli(ctx: Any, rt: Any) -> None:
             if action in CLI_VERBS:
                 return cli_verb(rt, action, args)
             if action == "check":
-                text, ok = check_result(rt, getattr(args, "tier", None),
-                                        verbose=bool(getattr(args, "verbose", False)))
+                named = getattr(args, "tier", None) or getattr(args, "tier_name", None)
+                if getattr(args, "tier", None) and getattr(args, "tier_name", None) \
+                        and args.tier != args.tier_name:
+                    print(f"Two tiers given ({args.tier_name} and --tier {args.tier}); name one.")
+                    return 2
+                text, ok = check_result(rt, named, verbose=bool(getattr(args, "verbose", False)), form="terminal")
                 print(text)
                 return 0 if ok else 1
             if action == "watch":
@@ -1421,7 +1467,7 @@ def register_cli(ctx: Any, rt: Any) -> None:
                           interval=getattr(args, "interval", 1.0))
                 return 0
             if action == "status":
-                print(status_text(rt, verbose=bool(getattr(args, "verbose", False))))
+                print(status_text(rt, verbose=bool(getattr(args, "verbose", False)), form="terminal"))
                 return 0
             print("Usage: hermes confidential setup|check|watch|status|on <tier>|off|receipts <session>|"
                   "pins [approve|review|retire <fp>]|allow <tool>|revoke <tool>|revoke --all|replay <receipt.json>")

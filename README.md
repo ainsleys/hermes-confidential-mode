@@ -105,7 +105,7 @@ hermes confidential status | grep '^Plugin:'
 $ hermes confidential status
 Confidential mode: not locked (observing only)
 …
-Preflight: run /confidential check <tier>
+Preflight: run hermes confidential check --tier <tier>
 …
 ```
 
@@ -246,7 +246,7 @@ except where noted.
 | `on <on-host-only\|attested>` | Lock this profile (the preflight runs first). |
 | `off` | Unlock, with the lock period's counts. |
 | `status [--verbose]` | Lock state, pins, verification, breaches, installed commit; `--verbose` adds the tool list and the preflight. |
-| `check [tier]` | The preflight table (`check --tier <tier>` in a terminal). |
+| `check [tier] [--verbose]` | The preflight table; with no tier, names the tier it checks and why. |
 | `setup` | Terminal only: `hermes confidential setup [--vendor near] --model <id>`. |
 | `allow <tool>` | Let an off-host tool run without asking, for this lock (asks you). |
 | `revoke <tool>`, `revoke --all` | Withdraw the grants confidential mode holds. |

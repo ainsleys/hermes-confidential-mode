@@ -725,3 +725,39 @@ def test_near_setup_block_routes_vision_through_near_with_the_plaintext_note(plu
     assert report.ok, _sub(plugin, "preflight").format_report(report)
     out, cfg = _setup_block(plugin, capsys, "--vendor", "near", "--model", "m", "--vision-model", "v")
     assert cfg["auxiliary"]["vision"]["model"] == "v" and cfg["confidential"]["near"]["models"] == ["m", "v"]
+
+
+# ── Amendment 14: the command form that works where the user is ────────────────────────────────────
+
+def test_status_and_refusals_print_the_form_for_the_surface(plugin, capsys):
+    commands = _sub(plugin, "commands")
+    assert "Preflight: run /confidential check <tier>" in plugin.slash("status")
+    assert "Preflight: run hermes confidential check --tier <tier>" in commands.status_text(plugin.rt, form="terminal")
+    parser, handler = _replay_parser(plugin)
+    assert handler(parser.parse_args(["status"])) == 0
+    assert "hermes confidential check --tier <tier>" in capsys.readouterr().out
+    assert "Lock first with /confidential on <tier>" in plugin.slash("allow web_search")
+    import io
+    out = io.StringIO()
+    commands.cli_verb(plugin.rt, "allow", argparse.Namespace(tool="web_search"), out=out)
+    assert "Lock first with hermes confidential on <tier>" in out.getvalue()
+    assert plugin.slash("on on-host-only").startswith("Locked")
+    assert "Run /confidential off first" in plugin.slash("on on-host-only")
+    out = io.StringIO()
+    commands.cli_verb(plugin.rt, "on", argparse.Namespace(tier="on-host-only"), out=out)
+    assert "Run hermes confidential off first" in out.getvalue()
+
+
+def test_cli_check_takes_a_positional_tier_and_names_the_tier_it_checks(plugin, capsys):
+    parser, handler = _replay_parser(plugin)
+    assert parser.parse_args(["check", "attested"]).tier_name == "attested"
+    assert handler(parser.parse_args(["check", "on-host-only"])) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("confidential preflight: tier=on-host-only PASS")
+    assert handler(parser.parse_args(["check"])) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("Checking the on-host-only tier (model.base_url is on this machine). To check the "
+                          "other tier: hermes confidential check --tier attested\n"), out
+    assert handler(parser.parse_args(["check", "attested", "--tier", "on-host-only"])) == 2
+    assert plugin.slash("check").startswith("Checking the on-host-only tier (model.base_url is on this "
+                                            "machine). To check the other tier: /confidential check attested")

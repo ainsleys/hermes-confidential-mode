@@ -212,6 +212,17 @@ def fingerprint_matches(recorded: Any, config: Mapping, *, plugin_aux_tasks: Seq
 
 # ── helpers ──────────────────────────────────────────────────────────────────────────────────────
 
+def command_text(verb: str, form: Any = "") -> str:
+    """The command as the user types it where they are (Amendment 14): from a terminal command (form
+    "terminal") ``hermes confidential <verb>``, with ``check <tier>`` written ``check --tier <tier>``;
+    anywhere else, chat included (whose platform may also be "cli"), ``/confidential <verb>``."""
+    if form == "terminal":
+        if verb.startswith("check ") and not verb.startswith("check --"):
+            verb = "check --tier " + verb[len("check "):]
+        return "hermes confidential " + verb
+    return "/confidential " + verb
+
+
 def age_text(seconds: float | None) -> str:
     if seconds is None:
         return "never"
@@ -388,8 +399,9 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
          verification: Callable[[str], Any] | None = None, session_id: str = "", surface: str = "",
          live_runtime: Callable[[], Optional[dict]] | None = None,
          cached_environments: Callable[[], list] | None = None,
-         clock: Callable[[], float] = time.time, progress: Any = None) -> LockResult:
-    """Lock the profile to ``tier`` or refuse with the reason. Never raises for a refusal."""
+         clock: Callable[[], float] = time.time, progress: Any = None, command_form: str = "") -> LockResult:
+    """Lock the profile to ``tier`` or refuse with the reason. Never raises for a refusal. ``command_form``
+    "terminal" writes the commands a refusal names in the terminal form (Amendment 14)."""
     try:
         tier = Tier(tier)
     except ValueError:
@@ -411,19 +423,21 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
     try:
         guard.__enter__()
     except LockBusy as exc:
-        return _transition_refused("lock", exc, ledger, base, tier=tier)
+        return _transition_refused("lock", exc, ledger, base, tier=tier, command_form=command_form)
     try:
         return _lock_held(tier, base, state=state, ledger=ledger, config=config, registry=registry,
                           plugin_aux_tasks=plugin_aux_tasks, provider_lookup=provider_lookup,
                           attested_ok=attested_ok, profile_base_url=profile_base_url,
                           builtin_aux_tasks=builtin_aux_tasks, allowlist_builder=allowlist_builder,
                           allowlist_path=allowlist_path, verification=verification, live_runtime=live_runtime,
-                          cached_environments=cached_environments, clock=clock, progress=progress)
+                          cached_environments=cached_environments, clock=clock, progress=progress,
+                          command_form=command_form)
     finally:
         guard.__exit__(None, None, None)
 
 
-def _transition_refused(what: str, exc: Any, ledger: Any, base: dict, *, tier: Any = None) -> "LockResult":
+def _transition_refused(what: str, exc: Any, ledger: Any, base: dict, *, tier: Any = None,
+                        command_form: str = "") -> "LockResult":
     """The refusal of a lock or unlock that could not take the transition lock: a read-only data directory is
     named as such (purpose ``<what>:data_dir``), an unusable lock file by its error (``<what>:lockfile``), and
     a held lock as another transition in progress (``<what>:busy``). The ledger row carries no path."""
@@ -438,10 +452,12 @@ def _transition_refused(what: str, exc: Any, ledger: Any, base: dict, *, tier: A
     head = "Not locked" if what == "lock" else "Not unlocked (the lock is unchanged)"
     if isinstance(exc, LockUnusable):
         return LockResult(False, f"{head}: {describe(exc)}. Check the plugin data directory's permissions, then "
-                          f"run /confidential {'on' if what == 'lock' else 'off'} again.", tier=tier)
+                          f"run {command_text('on <tier>' if what == 'lock' else 'off', command_form)} again.",
+                          tier=tier)
     others = "another lock or an unlock" if what == "lock" else "a lock or another unlock"
     return LockResult(False, f"{head}: {others} of this profile is in progress "
-                      f"({describe(exc)}). Run /confidential status, then try again.", tier=tier)
+                      f"({describe(exc)}). Run {command_text('status', command_form)}, then try again.",
+                      tier=tier)
 
 
 _TRANSITION_THREAD_LOCK = threading.Lock()
@@ -468,15 +484,15 @@ def _transition_lock(allowlist_path: Any):
 
 def _lock_held(tier: Tier, base: dict, *, state, ledger, config, registry, plugin_aux_tasks, provider_lookup,
                attested_ok, profile_base_url, builtin_aux_tasks, allowlist_builder, allowlist_path, verification,
-               live_runtime, cached_environments, clock, progress) -> LockResult:
+               live_runtime, cached_environments, clock, progress, command_form: str = "") -> LockResult:
     """The body of ``lock`` after the tier checks, run under the transition lock."""
     try:
         locked, current = state.locked()
     except Exception:
         locked, current = None, None
     if locked is True:
-        return LockResult(False, f"Already locked ({current.value}). Run /confidential off first, then lock again.",
-                          tier=current)
+        return LockResult(False, f"Already locked ({current.value}). Run {command_text('off', command_form)} "
+                          "first, then lock again.", tier=current)
 
     config = _pf.load_core_config() if config is None else config
     aux = _plugin_aux(plugin_aux_tasks)
