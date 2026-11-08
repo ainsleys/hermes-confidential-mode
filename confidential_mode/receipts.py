@@ -394,6 +394,7 @@ def _sections(rows: list[dict]) -> dict:
         "signed_sends": by_kind(("send_signed",)),
         "grants_revoked": by_kind(("grant_revoked",)),   # Amendment 10
         "send_pairs": [[a, b] for a, b in send_pairs(rows).items()],   # [attempt row, result row]
+        "usage_total": _usage_total(rows),                               # issue #3
     }
 
 # Added only when a receipt holds an encrypted NEAR send (W11, Amendment 5.1); checked by verify_chain then.
@@ -812,8 +813,46 @@ def _send_body(r: Mapping, attempt: Mapping | None = None) -> str:
     elif attempt is not None or r.get("decision") == "allowed":
         req += ", response size unknown"
     rows = f"  (rows #{attempt['id']} attempt, #{r['id']} result)" if attempt is not None else ""
+    usage = usage_counts(d)
+    tokens = f"  tokens {_counts_text(usage)} ({USAGE_SOURCE})" if usage else ""
     return (f"{_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  {req}  "
-            f"{_p(r['provider']) or '?'}/{_p(r['model']) or '?'}  {_p(r['decision']) or ''}").rstrip() + rows
+            f"{_p(r['provider']) or '?'}/{_p(r['model']) or '?'}  {_p(r['decision']) or ''}").rstrip() + tokens + rows
+
+
+#: Where a send's token counts come from (issue #3): the router's X-Tinfoil-Usage-Metrics header, copied into
+#: the send_observed row by the Tinfoil transport. The counts are the router's claim, not the plugin's measure.
+USAGE_SOURCE = "router-reported"
+USAGE_HEADER = "X-Tinfoil-Usage-Metrics"
+USAGE_FIRST_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def usage_counts(detail: Mapping) -> dict[str, int]:
+    """The integer token counts in a send_observed row's ``detail.usage``, or {}."""
+    usage = detail.get("usage") if isinstance(detail, Mapping) else None
+    if not isinstance(usage, Mapping):
+        return {}
+    return {str(k): v for k, v in usage.items() if isinstance(v, int) and not isinstance(v, bool)}
+
+
+def _counts_text(counts: Mapping[str, int]) -> str:
+    """``prompt_tokens=12 completion_tokens=34 total_tokens=46``: the usual keys first, then the others sorted."""
+    keys = [k for k in USAGE_FIRST_KEYS if k in counts] + sorted(k for k in counts if k not in USAGE_FIRST_KEYS)
+    return " ".join(f"{_p(k)}={counts[k]}" for k in keys)
+
+
+def _usage_total(rows: list[dict]) -> dict:
+    """The session's token counts summed over the send_observed rows that carry them (issue #3)."""
+    sends = [r for r in rows if r["kind"] == "send_observed"]
+    counts: dict[str, int] = {}
+    with_counts = 0
+    for r in sends:
+        usage = usage_counts(r["detail"])
+        if not usage:
+            continue
+        with_counts += 1
+        for k, v in usage.items():
+            counts[k] = counts.get(k, 0) + v
+    return {"sends_with_counts": with_counts, "sends": len(sends), "counts": counts}
 
 
 def _verify_body(r: Mapping, status: Mapping | None = None) -> str:
@@ -988,6 +1027,10 @@ def render_text(doc: Mapping) -> str:
     # is a refusal is shown under Refusals only.
     section("Sends (purpose, host, request and response bytes; never text)",
             [i for i in sec["sends"] if i not in pairs], send_line)
+    total = sec.get("usage_total") or {}
+    if total.get("counts"):
+        add(f"  Tokens this session ({USAGE_SOURCE}, {USAGE_HEADER}): {_counts_text(total['counts'])} over "
+            f"{total['sends_with_counts']} of {total['sends']} send(s)")
     section("Refusals", sec["refusals"],
             lambda r: f"{r['kind']}  {_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  "
                       f"reason: {_reason(r)}"

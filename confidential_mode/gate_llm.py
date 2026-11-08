@@ -223,7 +223,7 @@ class _Call:
 
 #: Fields of one per-exchange record (verify/tinfoil.py _observe_send) copied into the send_observed row.
 SEND_RECORD_FIELDS = ("hpke_key_used", "hpke_key_source", "response_decrypted", "stream_closed_before_eof",
-                      "encrypted", "tls_spki_sha256", "tls_matches_report")
+                      "encrypted", "tls_spki_sha256", "tls_matches_report", "usage")
 
 
 def send_record_detail(records: list) -> dict:

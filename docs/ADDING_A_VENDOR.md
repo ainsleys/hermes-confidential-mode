@@ -135,8 +135,11 @@ writes through `event_sink` only what the cache cannot see:
 `send_observed` is written by the llm gate (`gate_llm.py:LlmGate.guarded_call`), not by the
 adapter. A transport that observes each HTTP exchange calls `sendctx.add_record(record)` with the
 fields in `gate_llm.py:SEND_RECORD_FIELDS` (`hpke_key_used`, `encrypted`, `response_decrypted`,
-`tls_spki_sha256`, `tls_matches_report`, ...), and the gate copies those fields into its row
-(`TinfoilAdapter._observe_send`). A new ledger kind needs `ledger.py:KINDS` and
+`tls_spki_sha256`, `tls_matches_report`, `usage`, ...), and the gate copies those fields into its row
+(`TinfoilAdapter._observe_send`). `usage` holds the vendor's integer token counts for the exchange when the
+vendor reports them (Tinfoil: the `X-Tinfoil-Usage-Metrics` header, parsed by
+`verify/tinfoil.py:parse_usage_metrics`); receipts print the counts per send and summed for the session, and
+label them router-reported. A new ledger kind needs `ledger.py:KINDS` and
 `tests/unit/test_ledger.py::test_kinds_match_contract` changed together.
 
 ### Hooks the cache wires

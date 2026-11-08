@@ -760,3 +760,35 @@ def test_receipt_reads_only_the_sessions_locked_period(ledger):
                 raise AttributeError(name)
             return getattr(ledger, name)
     assert [r.id for r in receipts.collect_rows(Unbounded(), SID)] == bounded and lock in bounded
+
+
+# ── issue #3: token counts per send and per session ────────────────────────────────────────────────────────
+
+def test_usage_counts_show_per_send_and_as_a_session_total(ledger):
+    ledger.append(_ev("lock", session_id="", tier="attested", decision="locked", detail={"tier": "attested"}))
+    for n in (1, 2):
+        ledger.append(_ev("send_observed", purpose="main", provider="attested-tinfoil", host="r1.tinfoil.invalid",
+                          model="tf-model", bytes=100 * n, tier="attested", verdict="in_tier", decision="allowed",
+                          detail={"hpke_key_used": "11" * 32, "response_decrypted": True,
+                                  "usage": {"prompt_tokens": 10 * n, "completion_tokens": 5 * n, "total_tokens": 15 * n}}))
+    ledger.append(_ev("send_observed", purpose="main", provider="attested-tinfoil", host="r1.tinfoil.invalid",
+                      model="tf-model", bytes=7, tier="attested", verdict="in_tier", decision="allowed"))
+    text = render(ledger, SID)
+    assert "request 100 bytes" in text
+    line1 = next(line for line in text.splitlines() if "request 100 bytes" in line)
+    assert "tokens prompt_tokens=10 completion_tokens=5 total_tokens=15 (router-reported)" in line1
+    assert ("Tokens this session (router-reported, X-Tinfoil-Usage-Metrics): prompt_tokens=30 completion_tokens=15 "
+            "total_tokens=45 over 2 of 3 send(s)") in text
+    doc = json.loads(render(ledger, SID, fmt="json"))
+    assert doc["sections"]["usage_total"] == {"sends_with_counts": 2, "sends": 3,
+                                              "counts": {"prompt_tokens": 30, "completion_tokens": 15, "total_tokens": 45}}
+    assert verify_chain(json.dumps(doc)) is True
+
+
+def test_a_session_without_usage_counts_shows_no_token_line(ledger, tmp_path):
+    fill_every_kind(ledger)
+    text = render(ledger, SID, pins=_pins(tmp_path))
+    assert "Tokens this session" not in text and "router-reported" not in text
+    doc = json.loads(render(ledger, SID, pins=_pins(tmp_path), fmt="json"))
+    sends = len(doc["sections"]["sends"])
+    assert doc["sections"]["usage_total"] == {"sends_with_counts": 0, "sends": sends, "counts": {}}

@@ -90,7 +90,9 @@ used the SDK before the adapter existed may already have written to the defaults
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -584,6 +586,9 @@ class TinfoilAdapter:
                 acc = self._accepted
                 tls_fp = ((acc.evidence or {}).get("claims") or {}).get("tls_public_key_fp") if acc else None
                 rec["tls_spki_sha256"], rec["tls_matches_report"] = spki, (spki == tls_fp) if tls_fp else None
+            usage = parse_usage_metrics(response.headers.get(USAGE_METRICS_HEADER))
+            if usage is not None:
+                rec["usage"] = usage
             if RESPONSE_NONCE_HEADER in response.headers:
                 _wrap_stream_for_decryption_flag(response, rec)
             _record_send(rec)
@@ -840,6 +845,38 @@ class TinfoilAdapter:
 
 ENCAPSULATED_KEY_HEADER = "Ehbp-Encapsulated-Key"  # ehbp.protocol
 RESPONSE_NONCE_HEADER = "Ehbp-Response-Nonce"     # ehbp.protocol
+#: The router's token counts for one completion (issue #3): a JSON object such as
+#: {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}. The value is the router's claim, read
+#: from an untrusted header: ``parse_usage_metrics`` keeps only integer token-count fields under a size cap.
+USAGE_METRICS_HEADER = "X-Tinfoil-Usage-Metrics"
+USAGE_METRICS_MAX_CHARS = 2048
+USAGE_METRICS_MAX_FIELDS = 16
+USAGE_METRICS_MAX_VALUE = 2 ** 53
+_USAGE_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+
+
+def parse_usage_metrics(value: Any) -> dict[str, int] | None:
+    """The integer token-count fields of an X-Tinfoil-Usage-Metrics header value, or None when the header is
+    missing, not a JSON object within the size cap, or carries no such field. A kept key is a lower-case
+    identifier containing "token" (so no header key can collide with the ledger's forbidden detail keys), and
+    its value a non-negative integer below 2**53; booleans, floats, strings and nested values are dropped. At
+    most USAGE_METRICS_MAX_FIELDS fields are kept, in header order. Never raises."""
+    if not isinstance(value, str) or not value or len(value) > USAGE_METRICS_MAX_CHARS:
+        return None
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: dict[str, int] = {}
+    for key, v in data.items():
+        if (isinstance(key, str) and "token" in key and _USAGE_KEY.match(key) and isinstance(v, int)
+                and not isinstance(v, bool) and 0 <= v < USAGE_METRICS_MAX_VALUE):
+            out[key] = v
+            if len(out) >= USAGE_METRICS_MAX_FIELDS:
+                break
+    return out or None
 
 
 _PINNED_MARK = "_confidential_mode_tls_pinned"

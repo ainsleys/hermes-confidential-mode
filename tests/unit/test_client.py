@@ -686,3 +686,71 @@ def test_the_covering_verify_row_is_the_one_in_effect_when_the_request_began(tmp
     assert c["verify"] == v1 and c["hpke_matches"] is True and c["covered"] is True
     assert doc["header"]["hpke_mismatches"] == []
     ledger.close()
+
+
+# ── issue #3: X-Tinfoil-Usage-Metrics token counts in the send record ───────────────────────────────────────
+
+def _observe(tmp_path, headers: dict, body: bytes = b'{"choices": []}') -> dict:
+    from confidential_mode.verify import tinfoil as tmod
+    ad = _adapter(tmp_path)
+    request = httpx.Request("POST", "https://router.example/v1/chat/completions", content=b'{"m": 1}')
+    response = httpx.Response(200, headers=headers, content=body)
+    with tmod.capture_sends() as records:
+        ad._observe_send(request, response)
+    (r,) = records
+    return r
+
+
+def test_usage_metrics_header_token_counts_reach_the_send_record(tmp_path):
+    """Issue #3: the router's X-Tinfoil-Usage-Metrics header (JSON, integer counts) is kept in the send
+    record under ``usage``; the header is the router's claim and only integers are kept."""
+    r = _observe(tmp_path, {"X-Tinfoil-Usage-Metrics": '{"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}'})
+    assert r["usage"] == {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}
+
+
+@pytest.mark.parametrize("value", [
+    "", "not json", "[1, 2]", '"text"', "{}", '{"prompt_tokens": "12"}', '{"prompt_tokens": true}',
+    '{"prompt_tokens": 1.5}', '{"prompt_tokens": -1}', '{"prompt_tokens": null}',
+    '{"messages": 5}', '{"content": 5}', '{"cached": 5}', '{"Prompt Tokens": 5}', '{"' + "k" * 100 + '_tokens": 5}',
+    '{"a": {"b": 1}}', '{"prompt_tokens": ' + str(2 ** 63) + '}', '{"prompt_tokens": 1}' + " " * 5000,
+])
+def test_a_missing_or_malformed_usage_header_records_no_counts_and_no_error(tmp_path, value):
+    """Only lower-case token-count keys with integer values are kept, so a header key can never collide with
+    the ledger's forbidden detail keys (messages, content) and make the send row fail."""
+    r = _observe(tmp_path, {"X-Tinfoil-Usage-Metrics": value})
+    assert "usage" not in r, r.get("usage")
+    assert "usage" not in _observe(tmp_path, {})
+
+
+def test_usage_header_keeps_only_the_integer_token_fields_and_at_most_sixteen(tmp_path):
+    r = _observe(tmp_path, {"X-Tinfoil-Usage-Metrics": '{"prompt_tokens": 7, "model": "llama", "cached": false, "completion_tokens": 3}'})
+    assert r["usage"] == {"prompt_tokens": 7, "completion_tokens": 3}
+    many = "{" + ", ".join(f'"k{i}_tokens": {i}' for i in range(40)) + "}"
+    r = _observe(tmp_path, {"X-Tinfoil-Usage-Metrics": many})
+    assert len(r["usage"]) == 16 and r["usage"]["k0_tokens"] == 0 and "k16_tokens" not in r["usage"]
+
+
+def test_usage_counts_reach_the_send_observed_row(tmp_path):
+    """gate_llm copies the record's ``usage`` into the send_observed row with the other per-send fields."""
+    from confidential_mode import sendctx
+    from confidential_mode.gate_llm import build_middleware
+    from confidential_mode.ledger import Ledger
+    from confidential_mode.tiers import Tier, Verdict
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+
+    class _In:
+        tier = Tier.ATTESTED
+
+        def classify(self, dest):
+            return Verdict(True, "attested", "router.example")
+    mw = build_middleware(ledger=ledger, is_locked=lambda: (True, Tier.ATTESTED), predicate_for=lambda t: _In(),
+                          attested_ok=lambda p: Verdict(True, "verified", "router.example"))
+
+    def next_call(request):
+        sendctx.add_record({"hpke_key_used": "48" * 32, "response_decrypted": True,
+                            "usage": {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}})
+        return "ok"
+    mw(request={"model": "m"}, next_call=next_call, provider="attested-tinfoil", base_url="https://router.example/v1",
+       model="m", api_mode="chat_completions", session_id="s1")
+    (row,) = [r for r in ledger.tail(0) if r.kind == "send_observed"]
+    assert row.detail["usage"] == {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}
