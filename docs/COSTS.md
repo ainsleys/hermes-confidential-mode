@@ -11,10 +11,10 @@ The last section says which figures you can measure from what the ledger already
 ## The baseline
 
 The baseline is a typical Hermes install: a hosted frontier model (a Claude or GPT model)
-through OpenRouter or Nous Portal, streaming on, fallback providers on, side jobs such as compression
+through OpenRouter or Nous Portal, streaming on, fallback providers on, side calls such as compression
 and title generation on a cheap third-party model, and web tools enabled.
 
-"Side jobs" are the calls Hermes makes on the user's behalf that are not the main chat: compression of
+"Side calls" are the calls Hermes makes on the user's behalf that are not the main chat: compression of
 long sessions, title generation, vision analysis, memory, and similar. "Fallbacks" are the alternate
 providers Hermes tries when the main provider fails. "Off-host tools" are tools whose work leaves the
 machine, such as web search and web fetch. "Yolo mode" and "unattended mode" are Hermes settings in
@@ -31,8 +31,8 @@ response quality and task success match the baseline. The plugin writes the ledg
 
 The quality change in this mode comes from the model, not from the plugin. If you already run a
 local model, you lose nothing. If you switch from a hosted frontier model to a local one to use this
-tier, you take that local model's quality drop, which is large on most hardware. The model's
-availability is your hardware's availability.
+tier, you take that local model's quality drop, which is large on most hardware. The model is
+available only when your hardware is.
 
 What the plugin itself adds in this mode:
 
@@ -41,11 +41,11 @@ What the plugin itself adds in this mode:
   subagent, a new lock, a restart or a second process asks again.
   With `confidential.tools.ask: each_call`, every off-host tool call asks until you answer `session`
   or `always` for that tool. `/confidential revoke <tool>` brings the prompt back in either mode.
-- Off-host tool calls refused outright in yolo mode and unattended mode, because nobody is there to
+- The plugin refuses off-host tool calls outright in yolo mode and unattended mode, because nobody is there to
   answer, even for a tool an earlier `once` covered.
-- Cron jobs refused while locked.
-- Fallback providers refused while locked.
-- A model on another machine refused until you list its exact host. The tier accepts loopback by
+- The plugin refuses cron jobs while locked.
+- The plugin refuses fallback providers while locked.
+- The plugin refuses a model on another machine until you list its exact host. The tier accepts loopback by
   rule. A model server on your LAN, a tailnet or a cloud private network has a private-range
   address, and the lock refuses that address until you list it in `confidential.on_host.extra_hosts`.
   The preflight row for such a host names its range and the key.
@@ -55,17 +55,17 @@ the baseline when a person is present to answer prompts.
 
 ## The attested tier, Tinfoil or NEAR AI
 
-This is the mode with real differences. The differences come from four places: the models the tier allows, the
+This mode differs most from the baseline. The differences come from four places: the models the tier allows, the
 removal of fallbacks, the tool gate, and the vendor's own protocol.
 
 | Factor | Change versus the baseline | Cause |
 |---|---|---|
 | Model choice | Frontier models unavailable. Open-weight models only, such as the Qwen, DeepSeek, Llama and gpt-oss families, as the vendor serves them. | Only models served inside enclaves are in tier. |
 | Response quality | Drops to the chosen open-weight model's level. The expected gap is noticeable on coding and reasoning and larger on long-context work. | The model, plus any quantization and context limit the enclave host applies. |
-| Side-job quality | Compression, titles and memory must run on an in-tier model. Summaries may differ from the default aux model's. | The preflight refuses side routes that leave the tier. |
+| Side-job quality | Compression, titles and memory must run on an in-tier model. Summaries may differ from the default auxiliary model's. | The preflight refuses side-call routes that leave the tier. |
 | Task success | Lower. A provider outage fails the turn instead of falling back. Off-host tools are asked or refused. Image inputs on NEAR work, but each image leaves in plaintext to NEAR's gateway, and a remote image URL is refused. On NEAR, settings whose value is a mapping are refused, except `reasoning` and `stream_options`, which pass when their shape is known. Cron is refused. | Fallbacks removed, tool gate, NEAR encryption scope. |
 | Latency per turn | Tinfoil: roughly unchanged. NEAR: the whole reply arrives at once, then one signature fetch. | No streaming on NEAR: encryption refuses it. One extra request per turn. |
-| Setup | One-time preflight failures until side routes, fallbacks and vision point in tier. On NEAR, the setup command routes vision to a NEAR vision model, with a note that images are plaintext to the gateway. | The preflight is strict by design. The setup command prints most of the config for you to paste. |
+| Setup | One-time preflight failures until side-call routes, fallbacks and vision point in tier. On NEAR, the setup command routes vision to a NEAR vision model, with a note that images are plaintext to the gateway. | The preflight is strict by design. The setup command prints most of the config for you to paste. |
 | Pin approval | Tinfoil: one prompt per new router build. NEAR: one prompt per new CVM configuration, and a NEAR model entry can be approved only after its compose files are fetched from GitHub. | NEAR serves one model from several configurations. The service map is pinned only with every file hash-checked. |
 
 ### Expected sizes
