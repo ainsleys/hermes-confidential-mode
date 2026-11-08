@@ -361,6 +361,150 @@ def test_a_pool_whose_loop_has_closed_is_dropped_without_error(world, tmp_path):
     assert made[0].closed_on == [] and ad._async_transports == {} and ad._async_closing == set()
 
 
+class _SocketPool:
+    """A stand-in for httpx.AsyncHTTPTransport's shape: an aclose coroutine and httpcore's pool of
+    connections, each with a network stream that hands out a real socket."""
+
+    def __init__(self):
+        import socket
+        self.sock, self.peer = socket.socketpair()
+        stream = type("S", (), {"get_extra_info": lambda _s, name: self.sock if name == "socket" else None})()
+        conn = type("C", (), {})()
+        conn._connection = type("H", (), {})()
+        conn._connection._network_stream = stream
+        self._pool = type("P", (), {})()
+        self._pool._connections = [conn]
+        self.closed_on: list = []
+
+    async def aclose(self) -> None:
+        self.closed_on.append(asyncio.get_running_loop())
+
+    def close_peer(self):
+        self.peer.close()
+
+
+def test_a_close_scheduled_onto_a_stopped_loop_that_then_closes_leaves_no_coroutine(world, tmp_path, recwarn):
+    """fix-pass-3 review finding 3: a pool whose loop is stopped (not running) when it is dropped, and closed
+    before it runs again. The close is deferred onto the loop; when the loop closes first, no close coroutine
+    was ever created (no "never awaited" warning) and the pool's sockets are closed directly."""
+    import gc
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    loop = asyncio.new_event_loop()
+    pool = _SocketPool()
+    ad._async_transports[id(loop)] = (loop, pool)
+    ad._drop_send_pools()                       # from this thread, with the loop stopped
+    assert pool.sock.fileno() != -1 and pool.closed_on == [] and len(ad._async_closing) == 1
+    loop.close()
+    ad._drop_send_pools()                       # the next drop sweeps the deferred close of a closed loop
+    assert pool.sock.fileno() == -1 and ad._async_closing == set()
+    gc.collect()
+    assert not [w for w in recwarn.list if "never awaited" in str(w.message)]
+    pool.close_peer()
+
+
+def test_a_close_deferred_onto_a_stopped_loop_runs_when_the_loop_runs(world, tmp_path):
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    loop = asyncio.new_event_loop()
+    pool = _SocketPool()
+    ad._async_transports[id(loop)] = (loop, pool)
+    ad._drop_send_pools()
+    loop.run_until_complete(_settle())
+    assert pool.closed_on == [loop] and ad._async_closing == set()
+    loop.close()
+    pool.sock.close()
+    pool.close_peer()
+
+
+def test_a_pool_of_an_already_closed_loop_has_its_sockets_closed_directly(world, tmp_path):
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    loop = asyncio.new_event_loop()
+    loop.close()
+    pool = _SocketPool()
+    ad._async_transports[id(loop)] = (loop, pool)
+    ad._drop_send_pools()
+    assert pool.sock.fileno() == -1 and pool.closed_on == [] and ad._async_transports == {}
+    pool.close_peer()
+
+
+def test_a_retired_pool_with_an_abandoned_body_is_evicted(world, tmp_path):
+    """fix-pass-3 review finding 4: a stream left unread and unclosed while its pool is retired. Once the body
+    is collected (or its loop closed) the retired entry and its in-flight count are gone."""
+    import gc
+    ad, _, _ = _accepted(world, tmp_path, encrypt=False)
+    made = _pools(world, ad)
+    loop = asyncio.new_event_loop()
+
+    async def go():
+        c = openai.AsyncOpenAI(api_key="sk-near-test", base_url=BASE, http_client=ad.async_http_for_loop(),
+                               max_retries=0)
+        await c.chat.completions.with_raw_response.create(model=MODEL, messages=MSG, stream=True)
+        ad._drop_send_pools()
+        assert [p for _, p in ad._retired_async] == [made[0]]   # in flight: the body was never read or closed
+    loop.run_until_complete(go())
+    gc.collect()
+    loop.run_until_complete(_settle())
+    assert ad._retired_async == [] and ad._inflight == {}
+    loop.close()
+
+
+def _encrypted_async(world, tmp_path, pool_cls=None):
+    ad, _, _ = _accepted(world, tmp_path)
+    made: list = []
+
+    def factory():
+        made.append((pool_cls or _ClosingPool)(lambda r: world.handler(r)))
+        return made[-1]
+    ad._async_transport_factory = factory
+    return ad, made
+
+
+def test_http_421_on_an_encrypted_async_send_closes_the_pool_on_its_loop(world, tmp_path):
+    """fix-pass-3 review finding 5: the 421 re-verify path calls _drop_send_pools after the sealed response
+    released its pool."""
+    ad, made = _encrypted_async(world, tmp_path)
+    orig = world.handler
+
+    def gone(req):
+        if req.url.path == "/v1/chat/completions":
+            return httpx.Response(421, json={"error": {"message": "key no longer valid", "type": "provider_error"}})
+        return orig(req)
+    world.handler = gone
+
+    async def go():
+        c = openai.AsyncOpenAI(api_key="sk-near-test", base_url=BASE, http_client=ad.async_http_for_loop(),
+                               max_retries=0)
+        with pytest.raises(Exception) as ei:
+            await c.chat.completions.create(model=MODEL, messages=MSG)
+        assert "421" in repr(ei.value) or "421" in repr(ei.value.__cause__)
+        await _settle()
+        assert made[0].closed_on == [asyncio.get_running_loop()]
+        assert ad._inflight == {} and ad._async_transports == {} and ad._retired_async == []
+        assert ad.held_reason and "421" in ad.held_reason
+    asyncio.run(go())
+    assert ad._async_closing == set()
+
+
+class _MismatchPool(_ClosingPool):
+    async def handle_async_request(self, request):
+        raise near.TLSPinMismatch("the TLS certificate of this connection is not the one the quote binds")
+
+
+def test_a_tls_pin_mismatch_on_an_encrypted_async_send_closes_the_pool_on_its_loop(world, tmp_path):
+    ad, made = _encrypted_async(world, tmp_path, _MismatchPool)
+
+    async def go():
+        c = openai.AsyncOpenAI(api_key="sk-near-test", base_url=BASE, http_client=ad.async_http_for_loop(),
+                               max_retries=0)
+        with pytest.raises(Exception):
+            await c.chat.completions.create(model=MODEL, messages=MSG)
+        await _settle()
+        assert made[0].closed_on == [asyncio.get_running_loop()]
+        assert ad._inflight == {} and ad._async_transports == {} and ad._retired_async == []
+        assert ad.held_reason and "certificate" in ad.held_reason
+    asyncio.run(go())
+    assert ad._async_closing == set()
+
+
 # ── appraisal and replay ─────────────────────────────────────────────────────────────────────────
 
 def test_replay_recomputes_the_same_result_offline_and_detects_tampering(world, tmp_path):

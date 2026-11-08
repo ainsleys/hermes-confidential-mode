@@ -91,6 +91,7 @@ import secrets
 import ssl
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -933,6 +934,7 @@ class NearAdapter:
         pool (the sync pool and every loop's async pool) is closed once the requests still in flight on it
         have finished, so its sockets do not linger. An async pool is closed on the loop it was made on."""
         close_async = []
+        self._prune_closed_loops()
         with self._lock:
             t, self._sync_transport = self._sync_transport, None
             for loop, at in self._async_transports.values():
@@ -1132,11 +1134,30 @@ class NearAdapter:
             raise VerifyError("sync_http_view() before a successful verify()")
         return httpx.Client(transport=_SyncView(self), follow_redirects=False)
 
-    def _async_pool(self) -> httpx.AsyncBaseTransport:
-        loop = asyncio.get_running_loop()
+    def _prune_closed_loops(self) -> None:
+        """Pools whose loop has closed: drop them, closing their sockets directly, and forget their in-flight
+        count (a body abandoned on a closed loop can never release). Also closes the sockets of a deferred
+        close whose loop closed before running it."""
+        gone = []
         with self._lock:
             for key in [k for k, (lp, _) in self._async_transports.items() if lp.is_closed()]:
-                self._async_transports.pop(key, None)
+                gone.append(self._async_transports.pop(key)[1])
+            keep = []
+            for lp, at in self._retired_async:
+                if lp.is_closed():
+                    gone.append(at)
+                    self._inflight.pop(id(at), None)
+                else:
+                    keep.append((lp, at))
+            self._retired_async = keep
+        for at in gone:
+            _close_pool_sockets(at)
+        _sweep_closed_loops(self._async_closing)
+
+    def _async_pool(self) -> httpx.AsyncBaseTransport:
+        loop = asyncio.get_running_loop()
+        self._prune_closed_loops()
+        with self._lock:
             entry = self._async_transports.get(id(loop))
             if entry is None or entry[0] is not loop:
                 entry = (loop, self._async_transport_factory())
@@ -1492,13 +1513,49 @@ def _close_quietly(t) -> None:
         pass
 
 
+def _close_pool_sockets(t: Any) -> None:
+    """Close the sockets of an async pool whose loop can no longer run its close (fix-pass-3 review findings 3
+    and 4): each connection's socket in httpx's connection pool, closed directly, so nothing is left to the
+    garbage collector and no close coroutine is created. Never raises."""
+    try:
+        pool = getattr(t, "_pool", None)
+        conns = list(getattr(pool, "_connections", None) or [])
+    except Exception:  # noqa: BLE001
+        return
+    for conn in conns:
+        try:
+            inner = getattr(conn, "_connection", None) or conn
+            stream = getattr(inner, "_network_stream", None)
+            sock = stream.get_extra_info("socket") if stream is not None else None
+            if sock is not None:
+                sock.close()
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _sweep_closed_loops(keep: set) -> None:
+    """A close deferred onto a loop that closed before running it: close that pool's sockets directly."""
+    for entry in [e for e in list(keep) if isinstance(e, tuple)]:
+        loop, t = entry
+        try:
+            closed = loop.is_closed()
+        except Exception:  # noqa: BLE001
+            closed = True
+        if closed:
+            keep.discard(entry)
+            _close_pool_sockets(t)
+
+
 def _aclose_on_loop(loop: asyncio.AbstractEventLoop, t: Any, keep: set) -> None:
     """Close an async pool on the loop it was made on, so its sockets close: a task when that loop is the
-    running one, else scheduled onto it from this thread. A closed loop can run nothing; the reference is
-    dropped. ``keep`` holds the pending close until it finishes. Never raises."""
+    running one; from another thread, a callback scheduled onto the loop that creates the task only when the
+    loop runs it, so a loop closed first leaves no close coroutine unawaited (``keep`` holds the deferred
+    (loop, pool) pair, and ``_sweep_closed_loops`` closes its sockets directly). A loop already closed gets
+    its pool's sockets closed directly. ``keep`` holds each pending close until it finishes. Never raises."""
     aclose = getattr(t, "aclose", None)
     if not callable(aclose):
         return
+    _sweep_closed_loops(keep)
 
     def done(fut) -> None:
         keep.discard(fut)
@@ -1506,8 +1563,20 @@ def _aclose_on_loop(loop: asyncio.AbstractEventLoop, t: Any, keep: set) -> None:
             fut.exception()
         except BaseException:  # noqa: BLE001 - a cancelled close; nothing to report
             pass
+
+    def start() -> None:
+        keep.discard(entry)
+        try:
+            task = loop.create_task(aclose())
+        except Exception:  # noqa: BLE001
+            _close_pool_sockets(t)
+            return
+        keep.add(task)
+        task.add_done_callback(done)
+    entry = (loop, t)
     try:
         if loop.is_closed():
+            _close_pool_sockets(t)
             return
         try:
             running = asyncio.get_running_loop()
@@ -1515,19 +1584,25 @@ def _aclose_on_loop(loop: asyncio.AbstractEventLoop, t: Any, keep: set) -> None:
             running = None
         if running is loop:
             fut = loop.create_task(aclose())
-        else:
-            fut = asyncio.run_coroutine_threadsafe(aclose(), loop)
-        keep.add(fut)
-        fut.add_done_callback(done)
+            keep.add(fut)
+            fut.add_done_callback(done)
+            return
+        keep.add(entry)
+        loop.call_soon_threadsafe(start)
+    except RuntimeError:     # the loop closed meanwhile
+        keep.discard(entry)
+        _close_pool_sockets(t)
     except Exception:  # noqa: BLE001
         logger.debug("confidential-mode: could not schedule closing a NEAR async pool", exc_info=True)
 
 
 class _AsyncReleasing(httpx.AsyncByteStream):
-    """An async response body that releases its send pool when closed."""
+    """An async response body that releases its send pool when closed, or when it is collected unclosed (a
+    caller that abandoned the body), so a retired pool never stays listed for the adapter's life."""
 
     def __init__(self, inner, release):
         self._inner, self._release = inner, release
+        weakref.finalize(self, release)       # release() runs once: a later aclose() is a no-op
 
     async def __aiter__(self):
         async for chunk in self._inner:
