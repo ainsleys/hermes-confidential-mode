@@ -528,7 +528,7 @@ def _setup_block(plugin, capsys, *argv):
     assert handler(parser.parse_args(["setup", "--no-verify", *argv])) == 0
     out = capsys.readouterr().out
     import hermes_yaml
-    return out, hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Then run")])
+    return out, hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Next steps:")])
 
 
 def test_setup_block_gives_vision_and_side_jobs_suitable_models(plugin, capsys, monkeypatch):
@@ -761,3 +761,23 @@ def test_cli_check_takes_a_positional_tier_and_names_the_tier_it_checks(plugin, 
     assert handler(parser.parse_args(["check", "attested", "--tier", "on-host-only"])) == 2
     assert plugin.slash("check").startswith("Checking the on-host-only tier (model.base_url is on this "
                                             "machine). To check the other tier: /confidential check attested")
+
+
+def test_setup_lists_the_real_next_steps_in_order(plugin, capsys, monkeypatch):
+    monkeypatch.delenv("TINFOIL_API_KEY", raising=False)
+    out, _ = _setup_block(plugin, capsys, "--model", "llama3-3-70b")
+    tail = out[out.index("Next steps:"):]
+    assert tail.splitlines() == [
+        "Next steps:",
+        "  1. Set TINFOIL_API_KEY (see Requirements in README.md).",
+        "  2. Merge the block above into config.yaml.",
+        "  3. Verify and pin the enclave: run this setup again without --no-verify.",
+        "  4. Check: hermes confidential check --tier attested.",
+        "  5. Lock: hermes confidential on attested."]
+    plugin.rt.pins.stage(_result(plugin))
+    monkeypatch.setenv("TINFOIL_API_KEY", "test-key")
+    out, _ = _setup_block(plugin, capsys, "--model", "llama3-3-70b")
+    tail = out[out.index("Next steps:"):].splitlines()
+    assert tail[1] == "  1. Merge the block above into config.yaml."
+    assert tail[2] == ("  2. Approve the pin in a terminal you opened: hermes confidential pins review, then "
+                       "hermes confidential pins approve.")

@@ -504,8 +504,9 @@ def _lock_held(tier: Tier, base: dict, *, state, ledger, config, registry, plugi
         _append(ledger, LedgerEvent(
             kind="preflight_fail", purpose="lock", verdict="off_tier", decision="refused",
             detail={"failures": [i.key for i in report.failures()][:100], "fingerprint": report.fingerprint}, **base))
-        return LockResult(False, "Not locked: the preflight found routes that would leave the tier.\n"
-                          + _pf.format_report(report, collapse=True), tier=tier, report=report,
+        head = (_pf.missing_key_headline(report)
+                or "Not locked: the preflight found routes that would leave the tier.")
+        return LockResult(False, head + "\n" + _pf.format_report(report, collapse=True), tier=tier, report=report,
                           fingerprint=report.fingerprint)
 
     try:

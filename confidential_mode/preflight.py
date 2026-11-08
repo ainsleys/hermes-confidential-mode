@@ -391,9 +391,27 @@ def pin_is_the_cause(reason: Any) -> bool:
     return isinstance(reason, str) and "pins approve" in reason
 
 
+KEY_REQUIREMENTS = "see Requirements in README.md"
+
+
 def key_fix(env_var: str) -> str:
-    return (f"set {env_var} (export the variable or add the variable to Hermes' env file), or give Hermes the "
-            "key through model.api_key; a key added only with hermes auth is not visible to the plugin")
+    return (f"set {env_var} ({KEY_REQUIREMENTS}): export the variable or add the variable to Hermes' env file, "
+            "or give Hermes the key through model.api_key; a key added only with hermes auth is not visible to "
+            "the plugin")
+
+
+def missing_key_headline(report: "PreflightReport") -> str:
+    """The refusal's first line when a vendor key row fails (Amendment 14), else ''. A missing key is not a
+    route problem, so it is named first and by itself."""
+    keys = [i for i in report.failures() if i.key in ATTESTED_KEY_ENVS.values()]
+    if not keys:
+        return ""
+    what = " and ".join(f"{i.key} is {i.value_redacted}" for i in keys)
+    todo = " and ".join(i.key for i in keys)
+    head = f"Not locked: {what}; set {todo} ({KEY_REQUIREMENTS})."
+    if len(keys) < len(report.failures()):
+        head += " The preflight also found routes that would leave the tier."
+    return head
 
 
 def _attested_providers_in_use(config: Mapping, tasks: Sequence[str], plugins: Mapping[str, dict]) -> list[str]:
@@ -978,13 +996,11 @@ def _grouped(items: Sequence[PreflightItem]) -> list[PreflightItem]:
 
 def format_report(report: PreflightReport, *, value_width: int = 40, key_width: int = 44,
                   collapse: bool = False) -> str:
-    """Fixed-width table: KEY, VALUE (redacted), VERDICT, FIX. Fix text is not clipped. ``collapse`` (the
-    default of `check` and of a refused lock; Amendment 14) prints the vendor-key rows first and one row per
+    """Fixed-width table: KEY, VALUE (redacted), VERDICT, FIX. Fix text is not clipped. The vendor-key rows
+    come first. ``collapse`` (the default of `check` and of a refused lock; Amendment 14) prints one row per
     verdict for the auxiliary tasks that inherit the main route."""
-    items = list(report.items)
-    if collapse:
-        items = _grouped(items)
-        items = [i for i in items if i.key in KEY_ROW_KEYS] + [i for i in items if i.key not in KEY_ROW_KEYS]
+    items = _grouped(report.items) if collapse else list(report.items)
+    items = [i for i in items if i.key in KEY_ROW_KEYS] + [i for i in items if i.key not in KEY_ROW_KEYS]
     kw = min(key_width, max([3] + [len(i.key) for i in items]))
     vw = min(value_width, max([5] + [len(i.value_redacted) for i in items]))
     dw = max(len(v) for v in VERDICTS)

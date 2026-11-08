@@ -532,10 +532,10 @@ def test_setup_reports_a_vision_model_whose_attestation_is_unavailable_and_conti
     assert f"{VISION}: attestation unavailable (HTTP 503 from NEAR); vision left unset.\n" in out
     assert f"Verified {HOST}#{MODEL}:" in out                 # the main model verified on its own
     import hermes_yaml
-    cfg = hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Then run")])
+    cfg = hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Next steps:")])
     assert "vision" not in cfg["auxiliary"] and cfg["confidential"]["near"]["models"] == [MODEL]
     assert f"# vision left unset: {VISION}: attestation unavailable (HTTP 503 from NEAR)." in out
-    assert "auxiliary.vision is unset" in out
+    assert "  2. Set auxiliary.vision as the note in the block says.\n" in out
     pending = plugin.rt.pins.pending()
     assert pending is not None and pending.router_repo == f"{HOST}#{MODEL}"   # the pin names the verified model
 

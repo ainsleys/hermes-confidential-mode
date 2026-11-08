@@ -317,8 +317,9 @@ def test_attested_tier_needs_the_vendor_api_key():
     r = run(attested_config(), tier=Tier.ATTESTED, pred=attested_pred(), profile="attested-tinfoil", keys=())
     i = item(r, "TINFOIL_API_KEY")
     assert not r.ok and i.verdict == "off_tier" and i.value_redacted == "not set"
-    assert i.fix == ("set TINFOIL_API_KEY (export the variable or add the variable to Hermes' env file), or give "
-                     "Hermes the key through model.api_key; a key added only with hermes auth is not visible to the plugin")
+    assert i.fix == ("set TINFOIL_API_KEY (see Requirements in README.md): export the variable or add the variable "
+                     "to Hermes' env file, or give Hermes the key through model.api_key; a key added only with "
+                     "hermes auth is not visible to the plugin")
     # A NEAR route anywhere (here one auxiliary task) adds the NEAR row.
     both = AttestedPredicate({"attested-tinfoil", "attested-near"}, lambda _p: Verdict(True, "fresh", ""))
     cfg = attested_config(auxiliary={"vision": {"provider": "attested-tinfoil"},

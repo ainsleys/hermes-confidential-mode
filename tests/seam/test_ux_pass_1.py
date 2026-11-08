@@ -48,7 +48,11 @@ def test_attested_lock_without_the_key_is_refused_by_the_preflight(plugin, monke
     monkeypatch.delenv("TINFOIL_API_KEY", raising=False)
     plugin.cfg.write_text(ATTESTED_CONFIG)
     out = plugin.slash("on attested")
-    assert out.startswith("Not locked") and "set TINFOIL_API_KEY (export the variable or add the variable" in out
+    assert out.startswith("Not locked: TINFOIL_API_KEY is not set; set TINFOIL_API_KEY (see Requirements in "
+                          "README.md).\n"), out
+    assert "routes that would leave the tier" not in out            # a missing key is not a route problem
+    table = out.splitlines()[1:]
+    assert table[3].startswith("TINFOIL_API_KEY "), table[:5]       # the first row
     assert plugin.rt.state.locked() == (False, None)
     parser, handler = _cli(plugin)
     assert handler(parser.parse_args(["check", "--tier", "attested"])) == 1          # check exits 1 on FAIL
@@ -211,7 +215,7 @@ def test_tinfoil_setup_pins_every_side_call_and_check_summarises_side_calls_on_a
     parser, handler = _cli(plugin)
     assert handler(parser.parse_args(["setup", "--no-verify", "--model", "llama3-3-70b"])) == 0
     out = capsys.readouterr().out
-    cfg = hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Then run")])
+    cfg = hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Next steps:")])
     pf, locking = _sub(plugin, "preflight"), _sub(plugin, "locking")
     tasks = set(pf.builtin_aux_task_names())
     assert tasks <= set(cfg["auxiliary"]) and all(v["provider"] == "attested-tinfoil" for v in cfg["auxiliary"].values())

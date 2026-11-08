@@ -905,6 +905,31 @@ def attest_near_models(adapter: Any, models: list) -> tuple[list, dict]:
     return ok, bad
 
 
+def setup_next_steps(rt: Any, *, vendor: str, key_env: str, key_set: bool, verified: bool,
+                     vision_unset: bool = False) -> str:
+    """Setup's closing lines (Amendment 14): the steps still to do, in order, in the terminal form."""
+    steps: list[str] = []
+    if not key_set:
+        steps.append(f"Set {key_env} ({_pf.KEY_REQUIREMENTS}).")
+    steps.append("Merge the block above into config.yaml.")
+    if vision_unset:
+        steps.append("Set auxiliary.vision as the note in the block says.")
+    pins = getattr(rt, "pins", None)
+    try:
+        pending = [b for b in (pins.pending_all() if callable(getattr(pins, "pending_all", None))
+                               else [pins.pending()]) if b is not None and getattr(b, "vendor", vendor) == vendor]
+        approved = [e for e in pins.approved_entries() if getattr(e, "vendor", vendor) == vendor]
+    except Exception:  # noqa: BLE001
+        pending, approved = [], []
+    if pending:
+        steps.append("Approve the pin in a terminal you opened: hermes confidential pins review, then "
+                     "hermes confidential pins approve.")
+    elif not approved and not verified:
+        steps.append("Verify and pin the enclave: run this setup again without --no-verify.")
+    steps += ["Check: hermes confidential check --tier attested.", "Lock: hermes confidential on attested."]
+    return "Next steps:\n" + "\n".join(f"  {n}. {t}" for n, t in enumerate(steps, 1))
+
+
 KEY_NOT_SET_TEXT = "NOT set (export it or add it to Hermes' env file)"
 
 
@@ -967,9 +992,9 @@ def cli_setup_near(rt: Any, args: Any, out=None) -> int:
         out.write("auxiliary.vision goes through attested-near: images leave in plaintext to NEAR's gateway, and "
                   "the text around them is encrypted. The note in the block says how to refuse them instead.\n")
     out.write(near_config_block(model, block_vision, vision_unset_reason=unset_reason, unset_vision=vision) + "\n")
-    if block_vision is None:
-        out.write("auxiliary.vision is unset: set auxiliary.vision as the note in the block says before you lock.\n")
-    out.write("Then run `hermes confidential check --tier attested` and `/confidential on attested`.\n")
+    out.write(setup_next_steps(rt, vendor="near", key_env=_locking.NEAR_API_KEY_ENV, key_set=key_set,
+                               verified=not getattr(args, "no_verify", False),
+                               vision_unset=block_vision is None) + "\n")
     return 0
 
 
@@ -978,7 +1003,8 @@ def cli_setup(rt: Any, args: Any, out=None) -> int:
     if getattr(args, "vendor", None) == "near":
         return cli_setup_near(rt, args, out)
     model = getattr(args, "model", None) or _locking._cfg(rt.load_config(), "confidential", "model") or "<model>"
-    out.write(f"TINFOIL_API_KEY: {'set' if _provider_module(rt).tinfoil_api_key() else KEY_NOT_SET_TEXT}\n")
+    key_set = bool(_provider_module(rt).tinfoil_api_key())
+    out.write(f"TINFOIL_API_KEY: {'set' if key_set else KEY_NOT_SET_TEXT}\n")
     if not getattr(args, "no_verify", False):
         if rt.adapter is None:
             out.write("The attested provider is not registered; see `hermes confidential status`.\n")
@@ -1017,7 +1043,8 @@ def cli_setup(rt: Any, args: Any, out=None) -> int:
             enclave = None
     out.write(config_block(rt, model, vision_model=getattr(args, "vision_model", None) or DEFAULT_VISION_MODEL,
                            aux_model=getattr(args, "aux_model", None) or DEFAULT_AUX_MODEL, enclave=enclave) + "\n")
-    out.write("Then run `hermes confidential check --tier attested` and `/confidential on attested`.\n")
+    out.write(setup_next_steps(rt, vendor="tinfoil", key_env="TINFOIL_API_KEY", key_set=key_set,
+                               verified=not getattr(args, "no_verify", False)) + "\n")
     return 0
 
 

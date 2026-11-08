@@ -142,8 +142,14 @@ $ hermes confidential setup --vendor tinfoil --model llama3-3-70b
 TINFOIL_API_KEY: set
 Verified router-0.tinfoil.sh: code 284bd9e5d470c481 enclave … release v0.0.170 (verified_at is the host clock)
 …
-Then run `hermes confidential check --tier attested` and `/confidential on attested`.
+Next steps:
+  1. Merge the block above into config.yaml.
+  2. Check: hermes confidential check --tier attested.
+  3. Lock: hermes confidential on attested.
 ```
+
+Setup lists only the steps still to do: setting the key, or approving the pin in a terminal when
+setup could not ask you.
 
 For NEAR AI Cloud, use `--vendor near --model Qwen/Qwen3.8-27B`.
 
