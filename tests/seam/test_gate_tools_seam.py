@@ -212,7 +212,7 @@ def test_off_host_tool_prompts_with_our_message_and_runs_only_on_explicit_approv
 @pytest.mark.parametrize("path", ["call", "agent_order_call"])
 @pytest.mark.parametrize("answer", ["", "d", None, "yes"])
 def test_cli_answer_hermes_treats_as_a_grant_does_not_run_the_tool(hermes, monkeypatch, path, answer):
-    """tools/approval.py:1006-1009: any CLI answer but the exact "deny" grants. Prove the grant first,
+    """tools/approval.py:1006-1010: any CLI answer but the exact "deny" grants. Prove the grant first,
     then that the locked gate still does not run the handler."""
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     hermes.human(answer)

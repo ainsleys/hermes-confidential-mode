@@ -904,7 +904,7 @@ def test_yolo_enabled_mid_turn_after_lock_is_seen_per_call(hermes):
 
 @pytest.mark.parametrize("answer", [None, "", "DENY", "Deny", "d", "no", True, 0])
 def test_approve_directive_with_garbage_human_answer_does_not_run(hermes, answer):
-    """HERMES GAP (approval.py:1006-1009): the CLI grants on any answer except exactly 'deny'. Amendment 3
+    """HERMES GAP (approval.py:1006-1010): the CLI grants on any answer except exactly 'deny'. Amendment 3
     moves enforcement to gate_tools.build_tool_execution: next_call only on a recorded once/session/always."""
     if not callable(getattr(gate_tools, "build_tool_execution", None)):
         pytest.fail("pending W4 change: confidential_mode.gate_tools.build_tool_execution (Amendment 3) is missing")

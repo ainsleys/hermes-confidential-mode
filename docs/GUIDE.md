@@ -564,6 +564,10 @@ first.
 **A changed config blocks every turn.** If the routing config's fingerprint no longer matches the
 fingerprint recorded at lock time, every turn is blocked until you unlock and lock again.
 
+**Unreadable lock state blocks everything.** If the plugin can't read the lock state, it refuses every
+model call and blocks every tool, on-host tools included, until `/confidential status` or
+`/confidential off` repairs it.
+
 **The live model runtime is checked every turn.** `/model` and the `--provider` flag can switch one
 session's model without changing your config. The plugin checks the live runtime at the start of every
 locked turn and ends the turn if it's off-tier. The check runs in the `pre_llm_call` hook and again in
@@ -1095,7 +1099,9 @@ breaches; the context compactions; and the fixed closing paragraphs. Rows that d
 profile (locks, unlocks, verifications, pin events) are included when they fall in the lock period
 the session belongs to. A background verification the pins didn't accept is marked "NOT ACCEPTED" and
 never counted for a send. A row marked "unverified entry" has no evidence, or an incomplete capture,
-and shows nothing.
+and shows nothing. When Tinfoil's router reports token counts, each send line shows them and the receipt
+adds a session total; both are labelled router-reported, because the router states them and nothing
+checks them.
 
 A receipt never contains prompt or response text. The ledger rejects any row whose details carry a key
 that usually holds conversation content, such as `messages`, `prompt` or `content`, and rendering

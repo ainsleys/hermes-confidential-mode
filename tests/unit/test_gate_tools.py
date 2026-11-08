@@ -371,7 +371,7 @@ def test_off_host_tool_asks_with_kb_message_and_runs_on_explicit_answer():
 
 @pytest.mark.parametrize("answer", [None, "", "d", "yes", "Deny", "ONCE", "approve"])
 def test_hermes_grant_on_an_unexpected_answer_is_refused(answer):
-    # tools/approval.py:1006-1009: anything but the exact "deny" is a grant on the CLI.
+    # tools/approval.py:1006-1010: anything but the exact "deny" is a grant on the CLI.
     r = Rig(answer=answer, hermes_approved=True)
     out = r.run("web_search", {"q": "x"})
     assert refused(out) and r.ran() == []

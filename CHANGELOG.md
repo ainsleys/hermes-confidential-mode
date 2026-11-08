@@ -4,11 +4,9 @@ All notable changes to Hermes Confidential Mode are listed here. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version numbers follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
-
 ## 0.1.0 (unreleased)
 
-The first release, verified against Hermes Agent commit 84a0301 (Hermes 0.22.7 or later).
+The first release, for Hermes Agent 0.22.7 or later, verified against Hermes commit 84a0301.
 
 ### Added
 
@@ -21,20 +19,21 @@ The first release, verified against Hermes Agent commit 84a0301 (Hermes 0.22.7 o
 - Session receipts as text or hash-chained JSON, and `replay` to re-check a receipt's evidence offline. See [Quick start](README.md#quick-start), step 6.
 - `setup` for each vendor: verifies the enclave, asks for the first pin and prints the config block to merge. See [Quick start](README.md#quick-start), step 3.
 - `allow` and `revoke` for the plugin's own tool grants, and `status`, `check`, `pins` and `pins retire`. See [Commands](README.md#commands).
-- Token counts from Tinfoil's router in each send row and as a session total in receipts. See [README](README.md).
+- Token counts from Tinfoil's router in each send row and as a session total in receipts, labelled router-reported. See [GUIDE](docs/GUIDE.md#what-a-receipt-contains).
 
 ### Security
 
-- Off-tier main calls and every fallback are refused before any byte leaves while locked. See [Limits](README.md#limits).
+- Off-tier main calls and every fallback are refused before any byte leaves while locked. See [README](README.md).
 - Inference connections on both vendors are pinned to the TLS key of the verified report, inside the handshake. See [LIMITATIONS 9](docs/LIMITATIONS.md#9-what-the-network-still-sees-and-what-the-receipt-leaks).
 - Request bodies are encrypted to the enclave (Tinfoil's encrypted transport) or to the model key (NEAR), and NEAR replies are released only when their signature verifies. See [LIMITATIONS 14](docs/LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open).
 - A gated tool runs only on an exact `once`, `session` or `always` answer, so Hermes' grant-on-any-answer prompt cannot approve it. See [LIMITATIONS 2](docs/LIMITATIONS.md#2-the-cli-approve-directive-grants-on-any-answer-except-deny).
-- Tools are blocked, not asked, under yolo, approvals off, cron and one-shot runs. See [Limits](README.md#limits).
+- Tools are blocked, not asked, under yolo, approvals off, cron and one-shot runs. See [Quick start](README.md#quick-start), step 5.
 - Scheduled jobs, routed delegation and tool servers on off-tier remote hosts are blocked while locked. See [README](README.md).
 - A gateway `/model` or `/moa` switch is refused while locked. See [LIMITATIONS 1](docs/LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution).
 - Approval prompts refuse in a process started by an agent's tool, and tool calls that name the plugin's command or state files are refused. See [LIMITATIONS 15](docs/LIMITATIONS.md#15-an-agent-with-a-terminal-can-reach-the-approval-prompt).
-- Unreadable lock state refuses every send and blocks every tool until `status` or `off` repairs it. See [GUIDE](docs/GUIDE.md).
-- Vendor keys are read only through Hermes' secret scope and never shown; state files are written mode 0600 with a durable write. See [Install](README.md#install).
+- Unreadable lock state refuses every send and blocks every tool until `status` or `off` repairs it. See [GUIDE](docs/GUIDE.md#what-happens-while-locked).
+- Vendor keys are read only through Hermes' secret scope and never shown, and data files are mode 0600. See [Install](README.md#install).
+- State files are written with a durable write: fsync, rename, then fsync of the directory. See [INTERFACES](docs/INTERFACES.md#state-files-locks-and-writes).
 
 ### Known limits
 

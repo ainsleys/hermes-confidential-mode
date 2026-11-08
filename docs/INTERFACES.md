@@ -28,7 +28,9 @@ states what the plugin claims, and the [guide](GUIDE.md) describes how the plugi
   `tests/hostile/` holds adversarial cases against each contract; `tests/fault/` injects filesystem,
   process, vendor, Hermes and crypto failures; `tests/scenario/` is an end-to-end demo; `tests/live/`
   calls NEAR for real and is skipped without `NEAR_AI_API_KEY`. [RUNNING_TESTS.md](RUNNING_TESTS.md)
-  gives the commands.
+  gives the commands. A test's result must not depend on test order: Hermes memoises model-list probes
+  in process memory (`agent/model_metadata.py`), so every test that asserts no probe leaves starts with
+  that cache cleared.
 
 ## Shared types
 
@@ -358,8 +360,8 @@ value of a non-dict block; `delegation` provider, model, base_url, api_mode and 
 keys in `_PLUGIN_EXECUTION_KEYS`: isolation, hook_callback_timeout, load_timeout_seconds, enabled,
 disabled); `terminal.backend` and the resolved backend, normalised so that unset and `local` agree; and
 `confidential.on_host.extra_hosts` (the raw value) when the value is present and not empty. Auxiliary
-model and api_mode and the `confidential.near.*` keys are not covered. A config without that key fingerprints as it
-did before the key existed. This is fingerprint layout version 2; `locking.py:fingerprint_matches` also
+model and api_mode and the `confidential.near.*` keys are not covered. An absent `extra_hosts` key and an empty list
+fingerprint the same. This is fingerprint layout version 2; `locking.py:fingerprint_matches` also
 accepts the version-1 fingerprint of a lock recorded under version 1, so an upgrade is not a config
 change.
 
@@ -511,7 +513,9 @@ that nothing escapes: any exception becomes a refusal (`TEXT_INTERNAL_ERROR`, re
 `base_url`, `model`, `api_mode`, `session_id` and `request` from the middleware context and builds a
 `Destination`. Its purpose is `fallback` when the context has `call_role: fallback` or a
 `fallback_index` above 0, else `main`; at 84a0301 the context carries neither, so the purpose is `main`,
-and the destination fields already describe a fallback provider. The middleware never waits on a person.
+and the destination fields already describe a fallback provider. The middleware never waits on a person. The
+gate's ledger writes are best effort: a failed append is logged and never changes a send decision, so an
+allowed send is still sent exactly once and a refused send is still refused.
 
 - **Unlocked:** writes `send_observed` (decision `observed`, the host and the byte size of the
   serialised request) and calls `next_call` inside the send context.
@@ -565,7 +569,7 @@ cannot raise. Every refusal text starts "Confidential mode: ".
 The tool gate has two lines. The `pre_tool_call` hook (`gate_tools.py:build_pre_tool_call`) asks or
 blocks. The `tool_execution` middleware (`gate_tools.py:build_tool_execution`) enforces: it runs a gated
 tool only on an exact recorded answer or a grant, because Hermes' CLI approve directive grants on any
-answer except the exact string "deny" (`tools/approval.py:1006-1009`: None, "", "d", "Deny" and "yes" all
+answer except the exact string "deny" (`tools/approval.py:1006-1010`: None, "", "d", "Deny" and "yes" all
 run the tool) and a hook cannot veto after the prompt. The observer `post_approval_response`
 (`gate_tools.py:build_post_approval_response`) records each answer. The hook and the middleware share
 one policy (`gate_tools_policy.py:_Policy.decide`), and both never raise: the middleware's own failure is
@@ -824,7 +828,10 @@ refuses to lock under `plugins.isolation: host`.
 `TINFOIL_API_KEY`, context length `confidential.tinfoil.context_length`, default 65536), and
 `provider.py:register_near_profile` registers `attested-near` (key `NEAR_AI_API_KEY`, context length
 `confidential.near.context_length`, default 65536) with the same verification cache, pins file and
-ledger. Each profile's `base_url` is the adapter's: `https://<host>/v1` once the host is resolved, and
+ledger. The context-length override exists because returning an integer pre-empts Hermes'
+context-window probes (`GET {base_url}/models` and `POST /api/show` with plain httpx and the API key at
+agent build), which would otherwise reach the enclave host off the attested transport. Each profile's
+`base_url` is the adapter's: `https://<host>/v1` once the host is resolved, and
 `verify/tinfoil.py:PLACEHOLDER_BASE_URL` (`https://unresolved.attested-tinfoil.invalid/v1`) before;
 `_sync_profile_base_url` copies the resolved value into the profile after each verification.
 `attested-near` reports `supports_streaming` from `confidential.near.streaming` (default false), and
@@ -1064,7 +1071,7 @@ give an auxiliary send its session, tier and purpose `aux:<task>`.
   last open window for that attribute closes, across threads. The live windows are the SDK attestation
   (`_capture_hooks` around `type(sc).verify`) and, nested in it, `requests.Session.request` while
   `fetch_latest_release` runs (the SDK offers no seam to hand it a Session the plugin owns). Inside a
-  window a wrapper is process-wide and inert for every thread but the one that opened it.
+  window a wrapper is process-wide and inert for every thread but the thread that opened it.
   `_sdkpatch.installed_now()` lists the wrappers in place.
 
 ## NEAR adapter
@@ -1222,7 +1229,7 @@ sent on the pinned pool as an exchange (`verify/near_exchange.py:_Exchange`), an
   proceeds with its prepared values.
 - **Hashing and the signature.** The view hashes the exact request body and the response body as
   received (after any content decoding; for SSE every byte including `data:` framing, blank lines and
-  `[DONE]`; after the OpenAI SDK stops at `[DONE]` the view drains the rest before hashing). When the body
+  `[DONE]`; after the OpenAI SDK stops at `[DONE]` the view drains the rest of the body before hashing). When the body
   ends it fetches `GET /v1/signature/<id>?signing_algo=ed25519` with the request's own Authorization
   header, retrying 404 for at most `signature_wait_seconds`. An interrupted body gets no fetch and a row
   saying so. Without encryption NEAR's gateway re-signs streamed completions with its own key, which is
@@ -1418,7 +1425,7 @@ review_note=None) returns a reply string. It checks the self-approval marker fir
 `PinStore.prefetch_composes` before asking, and goes through `pending_all()` oldest first, one reply line
 per batch. A batch with an unpinned service map is not asked (`pin_denied`, decision
 `services_unpinned`). Under a lock held around the re-check and the apply, it applies a batch only on an
-exact `approve` and only when the pending batch's consent key still equals the one asked about; a
+exact `approve` and only when the pending batch's consent key still equals the consent key asked about; a
 re-staged pin with the same fingerprints but a different release tag is a swap and is not applied.
 Concurrent approvals for one batch apply exactly once. It writes one `pin_applied` row per entry (the
 entry's fingerprints, `vendor`, `router_repo`, `cvm_role`, `pinned`, `approved_via`, `reviewed_by`,
@@ -1460,7 +1467,7 @@ schema `confidential-mode/pin-review/v1` (`review.SCHEMA`; `review.BUNDLE_SCHEMA
 
 - **Inner compose texts.** `review.compose_url(commit, file, repo)` accepts only a 40-hex commit and a
   plain repository path and builds `https://raw.githubusercontent.com/<repo>/<commit>/<file>`, where the
-  repository is the one the measured compose names in `GITHUB_REPO` (`review.repo_of_app_compose`,
+  repository is the repository the measured compose names in `GITHUB_REPO` (`review.repo_of_app_compose`,
   recorded as `observed.github_repo` and shown as `repository`); nothing is fetched without one.
   `fetch_compose` keeps the bytes (at most 4 MiB) only when their SHA-256 equals the log's `file_sha256`,
   and caches them as `<data_dir>/pins/composes/<sha256>.yaml`; commit metadata from `api.github.com` is
@@ -1907,13 +1914,31 @@ documented plugin surface: exactly `tools.registry`, `agent.secret_scope`, `prov
 ## Citation index
 
 Code and test comments cite rules by the amendment that introduced them ("Amendment 4 F3"), by a review
-finding ("review finding 9", "SF2", "FI-3") or by a backlog or catalog-rule id. This table maps each
-citation found in the repository to the section of this file that now holds the rule. A plain "review
+finding ("review finding 9", "SF2", "FI-3"), by a backlog or catalog-rule id, or by the id of the work
+package or tester that owned the code (W1 to W13, T1 to T4) or of an earlier contract section ("INTERFACES
+W4"). This table maps each
+citation found in the repository to the section of this file that holds the rule. A plain "review
 finding N" is a finding of the codebase review unless the citing comment names another review.
 
 | Citation | Section |
 |---|---|
 | (C0) | [Conventions](#conventions), [The llm gate](#the-llm-gate) |
+| C1, C2 ruling | [Shared types](#shared-types); the C2 ruling (a ledger failure never changes a send decision) is in [The llm gate](#the-llm-gate) |
+| C3 review | [Consent](#consent) (an answer must match the choice value exactly) |
+| Ruling 8 | [Conventions](#conventions) (Identity checks across a trust boundary) |
+| D5 | [Sends](#sends) (Release rule) |
+| review finding 6e | [Sends](#sends) (Refusals: auxiliary calls reach the views without the llm gate) |
+| review finding 26 | [Build, dependencies and repository rules](#build-dependencies-and-repository-rules) (Dependencies) |
+| W1, "INTERFACES W1" | [The llm gate](#the-llm-gate), [Ledger](#ledger), [Lock state](#lock-unlock-and-the-per-turn-check) |
+| W2, "INTERFACES W2" | [Attested providers](#attested-providers), [Tinfoil adapter](#tinfoil-adapter), [Pins file](#pins-file) |
+| W3 | [Tiers](#tiers), [Preflight](#preflight) |
+| W4, "INTERFACES W4", T4 | [The tool gate](#the-tool-gate), [Consent](#consent) |
+| W5 | [Registration and hooks](#registration-and-hooks), [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check), [Commands](#commands) |
+| W6 | [Receipts](#receipts), [Conventions](#conventions) (Tests: the scenario demo) |
+| W11 | [Sends](#sends) (encryption), [Preflight](#preflight) (NEAR settings) |
+| W12 | [Pins file](#pins-file), [Pin review bundle](#pin-review-bundle) |
+| W13 | [Verification](#verification) (compose-manager attestation), [Evidence](#evidence) |
+| T1 | [The llm gate](#the-llm-gate) |
 | Amendment 1 | [Tiers](#tiers), [Preflight](#preflight), [Decisions](#decisions) |
 | Amendment 2 | [The llm gate](#the-llm-gate), [Lock state](#lock-unlock-and-the-per-turn-check), [Decisions](#decisions), [Ledger](#ledger), [Consent](#consent) |
 | Amendment 3, Amendment 3 addendum, Amendment 3 ruling | [The tool gate](#the-tool-gate), [The allowlist](#the-allowlist), [Preflight](#preflight) (TTS), [Consent](#consent) |
@@ -1926,10 +1951,10 @@ finding N" is a finding of the codebase review unless the citing comment names a
 | Amendment 4 F7 | [Ledger](#ledger) (Row kinds), [Receipts](#receipts) |
 | Amendment 4 F8 | [Attested providers](#attested-providers) (attested_ok) |
 | Amendment 4 F9 | [Receipts](#receipts) (Unverified entries, Closing), [Ledger](#ledger) (Trust) |
-| Amendment 4 F10 | [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Live runtime) |
 | Amendment 4 F11 | [Receipts](#receipts) |
 | Amendment 4 F12 | [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Lock reply) |
 | Amendment 4 ruling 1 | [Attested providers](#attested-providers) (create_client) |
+| Amendment 4 T2 | [Attested providers](#attested-providers) (Profiles: the context-length override) |
 | Amendment 5 | [NEAR adapter](#near-adapter), [Ledger](#ledger), [Receipts](#receipts), [Replay](#replay), [Commands](#commands) (setup) |
 | Amendment 5.1 | [Sends](#sends) (encryption, TLS pin, refusals), [Attested providers](#attested-providers) (classify_refusal), [Preflight](#preflight) (NEAR settings) |
 | Amendment 5.2 | [Verification](#verification), [Evidence](#evidence), [Ledger](#ledger) (Evidence blobs), [Attested providers](#attested-providers) (A lost verify row), [Receipts](#receipts), [Replay](#replay) |
@@ -1947,17 +1972,13 @@ finding N" is a finding of the codebase review unless the citing comment names a
 | codebase review finding 1, 19; review finding 4 | [Sends](#sends) (TLS pin, Refusals), [Verification](#verification) |
 | review finding 1, Finding 11 (revoke tests) | [Revoke](#revoke), [The allowlist](#the-allowlist) (Additions) |
 | review finding 12 | [Build, dependencies and repository rules](#build-dependencies-and-repository-rules) (Version) |
-| review finding 14 | [Conventions](#conventions) (Tests) |
+| review finding 14 | [Conventions](#conventions) (Tests: test-order independence) |
 | review finding 18 | [The allowlist](#the-allowlist) (Persistence) |
 | review finding 21 | [Replay](#replay) |
 | plan review finding 7 | [Receipts](#receipts), [Replay](#replay) |
 | Amendment 7, Amendment 7 migration | [Self-approval guard](#self-approval-guard), [Pins file](#pins-file), [Consent](#consent), [Pin review bundle](#pin-review-bundle), [Ledger](#ledger) |
-| Amendment 8 | [Commands](#commands) (setup) |
-| Amendment 9 | [Vendor adapter interface](#vendor-adapter-interface), [Attested providers](#attested-providers) (Background re-verification), [Tinfoil adapter](#tinfoil-adapter) (Locks), [Sends](#sends) (Image parts, Image notice), [Self-approval guard](#self-approval-guard), [Receipts](#receipts) |
-| C01, S09 | [Vendor adapter interface](#vendor-adapter-interface) (Prepare and commit), [Sends](#sends) (Exchange), [Tinfoil adapter](#tinfoil-adapter) (Locks) |
-| U02 | [Sends](#sends) (Image parts) |
-| U03 | [Attested providers](#attested-providers) (Background re-verification) |
-| S14 | [Self-approval guard](#self-approval-guard) |
+| Amendment 9 | [Vendor adapter interface](#vendor-adapter-interface), [Attested providers](#attested-providers) (Background re-verification), [Tinfoil adapter](#tinfoil-adapter) (Locks), [Sends](#sends) (Image parts, Image notice), [Self-approval guard](#self-approval-guard), [Receipts](#receipts), [Ledger](#ledger) (Row kinds: `notice`) |
+| S09 | [Vendor adapter interface](#vendor-adapter-interface) (Prepare and commit), [Sends](#sends) (Exchange), [Tinfoil adapter](#tinfoil-adapter) (Locks) |
 | Amendment 10, D03 | [Tiers](#tiers), [Preflight](#preflight) (On-host hosts, Config fingerprint) |
 | Amendment 10, U06 | [Revoke](#revoke), [State files, locks and writes](#state-files-locks-and-writes) (File locks) |
 | Amendment 11 | [The allowlist](#the-allowlist) (CLI processes), [Preflight](#preflight) (Credentials, Fixes), [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Lock reply), [Decisions](#decisions) (Bypass), [Receipts](#receipts) (Send pairs), [Commands](#commands), [Ledger](#ledger) (File modes), [Consent](#consent) (The pin prompt), [Build, dependencies and repository rules](#build-dependencies-and-repository-rules) |
@@ -1972,7 +1993,7 @@ finding N" is a finding of the codebase review unless the citing comment names a
 | FI-5 | [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Transition lock, Unlock) |
 | FI-6 | [Ledger](#ledger) (Append rules), [Receipts](#receipts) (Coverage), [Attested providers](#attested-providers) (attested_ok), [Pins file](#pins-file) |
 | FI-7 | [State files, locks and writes](#state-files-locks-and-writes) (File locks) |
-| Amendment 13 | [Revoke](#revoke), [Decisions](#decisions) (Rule keys, Ask mode, Lock grants), [Preflight](#preflight) (Credentials), [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Per-turn check), [Tinfoil adapter](#tinfoil-adapter), [Build, dependencies and repository rules](#build-dependencies-and-repository-rules) |
+| Amendment 13 | [Revoke](#revoke), [Decisions](#decisions) (Rule keys, Ask mode, Lock grants), [Preflight](#preflight) (Credentials), [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Per-turn check), [Tinfoil adapter](#tinfoil-adapter), [Build, dependencies and repository rules](#build-dependencies-and-repository-rules), [Tiers](#tiers) (`cached_lookups_only`) |
 | S17 | [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Per-turn check) |
 | catalog rule 9 | [Revoke](#revoke), [Hermes private names](#hermes-private-names) |
 | catalog rule 10 | [Build, dependencies and repository rules](#build-dependencies-and-repository-rules) (Dependencies) |
@@ -1983,7 +2004,7 @@ finding N" is a finding of the codebase review unless the citing comment names a
 | Amendment 14 | [Shared types](#shared-types) (VendorHTTPError), [Preflight](#preflight) (Fixes, Report format), [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Command forms, Unlock), [Consent](#consent) (Terminal answers), [Commands](#commands), [Revoke](#revoke), [Sends](#sends) (Pools and loops) |
 | SF1 | [Revoke](#revoke) (Nothing to revoke) |
 | SF2, SF2-on-host | [Preflight](#preflight) (Fixes) |
-| SF3, S1, S2 | [Shared types](#shared-types) (`http_source`), [Tinfoil adapter](#tinfoil-adapter) (HTTP errors) |
+| SF3, S1 | [Shared types](#shared-types) (`http_source`), [Tinfoil adapter](#tinfoil-adapter) (HTTP errors) |
 | L1 | [Commands](#commands) (Terminal form), [Hermes private names](#hermes-private-names) (All or nothing) |
 | L2 | [Preflight](#preflight) (Credentials, Report format) |
 | L3 | [Commands](#commands) (setup) |
@@ -1991,9 +2012,13 @@ finding N" is a finding of the codebase review unless the citing comment names a
 | L5, L7, P1 | [Sends](#sends) (Pools and loops) |
 | L8, L8-scan | [Revoke](#revoke) (Nothing to revoke), [Ledger](#ledger) (Reads) |
 | R1, R2 | [Revoke](#revoke) (Open gaps) |
-| fix-pass-3 review findings 1, 2 | [The llm gate](#the-llm-gate) (Response size) |
+| fix-pass-3 review finding 1 | [The llm gate](#the-llm-gate) (Response size) |
 | fix-pass-3 review findings 3, 4, 5 | [Sends](#sends) (Pools and loops) |
 | fix-pass-3 review finding 7 | [Tinfoil adapter](#tinfoil-adapter) (Capture windows) |
 | Amendment 15 | [Hermes private names](#hermes-private-names) |
-| Amendment 16 | [Conventions](#conventions) (Module map) |
-| Amendment 17 | [Classification](#classification) (issue #1), [Tinfoil adapter](#tinfoil-adapter) (Plaintext error replies, Token counts; issues #2, #3), [The llm gate](#the-llm-gate) (issue #2), [Receipts](#receipts) (Token counts), [Sends](#sends) (Refused reply fields; issue #36), [State files, locks and writes](#state-files-locks-and-writes) (Durable writes; issue #37), [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Gateway command check; issue #45) |
+| issue #1 | [Classification](#classification) |
+| issue #2 | [Tinfoil adapter](#tinfoil-adapter) (Plaintext error replies), [The llm gate](#the-llm-gate), [Shared types](#shared-types) (`inference_next_step`) |
+| issue #3 | [Tinfoil adapter](#tinfoil-adapter) (Token counts), [Receipts](#receipts) (Token counts) |
+| issue #36 | [Sends](#sends) (Refused reply fields) |
+| issue #37 | [State files, locks and writes](#state-files-locks-and-writes) (Durable writes) |
+| issue #45 | [Lock, unlock and the per-turn check](#lock-unlock-and-the-per-turn-check) (Gateway command check) |

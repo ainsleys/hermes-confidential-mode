@@ -196,7 +196,7 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
     """``pre_tool_call`` callback: blocks every refuse decision (ledgered tool_refused) and, for an
     off-host tool, returns the approve directive with the "~N KB" message (ledgered tool_asked).
     The directive only ASKS: Hermes' CLI grants on any answer except the exact string "deny"
-    (tools/approval.py:1006-1009), so enforcement is build_tool_execution. REGISTER BOTH, with the
+    (tools/approval.py:1006-1010), so enforcement is build_tool_execution. REGISTER BOTH, with the
     same ``decisions`` (or both defaulting to DEFAULT_DECISIONS) and build_post_approval_response.
 
     If the middleware already asked for this exact call (agent-loop order: tool_execution is
