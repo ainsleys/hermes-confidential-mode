@@ -112,8 +112,9 @@ Preflight: run hermes confidential check --tier <tier>
 `hermes confidential watch` streams each model call's purpose, host and size, locked or not.
 
 **2. Try the plugin without a key.** The `on-host-only` tier needs no vendor key: every model call must stay
-on this machine. With a local model server such as Ollama on port 11434, add this to `config.yaml`,
-using model names your server has:
+on this machine. With a local model server such as Ollama on port 11434, set these keys in
+`config.yaml` (replace any `model:` or `auxiliary.vision` you already have), using model names your
+server has:
 
 ```yaml
 model: {provider: custom, base_url: http://127.0.0.1:11434/v1, default: llama3}
