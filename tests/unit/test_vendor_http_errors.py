@@ -175,6 +175,7 @@ def _pinned_async_transport(monkeypatch, tmp_path, status: int):
     (503, "try again in a few minutes"),
     (401, "check TINFOIL_API_KEY"),
     (404, "check the model id; the router does not serve it"),
+    (302, "the router answered with a redirect, which the plugin does not follow"),
 ])
 def test_a_plaintext_error_reply_names_the_status_and_the_router_and_never_the_body_sync(
         monkeypatch, tmp_path, status, tail):
@@ -216,3 +217,71 @@ def test_a_bodiless_request_passes_a_plaintext_2xx_through(monkeypatch, tmp_path
     t = _pinned_sync_transport(monkeypatch, tmp_path, 200)
     with httpx.Client(transport=t) as c:
         assert c.get("https://inf.example/.well-known/tinfoil-attestation").status_code == 200
+
+
+KEY_CONFIG_PROBLEM = (b'{"type": "urn:ietf:params:ehbp:error:key-config", "title": "stale key", '
+                      b'"detail": "echo of messages[0].content=SECRET-PROMPT"}')
+
+
+def _net_replying(monkeypatch, replies: list, seen: list, attr: str = "HTTPTransport"):
+    """httpx's network transport replaced by one that answers ``replies`` in order (status, headers, body)."""
+    class _Net(httpx.MockTransport):
+        def __init__(self, verify=None, **_kw):
+            def handler(request: httpx.Request) -> httpx.Response:
+                seen.append(request.url.path)
+                status, headers, body = replies[min(len(seen), len(replies)) - 1]
+                return httpx.Response(status, headers=headers, content=body)
+            super().__init__(handler)
+    monkeypatch.setattr(httpx, attr, _Net)
+
+
+def test_the_key_config_mismatch_reply_reaches_the_ehbp_layer_through_the_guard(monkeypatch, tmp_path):
+    """Review B3: ehbp 0.4.2 turns a plaintext 422 application/problem+json reply of type key-config into
+    KeyConfigMismatchError, which the Tinfoil SDK catches to re-attest and retry. The guard must let that reply
+    through; every other plaintext error is still a VendorHTTPError."""
+    from types import SimpleNamespace
+
+    from ehbp import KeyConfigMismatchError
+
+    from confidential_mode.verify.tinfoil import TinfoilAdapter
+    seen: list = []
+    _net_replying(monkeypatch, [(422, {"content-type": "application/problem+json"}, KEY_CONFIG_PROBLEM)], seen)
+    ad = TinfoilAdapter(data_dir=tmp_path / "d", enclave="inf.example", tls_probe=False)
+    t = ad.pinned_ehbp_sync_transport(SimpleNamespace(_require_hpke_public_key=_hpke_hex))
+    with httpx.Client(transport=t) as c, pytest.raises(KeyConfigMismatchError):
+        c.post("https://inf.example/v1/chat/completions", content=b'{"messages": [{"content": "hi"}]}')
+    # a 422 that is not a problem+json document is a vendor error like any other
+    seen.clear()
+    _net_replying(monkeypatch, [(422, {"content-type": "application/json"}, KEY_CONFIG_PROBLEM)], seen)
+    t = ad.pinned_ehbp_sync_transport(SimpleNamespace(_require_hpke_public_key=_hpke_hex))
+    with httpx.Client(transport=t) as c, pytest.raises(VendorHTTPError, match="HTTP 422 from Tinfoil"):
+        c.post("https://inf.example/v1/chat/completions", content=b'{"messages": [{"content": "hi"}]}')
+
+
+def test_a_key_rotation_still_re_attests_and_retries_through_the_sdk_chain(monkeypatch, tmp_path):
+    """The SDK's _EHBPReVerifyingTransport sits above the pinned EHBP transport the adapter builds. A 422
+    key-config reply makes it rebuild the transport from a fresh attestation and retry once; the second 422
+    surfaces as the mismatch. The adapter's builder (and so its attestation hook) runs twice and the router
+    sees two requests."""
+    from types import SimpleNamespace
+
+    from ehbp import KeyConfigMismatchError
+    from tinfoil.client import _EHBPReVerifyingTransport
+
+    from confidential_mode.verify.tinfoil import TinfoilAdapter
+    seen: list = []
+    reply = (422, {"content-type": "application/problem+json"}, KEY_CONFIG_PROBLEM)
+    _net_replying(monkeypatch, [reply, reply], seen)
+    ad = TinfoilAdapter(data_dir=tmp_path / "d", enclave="inf.example", tls_probe=False)
+    attestations: list = []
+    key = _hpke_hex()
+
+    def require_key():
+        attestations.append(1)
+        return key
+    sc = SimpleNamespace(_require_hpke_public_key=require_key)
+    ad._pin_ehbp_builders(sc)
+    chain = _EHBPReVerifyingTransport(sc, sc._build_ehbp_sync_transport())
+    with httpx.Client(transport=chain) as c, pytest.raises(KeyConfigMismatchError):
+        c.post("https://inf.example/v1/chat/completions", content=b'{"messages": [{"content": "hi"}]}')
+    assert len(attestations) == 2 and seen == ["/v1/chat/completions"] * 2

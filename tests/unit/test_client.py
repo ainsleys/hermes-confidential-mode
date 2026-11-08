@@ -754,3 +754,20 @@ def test_usage_counts_reach_the_send_observed_row(tmp_path):
        model="m", api_mode="chat_completions", session_id="s1")
     (row,) = [r for r in ledger.tail(0) if r.kind == "send_observed"]
     assert row.detail["usage"] == {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}
+
+
+def test_a_usage_header_the_json_parser_cannot_handle_drops_the_counts_and_nothing_else(tmp_path, monkeypatch):
+    """Review S1: on Python 3.11 json.loads raises RecursionError on a deeply nested value within the size cap.
+    The parser never raises, and a parser failure never costs the rest of the send record."""
+    from confidential_mode.verify import tinfoil as tmod
+    assert tmod.parse_usage_metrics("[" * 2000) is None
+    assert tmod.parse_usage_metrics("{" * 2000) is None
+
+    def boom(_value):
+        raise RecursionError("maximum recursion depth exceeded")
+    monkeypatch.setattr(tmod.json, "loads", boom)
+    assert tmod.parse_usage_metrics('{"prompt_tokens": 1}') is None
+    r = _observe(tmp_path, {"X-Tinfoil-Usage-Metrics": '{"prompt_tokens": 1}', "Ehbp-Response-Nonce": "00" * 32})
+    assert "usage" not in r
+    assert r["host"] == "router.example" and r["encrypted"] is True and "response_decrypted" in r
+    assert r.get("hpke_key_source") in ("ehbp_transport", "sdk_state")

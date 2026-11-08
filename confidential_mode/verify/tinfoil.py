@@ -567,13 +567,16 @@ class TinfoilAdapter:
                 acc = self._accepted
                 tls_fp = ((acc.evidence or {}).get("claims") or {}).get("tls_public_key_fp") if acc else None
                 rec["tls_spki_sha256"], rec["tls_matches_report"] = spki, (spki == tls_fp) if tls_fp else None
-            usage = parse_usage_metrics(response.headers.get(USAGE_METRICS_HEADER))
-            if usage is not None:
-                rec["usage"] = usage
             if RESPONSE_NONCE_HEADER in response.headers:
                 _wrap_stream_for_decryption_flag(response, rec)
             _record_send(rec)
         except Exception:
+            return response
+        try:   # the router's token counts (issue #3), after the record is written: a parser failure costs only them
+            usage = parse_usage_metrics(response.headers.get(USAGE_METRICS_HEADER))
+            if usage is not None:
+                rec["usage"] = usage
+        except Exception:  # noqa: BLE001
             pass
         return response
 
@@ -832,21 +835,25 @@ RESPONSE_NONCE_HEADER = "Ehbp-Response-Nonce"     # ehbp.protocol
 USAGE_METRICS_HEADER = "X-Tinfoil-Usage-Metrics"
 USAGE_METRICS_MAX_CHARS = 2048
 USAGE_METRICS_MAX_FIELDS = 16
+USAGE_METRICS_MAX_NESTING = 64
 USAGE_METRICS_MAX_VALUE = 2 ** 53
 _USAGE_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 
 
 def parse_usage_metrics(value: Any) -> dict[str, int] | None:
     """The integer token-count fields of an X-Tinfoil-Usage-Metrics header value, or None when the header is
-    missing, not a JSON object within the size cap, or carries no such field. A kept key is a lower-case
-    identifier containing "token" (so no header key can collide with the ledger's forbidden detail keys), and
-    its value a non-negative integer below 2**53; booleans, floats, strings and nested values are dropped. At
-    most USAGE_METRICS_MAX_FIELDS fields are kept, in header order. Never raises."""
+    missing, not a JSON object within the size cap, nested deeper than USAGE_METRICS_MAX_NESTING, or carries no
+    such field. A kept key is a lower-case identifier containing "token" (so no header key can collide with the
+    ledger's forbidden detail keys), and its value a non-negative integer below 2**53; booleans, floats, strings
+    and nested values are dropped. At most USAGE_METRICS_MAX_FIELDS fields are kept, in header order. Never
+    raises: any parser error gives None."""
     if not isinstance(value, str) or not value or len(value) > USAGE_METRICS_MAX_CHARS:
         return None
+    if value.count("[") + value.count("{") > USAGE_METRICS_MAX_NESTING:
+        return None      # json.loads recurses per nesting level and raises RecursionError on Python 3.11
     try:
         data = json.loads(value)
-    except ValueError:
+    except Exception:  # noqa: BLE001 - ValueError, and RecursionError from a nested value the count missed
         return None
     if not isinstance(data, dict):
         return None
@@ -873,13 +880,29 @@ def _is_pinned(transport) -> bool:
     return getattr(transport, _PINNED_MARK, False) is True
 
 
+#: ehbp 0.4.2's key-configuration mismatch reply (ehbp/_http.py KEY_CONFIG_MISMATCH_STATUS,
+#: ehbp/protocol.py PROBLEM_JSON_MEDIA_TYPE): a plaintext 422 application/problem+json document. The EHBP layer
+#: turns it into KeyConfigMismatchError, which the SDK's _EHBPReVerifyingTransport catches to re-attest and
+#: retry once, so the guard lets that reply through unread.
+KEY_CONFIG_MISMATCH_STATUS = 422
+PROBLEM_JSON_MEDIA_TYPE = "application/problem+json"
+
+
+def _media_type(response) -> str:
+    return str(response.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+
+
 def _plaintext_error(request, response) -> VendorHTTPError | None:
     """Issue #2: the router answered an encrypted request in plaintext (no response nonce) with an HTTP error.
     The reply is a rate limit, an outage or a refused key, not a cryptographic failure, so the send fails as a
-    VendorHTTPError naming the status and the router; the body is the router's and is dropped unread. A 2xx
-    without a nonce is left to the EHBP layer, which refuses it (MissingResponseNonceError)."""
+    VendorHTTPError naming the status and the connected host; the body is the router's and is dropped unread.
+    Two replies pass through to the EHBP layer: a 2xx without a nonce, which it refuses
+    (MissingResponseNonceError), and the 422 problem+json key-configuration reply, which it turns into
+    KeyConfigMismatchError so the SDK re-attests (review B3)."""
     status = response.status_code
     if RESPONSE_NONCE_HEADER in response.headers or status // 100 == 2:
+        return None
+    if status == KEY_CONFIG_MISMATCH_STATUS and _media_type(response) == PROBLEM_JSON_MEDIA_TYPE:
         return None
     host = request.url.host or "(unknown host)"
     return VendorHTTPError(vendor="Tinfoil", subject=f"Tinfoil router {host}", status=status, path=request.url.path,

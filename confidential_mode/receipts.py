@@ -852,7 +852,8 @@ def _usage_total(rows: list[dict]) -> dict:
         with_counts += 1
         for k, v in usage.items():
             counts[k] = counts.get(k, 0) + v
-    return {"sends_with_counts": with_counts, "sends": len(sends), "counts": counts}
+    return {"sends_with_counts": with_counts, "sends": len(sends), "counts": counts, "source": USAGE_SOURCE,
+            "header": USAGE_HEADER}
 
 
 def _verify_body(r: Mapping, status: Mapping | None = None) -> str:

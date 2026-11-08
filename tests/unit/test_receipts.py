@@ -781,7 +781,8 @@ def test_usage_counts_show_per_send_and_as_a_session_total(ledger):
             "total_tokens=45 over 2 of 3 send(s)") in text
     doc = json.loads(render(ledger, SID, fmt="json"))
     assert doc["sections"]["usage_total"] == {"sends_with_counts": 2, "sends": 3,
-                                              "counts": {"prompt_tokens": 30, "completion_tokens": 15, "total_tokens": 45}}
+                                              "counts": {"prompt_tokens": 30, "completion_tokens": 15, "total_tokens": 45},
+                                              "source": "router-reported", "header": "X-Tinfoil-Usage-Metrics"}
     assert verify_chain(json.dumps(doc)) is True
 
 
@@ -791,4 +792,5 @@ def test_a_session_without_usage_counts_shows_no_token_line(ledger, tmp_path):
     assert "Tokens this session" not in text and "router-reported" not in text
     doc = json.loads(render(ledger, SID, pins=_pins(tmp_path), fmt="json"))
     sends = len(doc["sections"]["sends"])
-    assert doc["sections"]["usage_total"] == {"sends_with_counts": 0, "sends": sends, "counts": {}}
+    assert doc["sections"]["usage_total"] == {"sends_with_counts": 0, "sends": sends, "counts": {},
+                                              "source": "router-reported", "header": "X-Tinfoil-Usage-Metrics"}

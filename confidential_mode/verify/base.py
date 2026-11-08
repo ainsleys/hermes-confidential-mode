@@ -29,6 +29,8 @@ def inference_next_step(status: int, key_name: str) -> str:
         return "check the model id; the router does not serve it"
     if status == 429:
         return "the router is rate limiting; try again in a few minutes"
+    if 300 <= status < 400:
+        return "the router answered with a redirect, which the plugin does not follow"
     return "try again in a few minutes"
 
 
