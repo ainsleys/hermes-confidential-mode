@@ -540,3 +540,25 @@ def test_an_image_type_part_names_the_real_reason_under_disclose():
     with pytest.raises(e2.E2EEError, match="not supported") as ei:
         e2.encrypt_request(body, MODEL_PUB)
     assert "is refuse" not in str(ei.value)
+
+
+@pytest.mark.parametrize("place", ["body", "choice", "message", "tool_call"])
+def test_a_response_carrying_nearai_tool_result_is_refused_by_name(place):
+    """Issue #36: NEAR's guide says nearai_tool_result.output (a tool NEAR ran on its side) is encrypted to the
+    client key, and the plugin has no captured shape for it. The response is refused and the reason names the
+    field, the way logprobs is refused; nothing is guessed and nothing reaches Hermes as ciphertext."""
+    client = e2.ClientKey.generate()
+    body = full_response(client.public_hex)
+    field = {"output": "deadbeef" * 20, "name": "web_search"}
+    if place == "body":
+        body["nearai_tool_result"] = field
+    elif place == "choice":
+        body["choices"][0]["nearai_tool_result"] = field
+    elif place == "message":
+        body["choices"][0]["message"]["nearai_tool_result"] = field
+    else:
+        body["choices"][0]["message"]["tool_calls"][0]["nearai_tool_result"] = field
+    with pytest.raises(e2.E2EEError, match="nearai_tool_result") as got:
+        e2.decrypt_response(body, client)
+    assert "refused" in str(got.value) and "deadbeef" not in str(got.value)
+    assert "nearai_tool_result" in e2.REFUSED_RESPONSE_KEYS and "logprobs" in e2.REFUSED_RESPONSE_KEYS

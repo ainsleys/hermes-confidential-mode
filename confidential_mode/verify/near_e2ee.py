@@ -31,7 +31,9 @@ What this module adds to that table, all fail-closed (``E2EEError``, raised befo
     ``effort``, ``summary``, ``max_tokens``, ``exclude`` only), ``stream_options`` (``include_usage`` only) and
     ``reasoning_effort``. Each string must be one of a fixed set of words, so these settings carry no
     free text; any other key or value is refused;
-  * ``logprobs`` and ``top_logprobs`` are refused (the page does not define the encrypted token format);
+  * ``logprobs`` and ``top_logprobs`` are refused (the page does not define the encrypted token format), and a
+    response that carries ``nearai_tool_result`` (the result of a tool NEAR ran on its side, encrypted to the
+    client key per the page) is refused by name until its shape is confirmed from a capture (issue #36);
   * message content that is a list is flattened to one string when every part is text. A list with any
     other part (an image, audio, a file) keeps its structure (Amendment 9): every text part is sealed in
     place and every other part leaves as plaintext, because NEAR's encryption does not cover it. The report
@@ -140,6 +142,16 @@ def _structured_ok(key: str, value: Any) -> bool:
 
 PROCESSED_KEYS = frozenset({"messages", "tools", "tool_choice"})
 REFUSED_KEYS = frozenset({"logprobs", "top_logprobs"})
+# Response fields the plugin refuses rather than passes through or guesses at (issue #36): logprobs (the page
+# does not define the encrypted token format) and nearai_tool_result (NEAR's guide says its ``output`` is
+# encrypted to the client key; no captured shape yet). Checked at the top level, on each choice, message and
+# tool call.
+REFUSED_RESPONSE_KEYS = frozenset({"logprobs", "nearai_tool_result"})
+REFUSED_RESPONSE_REASONS = {
+    "logprobs": "the response carries logprobs, whose encrypted format NEAR does not define; refused",
+    "nearai_tool_result": ("the response carries nearai_tool_result, whose encrypted format the plugin has not "
+                           "confirmed from a capture; refused"),
+}
 ROLES = frozenset({"system", "developer", "user", "assistant", "tool"})
 MESSAGE_PLAINTEXT_KEYS = frozenset({"role", "tool_call_id"})
 MESSAGE_DROPPED_KEYS = frozenset({"reasoning_content", "reasoning", "reasoning_details"})
@@ -652,12 +664,22 @@ def _open_str(client, value: Any, path: str, opened: dict) -> Any:
     return text
 
 
+def _refuse_unhandled(mapping: Mapping) -> None:
+    """Raise E2EEError when ``mapping`` carries a response field the plugin refuses (REFUSED_RESPONSE_KEYS)
+    with a value other than None."""
+    for key in REFUSED_RESPONSE_KEYS:
+        if mapping.get(key) is not None:
+            raise E2EEError(REFUSED_RESPONSE_REASONS[key])
+
+
 def decrypt_response(body: Mapping, client) -> tuple[dict, dict]:
     """An unstreamed chat completion with every field of NEAR's response table opened with ``client``.
     Returns (new body, report). Raises E2EEError when a field that must be ciphertext is not, or does
-    not decrypt: a downgrade is never passed through."""
+    not decrypt, or when the response carries a field the plugin refuses (REFUSED_RESPONSE_KEYS): a
+    downgrade is never passed through, and no unconfirmed shape is guessed."""
     if not isinstance(body, Mapping):
         raise E2EEError("the response body is not a JSON object; response refused")
+    _refuse_unhandled(body)
     choices = body.get("choices")
     if not isinstance(choices, list) or not choices:
         raise E2EEError("the response carries no choices; response refused")
@@ -666,9 +688,9 @@ def decrypt_response(body: Mapping, client) -> tuple[dict, dict]:
     for ch in choices:
         if not isinstance(ch, Mapping) or not isinstance(ch.get("message"), Mapping):
             raise E2EEError("a response choice carries no message; response refused")
-        if ch.get("logprobs") is not None:
-            raise E2EEError("the response carries logprobs, whose encrypted format NEAR does not define; refused")
+        _refuse_unhandled(ch)
         msg = dict(ch["message"])
+        _refuse_unhandled(msg)
         for f in RESPONSE_MESSAGE_FIELDS:
             if f in msg:
                 msg[f] = _open_str(client, msg[f], f"choices[].message.{f}", opened)
@@ -687,6 +709,7 @@ def decrypt_response(body: Mapping, client) -> tuple[dict, dict]:
             for call in calls:
                 if not isinstance(call, Mapping) or not isinstance(call.get("function"), Mapping):
                     raise E2EEError("a response tool call carries no function; response refused")
+                _refuse_unhandled(call)
                 fn = dict(call["function"])
                 if not (isinstance(fn.get("name"), str) and fn["name"]):
                     raise E2EEError("a response tool call has no name ciphertext; response refused")
