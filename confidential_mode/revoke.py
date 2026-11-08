@@ -154,7 +154,7 @@ def _command_allowlist(config: Any) -> list:
 
 def remove_command_allowlist_grants(tools: set[str] | None) -> tuple[list[str], list[str]]:
     """Remove the plugin's keys for ``tools`` (None = every plugin key) from command_allowlist in config.yaml:
-    read the user's file with ``read_raw_config``, drop only entries ``gate_tools.parse_pattern_key`` reads as
+    read the user's file with ``read_raw_config``, drop only entries ``gate_tools_hermes.parse_pattern_key`` reads as
     the plugin's own rule key, and save with ``save_config``; nothing is written when there is none. Returns
     (tools removed, other entries that name one of ``tools`` and were left alone)."""
     from hermes_cli.config import load_config, read_raw_config, save_config
@@ -446,7 +446,7 @@ def hermes_holds_grant(rt: Any, tools: set[str] | None) -> bool:
     under now for one of ``tools`` (any tool when None), in any approval session. Read-only; True when
     Hermes' tables cannot be read (the caller then revokes as before)."""
     try:
-        from .commands import hermes_approval_keys
+        from .commands_pins import hermes_approval_keys
         from .gate_tools import parse_pattern_key
         watcher = getattr(rt, "revocations", None)
         permanent, session = hermes_approval_keys(None)

@@ -40,7 +40,7 @@ HERMES_VERIFIED_COMMIT = "84a0301"
 def hermes_yaml() -> Any:
     """Hermes' ``hermes_yaml`` module (ruamel-backed ``safe_load`` / ``safe_dump``). Verified at 84a0301.
 
-    Used by ``gate_tools._read_json_or_yaml`` to read a hand-edited ``allowlist.yaml``.
+    Used by ``gate_tools_allowlist._read_json_or_yaml`` to read a hand-edited ``allowlist.yaml``.
     Missing: raises ImportError; the caller returns None (the file adds no tool)."""
     import hermes_yaml as module
     return module
@@ -84,7 +84,7 @@ def approval_keys(session_key: str | None = None) -> tuple[set, set]:
     when None), read under Hermes' own lock: ``tools.approval._lock``, ``_permanent_set()``,
     ``_session_approved``. Read only. Verified at 84a0301.
 
-    Used by ``commands.hermes_approval_keys`` (``/confidential status`` grant lines, ``revoke``'s check for a
+    Used by ``commands_pins.hermes_approval_keys`` (``/confidential status`` grant lines, ``revoke``'s check for a
     grant Hermes still holds). Missing: raises ImportError; ``remembered_grants`` lists nothing and
     ``revoke.hermes_holds_grant`` returns True (the revoke records and moves the rule key)."""
     from tools.approval import _lock, _permanent_set, _session_approved
@@ -104,7 +104,7 @@ def approval_state_functions() -> tuple[Callable[[], bool], Callable[[], str], C
     ``tools.approval._presence``), uncalled: yolo is on for this context; ``approvals.mode`` ("off" is a
     bypass); (callback, is_cli, is_gateway, is_ask), the surfaces Hermes' gate could ask. Verified at 84a0301.
 
-    Used by ``gate_tools._hermes_approval_state``, which resolves all three before reading any. Missing (any
+    Used by ``gate_tools_hermes._hermes_approval_state``, which resolves all three before reading any. Missing (any
     of the three): raises ImportError; ``hermes_bypass_active`` returns True (block) and
     ``hermes_bypass_is_interactive`` False (the unattended refusal text)."""
     from tools.approval import _presence, _yolo_active
@@ -116,7 +116,7 @@ def is_approved(session_key: str, pattern_key: str) -> bool:
     """``tools.approval.is_approved(session_key, pattern_key)``: Hermes holds a session or always grant.
     Verified at 84a0301.
 
-    Used by ``gate_tools.hermes_remembered_grant`` with the ``plugin_rule:`` prefixed key. Missing: raises
+    Used by ``gate_tools_hermes.hermes_remembered_grant`` with the ``plugin_rule:`` prefixed key. Missing: raises
     ImportError; the gate reads it as no grant and asks."""
     from tools.approval import is_approved as _is_approved
     return _is_approved(session_key, pattern_key)
@@ -126,9 +126,9 @@ def current_session_key(*args: Any) -> str:
     """``tools.approval_context.get_current_session_key(default="default")``: the approval session key of
     this context. Verified at 84a0301.
 
-    Used by ``gate_tools.hermes_remembered_grant`` (no argument) and ``gate_tools.grant_scope`` (default "").
-    Missing: raises ImportError; ``hermes_remembered_grant`` returns False (ask), ``grant_scope`` uses an empty
-    key."""
+    Used by ``gate_tools_hermes.hermes_remembered_grant`` (no argument) and ``gate_tools_grants.grant_scope``
+    (default ""). Missing: raises ImportError; ``hermes_remembered_grant`` returns False (ask),
+    ``grant_scope`` uses an empty key."""
     from tools.approval_context import get_current_session_key
     return get_current_session_key(*args)
 
@@ -140,7 +140,7 @@ def request_tool_approval_functions() -> tuple[Callable[..., dict], Callable[...
     ``request_tool_approval(tool_name, reason, *, rule_key=)`` asks through Hermes' own gate (CLI panel,
     gateway card); ``set_current_observability_context(turn_id=, tool_call_id=, session_id=)`` binds the ids
     ``post_approval_response`` reports and returns the tokens ``reset_current_observability_context(tokens)``
-    takes. Used by ``gate_tools.hermes_request_approval``, which resolves all three before it sets the context,
+    takes. Used by ``gate_tools_hermes.hermes_request_approval``, which resolves all three before it sets the context,
     so a missing reset can never leave the plugin's ids bound for Hermes' later approvals. Missing (any of the
     three): raises ImportError before any context is set or anyone is asked; the tool gate refuses the call."""
     from tools.approval import request_tool_approval
@@ -158,7 +158,7 @@ def terminal_env_config_reader() -> Callable[[], dict]:
 
     Returned uncalled because ``preflight.resolved_terminal_backend`` treats a failed import (fall back to
     ``terminal_env_fallback``) differently from a failed call (a non-local marker). Missing: raises
-    ImportError; ``gate_tools.hermes_terminal_backend`` raises and the gate blocks; the preflight falls back."""
+    ImportError; ``gate_tools_hermes.hermes_terminal_backend`` raises and the gate blocks; the preflight falls back."""
     from tools.terminal_tool import _get_env_config
     return _get_env_config
 
@@ -167,7 +167,7 @@ def env_backend_tag(env: Any) -> Any:
     """The backend tag Hermes puts on a terminal environment it creates: ``env.env_type``, else the private
     ``env._hermes_backend_name``. Verified at 84a0301.
 
-    Used by ``gate_tools.hermes_terminal_backend`` and ``cached_remote_environments``. Missing: None (read with
+    Used by ``gate_tools_hermes.hermes_terminal_backend`` and ``cached_remote_environments``. Missing: None (read with
     a ``getattr`` default); both callers report an untagged environment as unknown, which blocks."""
     return getattr(env, "env_type", None) or getattr(env, "_hermes_backend_name", None)
 
@@ -176,7 +176,7 @@ def active_env_reader() -> Callable[[str], Any]:
     """``tools.terminal_tool_lifecycle.get_active_env``, the function itself: the environment Hermes cached
     for a task id, or None. Verified at 84a0301.
 
-    Used by ``gate_tools.hermes_terminal_backend``, which obtains it together with
+    Used by ``gate_tools_hermes.hermes_terminal_backend``, which obtains it together with
     ``terminal_env_config_reader`` before reading either. Missing: raises ImportError; the gate blocks."""
     from tools.terminal_tool_lifecycle import get_active_env
     return get_active_env
@@ -186,7 +186,7 @@ def cached_terminal_environments() -> list:
     """``list(tools.terminal_tool._active_environments.items())`` read under ``_env_lock``: (task key,
     environment) of every environment Hermes has cached. Verified at 84a0301.
 
-    Used by ``gate_tools.cached_remote_environments`` (the lock is refused while a remote one exists).
+    Used by ``gate_tools_hermes.cached_remote_environments`` (the lock is refused while a remote one exists).
     Missing: raises ImportError; the caller raises and the lock is refused."""
     from tools.terminal_tool import _active_environments, _env_lock
     with _env_lock:
@@ -211,7 +211,7 @@ def mcp_server_configs() -> Any:
     """``tools.mcp_tool_config._load_mcp_config()``: ``mcp_servers`` from config, portable packages included.
     Verified at 84a0301.
 
-    Used by ``gate_tools._default_mcp_configs``. Missing: raises ImportError; the caller skips this source
+    Used by ``gate_tools_classify._default_mcp_configs``. Missing: raises ImportError; the caller skips this source
     and keeps the live configs."""
     from tools.mcp_tool_config import _load_mcp_config
     return _load_mcp_config()
@@ -228,7 +228,7 @@ def mcp_live_servers() -> list:
     """``list(tools.mcp_tool._servers.items())`` read under ``tools.mcp_tool._lock``: (server key, server
     task) of every connected MCP server. Verified at 84a0301.
 
-    Used by ``gate_tools._default_mcp_configs`` (a server's live ``_config``). Missing: raises ImportError; the
+    Used by ``gate_tools_classify._default_mcp_configs`` (a server's live ``_config``). Missing: raises ImportError; the
     caller keeps the configured servers only."""
     from tools.mcp_tool import _servers
     with _mcp_lock():
@@ -239,7 +239,7 @@ def mcp_server_config(server: Any) -> Any:
     """The private ``MCPServerTask._config`` of a live MCP server: the config it was connected with. Verified
     at 84a0301.
 
-    Used by ``gate_tools._default_mcp_configs``. Missing: None (read with a ``getattr`` default); the caller
+    Used by ``gate_tools_classify._default_mcp_configs``. Missing: None (read with a ``getattr`` default); the caller
     skips that server and keeps its configured entry."""
     return getattr(server, "_config", None)
 
@@ -247,7 +247,7 @@ def mcp_server_config(server: Any) -> Any:
 def mcp_key_name(key: Any) -> str:
     """``tools.mcp_tool_scope._key_name(key)``: the server name of a live server key. Verified at 84a0301.
 
-    Used by ``gate_tools._default_mcp_configs``. Missing: raises ImportError; the caller keeps the configured
+    Used by ``gate_tools_classify._default_mcp_configs``. Missing: raises ImportError; the caller keeps the configured
     servers only."""
     from tools.mcp_tool_scope import _key_name
     return _key_name(key)
@@ -257,7 +257,7 @@ def mcp_tool_server_names() -> dict:
     """``dict(tools.mcp_tool._mcp_tool_server_names)`` read under ``tools.mcp_tool._lock``: MCP tool name to
     server name. Verified at 84a0301.
 
-    Used by ``gate_tools._default_mcp_tool_servers``. Missing: raises ImportError; the caller returns {} (no
+    Used by ``gate_tools_classify._default_mcp_tool_servers``. Missing: raises ImportError; the caller returns {} (no
     MCP tool maps to a server, so none is on-host)."""
     from tools.mcp_tool import _mcp_tool_server_names
     with _mcp_lock():
@@ -272,7 +272,7 @@ def plugin_tool_names() -> set:
     """``hermes_cli.plugins.get_plugin_manager()._plugin_tool_names``: the tools plugins registered.
     Verified at 84a0301.
 
-    Used by ``gate_tools._default_plugin_tool_names`` to tell plugin tools from built-in ones. Missing
+    Used by ``gate_tools_classify._default_plugin_tool_names`` to tell plugin tools from built-in ones. Missing
     ``get_plugin_manager``: raises ImportError and the caller returns an empty set. Missing
     ``_plugin_tool_names`` on the manager: an empty set (read with a ``getattr`` default)."""
     from hermes_cli.plugins import get_plugin_manager
@@ -302,7 +302,7 @@ def default_config() -> dict:
 def delegation_config() -> Any:
     """``tools.delegate_tool_config._load_config()``: the ``delegation`` config section. Verified at 84a0301.
 
-    Used by ``gate_tools._load_delegation_config``, read per ``delegate_task`` call. Missing: raises
+    Used by ``gate_tools_calls._load_delegation_config``, read per ``delegate_task`` call. Missing: raises
     ImportError; ``default_delegation_ok`` returns False and ``delegate_task`` is blocked."""
     from tools.delegate_tool_config import _load_config
     return _load_config()
@@ -360,6 +360,6 @@ def import_tool_module(name: str) -> Any:
     """``importlib.import_module(name)`` for a Hermes built-in tool module named in ``allowlist.yaml``
     (``tools.*``): importing it registers its tools. Verified at 84a0301.
 
-    Used by ``gate_tools._import_modules``. Missing: raises ImportError; the caller skips the module (and
+    Used by ``gate_tools_allowlist._import_modules``. Missing: raises ImportError; the caller skips the module (and
     ``ensure_tools_for_lock`` falls back to the full discovery)."""
     return importlib.import_module(name)
