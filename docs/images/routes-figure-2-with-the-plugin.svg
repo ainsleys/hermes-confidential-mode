@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" font-family="IBM Plex Sans, Helvetica Neue, Arial, sans-serif" viewBox="0 0 900 500" role="img" aria-label="Six routes leave a locked Hermes profile. A preflight, run at lock and before every turn, crosses five of them. Main chat and side calls go only to the verified enclave; a side call that strays mid-turn is recorded, not stopped. Fallback is refused and a failed request ends the turn. Tools outside the on-host list ask once per lock in each conversation and are blocked under yolo, approvals off and unattended runs. Memory must be the built-in store or none. Shell, code and command MCP servers stay open on this host and are listed as unproven in the receipt. Dots mark where ledger rows are written on this host.">
+<svg xmlns="http://www.w3.org/2000/svg" font-family="IBM Plex Sans, Helvetica Neue, Arial, sans-serif" viewBox="0 0 900 500" role="img" aria-label="Six routes leave a locked Hermes profile. A preflight, run at lock and before every turn, crosses five of them. Main chat and side calls go only to the verified enclave; a side call that strays mid-turn is recorded, not stopped. Fallback is refused and a failed request ends the turn. Tools not classed as on-host ask once per lock in each conversation and are blocked under yolo, approvals off and unattended runs. Memory must be the built-in store or none. Shell, code and command MCP servers stay open on this host and are listed as unproven in the receipt. Dots mark where ledger rows are written on this host.">
   <style>
     svg { color: #1f2320; }
     .muted { opacity: 0.72; }
@@ -39,9 +39,9 @@
   <text x="576" y="212" font-size="13" font-weight="600" fill="currentColor">Refused</text>
   <text x="576" y="230" font-size="12" fill="currentColor" class="muted">a failed request ends the turn</text>
 
-  <!-- row 4 · tools outside the on-host list -> ask once per lock -->
+  <!-- row 4 · tools not classed as on-host -> ask once per lock -->
   <line x1="180" y1="276" x2="556" y2="276" stroke="currentColor" stroke-width="1.6" marker-end="url(#b-head)"/>
-  <text x="380" y="268" text-anchor="middle" font-size="13" fill="currentColor">tools off the on-host list</text>
+  <text x="380" y="268" text-anchor="middle" font-size="13" fill="currentColor">tools not classed as on-host</text>
   <rect x="560" y="254" width="320" height="64" rx="5" fill="none" stroke="currentColor" stroke-width="1.2"/>
   <text x="576" y="274" font-size="13" font-weight="600" fill="currentColor">Ask once per lock</text>
   <text x="576" y="292" font-size="12" fill="currentColor" class="muted">in each conversation</text>

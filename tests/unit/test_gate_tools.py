@@ -91,9 +91,16 @@ def allowlist(**kw):
 # --------------------------------------------------------------------------------------------------
 
 def test_on_host_set_is_exactly_the_contract():
+    """The on-host set is the on-host class of docs/TOOL_CLASSES.md (issue #1): the original contract's tools
+    except skill_view, plus the Desktop pane, kanban and other tools whose data stays on this machine."""
     assert ON_HOST_TOOLS == {
         "terminal", "process_manage", "execute_code", "read_file", "write_file", "patch", "search_files",
-        "skills_list", "skill_view", "skill_manage", "todo_list", "memory", "clarify", "session_search"}
+        "skills_list", "skill_manage", "todo_list", "memory", "clarify", "session_search",
+        "annotate_preview", "close_terminal", "focus_pane", "gui_tour", "react_to_message", "read_terminal",
+        "read_window_below", "set_theme", "show_tip", "desktop_project",
+        "kanban_attach", "kanban_attachments", "kanban_block", "kanban_comment", "kanban_create", "kanban_heartbeat",
+        "kanban_link", "kanban_list", "kanban_request_changes", "kanban_schedule", "kanban_show", "kanban_unblock",
+        "yb_search_sticker"}
     al = allowlist()
     assert set(al.on_host) - {"lh_query", "on_host_query"} == ON_HOST_TOOLS
 
@@ -135,7 +142,7 @@ def test_on_host_name_overridden_by_plugin_is_not_on_host():
 def test_format_allowlist_lists_every_bucket():
     al = allowlist()
     text = format_allowlist(al)
-    assert "on-host (runs without asking): 16" in text
+    assert "on-host (runs without asking): 38" in text     # 36 on-host built-ins, a stdio and a loopback MCP server
     assert "blocked (MCP server URL off-tier or unreadable): 5" in text
     assert "blocked (scheduled jobs): 1" in text
     assert "remote_query  [mcp-remote; mcp; server=remote, transport=url, host=mcp.example.com]" in text
@@ -911,3 +918,59 @@ def test_choice_repr_checks_the_type_before_comparing():
         __hash__ = str.__hash__
     assert _choice_repr(Liar("hunter2")) == "other" and _choice_repr("once") == "once"
     assert _choice_repr("") == "" and _choice_repr(None) is None and _choice_repr(7) == "<int>"
+
+
+# --------------------------------------------------------------------------------------------------
+# Issue #1: classification by data flow, one table in code, the same table in docs/TOOL_CLASSES.md
+# --------------------------------------------------------------------------------------------------
+
+def _docs_table() -> dict[str, str]:
+    """{tool: class} from the table in docs/TOOL_CLASSES.md (rows ``| name | class | evidence |``)."""
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[2] / "docs" / "TOOL_CLASSES.md").read_text(encoding="utf-8")
+    out = {}
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 3 and cells[0].startswith("`") and cells[0].endswith("`"):
+            out[cells[0].strip("`")] = cells[1]
+    return out
+
+
+def test_the_docs_table_equals_the_code_table():
+    from confidential_mode.gate_tools_classify import BUILTIN_TOOL_CLASSES, DATA_CLASSES
+    assert _docs_table() == dict(BUILTIN_TOOL_CLASSES)
+    assert set(BUILTIN_TOOL_CLASSES.values()) <= set(DATA_CLASSES)
+    assert len(BUILTIN_TOOL_CLASSES) == 73
+
+
+def test_the_on_host_set_is_the_on_host_rows_of_the_table():
+    from confidential_mode.gate_tools_classify import BUILTIN_TOOL_CLASSES
+    assert ON_HOST_TOOLS == {n for n, c in BUILTIN_TOOL_CLASSES.items() if c == "on-host"}
+    # shell, code execution and file tools keep their class
+    assert {"terminal", "process_manage", "execute_code", "read_file", "write_file", "patch",
+            "search_files"} <= ON_HOST_TOOLS
+    # tools whose data stays on this machine run without a prompt
+    assert {"kanban_list", "kanban_create", "read_terminal", "set_theme", "desktop_project", "todo_list",
+            "yb_search_sticker"} <= ON_HOST_TOOLS
+    # tools whose data leaves, and tools the audit could not settle, ask
+    assert {"web_search", "desktop_preview", "drive_preview", "kanban_attach_url", "skill_view",
+            "computer_use", "text_to_speech"}.isdisjoint(ON_HOST_TOOLS)
+
+
+def test_each_route_names_the_data_class_it_came_from():
+    from confidential_mode.gate_tools_classify import BUILTIN_TOOL_CLASSES
+    entries = [(n, "x", _builtin_handler) for n in BUILTIN_TOOL_CLASSES] + [("brand_new_tool", "x", _builtin_handler)]
+    al = allowlist(entries=entries, mcp_configs={})
+    for name, cls in BUILTIN_TOOL_CLASSES.items():
+        info = al.get(name)
+        assert info.data_class == cls, name
+        if name == "cronjob_manage":
+            assert info.route is Route.BLOCK_CRON
+        elif name == "delegate_task":
+            assert info.route is Route.DELEGATE
+        else:
+            assert info.route is (Route.ON_HOST if cls == "on-host" else Route.ASK), name
+    unknown = al.get("brand_new_tool")
+    assert unknown.route is Route.ASK and unknown.data_class == "unknown"
+    assert "not audited" in unknown.reason
+    assert "off-host" in format_allowlist(al) and "unsettled" in format_allowlist(al) and "not audited" in format_allowlist(al)

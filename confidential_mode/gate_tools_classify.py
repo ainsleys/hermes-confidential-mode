@@ -1,9 +1,10 @@
 """Tool gate, classification: the route each registered tool takes while locked.
 
 ``classify_tool`` gives a tool its ``Route`` from its name, toolset and origin (built-in, plugin or MCP):
-the contract's on-host set runs, ``cronjob_manage`` and MCP servers whose URL host is off-tier are
-blocked, ``delegate_task`` is checked per call, and everything else asks. The ``_default_*`` readers find
-MCP server configs and plugin tool names through hermes_compat.py.
+``BUILTIN_TOOL_CLASSES`` classes every built-in by data flow (on-host, off-host, ask; issue #1); the on-host
+rows run, ``cronjob_manage`` and MCP servers whose URL host is off-tier are blocked, ``delegate_task`` is
+checked per call, and everything else (off-host, unsettled, not audited, plugin tools) asks. The
+``_default_*`` readers find MCP server configs and plugin tool names through hermes_compat.py.
 """
 from __future__ import annotations
 
@@ -13,11 +14,55 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-# The contract's on-host set (docs/INTERFACES.md, "W4 gate_tools.py, consent.py"). Exactly these.
-ON_HOST_TOOLS: frozenset[str] = frozenset({
-    "terminal", "process_manage", "execute_code", "read_file", "write_file", "patch", "search_files",
-    "skills_list", "skill_view", "skill_manage", "todo_list", "memory", "clarify", "session_search",
-})
+# Data-flow classes of Hermes' built-in tools (issue #1; docs/TOOL_CLASSES.md holds the same table with the
+# evidence for each row). A tool is on-host only when its code makes no network call and launches nothing that
+# does; a tool whose data leaves this machine is off-host; a tool the audit could not settle from Hermes'
+# source at 84a0301 is ask. Off-host and ask tools both take the ASK route; the class is kept on the ToolInfo so
+# the lock reply and the receipt can name it. Shell, code execution and the file tools keep the on-host class
+# of the original contract (their data stays on the terminal backend, which the preflight requires to be local).
+ON_HOST = "on-host"
+OFF_HOST = "off-host"
+UNSETTLED = "ask"
+DATA_CLASSES = (ON_HOST, OFF_HOST, UNSETTLED)
+BUILTIN_TOOL_CLASSES: dict[str, str] = {
+    # shell, code execution, files
+    "terminal": ON_HOST, "process_manage": ON_HOST, "execute_code": ON_HOST,
+    "read_file": ON_HOST, "write_file": ON_HOST, "patch": ON_HOST, "search_files": ON_HOST,
+    # skills, memory, todo, clarify, session search
+    "skills_list": ON_HOST, "skill_view": UNSETTLED, "skill_manage": ON_HOST, "todo_list": ON_HOST,
+    "memory": ON_HOST, "clarify": ON_HOST, "session_search": ON_HOST,
+    # the Desktop app's panes
+    "annotate_preview": ON_HOST, "close_terminal": ON_HOST, "desktop_preview": OFF_HOST, "drive_preview": OFF_HOST,
+    "focus_pane": ON_HOST, "gui_tour": ON_HOST, "react_to_message": ON_HOST, "read_terminal": ON_HOST,
+    "read_window_below": ON_HOST, "set_theme": ON_HOST, "show_tip": ON_HOST, "desktop_project": ON_HOST,
+    "computer_use": UNSETTLED, "setup_beat": OFF_HOST,
+    # the kanban board
+    "kanban_attach": ON_HOST, "kanban_attach_url": OFF_HOST, "kanban_attachments": ON_HOST, "kanban_block": ON_HOST,
+    "kanban_comment": ON_HOST, "kanban_complete": UNSETTLED, "kanban_create": ON_HOST, "kanban_heartbeat": ON_HOST,
+    "kanban_link": ON_HOST, "kanban_list": ON_HOST, "kanban_request_changes": ON_HOST,
+    "kanban_request_review": UNSETTLED, "kanban_schedule": ON_HOST, "kanban_show": ON_HOST, "kanban_unblock": ON_HOST,
+    # web, browser, media, messaging, connectors
+    "browser_cdp": OFF_HOST, "browser_dialog": OFF_HOST, "browser_exec": OFF_HOST, "browser_vault": OFF_HOST,
+    "web_search": OFF_HOST, "web_extract": OFF_HOST, "x_search": OFF_HOST,
+    "image_generate": OFF_HOST, "vision_analyze": OFF_HOST, "video_analyze": OFF_HOST, "video_generate": OFF_HOST,
+    "xai_video_edit": OFF_HOST, "xai_video_extend": OFF_HOST, "text_to_speech": UNSETTLED,
+    "discord": OFF_HOST, "discord_admin": OFF_HOST,
+    "feishu_doc_read": OFF_HOST, "feishu_drive_add_comment": OFF_HOST, "feishu_drive_list_comment_replies": OFF_HOST,
+    "feishu_drive_list_comments": OFF_HOST, "feishu_drive_reply_comment": OFF_HOST,
+    "yb_query_group_info": OFF_HOST, "yb_query_group_members": OFF_HOST, "yb_search_sticker": ON_HOST,
+    "yb_send_dm": OFF_HOST, "yb_send_sticker": OFF_HOST,
+    "manage_catalog": UNSETTLED, "manage_connections": OFF_HOST,
+    # scheduled jobs and delegation: their own routes (BLOCK_CRON, DELEGATE); the class is for the record
+    "cronjob_manage": OFF_HOST, "delegate_task": OFF_HOST,
+}
+#: The built-in tools that run without a prompt while locked: the on-host rows of the table.
+ON_HOST_TOOLS: frozenset[str] = frozenset(n for n, c in BUILTIN_TOOL_CLASSES.items() if c == ON_HOST)
+UNKNOWN = "unknown"   # a built-in tool the table does not name: a Hermes change the audit has not seen
+CLASS_REASONS = {
+    OFF_HOST: "off-host: the tool's data leaves this machine (docs/TOOL_CLASSES.md)",
+    UNSETTLED: "unsettled: the audit could not settle the tool's data flow from Hermes' source (docs/TOOL_CLASSES.md)",
+    UNKNOWN: "not audited: Hermes 84a0301's table has no row for this tool",
+}
 CRON_TOOL = "cronjob_manage"
 DELEGATE_TOOL = "delegate_task"
 
@@ -55,6 +100,7 @@ class ToolInfo:
     mcp_host: str | None = None       # host_of(url) for URL servers
     reason: str = ""                     # why this route (verdict reason for MCP URL servers)
     mode: str | None = None           # reserved for MODE_TOOLS (see above); None = plain route
+    data_class: str = ""              # built-in tools: on-host | off-host | ask | unknown (issue #1)
 
 
 def _default_mcp_configs() -> dict[str, dict]:
@@ -167,6 +213,7 @@ def classify_tool(name: str, toolset: str, *, origin: Origin, mcp_server: str | 
         # config unreadable / neither url nor command: fail closed
         return ToolInfo(name, toolset, origin, Route.BLOCK_MCP_URL, mcp_server, transport, None,
                         "server config not found")
+    data_class = BUILTIN_TOOL_CLASSES.get(name, UNKNOWN) if origin is Origin.BUILTIN else ""
     if name in ON_HOST_TOOLS and origin is Origin.BUILTIN:
         route = Route.ON_HOST
     elif name == CRON_TOOL:
@@ -175,4 +222,5 @@ def classify_tool(name: str, toolset: str, *, origin: Origin, mcp_server: str | 
         route = Route.DELEGATE
     else:
         route = Route.ASK
-    return ToolInfo(name, toolset, origin, route)
+    reason = CLASS_REASONS.get(data_class, "") if origin is Origin.BUILTIN else ""
+    return ToolInfo(name, toolset, origin, route, reason=reason, data_class=data_class)

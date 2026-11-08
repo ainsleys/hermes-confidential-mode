@@ -241,7 +241,7 @@ def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeyp
     assert result["final_response"] == "provider answered"
     assert len(rec.provider_calls) == 1
     assert "[confidential mode] This profile is locked (on-host-only)" in _sent_text(rec.provider_calls[0])
-    assert "the first time each tool outside the on-host list runs in this conversation" in \
+    assert "the first time each tool not classed as on-host runs in this conversation" in \
         _sent_text(rec.provider_calls[0])
     rows = [(e.kind, e.decision, e.verdict) for e in plugin.rt.ledger.tail(0)]
     assert ("lock", "locked", "in_tier") in rows

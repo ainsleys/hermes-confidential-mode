@@ -267,13 +267,16 @@ headers, sizes and timing, and a gateway that swapped the reply key would be cau
   `tests/hostile/test_near_e2ee_hostile.py::test_gateway_that_swaps_the_client_key_is_detected_and_the_reply_withheld`.
 - Bound: [14](LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open).
 
-**P13. The plugin asks the user the first time each tool outside its 14-tool on-host list runs
-during a lock.**
-- Code: `gate_tools_classify.py:ON_HOST_TOOLS`, `gate_tools_classify.py:classify_tool`,
+**P13. The plugin asks the user the first time each tool it does not class as on-host runs
+during a lock; the class follows the tool's data flow (docs/TOOL_CLASSES.md).**
+- Code: `gate_tools_classify.py:BUILTIN_TOOL_CLASSES`, `gate_tools_classify.py:ON_HOST_TOOLS`,
+  `gate_tools_classify.py:classify_tool`,
   `gate_tools_allowlist.py:build_allowlist`, `gate_tools_policy.py:_Policy.decide`;
   `gate_tools.py:build_pre_tool_call` asks, and `gate_tools.py:build_tool_execution` runs the tool only
   on an exact `once`, `session` or `always`.
-- Tests: `tests/unit/test_gate_tools.py::test_on_host_set_is_exactly_the_contract`,
+- Tests: `tests/unit/test_gate_tools.py::test_the_docs_table_equals_the_code_table`,
+  `tests/unit/test_gate_tools.py::test_the_on_host_set_is_the_on_host_rows_of_the_table`,
+  `tests/seam/test_gate_tools_seam.py::test_every_builtin_tool_registered_at_the_pinned_hermes_has_a_data_flow_row`,
   `tests/unit/test_gate_tools.py::test_on_host_name_overridden_by_plugin_is_not_on_host`,
   `tests/seam/test_register.py::test_locked_web_search_asks_and_runs_only_on_exact_once`.
 - Bound: [2](LIMITATIONS.md#2-the-cli-approve-directive-grants-on-any-answer-except-deny),
@@ -347,7 +350,7 @@ encrypts the text (Tinfoil encrypts the whole body through the vendor's transpor
 signature on NEAR before releasing the reply, writes a ledger row with the size and never the text,
 and renders a receipt anyone can replay offline. README Figure 2 (what the lock covers, also GUIDE
 Figure 2): while a profile is locked, main chat and side calls go only to the verified enclave,
-fallback is refused, tools outside the on-host list ask once per lock in each conversation, memory
+fallback is refused, tools not classed as on-host ask once per lock in each conversation, memory
 must be the built-in store or none, and shell, code and command MCP servers stay open on this host.**
 README Figure 1: T1 and T2 (verified against the approved build), P7 (pinned before any byte; on
 NEAR to the certificate the gateway's quote binds), P9 (the fetch drawn unpinned), P10 and P11 (the

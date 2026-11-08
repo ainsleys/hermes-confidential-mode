@@ -70,9 +70,11 @@ grant) and `build_post_approval_response` (the observer that records each answer
 10, 11, 12, 13, 15, 16.
 
 **`gate_tools_classify.py`**. `classify_tool` gives each registered tool its `Route` (on-host, ask,
-delegate, block-cron, block-mcp-url) from its name, toolset and `Origin`; `ON_HOST_TOOLS` is the
-contract's on-host set. The `_default_*` readers find MCP server configs and plugin tool names. Imports
-nothing at load; lazy: `hermes_compat`, `tiers`. Amendment 16, and gate_tools.py's.
+delegate, block-cron, block-mcp-url) from its name, toolset and `Origin`; `BUILTIN_TOOL_CLASSES` is the
+data-flow class (on-host, off-host, ask) of every built-in tool at Hermes 84a0301, the same table as
+[TOOL_CLASSES.md](TOOL_CLASSES.md), and `ON_HOST_TOOLS` is its on-host rows. The `_default_*` readers find
+MCP server configs and plugin tool names. Imports nothing at load; lazy: `hermes_compat`, `tiers`.
+Amendments 16, 17, and gate_tools.py's.
 
 **`gate_tools_allowlist.py`**. `build_allowlist` classifies Hermes' live registry at lock; `Allowlist`
 records each entry's route and handler identity, persists the set to `allowlist.yaml`, adds the tools a

@@ -368,8 +368,8 @@ def build_allowlist(registry: Any, *, mcp_configs: Mapping[str, Mapping[str, Any
 
 _ROUTE_TITLES = (
     (Route.ON_HOST, "on-host (runs without asking)"),
-    (Route.ASK, "off-host (asks the first time per lock in each conversation, each call with "
-                "confidential.tools.ask: each_call; blocked under yolo/approvals off/unattended)"),
+    (Route.ASK, "ask: off-host, unsettled or not audited (asks the first time per lock in each conversation, each "
+                "call with confidential.tools.ask: each_call; blocked under yolo/approvals off/unattended)"),
     (Route.DELEGATE, "delegation (default backend only, no profile/ACP)"),
     (Route.BLOCK_CRON, "blocked (scheduled jobs)"),
     (Route.BLOCK_MCP_URL, "blocked (MCP server URL off-tier or unreadable)"),
@@ -398,6 +398,8 @@ def format_allowlist(allowlist: Allowlist) -> str:
         lines.append(f"{title}: {len(infos)}")
         for info in infos:
             extra = [info.origin.value]
+            if info.route is Route.ASK and info.reason:
+                extra.append(info.reason.split(":", 1)[0])     # off-host | unsettled | not audited (issue #1)
             if info.mcp_server is not None:
                 extra.append(f"server={_printable(info.mcp_server)}, transport={info.mcp_transport}"
                              + (f", host={_printable(info.mcp_host)}" if info.mcp_host else ""))

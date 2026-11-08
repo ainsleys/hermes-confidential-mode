@@ -343,3 +343,19 @@ def test_unlocked_observes_only(hermes, monkeypatch):
     assert hermes.ran[OFF] == [{}] and hermes.ran["cronjob_manage"] == [{"action": "list"}]
     assert hermes.ran[MCP_URL] == [{}]
     assert hermes.prompts == [] and hermes.events() == []
+
+
+def test_every_builtin_tool_registered_at_the_pinned_hermes_has_a_data_flow_row(hermes):
+    """Issue #1: the classification table names every built-in tool Hermes 84a0301 registers, so no built-in
+    reaches the gate unclassified; a tool missing here is a Hermes change the audit has not seen."""
+    from tools.registry import discover_builtin_tools, registry
+
+    from confidential_mode.gate_tools_classify import BUILTIN_TOOL_CLASSES, _default_plugin_tool_names
+    discover_builtin_tools()
+    plugin_tools = _default_plugin_tool_names() | {OFF}       # the fixture's own test tool
+    registered = {e.name for e in registry.get_all_entries()
+                  if not str(e.toolset).startswith("mcp-") and e.name not in plugin_tools}
+    missing = sorted(registered - set(BUILTIN_TOOL_CLASSES))
+    assert missing == [], f"built-in tools without a data-flow row: {missing}"
+    stale = sorted(set(BUILTIN_TOOL_CLASSES) - registered)
+    assert stale == [], f"rows for tools Hermes 84a0301 does not register: {stale}"

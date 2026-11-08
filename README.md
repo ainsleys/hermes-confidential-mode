@@ -34,9 +34,11 @@ approved; `on-host-only` allows only your machine. While locked:
   call encrypted to the model's key and every reply signed by it. The gateway between you and the
   model cannot read the text. (On NEAR the gateway still sees images, the model id, settings, headers, sizes
   and timing, and a gateway that swapped the reply key would be caught only afterwards.)
-- The plugin asks you the first time each tool outside its on-host list runs during a lock. That list
-  is 14 tools (shell, code, files, skills, memory, todo, clarify and session search), so every tool that could send
-  data off the machine asks, and so do some local ones such as Desktop pane and kanban tools. An
+- The plugin asks you the first time each tool it does not class as on-host runs during a lock. The
+  class follows where the tool's data goes: 36 of Hermes' 73 built-in tools keep their data on this machine
+  (shell, code, files, skills, memory, todo, clarify, session search, the kanban board and the Desktop
+  panes that read or arrange the app) and run without a prompt; every tool that sends data off the machine
+  asks, and so does every tool whose data flow the audit could not settle (docs/TOOL_CLASSES.md). An
   allow lasts until you unlock, in that conversation only, so another chat, user or subagent is
   asked again (`confidential.tools.ask: each_call` asks on every call instead). When nobody can
   answer (yolo, approvals off, cron, one-shot runs), the tool is blocked. Tool servers on
@@ -73,7 +75,7 @@ anyone can replay offline.*
 ![Figure 2: what the lock covers](docs/images/routes-figure-2-with-the-plugin.svg)
 
 *Figure 2. While a profile is locked, main chat and side calls go only to the verified enclave,
-fallback is refused, tools outside the on-host list ask once per lock in each conversation, memory
+fallback is refused, tools not classed as on-host ask once per lock in each conversation, memory
 must be the built-in store or none, and shell, code and command MCP servers stay open on this host.*
 
 ## Requirements
@@ -176,7 +178,7 @@ For NEAR AI Cloud, use `--vendor near --model Qwen/Qwen3.8-27B`.
 
 **4. Lock.** The preflight checks every route in your config first. If any would leave the tier, the
 lock is refused with a table naming each key to change. Once locked, each tool outside the
-on-host list asks you the first time that tool runs, on both tiers.
+on-host class asks you the first time that tool runs, on both tiers.
 
 ```
 $ hermes confidential on attested
@@ -186,7 +188,7 @@ Details: hermes confidential status --verbose; docs/LIMITATIONS.md
 ```
 
 **5. Have a conversation.** Start `hermes` and ask something that needs the web. The first time each
-tool outside the on-host list runs, Hermes' approval panel shows the plugin's line:
+tool not classed as on-host runs, Hermes' approval panel shows the plugin's line:
 
 ```
 Confidential mode: web_search wants to send ~1 KB of this conversation off the machine; allowing once covers web_search in this conversation until this profile is unlocked
@@ -249,7 +251,7 @@ list and the change that would close each limit.
   another plugin could edit. Only the attached enclave evidence can be checked by someone else.
   ([section 6](docs/LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process))
 - **Tools ask once per lock in each conversation, then run without asking.** The plugin asks you the first time each tool
-  outside its on-host list runs during a lock; after Allow once, later calls to that tool in the
+  not classed as on-host runs during a lock; after Allow once, later calls to that tool in the
   same conversation run until you unlock, each with a ledger row. An answer an agent gave itself
   through a nested chat counts the same way. The grant lives in the process that asked, so a restart
   or a second process asks again. `confidential.tools.ask: each_call` asks on every call.

@@ -70,8 +70,8 @@ The plugin does four things for a Hermes profile.
    route leads off-tier, the lock is refused and the plugin names the key to change ([Tiers](#tiers),
    [Locking](#locking)).
 3. **While locked, it guards four of the five other routes.** Side calls must resolve to the tier and
-   are rechecked every turn. Fallbacks are refused, and a failed request ends the turn. Tools outside the
-   on-host list ask you the first time each runs during a lock. Memory must be the
+   are rechecked every turn. Fallbacks are refused, and a failed request ends the turn. Tools the plugin
+   does not class as on-host ask you the first time each runs during a lock. Memory must be the
    built-in store. Shell and code execution stay open.
 4. **It renders a receipt for any session.** The receipt lists where the text went, attaches the
    enclave evidence captured at each verification, and ends with fixed paragraphs naming what it
@@ -81,7 +81,7 @@ The plugin does four things for a Hermes profile.
 ![Figure 2: what the lock covers](images/routes-figure-2-with-the-plugin.svg)
 
 *Figure 2. While a profile is locked, main chat and side calls go only to the verified enclave,
-fallback is refused, tools outside the on-host list ask once per lock in each conversation, memory
+fallback is refused, tools not classed as on-host ask once per lock in each conversation, memory
 must be the built-in store or none, and shell, code and command MCP servers stay open on this host.*
 
 **Limits.** Shell, code execution and MCP servers started as a command on this host run unchecked

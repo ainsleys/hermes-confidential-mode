@@ -42,8 +42,9 @@ def attested_profile_for(config: Mapping | None) -> str:
 ZDR_REASON = "zero-retention tier not implemented"
 
 # User-facing disclosures (Amendment 4 F1(d), F12; must agree with the tool gate and the README).
-TOOLS_TEXT = ("Tools outside the plugin's 14-tool on-host list (web, browser, messaging, media and other off-host "
-              "tools, and some local Desktop and kanban tools) ask you the first time each runs during a lock "
+TOOLS_TEXT = ("Tools the plugin does not class as on-host (web, browser, messaging, media and other tools whose "
+              "data leaves this machine, and tools whose data flow could not be settled from Hermes' source; "
+              "docs/TOOL_CLASSES.md) ask you the first time each runs during a lock "
               "(every call with confidential.tools.ask: each_call); under yolo, approvals off or an unattended run "
               "those asks become blocks. Off-tier remote MCP servers, scheduled jobs and routed delegation are "
               "blocked.")
@@ -65,7 +66,7 @@ STRUCTURE_FAILED_TEXT = (
     "/confidential on <tier>.")
 #: How the locked note describes the tool prompt, by confidential.tools.ask (Amendment 13).
 LOCKED_NOTE_ASK = {
-    "once_per_lock": ("ask the user the first time each tool outside the on-host list runs in this "
+    "once_per_lock": ("ask the user the first time each tool not classed as on-host runs in this "
                       "conversation during the lock; after the user allows a tool once, later calls of that tool "
                       "in this conversation run without asking until unlock"),
     "each_call": "ask the user first, each call",
