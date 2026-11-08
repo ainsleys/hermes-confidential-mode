@@ -46,6 +46,7 @@ SK = "cm:w5:seam"
 BASE_CONFIG = f"""\
 plugins:
   enabled: [confidential-mode]
+  load_timeout_seconds: 0   # load inline: an abandoned loader thread would register the provider after teardown
 model:
   provider: custom
   default: llama3
@@ -535,3 +536,13 @@ def test_live_verification_is_ledgered_with_evidence(plugin):
     provider.verification_cache.refresh(provider.PROFILE_NAME)
     rows = [e for e in plugin.rt.ledger.tail(0) if e.kind == "verify_ok"]
     assert rows and rows[-1].detail["evidence"] == evidence and rows[-1].host == "router.tinfoil.invalid"
+
+
+def test_the_split_near_modules_share_the_adapter_logger(plugin):
+    """Hermes loads the plugin as hermes_plugins.<slug>; the split NEAR modules must log under verify/near.py's
+    logger in that package, not under a hard-coded top-level name, or their warnings leave gateway.log."""
+    base = plugin.mod.__name__ + ".confidential_mode.verify."
+    near = importlib.import_module(base + "near")
+    assert near.logger.name.startswith("hermes_plugins.") and near.logger.name.endswith(".verify.near")
+    for name in ("near_transport", "near_send", "near_exchange"):
+        assert importlib.import_module(base + name).logger is near.logger, name

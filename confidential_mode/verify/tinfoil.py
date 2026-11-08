@@ -43,7 +43,7 @@ fetch points, which call through and record the bytes:
                                                <data_dir>/trust-roots/<sha256>.json
 Layout: schema, vendor, captured_at (SDK verifiedAt), captured_at_unix, sdk_version, repo, enclave_host,
 enclave_source, platform ("sev-snp"|"tdx"), attestation, sev, tdx, release, sigstore_bundle,
-hardware_measurements, trusted_root {sha256, path}, tls_cert_pem + tls_observation (TLS spike, below),
+hardware_measurements, trusted_root {sha256, path}, tls_cert_pem + tls_observation (TLS observation, below),
 claims {code_fingerprint, enclave_fingerprint, release_tag, tls_public_key_fp, hpke_public_key},
 verification_document (SDK to_dict), capture_complete, capture_missing[, capture_errors]. Every blob is
 a string, so the dict is JSON-serialisable and passes the ledger's content-key filter.
@@ -264,7 +264,7 @@ class TinfoilAdapter:
         self.async_attestation_count = 0
         self._counter_bucket = threading.local()
         self._capture_local = threading.local()
-        # TLS spike: after each explicit verify, one bodyless GET of the attestation document over the
+        # TLS observation: after each explicit verify, one bodyless GET of the attestation document over the
         # VERIFIED EHBP pool records the TLS peer certificate (evidence.tls_cert_pem/tls_observation).
         self.tls_probe = bool(tls_probe)
         self.verified_mono: float | None = None

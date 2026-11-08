@@ -52,6 +52,14 @@ jobs:
           path: hermes-confidential-mode
           persist-credentials: false
 
+      - name: Check out Hermes at the pinned commit (its lock pins openai and httpx, which mypy reads)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          repository: ${{ env.HERMES_REPOSITORY }}
+          ref: ${{ env.HERMES_SHA }}
+          path: hermes-agent
+          persist-credentials: false
+
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
@@ -60,9 +68,16 @@ jobs:
       - name: Install Python 3.11
         run: uv python install 3.11
 
-      - name: Install the plugin's dependencies (mypy reads their types; Hermes is not needed)
+      - name: Install Hermes' locked dependencies and the plugin's pins (mypy reads their types)
+        working-directory: hermes-agent
         run: |
+          uv export --frozen --no-hashes --no-emit-project --no-dev > "$RUNNER_TEMP/hermes-lock.txt"
+          sed -E -e "s/python_full_version >= '3\.14' and //g" \
+                 -e "s/ ; python_full_version >= '3\.14'\$//" \
+                 "$RUNNER_TEMP/hermes-lock.txt" > "$RUNNER_TEMP/hermes-requirements.txt"
           uv venv --python 3.11 "$GITHUB_WORKSPACE/venv"
+          uv pip install --python "$GITHUB_WORKSPACE/venv/bin/python" --no-deps \
+            -r "$RUNNER_TEMP/hermes-requirements.txt"
           uv pip install --python "$GITHUB_WORKSPACE/venv/bin/python" \
             -r "$GITHUB_WORKSPACE/hermes-confidential-mode/pyproject.toml"
 

@@ -488,8 +488,8 @@ def test_gather_over_a_generator_expression_works(cm, setup, clock):
 
 
 def test_sync_wrapper_awaited_from_a_coroutine_may_raise_but_never_leaks(cm, setup, clock):
-    """`await wrapper()` where wrapper is sync: the frame check sees a sync caller. The spike's claim is
-    'a wrong guess can only raise, never leak' -- hold it to that."""
+    """`await wrapper()` where wrapper is sync: the frame check sees a sync caller. The claim is
+    'a wrong guess can only raise, never leak'; hold it to that."""
     adapter, store, profile = setup([_good(cm, clock)])
     c = h.create(profile)
 

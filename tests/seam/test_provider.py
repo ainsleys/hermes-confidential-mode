@@ -42,7 +42,7 @@ _SCRUB_ENV = (
 )
 
 
-# ── recording transports (same shape as the C0 follow-up spike) ───────────────────────────────
+# ── recording transports ──────────────────────────────────────────────────────────────────────
 
 def _completion(model):
     return {"id": "s-1", "object": "chat.completion", "created": int(time.time()), "model": model,

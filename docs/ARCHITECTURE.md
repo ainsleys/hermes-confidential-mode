@@ -233,7 +233,7 @@ receipt (`replay_receipt`, `replay_signed_send`). Imports `verify.near`, `verify
 
 **`verify/policy_check.py`** and **`verify/sev_check.py`**. Standalone second checks the replay runs: the
 Sigstore release-bundle identity and policy (`check_bundle`), and an AMD SEV-SNP report checker. Each
-imports nothing from the plugin and runs on its own with `python -I`. No amendment names them.
+imports nothing from the plugin and runs on its own with `python -I` (Python 3.11 or later). No amendment names them.
 
 ## Commands
 

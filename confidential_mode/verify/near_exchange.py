@@ -24,7 +24,7 @@ from .near_transport import TLSPinMismatch, _peer_der, _spki_sha256
 if TYPE_CHECKING:
     from .near import NearAdapter
 
-logger = logging.getLogger("confidential_mode.verify.near")   # the name this code has always logged under
+logger = logging.getLogger(__name__.rsplit(".", 1)[0] + ".near")   # verify/near.py's logger, under any package name
 
 
 MAX_ID_BUFFER = 8 * 1024 * 1024

@@ -360,7 +360,7 @@ and code open, unproven in the receipt) cover every part except memory, command 
 ledger rows for tool answers.
 - Code: memory: `preflight.py:run_preflight` (`memory.provider` must be empty, `builtin`,
   `built-in`, `local` or `none`, `preflight.py:_ON_HOST_MEMORY`);
-  command MCP servers: `gate_tools.py:classify_tool` (a `command:` server is on-host, a `url:` server
+  command MCP servers: `gate_tools_classify.py:classify_tool` (a `command:` server is on-host, a `url:` server
   off-tier is blocked); tool answers: `gate_tools.py:build_post_approval_response` (`tool_allowed`
   and `tool_refused` rows).
 - Tests: `tests/unit/test_preflight.py::test_memory_external_off_tier`,

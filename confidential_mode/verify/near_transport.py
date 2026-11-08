@@ -19,7 +19,7 @@ import httpx
 
 from .base import VerifyError
 
-logger = logging.getLogger("confidential_mode.verify.near")   # the name this code has always logged under
+logger = logging.getLogger(__name__.rsplit(".", 1)[0] + ".near")   # verify/near.py's logger, under any package name
 
 
 def _peer_der(response) -> bytes | None:
@@ -93,7 +93,7 @@ def pinned_ssl_context(expected_spki: Callable[[], str | None], *,
         return obj
 
     ctx.wrap_socket = wrap_socket  # type: ignore[method-assign]  # the pin check wraps the context's own
-    ctx.wrap_bio = wrap_bio  # type: ignore[method-assign]
+    ctx.wrap_bio = wrap_bio  # type: ignore[method-assign]  # the pin check replaces SSLContext.wrap_bio on this instance
     return ctx
 
 

@@ -496,7 +496,7 @@ class LlmGate:
     def as_middleware(self) -> Callable[..., Any]:
         def confidential_mode_llm_execution(request=None, next_call=None, **context):
             return self(request, next_call, **context)
-        confidential_mode_llm_execution.gate = self  # type: ignore[attr-defined]
+        confidential_mode_llm_execution.gate = self  # type: ignore[attr-defined]  # attribute set on a function object
         return confidential_mode_llm_execution
 
 

@@ -352,7 +352,7 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         if choice is not _MISSING:                 # pre_tool_call asked (model_tools order)
             if type(choice) is str and choice in _ALLOW_CHOICES:
                 if dec.pop_ledgered(key):  # type: ignore[arg-type]  # a choice was found, so key is set
-                    row = dec.pop_row(key)  # type: ignore[arg-type]
+                    row = dec.pop_row(key)  # type: ignore[arg-type]  # same: key is set when a choice was found
                 else:                              # the hook's tool_allowed row could not be written
                     row = _allowed_row(tool_name, args, session_id, base, choice)
                 _grant_for_lock(tool_name, choice, row, session_id)

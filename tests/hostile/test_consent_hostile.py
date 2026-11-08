@@ -232,7 +232,7 @@ def test_control_exact_value_applies_once_with_the_shown_pending():
         "Amendment 2: consent passes apply(pending, approved_via=<surface>)"
     question = ctx.asked[0][0]
     assert p.code_fingerprint[:8] in question or p.enclave_fingerprint[:8] in question, \
-        "the human must see what they are pinning (spike 3 question shows the fingerprints)"
+        "the human must see what they are pinning (the pin question shows the fingerprints)"
 
 
 def test_no_pending_asks_nobody_and_applies_nothing():
@@ -493,7 +493,7 @@ def test_two_concurrent_approvals_for_same_pending_apply_once():
 
 
 # --------------------------------------------------------------------------------------------------
-# real gateway path (spike harness): /confidential-style command -> ask_choice -> typed reply
+# real gateway path: /confidential-style command -> ask_choice -> typed reply
 # --------------------------------------------------------------------------------------------------
 
 async def _wait_until(pred, timeout=10.0):
@@ -593,7 +593,7 @@ def _gateway(real_ctx, store, ledger, replies, *, before_reply=None):
         await adapter.handle_message(_event("/t4-pin"))
         await _wait_until(lambda: any("\n  1." in s or "1." in s for s in adapter.sent))
         prompt = next(s for s in adapter.sent if "1." in s)
-        await asyncio.sleep(0.5)              # let the clarify entry register (spike harness does the same)
+        await asyncio.sleep(0.5)              # let the clarify entry register
         if before_reply:
             before_reply()
         for r in replies:

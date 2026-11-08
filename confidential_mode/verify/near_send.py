@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from .near import NearAdapter
     from .near_exchange import NearRefusal, _Exchange
 
-logger = logging.getLogger("confidential_mode.verify.near")   # the name this code has always logged under
+logger = logging.getLogger(__name__.rsplit(".", 1)[0] + ".near")   # verify/near.py's logger, under any package name
 
 
 def _refuse(adapter: NearAdapter, exc: BaseException, stage: str, *, ex: _Exchange | None = None,

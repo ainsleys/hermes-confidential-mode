@@ -850,10 +850,10 @@ def _bypass(h, kind, monkeypatch):
 CONTRACT_BYPASSES = ["session_yolo", "mode_off", "process_yolo", "hermes_z", "cron_approve", "unattended_approve",
                      "single_query_approve"]
 # A grant under a key that is not ours (bare tool name) must not apply: the human is asked (or blocked).
-SPIKE_BYPASSES = ["remembered_bare_always", "remembered_bare_session"]
+REMEMBERED_BYPASSES = ["remembered_bare_always", "remembered_bare_session"]
 
 
-@pytest.mark.parametrize("kind", CONTRACT_BYPASSES + SPIKE_BYPASSES)
+@pytest.mark.parametrize("kind", CONTRACT_BYPASSES + REMEMBERED_BYPASSES)
 def test_bypass_state_offhost_never_runs_without_a_human(hermes, monkeypatch, kind):
     probe(hermes, "_t4_net")
     hermes.answer["value"] = "deny"
