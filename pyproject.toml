@@ -3,6 +3,9 @@ name = "hermes-confidential-mode"
 version = "0.1.0"
 description = "Attested inference provider and locked mode for Hermes Agent"
 requires-python = ">=3.11"
+# SPDX expression (PEP 639), the form Hermes' own pyproject.toml uses.
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     # Exact: 0.15.0 requires openai>=3.26 and Hermes pins openai 2.54.0 (docs/dev/C0-spikes.md, spike 2).
     "tinfoil==0.14.2",
