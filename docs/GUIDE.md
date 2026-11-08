@@ -1328,6 +1328,7 @@ GitHub compose fetches).
 
 - [INTERFACES.md](INTERFACES.md) is the developer contract: the shared types, what each module exposes
   and guarantees, the file and row formats, and each module's rules with Hermes.
+- [CHANGELOG.md](../CHANGELOG.md) lists what each release changes for users.
 - [ARCHITECTURE.md](ARCHITECTURE.md) describes each module, what it imports, and the data files.
 - [RUNNING_TESTS.md](RUNNING_TESTS.md) gives the test command, the PyNaCl setup, the live NEAR tests and
   the real captures.

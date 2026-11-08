@@ -309,6 +309,7 @@ except where noted.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): every module, what it imports, and the data files.
 - [docs/INTERFACES.md](docs/INTERFACES.md): the developer contract: shared types, each module's rules,
   and the file and row formats.
+- [CHANGELOG.md](CHANGELOG.md): what each release changes.
 - [SECURITY.md](SECURITY.md): how to report a vulnerability, and the threat model in brief.
 
 ## Prior work
