@@ -6,7 +6,7 @@ provider profile, pins, a replay module, setup, tests and documentation. Tinfoil
 rule below is read from their code. The last section, "Known coupling", lists the places where Tinfoil
 or NEAR is named outside the adapters, so a third vendor also needs edits there.
 
-Paths are relative to `confidential_mode/` unless the path starts with `tests/`, `docs/` or names a file at
+Paths are relative to `confidential_mode/` unless the path starts with `tests/` or `docs/` or names a file at
 the repository root (`__init__.py`, `plugin.yaml`, `pyproject.toml`, `catalog/`).
 [INTERFACES.md](INTERFACES.md) is the developer contract. Its Amendments 5, 5.1, 5.2, 7 and 9 hold the
 contract entries for the NEAR adapter, the nearest model for a third adapter's contract.
