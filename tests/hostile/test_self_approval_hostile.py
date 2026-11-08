@@ -314,13 +314,30 @@ def _nested_home(tmp_root: Path) -> Path:
     return home
 
 
+def _hermes_checkout() -> Path:
+    """The Hermes checkout the nested ``hermes`` runs from: the one this process imported ``hermes_cli``
+    from, else ``$HERMES_AGENT_ROOT``. Skips the test when neither is a Hermes checkout."""
+    candidates = []
+    try:
+        import hermes_cli
+        candidates.append(Path(hermes_cli.__file__).resolve().parents[1])
+    except Exception:  # noqa: BLE001
+        pass
+    if os.environ.get("HERMES_AGENT_ROOT"):
+        candidates.append(Path(os.environ["HERMES_AGENT_ROOT"]))
+    for root in candidates:
+        if (root / "hermes_cli" / "main.py").is_file():
+            return root
+    pytest.skip("no Hermes checkout: hermes_cli is not importable and HERMES_AGENT_ROOT is unset or not a checkout")
+
+
 def _run_nested_hermes(home: Path, env: dict, argv: list, answer: bytes = b"1\n") -> str:
     """Run a real ``hermes`` (python -m hermes_cli.main) under a pty and answer its terminal prompt."""
     import select
     import time
     master, slave = pty.openpty()
     proc = subprocess.Popen([sys.executable, "-m", "hermes_cli.main", *argv], stdin=slave, stdout=slave,
-                            stderr=slave, env={**env, "HERMES_HOME": str(home)}, cwd=str(Path.home() / "hermes-agent"),
+                            stderr=slave, env={**env, "HERMES_HOME": str(home)}, cwd=str(_hermes_checkout()),
                             start_new_session=True)
     os.close(slave)
     buf, answered, end = b"", False, time.time() + 120
