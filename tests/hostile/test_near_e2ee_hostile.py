@@ -13,7 +13,7 @@ import httpx
 import openai
 import pytest
 
-from confidential_mode.verify import near, near_e2ee as e2
+from confidential_mode.verify import near, near_e2ee as e2, near_send
 from confidential_mode.verify.base import VerifyError
 
 from ..near_world import BASE, MODEL, NearWorld
@@ -325,7 +325,7 @@ def test_gateway_that_swaps_the_client_key_is_detected_and_the_reply_withheld(tm
 def test_async_signature_timeout_is_recorded_withheld(tmp_path, monkeypatch):
     world = NearWorld()
     ad, _, rows = _setup(world, tmp_path)
-    monkeypatch.setattr(near, "_signature_step_bound", lambda a: 0.05)
+    monkeypatch.setattr(near_send, "_signature_step_bound", lambda a: 0.05)
     orig = ad.fetch_signature
 
     def slow(*a, **k):

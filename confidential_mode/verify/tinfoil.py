@@ -351,7 +351,7 @@ class TinfoilAdapter:
         return str(fp) if fp else None
 
     def pinned_context(self, sc=None):
-        from .near import pinned_ssl_context
+        from .near_transport import pinned_ssl_context
         return pinned_ssl_context(lambda: self.expected_tls_fp(sc), base=self.tls_base_context,
                                   binds="the verified Tinfoil report", source="Tinfoil")
 
@@ -410,7 +410,7 @@ class TinfoilAdapter:
         """A send that met a certificate other than the attested one: ledger it and ask for a bounded
         re-verify. Anything else is left to the caller. Never raises."""
         try:
-            from .near import TLSPinMismatch
+            from .near_transport import TLSPinMismatch
             pin = next((e for e in _chain(exc) if isinstance(e, TLSPinMismatch)), None)
             if pin is None:
                 return
@@ -684,7 +684,7 @@ class TinfoilAdapter:
         (VerifyError) after a ``verify_fail`` row (purpose ``tls_pin``); any other probe failure is recorded
         in the evidence and does not fail the verification. ``http`` (the new pool) is not used: the pool is
         pinned to the accepted key, which this result is not yet."""
-        from .near import TLSPinMismatch, pinned_ssl_context
+        from .near_transport import TLSPinMismatch, pinned_ssl_context
         ev = result.evidence if isinstance(result.evidence, dict) else None
         if ev is None:
             return

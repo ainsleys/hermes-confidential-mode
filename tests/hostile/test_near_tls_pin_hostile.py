@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from confidential_mode.verify import near
+from confidential_mode.verify import near, near_transport
 from confidential_mode.verify.base import VerifyError
 from confidential_mode.verify.near import TLSPinMismatch, pinned_ssl_context
 
@@ -208,7 +208,7 @@ def test_pin_keeps_the_normal_chain_check(server):
 def test_adapter_default_send_transports_are_pinned_to_the_accepted_gateway(server, tmp_path, monkeypatch):
     """The adapter's own default sync and async send transports pin to pinned_spki(), which is the
     fingerprint in the accepted gateway evidence."""
-    monkeypatch.setattr(near, "_default_context", server.trust)
+    monkeypatch.setattr(near_transport, "_default_context", server.trust)
     world = NearWorld()
     ad = world.adapter(tmp_path)
     ad.verify()
