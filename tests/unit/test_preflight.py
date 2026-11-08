@@ -900,3 +900,19 @@ def test_a_key_not_readable_in_this_scope_is_not_told_to_set_the_key():
     r = run(attested_config(), tier=Tier.ATTESTED, pred=attested_pred(), profile="attested-tinfoil", keys=())
     assert pf.missing_key_headline(r) == ("Not locked: TINFOIL_API_KEY is not set; set TINFOIL_API_KEY (see "
                                           "Requirements in README.md).")
+
+
+def test_an_on_host_route_fix_follows_the_failure_reason():
+    """Re-review SF2-on-host: only a host off this machine gets "a server on this machine"; an unusable URL is
+    told to be rewritten, and a moa provider on a loopback URL is told the provider value."""
+    pf_route = pf.route_fix
+    assert pf_route(Tier.ON_HOST, "auxiliary.x", "custom", "https://api.example.com/v1",
+                    "host api.example.com is not an IP literal or a listed on-host name", "custom").startswith(
+        "set auxiliary.x.base_url to a server on this machine")
+    assert pf_route(Tier.ON_HOST, "auxiliary.x", "custom", "ftp://127.0.0.1/v1",
+                    "base_url must start with http:// or https://", "custom").startswith(
+        "rewrite auxiliary.x.base_url as a plain http:// or https:// URL")
+    cfg = base_config(auxiliary={"vision": {"provider": "ollama", "base_url": ON_HOST_URL},
+                                 "compression": {"provider": "moa", "base_url": ON_HOST_URL}})
+    fix = item(run(cfg), "auxiliary.compression.provider").fix
+    assert "server on this machine" not in fix and fix.startswith("set auxiliary.compression.provider: "), fix

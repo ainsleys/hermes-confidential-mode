@@ -469,12 +469,17 @@ def _main_provider_fix(tier: Tier) -> str:
 def route_fix(tier: Tier, prefix: str, provider: str, base_url: str, reason: str, value: str) -> str:
     """The FIX for an explicit route that fails (review SF2): the value to write, never only "an in-tier
     route". A provider the tier can use whose route still fails says why; an on-host route with an off-host
-    base_url names a base_url on this machine; any other provider names ``value``."""
+    base_url whose host is off this machine names a base_url on this machine, one whose URL is unusable says
+    to rewrite the URL; any other failure names ``value`` for the provider (re-review SF2-on-host)."""
     p = _s(provider).lower()
     if tier == Tier.ATTESTED and p in ATTESTED_KEY_ENVS:
         return f"{prefix}.provider is {p}; that route does not pass yet ({reason})"
     if tier == Tier.ON_HOST and _s(base_url):
-        return f"set {prefix}.base_url to a server on this machine, such as {ON_HOST_EXAMPLE_URL} ({reason})"
+        text = _s(reason)
+        if text.startswith("host "):          # the host is off this machine (tiers.OnHostPredicate)
+            return f"set {prefix}.base_url to a server on this machine, such as {ON_HOST_EXAMPLE_URL} ({reason})"
+        if text.startswith("base_url"):       # the URL itself is unusable (tiers.strict_host)
+            return f"rewrite {prefix}.base_url as a plain http:// or https:// URL, such as {ON_HOST_EXAMPLE_URL} ({reason})"
     return f"set {prefix}.provider: {value} ({reason})"
 
 
