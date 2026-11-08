@@ -247,6 +247,12 @@ list and the change that would close each limit.
 - **A locked session has no fallback.** If the provider errors, or can't be verified within 20
   seconds, the turn ends and you resend; nothing is rerouted.
   ([docs/LIMITATIONS.md](docs/LIMITATIONS.md), [docs/COSTS.md](docs/COSTS.md))
+- **Hermes' own approval prompt grants on any answer except `deny`.** This is a Hermes core issue,
+  not one a plugin can fix: the approve path treats no answer, an empty answer, a typo and `yes` alike
+  as a grant, and a plugin cannot veto after the prompt. For the tools this plugin gates, the plugin
+  runs the tool only when the recorded answer is exactly `once`, `session` or `always`, and refuses
+  anything else. Every other tool keeps Hermes' behaviour.
+  ([section 2](docs/LIMITATIONS.md#2-the-cli-approve-directive-grants-on-any-answer-except-deny))
 
 A side call that goes off-tier mid-turn (after a runtime model switch, say) is recorded as a breach,
 not stopped. Locked mode doesn't apply in Hermes' safe-worker mode, which loads no plugins. If Hermes
