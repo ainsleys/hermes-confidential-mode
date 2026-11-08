@@ -1,8 +1,10 @@
 # Claim index
 
-This index lists every claim on the [README](../README.md)'s first screen and every row of its
-Commands table. Each entry gives the claim in one sentence, the code that enforces the claim, the tests that
-prove the claim, and the section of [LIMITATIONS.md](LIMITATIONS.md) that bounds the claim.
+This index lists every claim on the [README](../README.md)'s first screen (the tagline, "What Hermes
+does today", "What the plugin does", the Figure 2 caption, "The receipt" and "Three limits") and every
+row of its Commands table: 54 entries. Each entry gives the claim in one sentence, the code that
+enforces the claim, the tests that prove the claim, and the section of
+[LIMITATIONS.md](LIMITATIONS.md) that bounds the claim.
 
 - **Code** is `file:function`, with paths from the repository root. `__init__.py` is the plugin's
   root module (`register(ctx)` and the hooks); every other path is under `confidential_mode/`.
@@ -13,16 +15,17 @@ prove the claim, and the section of [LIMITATIONS.md](LIMITATIONS.md) that bounds
 
 ## UNTRACED
 
-These claims, or parts of claims, have no code or test that establishes them as worded. Each claim is
-fixed by changing the README wording or by adding the code and test named.
+These claims, or parts of claims, have no code or test in this repository that establishes them as
+worded.
 
-1. **P18, "`hermes confidential status` shows where calls have gone."** `status_text` prints the
-   configured main route, the live runtime of the last locked turn, the breach state and this lock's
-   refusal, ask and allow counts. No status line lists the hosts that calls went to; `watch` and
-   receipts do. No test asserts a per-host history in status.
-2. **L1, the model families "Qwen, DeepSeek, Llama and gpt-oss".** The code admits a provider, not
-   a model family: the attested predicate accepts only the two attested profiles. Which models those
-   vendors serve is the vendors' catalogue, which no code or test reads.
+1. **H1, Hermes' own Tinfoil or NEAR connection.** Hermes 84a0301 has no Tinfoil or NEAR provider
+   (no file in its source names either vendor), so reaching either vendor is an ordinary
+   OpenAI-compatible `base_url`. The statement is read from Hermes' source; no test here asserts it.
+2. **L1, the model half: "those are open-weight models such as the Qwen, DeepSeek, Llama and gpt-oss
+   families, so a hosted frontier model cannot be in the tier".** The README states this as a fact
+   about the two vendors' catalogues. The code admits a provider, not a model family:
+   `provider.py:near_models` builds the NEAR allowlist from whatever the user configures, and the
+   Tinfoil router serves whatever Tinfoil deploys. No code or test reads either catalogue.
 
 ## Tagline
 
@@ -32,7 +35,8 @@ fixed by changing the README wording or by adding the code and test named.
   `verify/near.py:NearAdapter.prepare_verification`, `verify/near.py:appraise`;
   `verify/near_checks.py:check_report`, `verify_jwt`, `check_compose_manager`;
   `provider.py:VerificationCache.refresh`.
-- Tests: `tests/unit/test_client.py::test_adapter_verify_maps_document_and_counts_one_attestation`,
+- Tests: `tests/unit/test_client.py::test_adapter_verify_raises_verify_error_on_anything`,
+  `tests/fault/test_vendor_faults.py::test_a_tinfoil_attestation_fault_fails_the_verify_and_publishes_nothing`,
   `tests/unit/test_real_capture.py::test_standalone_policy_check_rejects_mismatches_on_the_real_bundle`,
   `tests/unit/test_near_real_capture.py::test_real_capture_appraises_with_real_intel_signatures`,
   `tests/hostile/test_near_cm_hostile.py::test_nonce_echoed_but_the_quote_binds_another_fails`.
@@ -54,8 +58,10 @@ fixed by changing the README wording or by adding the code and test named.
 down.
 - Code: `gate_llm.py:LlmGate.handle`; `preflight.py:run_preflight`; `__init__.py:Runtime.turn_check`;
   `__init__.py:_observe`.
-- Tests: `tests/seam/test_register.py::test_locked_off_tier_provider_is_refused_with_zero_provider_calls`,
-  `tests/seam/test_register.py::test_aux_call_to_off_tier_host_while_locked_is_a_breach`.
+- Tests: `tests/hostile/test_gate_llm_hostile.py::test_off_tier_locked_refuses_with_zero_provider_requests`,
+  `tests/seam/test_gate_llm.py::test_locked_off_tier_refused`,
+  `tests/seam/test_register.py::test_aux_call_to_off_tier_host_while_locked_is_a_breach`; the
+  live-runtime path: `tests/seam/test_register.py::test_locked_off_tier_provider_is_refused_with_zero_provider_calls`.
 - Bound: [1](LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution) (a side call that
   strays is recorded, not stopped).
 
@@ -72,6 +78,42 @@ down.
   `tests/seam/test_near_seam.py::test_cli_replay_checks_evidence_and_every_signed_response`.
 - Bound: [6](LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process); Smaller gaps: "The
   offline replay's identity checks have limits".
+
+## What Hermes does today
+
+These entries state what Hermes 84a0301 does without the plugin. A path after the word "Hermes" is a
+file in the Hermes checkout.
+
+**H1. Pointed at Tinfoil or NEAR AI Cloud, Hermes makes an ordinary HTTPS connection to a URL: no
+hardware report is checked, no build is pinned, the vendor's encrypted transport is not used, and no
+reply signature is verified.** UNTRACED (see above).
+
+**H2. Hermes makes more model calls than the one the user sees, for titles, compression, images and
+more.**
+- Code: Hermes `agent/auxiliary_client.py`; the plugin lists the tasks with
+  `preflight.py:builtin_aux_task_names` and `preflight.py:plugin_aux_task_names`.
+- Tests: `tests/hostile/test_integrated_hostile.py::test_leak_title_generation_follows_live_off_tier_runtime`,
+  `tests/hostile/test_preflight_hostile.py::test_each_builtin_task_hosted_is_flagged`.
+- Bound: [1](LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution).
+
+**H3. Side calls follow the main provider, but an image sent while the vision route is on `auto` may
+go to OpenRouter or Nous when the user holds a key for them.**
+- Code: Hermes `agent/auxiliary_client.py:_vision_auto_route` and `_get_provider_chain`; the plugin
+  reports the case with `preflight.py:auto_chain_readable` and `preflight.py:AUTO_CHAIN_KEYS`.
+- Tests: `tests/hostile/test_preflight_hostile.py::test_vision_auto_or_implicit_is_flagged_even_with_on_host_main`,
+  `tests/unit/test_preflight.py::test_auto_side_calls_stay_in_tier_with_a_note_while_an_openrouter_or_nous_credential_is_readable`.
+- Bound: [1](LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution).
+
+**H4. Any provider listed under `fallback_providers` can take a call.**
+- Code: Hermes `hermes_cli/fallback_config.py:get_fallback_chain`.
+- Tests: `tests/scenario/test_demo.py::test_control_unlocked_5xx_falls_back_to_openrouter`.
+- Bound: Smaller gaps: "A locked session has no fallback".
+
+**H5. Tools such as web search pass parts of what the user wrote on to outside sites.**
+- Code: Hermes `tools/`; the plugin classifies such tools as off-host with `gate_tools.py:classify_tool`.
+- Tests: `tests/seam/test_register.py::test_locked_web_search_asks_and_runs_only_on_exact_once` (shows the
+  plugin asking before `web_search` runs; no test here observes what the outside site receives).
+- Bound: [3](LIMITATIONS.md#3-shell-and-code-execution-tools-are-not-inspected).
 
 ## What the plugin does
 
@@ -91,9 +133,11 @@ mid-turn is recorded, not stopped.**
 - Code: main calls: `gate_llm.py:LlmGate.handle` (classifies, then refuses before `next_call`). Side
   calls: `__init__.py:_aux` and `__init__.py:_observe` write a `breach` row and mark the session
   breached.
-- Tests: `tests/seam/test_register.py::test_locked_off_tier_provider_is_refused_with_zero_provider_calls`,
+- Tests: `tests/hostile/test_gate_llm_hostile.py::test_off_tier_locked_refuses_with_zero_provider_requests`,
+  `tests/seam/test_gate_llm.py::test_locked_off_tier_refused`,
   `tests/seam/test_register.py::test_aux_call_to_off_tier_host_while_locked_is_a_breach`,
-  `tests/hostile/test_client_hostile.py::test_real_aux_sync_and_async_stay_on_the_attested_transport`.
+  `tests/hostile/test_client_hostile.py::test_real_aux_sync_and_async_stay_on_the_attested_transport`;
+  the live-runtime path: `tests/seam/test_register.py::test_locked_off_tier_provider_is_refused_with_zero_provider_calls`.
 - Bound: [1](LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution),
   [5](LIMITATIONS.md#5-safe-worker-mode-disables-hooks-and-middleware).
 
@@ -123,7 +167,8 @@ mid-turn is recorded, not stopped.**
   `auxiliary.<task>.fallback_chain` and `delegation.fallback_providers` must be empty or in-tier);
   `gate_llm.py:LlmGate.guarded_call` (a provider error becomes a refusal, so Hermes' fallback never
   arms); `gate_llm.py:LlmGate.handle` (a fallback re-entry to another provider is classified again);
-  `provider.py:classify_refusal` (`should_fallback: False`).
+  `provider.py:classify_refusal` (`should_fallback: False`, for NEAR's `NearRefusal` only; Hermes'
+  own classifier decides every other error, and `guarded_call` keeps the fallback unarmed).
 - Tests: `tests/hostile/test_preflight_hostile.py::test_fallback_providers_must_be_empty`,
   `tests/hostile/test_gate_llm_hostile.py::test_fallback_reentry_with_off_tier_provider_is_refused`,
   `tests/hostile/test_gate_llm_hostile.py::test_locked_in_tier_any_provider_error_refuses_once_without_failover`,
@@ -175,7 +220,7 @@ request byte, to the TLS key of the verified report the plugin accepted.**
   `tests/hostile/test_near_e2ee_hostile.py::test_tls_pin_mismatch_on_send_gets_a_row_drops_pools_and_reverifies`.
 - Bound: [9](LIMITATIONS.md#9-what-the-network-still-sees-and-what-the-receipt-leaks).
 
-**P9. The attestation fetch is not pinned; what it returns is checked by its signatures.**
+**P9. The attestation fetch is not pinned; the attestation the fetch returns is checked by the attestation's signatures.**
 - Code: `verify/near.py:NearAdapter._attest_pool` (unpinned) and `verify/near.py:appraise` (the
   certificate seen must carry the SPKI the gateway quote binds); Tinfoil: the SDK's own checks,
   required by `TinfoilAdapter._result_from_document`, and the TLS probe `TinfoilAdapter._probe_tls`.
@@ -185,7 +230,7 @@ request byte, to the TLS key of the verified report the plugin accepted.**
 - Bound: [8](LIMITATIONS.md#8-no-nonce-no-attested-time).
 
 **P10. On Tinfoil, text is encrypted to the enclave's key through the vendor's encrypted transport
-before it leaves the machine.**
+before the text leaves the machine.**
 - Code: `verify/tinfoil.py:TinfoilAdapter` (transport `ehbp`), `TinfoilAdapter.pinned_ehbp_sync_transport`,
   `TinfoilAdapter._observe_send` (records the HPKE key used); `gate_llm.py:send_record_detail`;
   `receipts.py:_send_coverage` (flags a send whose key differs from the covering verification's).
@@ -206,7 +251,7 @@ every reply is signed by that key.**
   `tests/unit/test_near.py::test_unstreamed_send_is_hashed_signed_and_verified_as_provider_tee`.
 - Bound: [14](LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open).
 
-**P12. The gateway cannot read the text; on NEAR it still sees images, the model id, settings,
+**P12. The gateway cannot read the text; on NEAR the gateway still sees images, the model id, settings,
 headers, sizes and timing, and a gateway that swapped the reply key would be caught only afterwards.**
 - Code: `verify/near_e2ee.py:PLAINTEXT_KEYS`, `verify/near_e2ee.py:_image_part`;
   `verify/near.py:NearAdapter.finish_exchange` (records `plaintext_keys` and `plaintext_parts`);
@@ -260,7 +305,7 @@ asks on every call.**
   cron config".
 
 **P17. Every model call is logged with its host and size, never its text, from the moment the plugin
-is enabled.**
+is enabled.** An installed plugin that is not enabled registers nothing and logs nothing.
 - Code: `gate_llm.py:LlmGate.handle` (unlocked `send_observed`), `__init__.py:_pre_api_request`,
   `__init__.py:_aux`, `__init__.py:_observe`; `ledger.py:FORBIDDEN_DETAIL_KEYS` and
   `ledger.py:Ledger.append`.
@@ -271,19 +316,37 @@ is enabled.**
 - Bound: [5](LIMITATIONS.md#5-safe-worker-mode-disables-hooks-and-middleware),
   [9](LIMITATIONS.md#9-what-the-network-still-sees-and-what-the-receipt-leaks).
 
-**P18. `hermes confidential status` shows where calls have gone.** UNTRACED as worded (see above).
-- Code: `commands.py:status_text` (`_main_route_line`, `_live_runtime_line`, breach state, this lock's
-  counts).
-- Tests: `tests/seam/test_commands.py::test_status_unlocked_and_locked`.
+**P18. `hermes confidential status` shows the configured route, the live runtime, breaches and this
+lock's refusal, ask and allow counts; `receipts` shows where each call went.**
+- Code: `commands.py:status_text` (`_main_route_line`, `_live_runtime_line`, the breach line,
+  `locking.py:period_counts`); `receipts.py:render_text` (the Sends section lists each call's host).
+- Tests: `tests/seam/test_commands.py::test_status_unlocked_and_locked`,
+  `tests/unit/test_receipts.py::test_every_kind_is_rendered_in_order`.
 - Bound: none.
 
 **P19. `hermes confidential watch` streams model calls live.**
 - Code: `watch.py:run`, `watch.py:latest`, `watch.py:format_row`; in chat, `commands.py:watch_text`
   shows the latest rows only.
-- Tests: `tests/unit/test_watch.py::test_streaming_polls_tail_for_new_rows`,
+- Tests: `tests/unit/test_watch.py::test_streaming_polls_tail_for_new_rows` (streams a `tool_refused`
+  row; the polling is the same for every kind), `tests/unit/test_watch.py::test_once_prints_header_and_every_row_without_ansi_when_not_a_tty`
+  (prints `send_observed`, `send_refused` and `breach` rows),
   `tests/unit/test_watch.py::test_unprintable_values_cannot_forge_lines`,
   `tests/seam/test_commands.py::test_cli_status_check_watch`.
 - Bound: [9](LIMITATIONS.md#9-what-the-network-still-sees-and-what-the-receipt-leaks).
+
+## Figure 2 caption
+
+**F1. With the plugin, the preflight checks every configured route, side calls go to the verified
+enclave, fallback is refused, tools ask, memory stays on the host, shell and code stay open on the
+host, and a ledger records model sends and tool answers.** P2, P1, P4, P13, L3 and P17 cover every
+part except memory and tool answers.
+- Code: memory: `preflight.py:run_preflight` (`memory.provider` must be on-host or the built-in);
+  tool answers: `gate_tools.py:build_post_approval_response` (`tool_allowed` and `tool_refused` rows).
+- Tests: `tests/unit/test_preflight.py::test_memory_external_off_tier`,
+  `tests/hostile/test_preflight_hostile.py::test_hosted_memory_provider_is_flagged`,
+  `tests/seam/test_register.py::test_locked_web_search_asks_and_runs_only_on_exact_once`.
+- Bound: [1](LIMITATIONS.md#1-auxiliary-calls-are-not-wrapped-by-llm_execution),
+  [3](LIMITATIONS.md#3-shell-and-code-execution-tools-are-not-inspected).
 
 ## The receipt
 
@@ -336,11 +399,12 @@ carries the enclave's signature over the exact bytes.**
 
 ## Three limits
 
-**L1. The attested tier admits only models served inside Tinfoil or NEAR enclaves; no Claude or GPT
-model can be in the tier.** The model-family list is UNTRACED (see above).
+**L1. The attested tier admits only models the two vendors serve inside enclaves; those are
+open-weight models such as the Qwen, DeepSeek, Llama and gpt-oss families, so a hosted frontier model
+cannot be in the tier.** The first half is enforced; the model half is a vendor fact and UNTRACED
+(see above).
 - Code: `tiers.py:AttestedPredicate.classify` (the provider must be one of
-  `locking.py:ATTESTED_PROFILES` and its host the profile's); `provider.py:near_models` (the NEAR
-  model allowlist).
+  `locking.py:ATTESTED_PROFILES` and its host the profile's).
 - Tests: `tests/unit/test_tiers.py::test_attested_provider_match_is_exact`,
   `tests/unit/test_tiers.py::test_attested_predicate_base_url_override_must_match_profile`,
   `tests/seam/test_near_seam.py::test_preflight_treats_attested_near_as_in_tier_and_other_providers_as_off_tier`.
@@ -349,7 +413,8 @@ model can be in the tier.** The model-family list is UNTRACED (see above).
 **L2. Because fallbacks are refused while locked, a vendor outage ends the turn instead of routing
 elsewhere.**
 - Code: `gate_llm.py:LlmGate.guarded_call` (`TEXT_PROVIDER_ERROR`); `provider.py:VerificationCache.ensure`
-  (`DEFAULT_VERIFY_WAIT_SECONDS`, 20 s, then `REASON_VERIFY_PENDING`); `provider.py:classify_refusal`.
+  (`DEFAULT_VERIFY_WAIT_SECONDS`, 20 s, then `REASON_VERIFY_PENDING`); `provider.py:classify_refusal`
+  (NEAR's `NearRefusal` only: retryable gateway errors stay on NEAR, never another provider).
 - Tests: `tests/hostile/test_gate_llm_hostile.py::test_locked_in_tier_any_provider_error_refuses_once_without_failover`,
   `tests/hostile/test_client_hostile.py::test_verify_hanging_on_first_call_create_client_is_bounded`,
   `tests/seam/test_near_seam.py::test_gateway_errors_keep_hermes_recovery_and_refusals_stay_fatal`.
@@ -423,6 +488,7 @@ config block.**
   `tests/seam/test_commands.py::test_setup_block_gives_vision_and_side_jobs_suitable_models`,
   `tests/seam/test_near_seam.py::test_setup_stops_when_the_main_model_attestation_is_unavailable`,
   `tests/hostile/test_integrated_hostile.py::test_cli_setup_terminal_asker_non_tty_never_pins_withstood`.
+  The chat refusal (`commands.py:handle_slash` returning `TERMINAL_ONLY["setup"]`) has no test.
 - Bound: Smaller gaps: "The first pin is trust on first use".
 
 **K6. `allow <tool>` lets an off-host tool run without asking for this lock, after asking the user.**
@@ -444,16 +510,19 @@ config block.**
 **K8. `pins` lists the approved pins, the pending pin and the tool grants.**
 - Code: `commands.py:pins_text`, `commands.py:_pin_lines`, `commands.py:_grant_lines`.
 - Tests: `tests/seam/test_commands.py::test_pins_approve_applies_only_on_explicit_approve` (asserts the
-  listing), `tests/hostile/test_near_cm_hostile.py::test_a_long_service_list_folds_into_a_count_and_pins_prints_every_line`.
+  approval history and the code fingerprint),
+  `tests/hostile/test_near_cm_hostile.py::test_a_long_service_list_folds_into_a_count_and_pins_prints_every_line`
+  (asserts the pending pin's lines). No test asserts the tool-grant lines of `pins`.
 - Bound: none.
 
 **K9. `pins review` runs in a terminal only and builds the review bundle for a pending pin.**
 - Code: `review.py:cli_review`, `review.py:build_bundle`, `review.py:entry_review`,
-  `review.py:fetch_compose`.
+  `review.py:fetch_compose`; the chat refusal is the `pins review` branch of `commands.py:handle_slash`.
 - Tests: `tests/unit/test_review.py::test_review_fetches_tags_then_the_prompt_pins_the_services`,
   `tests/unit/test_review.py::test_review_json_on_the_cli_validates_and_escapes`,
   `tests/unit/test_review.py::test_hostile_vendor_strings_are_rendered_inert`,
-  `tests/seam/test_commands.py::test_pins_review_with_nothing_pending_says_so`.
+  `tests/seam/test_commands.py::test_pins_review_with_nothing_pending_says_so`. The chat refusal has no
+  test.
 - Bound: Smaller gaps: "NEAR model entries need GitHub".
 
 **K10. `pins approve` approves the pending pin after asking the user.**
