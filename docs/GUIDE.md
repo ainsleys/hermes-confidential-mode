@@ -1054,7 +1054,7 @@ says each image leaves in plaintext to NEAR's gateway, and names the two ways to
 `TINFOIL_API_KEY` and a Tinfoil pin. An on-host vision route is off-tier on the attested tier.
 
 Setup attests the gateway with each model on its own, so one model whose attestation endpoint fails
-leaves the other usable. Each failure prints one line naming the model, the vendor and the HTTP
+leaves the other model usable. Each failure prints one line naming the model, the vendor and the HTTP
 status, such as `Qwen/Qwen3-VL-30B-A3B-Instruct: attestation unavailable (HTTP 503 from NEAR); vision
 left unset.` A vision model that fails is left out of the block, with a comment saying how to set
 `auxiliary.vision` before you lock. A main model that fails stops setup with one next step: try again
