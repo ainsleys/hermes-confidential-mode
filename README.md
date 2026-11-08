@@ -41,7 +41,9 @@ approved; `on-host-only` allows only your machine. While locked:
   answer (yolo, approvals off, cron, one-shot runs), the tool is blocked. Tool servers on
   off-tier remote hosts, scheduled jobs and routed delegation are blocked.
 - Every model call is logged with its host and size, never its text, from the moment the plugin is
-  installed. `hermes confidential status` shows where calls have gone; `watch` streams them live.
+  enabled. `hermes confidential status` shows the configured route, the live runtime, breaches and
+  this lock's refusal, ask and allow counts; `receipts` shows where each call went, and `watch`
+  streams the calls live.
 
 **The receipt.** When you want, you render a receipt for the current session or any past one. It is
 built from the plugin's log: every model call, the lock period, the enclave build that was verified,
@@ -50,10 +52,10 @@ JSON that carries the evidence; the evidence is signed by the enclave's hardware
 NEAR each reply carries the enclave's signature over the exact bytes, so anyone can re-check the JSON
 form offline with `hermes confidential replay`.
 
-**Three limits before you rely on this.** The attested tier admits only models served inside Tinfoil
-or NEAR enclaves, open-weight families such as Qwen, DeepSeek, Llama and gpt-oss; no Claude or GPT
-model can be in the tier, and because fallbacks are refused while locked, a vendor outage ends the
-turn instead of routing elsewhere. The agent can still run shell commands and code, and the plugin
+**Three limits before you rely on this.** The attested tier admits only models the two vendors serve
+inside enclaves; those are open-weight models such as the Qwen, DeepSeek, Llama and gpt-oss families,
+so a hosted frontier model cannot be in the tier. Because fallbacks are refused while locked, a vendor
+outage ends the turn instead of routing elsewhere. The agent can still run shell commands and code, and the plugin
 does not look inside them, so a command such as `curl` could send text anywhere; every receipt says
 so. And the receipt itself is written by the plugin on your machine, so someone else can trust only
 its signed evidence.
