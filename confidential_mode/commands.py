@@ -1005,6 +1005,15 @@ def cli_setup_near(rt: Any, args: Any, out=None) -> int:
         verified, failed = attest_near_models(adapter, [model, vision])
         for m, exc in failed.items():
             line = near_model_failure(m, exc)
+            try:   # review L3: the watch view shows each model that did not verify
+                rt.ledger.append({"ts": time.time(), "session_id": "", "kind": "verify_fail", "purpose": "verify",
+                                  "provider": _locking.NEAR_PROFILE_NAME, "host": getattr(adapter, "host", ""),
+                                  "model": m, "surface": "cli-setup",
+                                  "detail": {"vendor": "near", "source": "setup", "model": m,
+                                             "error_type": type(exc).__name__, "error": str(exc)[:300],
+                                             "reason": line[:300], "enclave_host": getattr(adapter, "host", "")}})
+            except Exception:  # noqa: BLE001 - setup still reports the failure on the terminal
+                pass
             if m == model:
                 out.write(f"{line}; setup stopped, because {m} is the main model.\n")
             else:

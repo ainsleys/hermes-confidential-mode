@@ -1059,7 +1059,8 @@ status, such as `Qwen/Qwen3-VL-30B-A3B-Instruct: attestation unavailable (HTTP 5
 left unset.` A vision model that fails is left out of the block, with a comment saying how to set
 `auxiliary.vision` before you lock. A main model that fails stops setup with one next step: try again
 in a few minutes for a 5xx status, or check the model id for a 404. `check` and `on` name the model
-and the status the same way in the failing row.
+and the status the same way in the failing row, and each model that fails in setup writes a
+`verify_fail` row that `watch` shows.
 
 Set `NEAR_AI_API_KEY` for inference and install `pynacl`. `scripts/near_first_contact.py` runs the
 same checks and one signed send, and prints no secrets.

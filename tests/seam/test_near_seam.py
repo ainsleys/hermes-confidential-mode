@@ -530,6 +530,9 @@ def test_setup_reports_a_vision_model_whose_attestation_is_unavailable_and_conti
     code, out = _setup_near(plugin, MODEL, VISION)
     assert code == 0, out
     assert f"{VISION}: attestation unavailable (HTTP 503 from NEAR); vision left unset.\n" in out
+    fails = [e for e in plugin.rt.ledger.tail(0) if e.kind == "verify_fail"]
+    assert [(e.model, e.detail["source"]) for e in fails] == [(VISION, "setup")]
+    assert f"verify_fail: {VISION}: attestation unavailable (HTTP 503 from NEAR)" in plugin.slash("watch")
     assert f"Verified {HOST}#{MODEL}:" in out                 # the main model verified on its own
     import hermes_yaml
     cfg = hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Next steps:")])
