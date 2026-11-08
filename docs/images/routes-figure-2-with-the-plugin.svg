@@ -1,79 +1,70 @@
-<svg xmlns="http://www.w3.org/2000/svg" font-family="IBM Plex Sans, Helvetica Neue, Arial, sans-serif" viewBox="0 40 900 520" role="img" aria-label="The same six arrows pass through a preflight gate. Main chat and side calls go to the verified enclave. Fallback is refused at lock time, tools ask first, memory must be the built-in store, shell and code remain open and uninspected. A ledger records model sends and tool answers and produces a receipt.">
-      <defs>
-        <marker id="m2-locked" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1f7a4d"/></marker>
-        <marker id="m2-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b4541a"/></marker>
-        <marker id="m2-shut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5b5f5c"/></marker>
-      </defs><rect x="0" y="40" width="900" height="520" fill="#fbfaf7"/>
-      <!-- the profile -->
-      <rect x="20" y="70" width="200" height="386" rx="6" fill="#f1f0ea" stroke="#1f2320" stroke-width="1.2"/>
-      <text x="120" y="100" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2320">Your Hermes profile</text>
-      <text x="120" y="124" text-anchor="middle" font-size="12" fill="#5f655f">locked: attested tier</text>
-      <text x="120" y="148" text-anchor="middle" font-size="12" fill="#1f2320">messages you type</text>
-      <text x="120" y="166" text-anchor="middle" font-size="12" fill="#1f2320">files the agent reads</text>
-      <text x="120" y="184" text-anchor="middle" font-size="12" fill="#1f2320">tool results</text>
-      <text x="120" y="202" text-anchor="middle" font-size="12" fill="#1f2320">memory it keeps</text>
+<svg xmlns="http://www.w3.org/2000/svg" font-family="IBM Plex Sans, Helvetica Neue, Arial, sans-serif" viewBox="0 0 900 500" role="img" aria-label="Six routes leave a locked Hermes profile. A preflight, run at lock and before every turn, crosses five of them. Main chat and side calls go only to the verified enclave; a side call that strays mid-turn is recorded, not stopped. Fallback is refused and a failed request ends the turn. Tools outside the on-host list ask once per lock in each conversation and are blocked under yolo and unattended runs. Memory must be the built-in store. Shell, code and command MCP servers stay open on this host and are listed as unproven in the receipt. Dots mark where ledger rows are written on this host.">
+  <style>
+    svg { color: #1f2320; }
+    .muted { opacity: 0.72; }
+    .open-s { stroke: #b4541a; }
+    .open-f { fill: #b4541a; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #e6edf3; }
+      .open-s { stroke: #f0883e; }
+      .open-f { fill: #f0883e; }
+    }
+  </style>
+  <defs>
+    <marker id="b-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="b-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="open-f"/></marker>
+  </defs>
 
-      <!-- preflight gate: a bar every configured route crosses at lock time -->
-      <rect x="319" y="100" width="6" height="256" rx="3" fill="#5b5f5c"/>
-      <rect x="319" y="380" width="6" height="76" rx="3" fill="#5b5f5c"/>
-      <text x="232" y="60" font-size="12.5" font-weight="600" fill="#1f2320">Preflight, at lock time</text>
-      <text x="232" y="78" font-size="11.5" fill="#5f655f">every configured route in-tier, or no lock</text>
-      <text x="232" y="92" font-size="11.5" fill="#5f655f">side calls · delegation · TTS · MCP · fallbacks · not shell, code or command MCP</text>
+  <!-- the locked profile -->
+  <rect x="20" y="76" width="160" height="372" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+  <text x="100" y="267" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">Locked profile</text>
 
-      <!-- ledger bus: every model send and tool answer is recorded on the way out -->
-      <line x1="541" y1="120" x2="541" y2="470" stroke="#1f2320" stroke-width="1" stroke-dasharray="3 3"/>
-      <circle cx="541" cy="120" r="3.5" fill="#1f2320"/>
-      <circle cx="541" cy="182" r="3.5" fill="#1f2320"/>
-      <circle cx="541" cy="244" r="3.5" fill="#1f2320"/>
-      <circle cx="541" cy="306" r="3.5" fill="#1f2320"/>
+  <!-- preflight: checks the configured routes at lock and before every turn; not shell, code or command MCP -->
+  <line x1="250" y1="80" x2="250" y2="372" stroke="currentColor" stroke-width="2" stroke-dasharray="2 4" stroke-linecap="round"/>
+  <text x="250" y="60" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">preflight · at lock, every turn</text>
 
-      <!-- rows 1-2 · main chat and side calls · one tall enclave box -->
-      <line x1="220" y1="120" x2="566" y2="120" stroke="#1f7a4d" stroke-width="1.6" marker-end="url(#m2-locked)"/>
-      <text x="434" y="112" text-anchor="middle" font-size="12.5" fill="#1f2320">main chat</text>
-      <line x1="220" y1="182" x2="566" y2="182" stroke="#1f7a4d" stroke-width="1.6" marker-end="url(#m2-locked)"/>
-      <text x="434" y="174" text-anchor="middle" font-size="12.5" fill="#1f2320">side calls · in-tier or no lock</text>
-      <text x="434" y="198" text-anchor="middle" font-size="11.5" fill="#5f655f">19+ kinds, rechecked each turn</text>
-      <text x="434" y="212" text-anchor="middle" font-size="11.5" fill="#5f655f">a stray one is logged, not stopped</text>
-      <rect x="570" y="94" width="310" height="114" rx="5" fill="#dff1e6" stroke="#1f7a4d" stroke-width="1.6"/>
-      <text x="586" y="118" font-size="13" font-weight="600" fill="#1f2320">Attested enclave (Tinfoil)</text>
-      <text x="586" y="138" font-size="11.5" fill="#5f655f">a verification under 5 min old before each send</text>
-      <text x="586" y="156" font-size="11.5" fill="#5f655f">enclave build pinned</text>
-      <text x="586" y="174" font-size="11.5" fill="#5f655f">a new code build needs a human's yes</text>
-      <text x="586" y="192" font-size="11.5" fill="#5f655f">side calls use the same verified client</text>
+  <!-- row 1 and 2 · main chat and side calls -> verified enclave -->
+  <line x1="180" y1="104" x2="556" y2="104" stroke="currentColor" stroke-width="1.6" marker-end="url(#b-head)"/>
+  <text x="380" y="96" text-anchor="middle" font-size="13" fill="currentColor">main chat</text>
+  <line x1="180" y1="154" x2="556" y2="154" stroke="currentColor" stroke-width="1.6" marker-end="url(#b-head)"/>
+  <text x="380" y="146" text-anchor="middle" font-size="13" fill="currentColor">side calls</text>
+  <rect x="560" y="80" width="320" height="98" rx="5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+  <text x="576" y="124" font-size="13" font-weight="600" fill="currentColor">Verified enclave only</text>
+  <text x="576" y="144" font-size="12" fill="currentColor" class="muted">a stray side call is recorded, not stopped</text>
 
-      <!-- row 3 · fallback · refused at lock time -->
-      <line x1="220" y1="244" x2="566" y2="244" stroke="#5b5f5c" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#m2-shut)"/>
-      <text x="434" y="236" text-anchor="middle" font-size="12.5" fill="#1f2320">fallback</text>
-      <rect x="570" y="218" width="310" height="52" rx="5" fill="#e6e6e2" stroke="#5b5f5c" stroke-width="1.6"/>
-      <text x="586" y="235" font-size="13" font-weight="600" fill="#1f2320">None allowed</text>
-      <text x="586" y="250" font-size="11.5" fill="#5f655f">lock refused while one is set</text>
-      <text x="586" y="264" font-size="11.5" fill="#5f655f">a failed request ends the turn</text>
+  <!-- row 3 · fallback -> refused -->
+  <line x1="180" y1="214" x2="556" y2="214" stroke="currentColor" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#b-head)"/>
+  <text x="380" y="206" text-anchor="middle" font-size="13" fill="currentColor">fallback</text>
+  <rect x="560" y="192" width="320" height="48" rx="5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <text x="576" y="212" font-size="13" font-weight="600" fill="currentColor">Refused</text>
+  <text x="576" y="230" font-size="12" fill="currentColor" class="muted">a failed request ends the turn</text>
 
-      <!-- row 4 · tools · guarded at runtime -->
-      <line x1="220" y1="306" x2="566" y2="306" stroke="#5b5f5c" stroke-width="1.6" marker-end="url(#m2-shut)"/>
-      <text x="434" y="298" text-anchor="middle" font-size="12.5" fill="#1f2320">tools · web, messaging, browser</text>
-      <rect x="570" y="280" width="310" height="52" rx="5" fill="#e6e6e2" stroke="#5b5f5c" stroke-width="1.6"/>
-      <text x="586" y="297" font-size="13" font-weight="600" fill="#1f2320">Asks you first</text>
-      <text x="586" y="312" font-size="11.5" fill="#5f655f">a session or always answer stops the asking</text>
-      <text x="586" y="326" font-size="11.5" fill="#5f655f">blocked under yolo, approvals off, unattended</text>
+  <!-- row 4 · tools outside the on-host list -> ask once per lock -->
+  <line x1="180" y1="276" x2="556" y2="276" stroke="currentColor" stroke-width="1.6" marker-end="url(#b-head)"/>
+  <text x="380" y="268" text-anchor="middle" font-size="13" fill="currentColor">off-list tools</text>
+  <rect x="560" y="254" width="320" height="64" rx="5" fill="none" stroke="currentColor" stroke-width="1.2"/>
+  <text x="576" y="274" font-size="13" font-weight="600" fill="currentColor">Ask once per lock</text>
+  <text x="576" y="292" font-size="12" fill="currentColor" class="muted">in each conversation</text>
+  <text x="576" y="308" font-size="12" fill="currentColor" class="muted">blocked under yolo or unattended</text>
 
-      <!-- row 5 · shell and code · still open -->
-      <line x1="220" y1="368" x2="566" y2="368" stroke="#b4541a" stroke-width="1.6" marker-end="url(#m2-open)"/>
-      <text x="434" y="360" text-anchor="middle" font-size="12.5" fill="#1f2320">shell · code · command MCP</text>
-      <rect x="570" y="342" width="310" height="52" rx="5" fill="#fbe9dc" stroke="#b4541a" stroke-width="1.6"/>
-      <text x="586" y="362" font-size="13" font-weight="600" fill="#1f2320">Still open: on this host, can reach the network</text>
-      <text x="586" y="380" font-size="11.5" fill="#5f655f">not inspected · listed as unproven in the receipt</text>
+  <!-- row 5 · memory -> built-in store -->
+  <line x1="180" y1="356" x2="556" y2="356" stroke="currentColor" stroke-width="1.6" marker-end="url(#b-head)"/>
+  <text x="380" y="348" text-anchor="middle" font-size="13" fill="currentColor">memory</text>
+  <rect x="560" y="332" width="320" height="48" rx="5" fill="none" stroke="currentColor" stroke-width="1.2"/>
+  <text x="576" y="361" font-size="13" font-weight="600" fill="currentColor">Built-in store only</text>
 
-      <!-- row 6 · memory · lock condition -->
-      <line x1="220" y1="430" x2="566" y2="430" stroke="#5b5f5c" stroke-width="1.6" marker-end="url(#m2-shut)"/>
-      <text x="434" y="422" text-anchor="middle" font-size="12.5" fill="#1f2320">memory</text>
-      <rect x="570" y="404" width="310" height="52" rx="5" fill="#e6e6e2" stroke="#5b5f5c" stroke-width="1.6"/>
-      <text x="586" y="424" font-size="13" font-weight="600" fill="#1f2320">Built-in store only</text>
-      <text x="586" y="442" font-size="11.5" fill="#5f655f">lock refused for an external one</text>
+  <!-- row 6 · shell, code, command MCP -> still open (accent) -->
+  <line x1="180" y1="421" x2="556" y2="421" class="open-s" stroke-width="1.8" marker-end="url(#b-open)"/>
+  <text x="380" y="413" text-anchor="middle" font-size="13" fill="currentColor">shell · code · command MCP</text>
+  <rect x="560" y="394" width="320" height="54" rx="5" fill="none" class="open-s" stroke-width="1.8"/>
+  <text x="576" y="416" font-size="13" font-weight="600" fill="currentColor">Open on this host</text>
+  <text x="576" y="434" font-size="12" fill="currentColor" class="muted">reaches the network · unproven</text>
 
-      <!-- ledger band -->
-      <rect x="20" y="478" width="860" height="70" rx="6" fill="#f1f0ea" stroke="#1f2320" stroke-width="1.2"/>
-      <text x="36" y="500" font-size="13" font-weight="600" fill="#1f2320">Ledger on this host, written at each dot → receipt at the end</text>
-      <text x="36" y="519" font-size="11.5" fill="#5f655f">records every model send (purpose, host, bytes) and every tool question and answer · never the text itself</text>
-      <text x="36" y="537" font-size="11.5" fill="#5f655f">receipt: where the text went (self-reported) · enclave evidence anyone holding the receipt can replay offline · the fixed list of what it cannot prove</text>
-    </svg>
+  <!-- ledger rows on this host -->
+  <circle cx="500" cy="104" r="4" fill="currentColor"/>
+  <circle cx="500" cy="154" r="4" fill="currentColor"/>
+  <circle cx="500" cy="214" r="4" fill="currentColor"/>
+  <circle cx="500" cy="276" r="4" fill="currentColor"/>
+  <circle cx="186" cy="478" r="4" fill="currentColor"/>
+  <text x="198" y="482" font-size="12.5" fill="currentColor">ledger row on this host</text>
+</svg>
