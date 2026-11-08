@@ -470,10 +470,10 @@ excerpt on a typical OpenRouter setup:
 ```
 confidential preflight: tier=attested FAIL (26 item(s)) fingerprint=3b1b1f8f92a4
 KEY                                      VALUE                                     VERDICT   FIX
-model.provider                           openrouter                                off_tier  set model.provider/model.base_url to an in-tier route (provider openrouter is not an attested profile)
+model.provider                           openrouter                                off_tier  set model.provider: attested-tinfoil or attested-near (hermes confidential setup prints the whole block) (provider openrouter is not an attested profile)
 fallback_providers[0]                    provider=openrouter, model=deepseek/d...  off_tier  remove fallback_providers entries while locked
 auxiliary.vision.provider                auto                                      off_tier  set auxiliary.vision.provider (or auxiliary.vision.base_url) explicitly: attested-tinfoil (or attested-near), with a vision model; ...
-auxiliary.compression.provider           deepinfra                                 off_tier  set auxiliary.compression.provider/auxiliary.compression.base_url to an in-tier route (provider deepinfra is not an attested profile)
+auxiliary.compression.provider           deepinfra                                 off_tier  set auxiliary.compression.provider: attested-tinfoil (or attested-near) (provider deepinfra is not an attested profile)
 auxiliary.* (17 tasks)                   inherit the main route                    off_tier  the main route is off_tier: fix model.provider, or set auxiliary.<task>.provider: attested-tinfoil (or attested-near) (check --verbose lists each task)
 ...
 memory.provider                          honcho                                    off_tier  set memory.provider: "" (built-in on-host memory) while locked

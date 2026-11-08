@@ -434,13 +434,14 @@ def _attested_providers_in_use(config: Mapping, tasks: Sequence[str], plugins: M
 ON_HOST_EXAMPLE_URL = "http://127.0.0.1:11434/v1"
 
 
-def provider_value_hint(tier: Tier, main_provider: str) -> str:
+def provider_value_hint(tier: Tier, main_provider: str, main_ok: bool = True) -> str:
     """The provider value a FIX tells you to write (Amendment 14): the main provider's name when it is a
-    provider the tier can use, else the tier's own values."""
+    provider the tier can use (on `on-host-only`, only while the main route passes), else the tier's own
+    values."""
     p = _s(main_provider).lower()
     if tier == Tier.ATTESTED:
         return p if p in ATTESTED_KEY_ENVS else "attested-tinfoil (or attested-near)"
-    if p and p not in _AUTO and p not in _CODEX and p != _MOA and p != "main":
+    if main_ok and p and p not in _AUTO and p not in _CODEX and p != _MOA and p != "main":
         return f"{p} (with a base_url on this machine)"
     return f"custom, with base_url {ON_HOST_EXAMPLE_URL} or another server on this machine"
 
@@ -450,6 +451,18 @@ def _main_provider_fix(tier: Tier) -> str:
         return ("model.provider: attested-tinfoil or attested-near (hermes confidential setup prints the whole "
                 "block)")
     return f"model.provider: custom and model.base_url: {ON_HOST_EXAMPLE_URL} (a model server on this machine)"
+
+
+def route_fix(tier: Tier, prefix: str, provider: str, base_url: str, reason: str, value: str) -> str:
+    """The FIX for an explicit route that fails (review SF2): the value to write, never only "an in-tier
+    route". A provider the tier can use whose route still fails says why; an on-host route with an off-host
+    base_url names a base_url on this machine; any other provider names ``value``."""
+    p = _s(provider).lower()
+    if tier == Tier.ATTESTED and p in ATTESTED_KEY_ENVS:
+        return f"{prefix}.provider is {p}; that route does not pass yet ({reason})"
+    if tier == Tier.ON_HOST and _s(base_url):
+        return f"set {prefix}.base_url to a server on this machine, such as {ON_HOST_EXAMPLE_URL} ({reason})"
+    return f"set {prefix}.provider: {value} ({reason})"
 
 
 def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plugin_aux_tasks: Sequence[Any],
@@ -493,7 +506,11 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     elif pin_is_the_cause(main_reason):
         main_fix = PIN_FIX
     else:
-        main_fix = f"set model.provider/model.base_url to an in-tier route ({main_reason})"
+        main_fix = (f"set {_main_provider_fix(tier)} ({main_reason})"
+                    if not (tier == Tier.ATTESTED and main_provider in ATTESTED_KEY_ENVS)
+                    and not (tier == Tier.ON_HOST and _s(block.get("base_url"))) else
+                    route_fix(tier, "model", main_provider, _s(block.get("base_url")), main_reason, ""))
+    hint = provider_value_hint(tier, main_provider, main_verdict in PASSING)
     add("model.provider", block.get("provider", ""), main_verdict, main_fix)
     add("model.default", _main_model(block), main_verdict, main_fix)
     if _s(block.get("base_url")):
@@ -527,7 +544,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             # Hermes ignores a non-dict block (treats it as auto); never let junk pass silently.
             add(f"{prefix}", raw_block, OFF_TIER, f"{prefix} must be a mapping with provider/model/base_url")
         if task == "vision" and provider in _AUTO and not base_url:
-            add(f"{prefix}.provider", cfg.get("provider") or "auto", OFF_TIER, _VISION_FIX.format(p=prefix, hint=provider_value_hint(tier, main_provider)))
+            add(f"{prefix}.provider", cfg.get("provider") or "auto", OFF_TIER, _VISION_FIX.format(p=prefix, hint=hint))
         elif (provider in _AUTO or provider == "main") and not base_url:
             # "auto"/"" resolve to the main route (text tasks); "main" is the main route for every task.
             shown = f"{cfg.get('provider') or 'auto'} -> {main_provider or 'auto'}"
@@ -538,13 +555,13 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             add(f"{prefix}.provider", shown, main_verdict,
                 INHERIT_FIX if pin_is_the_cause(main_reason) else
                 f"inherits the main route: fix model.provider, or set {prefix}.provider: "
-                f"{provider_value_hint(tier, main_provider)}", group="inherit")
+                f"{hint}", group="inherit")
         else:
             if provider == "main":  # "main" + base_url: main provider identity on an explicit endpoint
                 cfg = {**cfg, "provider": main_provider}
             v, reason = _route_item_verdict(ctx, cfg, purpose)
             fix = PIN_FIX if pin_is_the_cause(reason) else \
-                f"set {prefix}.provider/{prefix}.base_url to an in-tier route ({reason})"
+                route_fix(tier, prefix, _s(cfg.get("provider")), base_url, reason, hint)
             add(f"{prefix}.provider", cfg.get("provider") or "auto", v, fix)
             if base_url:
                 add(f"{prefix}.base_url", base_url, v, fix)
@@ -558,12 +575,12 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                 continue
             ep = _s(entry.get("provider")).lower()
             if ep in _AUTO:
-                add(key, entry, OFF_TIER, f"set {key}.provider: {provider_value_hint(tier, main_provider)}, or "
+                add(key, entry, OFF_TIER, f"set {key}.provider: {hint}, or "
                                           "remove the entry")
                 continue
             v, reason = _route_item_verdict(ctx, entry, f"{purpose}:fallback")
             add(key, entry, v, PIN_FIX if pin_is_the_cause(reason) else
-                f"remove {key} or point it at an in-tier route ({reason})")
+                f"remove {key}, or " + route_fix(tier, key, ep, _s(entry.get("base_url")), reason, hint))
 
     # delegation (delegate_task children; tools/delegate_tool.py resolves these like a main route)
     deleg = config.get("delegation")

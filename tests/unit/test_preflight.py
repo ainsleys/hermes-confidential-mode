@@ -192,7 +192,7 @@ def test_aux_explicit_provider_and_base_url():
                                  "compression": {"provider": "custom", "base_url": "https://api.example.com/v1"}})
     r = run(bad)
     i = item(r, "auxiliary.compression.base_url")
-    assert i.verdict == "off_tier" and "auxiliary.compression.provider" in i.fix
+    assert i.verdict == "off_tier" and "set auxiliary.compression.base_url to a server on this machine" in i.fix
 
 
 def test_aux_moa_provider_off_tier():
@@ -400,7 +400,7 @@ def test_a_pending_pin_is_named_as_the_fix_not_the_route():
     assert item(r, "delegation.provider").fix == "inherits the main route; fix the main route first"
     # Another cause keeps the route fix.
     r = run(cfg, tier=Tier.ATTESTED, pred=attested_pred(ok=False), profile="attested-tinfoil")
-    assert item(r, "model.provider").fix.startswith("set model.provider/model.base_url to an in-tier route")
+    assert item(r, "model.provider").fix.startswith("model.provider is attested-tinfoil; that route does not pass yet")
 
 
 def test_attested_tier_profile_missing():
@@ -868,3 +868,21 @@ def test_a_passing_group_collapses_too():
     r = run(base_config())
     short = format_report(r, collapse=True)
     assert r.ok and "auxiliary.* (" in short and "PASS" in short.splitlines()[0]
+
+
+def test_explicit_off_tier_routes_name_the_value_to_write_on_both_tiers():
+    """Review SF2: an explicit off-tier main provider (the common first run: openrouter), an explicit off-tier
+    auxiliary provider and an auxiliary fallback entry each name a value, never only "an in-tier route"."""
+    cfg = base_config(model={"provider": "openrouter", "default": "x"},
+                      auxiliary={"vision": {"provider": "custom", "base_url": ON_HOST_URL},
+                                 "compression": {"provider": "deepinfra",
+                                                 "fallback_chain": [{"provider": "openrouter", "model": "y"}]}})
+    for tier, want, pred in ((Tier.ATTESTED, "attested-tinfoil", attested_pred()),
+                             (Tier.ON_HOST, "custom", on_host_pred())):
+        r = run(cfg, tier=tier, pred=pred, keys=())
+        text = format_report(r)
+        assert "an in-tier route" not in text and "an in-tier provider" not in text, text
+        for key in ("model.provider", "auxiliary.compression.provider", "auxiliary.compression.fallback_chain[0]"):
+            fix = item(r, key).fix
+            assert want in fix and "openrouter (with" not in fix, (tier, key, fix)
+        assert item(r, "model.provider").fix.startswith("set model.provider: ")
