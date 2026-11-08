@@ -524,7 +524,7 @@ Branch `ux-pass-2`, from `fix-pass-3`. Each bullet answers a finding of the seco
 
 ## Amendment 15 (2026-11-08): one module for Hermes' private names (hermes_compat)
 
-Branch `cleanup-compat`, from `0a0dd42`. Extends Amendments 10 and 13 (catalog rule 9).
+Branch `cleanup-compat`, from `32842ae`. Extends Amendments 10 and 13 (catalog rule 9).
 
 - `confidential_mode/hermes_compat.py` is the only plugin module that imports an undocumented Hermes core module, and the only one that reads a private attribute of a Hermes object. Each private name has one accessor; its docstring names the Hermes symbol, the commit it was verified at (`HERMES_VERIFIED_COMMIT = "84a0301"`), the call site that uses it and that call site's fallback. The accessors:
   - YAML: `hermes_yaml`, `yaml_module` (hermes_yaml, else PyYAML).

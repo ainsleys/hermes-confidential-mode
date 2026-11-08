@@ -59,7 +59,8 @@ def _private_uses(tree: ast.AST, hermes: set[str]) -> list[tuple[int, str]]:
     * ``sys.modules["m"]`` and ``sys.modules.get / pop / setdefault("m")`` with a literal name.
 
     Out of reach, and left to review: module names built at run time (``"tools." + x``),
-    ``getattr(__import__(...), ...)``, ``builtins.__import__`` and ``_`` attributes on values returned by calls.
+    ``getattr(__import__(...), ...)``, ``builtins.__import__``, ``_`` attributes on values returned by calls, and
+    ``_`` attributes on a ``sys.modules[...]`` subscript.
     """
     out: list[tuple[int, str]] = []
     bound: dict[str, str] = {}
