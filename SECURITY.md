@@ -16,8 +16,8 @@ and receipts that carry private data before you attach anything.
 
 ## Scope
 
-In scope: the plugin's own code in this repository. That is `__init__.py`, everything under
-`confidential_mode/`, `scripts/`, and the claims the [README](README.md) makes about that code. A
+In scope: the plugin's own code in this repository, meaning `__init__.py`, everything under
+`confidential_mode/` and `scripts/`, and the claims the [README](README.md) makes about that code. A
 report that the code does not do what the README or [docs/CLAIMS.md](docs/CLAIMS.md) says the code does is
 in scope.
 
@@ -70,8 +70,9 @@ The plugin's code keeps these rules. A change that breaks one is a vulnerability
   the key Hermes resolved and passed to `create_client`. The plugin reads no `.env` file, no
   `auth.json`, nothing under `~/.tinfoil`, no keychain, and no key from `os.environ` itself.
 - **Presence checks never read the value out.** `OPENROUTER_API_KEY` and `NOUS_API_KEY` are checked
-  only for whether each variable is set, through the same secret scope. `preflight.py:key_state` returns "set",
-  "not set" or "not readable in this scope", never the value or its length.
+  only for whether each variable is set, through the same secret scope. `preflight.py:key_state`
+  reads the secret scope and, for presence only, a route's `api_key` in `config.yaml`; the function
+  returns "set", "not set" or "not readable in this scope", never the value or its length.
 - **Keys are never logged or stored.** No log line, ledger row, receipt or pins file carries a key.
   The ledger rejects rows whose detail carries conversation-shaped keys (`ledger.py:FORBIDDEN_DETAIL_KEYS`),
   and the preflight table redacts secret-looking config values (`preflight.py:redact_value`).
