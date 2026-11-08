@@ -279,6 +279,7 @@ except where noted.
 - [docs/COSTS.md](docs/COSTS.md): what locking costs in latency, quality and task success.
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md): every gap, and the change that would close it.
 - [docs/DISCLOSURE.md](docs/DISCLOSURE.md): what the plugin touches on your machine and the network.
+- [docs/CLAIMS.md](docs/CLAIMS.md): where each claim is enforced and tested.
 
 ## Prior work
 
