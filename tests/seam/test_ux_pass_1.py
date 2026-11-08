@@ -34,7 +34,7 @@ def test_a_lock_with_a_pin_pending_says_so_in_the_reply_and_in_status(plugin, mo
     out = plugin.slash("on attested")
     first, disclosures, details, second = out.split("\n")
     assert first.startswith("Locked to Tinfoil, llama3-3-70b at router.tinfoil.invalid; verified ")
-    assert disclosures == ("Off-host tools ask the first time per lock. Shell and code execution are not inspected. Auxiliary calls "
+    assert disclosures == ("Off-host tools ask the first time per lock in each conversation. Shell and code execution are not inspected. Auxiliary calls "
                            "are recorded, not refused. Not active in safe-worker mode.")
     assert details == "Details: hermes confidential status --verbose; docs/LIMITATIONS.md"
     assert second.startswith("A pin update for tinfoil is pending (1 entry). This lock uses the approved builds")

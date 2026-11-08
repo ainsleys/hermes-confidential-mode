@@ -517,7 +517,7 @@ In a terminal, refusals and breaches print in red and off-tier verdicts in yello
 4. Builds the tool allowlist from the tools registered in Hermes at that moment, and saves it to disk
    tagged with this lock's identity.
 5. Replies in three lines: what is locked; the four limits (off-host tools ask the first time per
-   lock, or each call under `confidential.tools.ask: each_call`; shell and code execution aren't
+   lock in each conversation, or each call under `confidential.tools.ask: each_call`; shell and code execution aren't
    inspected; auxiliary calls are recorded, not refused; and locked mode isn't active in safe-worker
    mode); and where the details are. `hermes confidential status --verbose` groups the
    allowlist into tools that run on this host, tools that ask, and tools that are blocked.

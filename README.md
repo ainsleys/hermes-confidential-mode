@@ -132,7 +132,7 @@ the first time that tool would send data off the machine, on both tiers.
 ```
 $ hermes confidential on attested
 Locked to Tinfoil, llama3-3-70b at router-0.tinfoil.sh; verified 4 s ago.
-Off-host tools ask the first time per lock. Shell and code execution are not inspected. Auxiliary calls are recorded, not refused. Not active in safe-worker mode.
+Off-host tools ask the first time per lock in each conversation. Shell and code execution are not inspected. Auxiliary calls are recorded, not refused. Not active in safe-worker mode.
 Details: hermes confidential status --verbose; docs/LIMITATIONS.md
 ```
 

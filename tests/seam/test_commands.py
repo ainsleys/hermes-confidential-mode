@@ -232,7 +232,7 @@ def test_attested_lock_message_and_refusal_reason_without_network(plugin, monkey
     monkeypatch.setenv("TINFOIL_API_KEY", "test-key")
     out = plugin.slash("on attested")
     assert out == ("Locked to Tinfoil, llama3-3-70b at router.tinfoil.invalid; verified 42 s ago.\n"
-                   "Off-host tools ask the first time per lock. Shell and code execution are not inspected. Auxiliary calls are "
+                   "Off-host tools ask the first time per lock in each conversation. Shell and code execution are not inspected. Auxiliary calls are "
                    "recorded, not refused. Not active in safe-worker mode.\n"
                    "Details: hermes confidential status --verbose; docs/LIMITATIONS.md"), out
     assert "LOCKED (attested)" in plugin.slash("status")

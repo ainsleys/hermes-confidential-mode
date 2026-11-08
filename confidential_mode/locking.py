@@ -259,7 +259,7 @@ _DISCLOSURES_TAIL = ("Shell and code execution are not inspected. Auxiliary call
                      "Not active in safe-worker mode.")
 #: By confidential.tools.ask (Amendment 13); LOCK_DISCLOSURES is the default mode's text.
 LOCK_DISCLOSURES_BY_MODE = {
-    "once_per_lock": f"Off-host tools ask the first time per lock. {_DISCLOSURES_TAIL}",
+    "once_per_lock": f"Off-host tools ask the first time per lock in each conversation. {_DISCLOSURES_TAIL}",
     "each_call": f"Off-host tools ask each call. {_DISCLOSURES_TAIL}",
 }
 LOCK_DISCLOSURES = LOCK_DISCLOSURES_BY_MODE["once_per_lock"]
