@@ -164,8 +164,9 @@ def _plain(value: Any, depth: int = 0) -> Any:
     """A JSON-ready copy of a response built of SimpleNamespace objects, dicts, lists and pydantic models.
     Attributes and dict keys whose names start with "_" are Hermes' own markers (a partial-stream stub's
     ``_clean_eof``, the ``_issuer_kind`` Hermes' Codex path adds to its dicts), not part of the provider's
-    response, and are left out. A bytes value counts as its length (a string of that many characters), not
-    as its repr."""
+    response, and are left out. A provider field whose key starts with "_" is left out too, so the figure can
+    only undercount, never overcount. A bytes value counts as its length (a string of that many characters),
+    not as its repr."""
     if depth > _RESPONSE_DEPTH:
         raise ValueError("response nested too deeply to measure")
     if value is None or isinstance(value, (str, int, float, bool)):
