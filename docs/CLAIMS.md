@@ -1,7 +1,7 @@
 # Claim index
 
 This index lists every claim on the [README](../README.md)'s first screen (the tagline, "What Hermes
-does today", "What the plugin does", the Figure 2 caption, "The receipt" and "Three limits") and every
+does today", "What the plugin does", the Figure 2 caption, "The receipt" and "Four limits") and every
 row of its Commands table: 54 entries. Each entry gives the claim in one sentence, the code that
 enforces the claim, the tests that prove the claim, and the section of
 [LIMITATIONS.md](LIMITATIONS.md) that bounds the claim.
@@ -84,9 +84,9 @@ down.
 These entries state what Hermes 84a0301 does without the plugin. A path after the word "Hermes" is a
 file in the Hermes checkout.
 
-**H1. Pointed at Tinfoil or NEAR AI Cloud, Hermes makes an ordinary HTTPS connection to a URL: no
-hardware report is checked, no build is pinned, the vendor's encrypted transport is not used, and no
-reply signature is verified.** UNTRACED (see above).
+**H1. Pointed at Tinfoil or NEAR AI Cloud, Hermes makes an ordinary HTTPS connection to a URL and
+checks no hardware report, pins no build, does not use the vendor's encrypted transport and verifies no
+reply signature.** UNTRACED (see above).
 
 **H2. Hermes makes more model calls than the call the user sees, for titles, compression, images and
 more.**
@@ -357,7 +357,7 @@ part except memory and tool answers.
   `tests/unit/test_receipts.py::test_receipt_reads_only_the_sessions_locked_period`.
 - Bound: [6](LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process).
 
-**R2. The receipt is built from the plugin's log: every model call, the lock period, the enclave
+**R2. The receipt is built from the plugin's ledger: every model call, the lock period, the enclave
 build that was verified, and the raw hardware evidence captured at each verification.**
 - Code: `receipts.py:build_receipt`, `receipts.py:_sections`, `receipts.py:_lock_info`,
   `receipts.py:_evidence_item` (joins the evidence blobs), `receipts.py:verify_facts`.
@@ -397,7 +397,7 @@ carries the enclave's signature over the exact bytes.**
   `tests/seam/test_commands.py::test_cli_replay_expected_fingerprints_come_from_the_pin_or_the_flag_not_the_receipt`.
 - Bound: Smaller gaps: "The offline replay's identity checks have limits".
 
-## Three limits
+## Four limits
 
 **L1. The attested tier admits only models the two vendors serve inside enclaves; those are
 open-weight models such as the Qwen, DeepSeek, Llama and gpt-oss families, so a hosted frontier model
