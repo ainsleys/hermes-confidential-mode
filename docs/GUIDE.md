@@ -461,7 +461,7 @@ per task. A missing vendor key is the first row, and a lock refused only for the
 first line: "Not locked: TINFOIL_API_KEY is not set; set TINFOIL_API_KEY (see Requirements in
 README.md)." In chat, `/confidential check [tier] [--verbose]`;
 in a terminal, `hermes confidential check attested` works as well as `--tier attested`. With no
-tier, `check` prints which tier it checks and why: the locked tier, else `attested` when
+tier, `check` prints which tier `check` picks and why: the locked tier, else `attested` when
 `model.provider` is an attested profile, else `on-host-only` when `model.base_url` is on this machine,
 else `attested`. Replies print commands in the form that works where you typed: the
 `hermes confidential ...` form from a terminal command, the `/confidential ...` form in chat. An
@@ -539,7 +539,7 @@ a timeout that short lets Hermes skip the plugin's per-turn check. The preflight
 
 The lock survives a restart: the plugin rebuilds the allowlist from the copy it saved at lock time,
 not from what happens to be registered after the restart. `/confidential off` unlocks and prints the
-lock period's counts. On a profile that isn't locked it says so and writes no ledger row.
+lock period's counts. On a profile that isn't locked, `off` says so and writes no ledger row.
 
 ### What happens while locked
 
@@ -748,7 +748,7 @@ release tag, and asks you on the terminal to Approve or Deny. The choice, its nu
 pins nothing (on a first run the reply says "no pin approved yet; nothing changed"); every Approve or Deny prompt in a terminal (`pins approve`, `allow`) works the same way.
 On a non-interactive terminal there's no answer and no pin. Setup then prints a config block for
 `config.yaml`. Setup never writes your config. Tinfoil offers no model list the plugin can fetch, so
-setup says it cannot check the `--model` id and whether the id is one `config.example.yaml` lists;
+setup says that setup cannot check the `--model` id and whether the id is one `config.example.yaml` lists;
 NEAR setup checks each id by attesting the model, so an id NEAR doesn't attest stops setup. `--vision-model` and `--aux-model` choose the vision and
 short-job models in the block, and `--no-verify` only prints the block.
 

@@ -111,7 +111,7 @@ Preflight: run hermes confidential check --tier <tier>
 
 `hermes confidential watch` streams each model call's purpose, host and size, locked or not.
 
-**2. Try it without a key.** The `on-host-only` tier needs no vendor key: every model call must stay
+**2. Try the plugin without a key.** The `on-host-only` tier needs no vendor key: every model call must stay
 on this machine. With a local model server such as Ollama on port 11434, add this to `config.yaml`,
 using model names your server has:
 
@@ -252,7 +252,7 @@ except where noted.
 | `on <on-host-only\|attested>` | Lock this profile (the preflight runs first). |
 | `off` | Unlock, with the lock period's counts. |
 | `status [--verbose]` | Lock state, pins, verification, breaches, installed commit; `--verbose` adds the tool list and the preflight. |
-| `check [tier] [--verbose]` | The preflight table; with no tier, names the tier it checks and why. |
+| `check [tier] [--verbose]` | The preflight table; with no tier, names the tier `check` picks and why. |
 | `setup` | Terminal only: `hermes confidential setup [--vendor near] --model <id>`. |
 | `allow <tool>` | Let an off-host tool run without asking, for this lock (asks you). |
 | `revoke <tool>`, `revoke --all` | Withdraw the grants confidential mode holds. |
