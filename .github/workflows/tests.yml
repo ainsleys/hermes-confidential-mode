@@ -13,10 +13,8 @@
 # --no-deps). The plugin's own pins (tinfoil==0.14.2, pynacl==1.6.*, sigstore>=4.5,<4.6 and every other
 # pin there) are installed from pyproject.toml on every version.
 #
-# Checkout path. The plugin is checked out as a directory named hermes-confidential-mode, as in
-# docs/RUNNING_TESTS.md. The repository root has an __init__.py, so under a directory name that is a valid
-# Python identifier (`plugin`, say) pytest imports the test modules as `<name>.tests...`, and the NEAR
-# tests that patch tests.near_world fail. A name with a hyphen avoids that.
+# Checkout path. The plugin is checked out as a directory named hermes-confidential-mode. Any name works:
+# the tests import one another with relative imports (docs/RUNNING_TESTS.md).
 
 name: tests
 

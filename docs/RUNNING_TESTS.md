@@ -61,11 +61,10 @@ each marker, and install exactly those versions into a separate environment:
 The continuous-integration workflow, `.github/workflows/tests.yml`, runs these steps on 3.11, 3.12
 and 3.13, and `uv sync --frozen --no-dev` on 3.14.
 
-Keep the plugin checkout in a directory named `hermes-confidential-mode`. The repository root has an
-`__init__.py`, so when the checkout directory's name is a valid Python identifier (`plugin`, say),
-pytest imports the test modules as `<name>.tests...`. `tests.near_world` is then two modules, and the
-NEAR tests that patch `tests.near_world` fail. A name with a hyphen keeps pytest's package names at
-`tests...`.
+The plugin checkout can have any directory name. The repository root has an `__init__.py`, so under a
+name that is a valid Python identifier (`plugin`, say) pytest imports the test modules as
+`<name>.tests...`; the tests import one another with relative imports, so each module is loaded once
+under either name, and `tests/unit/test_relative_test_imports.py` keeps it that way.
 
 A quicker check that every file compiles on 3.11:
 
