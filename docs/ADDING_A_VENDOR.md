@@ -8,8 +8,8 @@ or NEAR is named outside the adapters, so a third vendor also needs edits there.
 
 Paths are relative to `confidential_mode/` unless they start with `tests/`, `docs/` or name a file at
 the repository root (`__init__.py`, `plugin.yaml`, `pyproject.toml`, `catalog/`).
-[INTERFACES.md](INTERFACES.md) is the developer contract; Amendments 5, 5.1, 5.2, 7 and 9 record how
-NEAR was added and are the closest precedent.
+[INTERFACES.md](INTERFACES.md) is the developer contract. Its Amendments 5, 5.1, 5.2, 7 and 9 hold the
+contract entries for the NEAR adapter, the nearest model for a third adapter's contract.
 
 ## The pieces of a vendor
 
@@ -131,13 +131,13 @@ writes through `event_sink` only what the cache cannot see:
 `send_observed` is written by the llm gate (`gate_llm.py:LlmGate.guarded_call`), not by the
 adapter. A transport that observes each HTTP exchange calls `sendctx.add_record(record)` with the
 fields in `gate_llm.py:SEND_RECORD_FIELDS` (`hpke_key_used`, `encrypted`, `response_decrypted`,
-`tls_spki_sha256`, `tls_matches_report`, ...), and the gate copies them into its row
+`tls_spki_sha256`, `tls_matches_report`, ...), and the gate copies those fields into its row
 (`TinfoilAdapter._observe_send`). A new ledger kind needs `ledger.py:KINDS` and
 `tests/unit/test_ledger.py::test_kinds_match_contract` changed together.
 
 ### Hooks the cache wires
 
-`provider.py:VerificationCache._wire_adapter_sink` sets these attributes when they exist:
+`provider.py:VerificationCache._wire_adapter_sink` sets these attributes on an adapter that defines them:
 `event_sink`, `on_close` (stops the background refresh), `on_stale` (invalidates the cache entry, so
 the next call verifies inline). Optional members other modules read when present:
 `observe_key(host, tls_fp, hpke)` (first-seen record per key pair, Tinfoil),
@@ -153,7 +153,16 @@ supports_streaming, context_length, ...)` builds a Hermes `ProviderProfile` subc
 `RefusingClient` otherwise (no key, verification failed or pending, pin mismatch). The client never
 raises and is never None. `get_model_context_length` returns a fixed number so Hermes' context-length
 probes never reach the host off the attested transport. `classify_api_error` is
-`provider.py:classify_refusal`, which always answers `should_fallback: False`.
+`provider.py:classify_refusal`, which answers (always with `should_fallback: False`) only for an
+exception whose class name is `NearRefusal` and returns None for every other exception, so Hermes' own
+classifier decides another vendor's errors. The llm gate's `guarded_call` keeps the fallback unarmed
+for every vendor either way.
+
+`make_profile`'s defaults are Tinfoil's: `name` (`attested-tinfoil`), `display_name`, `description`,
+`env_var` (`TINFOIL_API_KEY`) and the subclass name `AttestedTinfoilProfile`. A new vendor passes
+every one of `name`, `display_name`, `description`, `env_var`, `supports_streaming` (False when the
+vendor signs only unstreamed replies or encrypts requests), `context_length`, `verify_wait_seconds`,
+`refresh_lead_seconds` and `ledger`, and the `ttl_seconds` read from `confidential.verify_ttl_seconds`.
 
 A new vendor adds `register_<vendor>_profile(ctx, *, config, data_dir, adapter, pins, on_event,
 ledger)` beside the two existing functions. The function reads its config keys under
@@ -190,7 +199,7 @@ batch and a verification count.
   with `role`, `measurement`, `app_id`, `compose_hash`, `os_image_hash`, `kms_id`, `instance_id` and
   (for models) `services_sha256` and `cm_image_reported`. `pins.py:views_from_cvms` turns these into
   `CvmView`s, `near_code_fingerprint` and `near_enclave_fingerprint` compute each entry's
-  fingerprints, and approval adds to the set (`concurrent: True`). Today the per-CVM path runs only
+  fingerprints, and approval adds to the set (`concurrent: True`). The per-CVM path runs only
   when `result.vendor == "near"` (see "Known coupling").
 - **Consent.** A matching entry counts only with a `pin_applied` row that names its fingerprints and no
   later `pin_retired` row (`provider.py:_consent_recorded`). Only `consent.py` (a person's exact
@@ -266,7 +275,8 @@ The suite runs from a Hermes checkout as [RUNNING_TESTS.md](RUNNING_TESTS.md) de
   threads"), the credential ("Credentials", "Environment variables"), and the private core import
   count, which `tests/seam/test_disclosure_imports.py` compares with `hermes plugins validate`.
 - `plugin.yaml` and `catalog/confidential-mode.yaml`: the `description` (hosts contacted, the key
-  variable, threads), `optional_env` in `plugin.yaml`, and `known_issues` in the catalog entry.
+  variable, threads), `requires_env` (`TINFOIL_API_KEY` only, in both files) and `optional_env` in
+  `plugin.yaml`, and `known_issues` in the catalog entry.
 - `pyproject.toml`: the vendor's dependencies, each with an upper bound.
 - [GUIDE.md](GUIDE.md): a chapter like "The attested tier with NEAR AI", and the tiers chapter.
 - [CLAIMS.md](CLAIMS.md): every entry that names "both vendors" or a vendor's mechanism (P7, P8, P10,
@@ -275,7 +285,7 @@ The suite runs from a Hermes checkout as [RUNNING_TESTS.md](RUNNING_TESTS.md) de
 
 ## Known coupling
 
-The adapter protocol does not yet carry every vendor difference. These places name Tinfoil or NEAR
+The adapter protocol does not carry every vendor difference. These places name Tinfoil or NEAR
 outside the adapters; a third vendor edits each one.
 
 - **Profile lists.** `locking.py:ATTESTED_PROFILES`, `locking.py:PROFILE_NAME`,
@@ -290,15 +300,21 @@ outside the adapters; a third vendor edits each one.
   (`confidential.near.encrypt`, `require_tls_binding`, `image_parts`, the encryption library, the
   chat-completions-only API mode).
 - **Pins.** `pins.py` branches on `result.vendor == "near"` for per-CVM views
-  (`PinStore.match`/`matching_entries`, `observe`, `stage`) and in `_whole_role`;
+  (`PinStore.match`/`matching_entries`, `observe`, `stage`), in `PinStore.apply` (a NEAR model entry
+  is approved only with its service map pinned) and `PinStore.refresh_pending` (recomputes NEAR model
+  entries only), and in `_whole_role`;
   `pins.py:VENDOR_POLICY` lists `concurrent` per vendor; `pins.py:NEAR_GATEWAY_REQUIRED`,
   `NEAR_MODEL_REQUIRED` and `near_code_fingerprint` define the per-CVM components;
   `provider.py:AUTO_APPLY_VENDORS` is Tinfoil only.
 - **Consent and review.** `consent.py:pin_question` shows `_near_pin_question` for NEAR and a
-  release-and-Sigstore prompt for every other vendor. `review.py:brief` picks `NEAR_QUESTIONS` or
+  release-and-Sigstore prompt for every other vendor; `consent.py:_approve_batch` words the NEAR result
+  ("added to the approved set") apart from every other vendor's. `review.py:brief` picks `NEAR_QUESTIONS` or
   `TINFOIL_QUESTIONS`; `review.py:build_bundle` adds release links for every vendor except NEAR, and
   `review.py:entry_review` shows per-component diffs and inner compose files only for entries that carry
   `components` (NEAR's per-CVM entries).
+- **Provider.** `provider.py:make_profile` defaults to Tinfoil's names (see "Profile registration");
+  `provider.py:classify_refusal` answers only for `NearRefusal`; `provider.py:image_parts_from` reads
+  `confidential.near.image_parts`.
 - **Verification detail.** `provider.py:_policy_check_detail` runs the Sigstore release-bundle check
   for every vendor except NEAR, so a third vendor without a Sigstore bundle records "evidence
   incomplete" in that non-gating field until the function learns the vendor.
@@ -306,12 +322,17 @@ outside the adapters; a third vendor edits each one.
   (`_tinfoil_verification_line`, `_near_verification_line`); `commands.py:_enclave_line` reads
   `rt.adapter` (Tinfoil) only.
 - **Setup and replay.** `commands.py:register_cli` (`--vendor` choices), `commands.py:cli_setup`,
-  `cli_setup_near`, `config_block`, `near_config_block`, `attest_near_models`; `commands.py:cli_replay`
-  falls back to the Tinfoil replay for any schema that is not NEAR's, and `DEFAULT_EXPECTED_REPO` is
-  Tinfoil's router repository.
+  `cli_setup_near`, `config_block`, `near_config_block`, `attest_near_models`;
+  `commands.py:HELP_LINES` and `commands.py:TERMINAL_ONLY` (the setup text names `[--vendor near]`);
+  `commands.py:TINFOIL_DOCUMENTED_MODELS` and `tinfoil_model_note`; `commands.py:DEFAULT_NEAR_MODEL`,
+  `DEFAULT_NEAR_VISION_MODEL` and `near_model_failure`. `commands.py:cli_replay` falls back to the
+  Tinfoil replay for any schema that is not NEAR's, labels a row's vendor `tinfoil` when neither the
+  row nor the evidence names one, and `DEFAULT_EXPECTED_REPO` is Tinfoil's router repository.
 - **Receipts.** `receipts.py:_near_sends`, `NEAR_CLOSING` and `NEAR_ENCRYPTION_NOTE` render the
   signed-response section for NEAR rows only; `receipts.py:verify_chain` checks those constants.
   `CLOSING_PARAGRAPH` speaks of a router, a release tag and an HPKE key, which is Tinfoil's shape.
+- **Manifest.** `plugin.yaml` and the catalog entry list `TINFOIL_API_KEY` as the one required
+  variable.
 - **Client.** `client.py:ConfidentialClient` assumes an OpenAI-compatible API, and passes the
   placeholder key `"tinfoil"` to the OpenAI client when Hermes supplies none.
 - **SDK patching.** `verify/_sdkpatch.py` (cache redirect, capture hooks, the thread-scoped overrides)
