@@ -68,8 +68,8 @@ The plugin does four things for a Hermes profile.
    route leads off-tier, the lock is refused and the plugin names the key to change ([Tiers](#tiers),
    [Locking](#locking)).
 3. **While locked, it guards four of the five other roads.** Side calls must resolve to the tier and
-   are rechecked every turn. Fallbacks are refused, and a failed request ends the turn. Off-host tools
-   ask you the first time each would send data off the machine during a lock. Memory must be the
+   are rechecked every turn. Fallbacks are refused, and a failed request ends the turn. Tools outside the
+   on-host list ask you the first time each runs during a lock. Memory must be the
    built-in store. Shell and code execution stay open.
 4. **It renders a receipt for any session.** The receipt lists where the text went, attaches the
    enclave evidence captured at each verification, and ends with fixed paragraphs naming what it
@@ -594,7 +594,7 @@ machine.
   terminal.backend: local (and unset TERMINAL_ENV), then run /confidential off and lock again."
   `docker` is refused too: a container can have its own network, and a Docker host can be remote.
 
-**Every other tool asks you the first time that tool would send data off the machine during a lock,** on
+**Every other tool asks you the first time that tool runs during a lock,** on
 Hermes' approval prompt:
 
 ```

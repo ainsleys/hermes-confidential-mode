@@ -41,10 +41,10 @@ def attested_profile_for(config: Mapping | None) -> str:
 ZDR_REASON = "zero-retention tier not implemented"
 
 # User-facing disclosures (Amendment 4 F1(d), F12; must agree with the tool gate and the README).
-TOOLS_TEXT = ("Tools that send data off this machine (web, browser, messaging, media and other off-host tools) "
-              "ask you the first time each would send data off the machine during a lock (every call with "
-              "confidential.tools.ask: each_call); under yolo, approvals off or an unattended run those asks "
-              "become blocks. Off-tier remote MCP servers, scheduled jobs and routed delegation are blocked.")
+TOOLS_TEXT = ("Tools outside the plugin's 14-tool on-host list (web, browser, messaging, media and other off-host "
+              "tools, and some local Desktop and kanban tools) ask you the first time each runs during a lock "
+              "(every call with confidential.tools.ask: each_call); under yolo, approvals off or an unattended run "
+              "those asks become blocks. Off-tier remote MCP servers, scheduled jobs and routed delegation are blocked.")
 AUX_TEXT = ("Not prevented, only recorded after the fact: Hermes' auxiliary model calls (session titles, "
             "compression, memory prefetch, vision, smart approvals, MCP sampling, background review) cannot be "
             "stopped by a plugin. The plugin checks the configured and live model runtime before each turn and "
@@ -63,7 +63,7 @@ STRUCTURE_FAILED_TEXT = (
     "/confidential on <tier>.")
 #: How the locked note describes the tool prompt, by confidential.tools.ask (Amendment 13).
 LOCKED_NOTE_ASK = {
-    "once_per_lock": ("ask the user the first time each tool would send data off the machine in this "
+    "once_per_lock": ("ask the user the first time each tool outside the on-host list runs in this "
                       "conversation during the lock; after the user allows a tool once, later calls of that tool "
                       "in this conversation run without asking until unlock"),
     "each_call": "ask the user first, each call",

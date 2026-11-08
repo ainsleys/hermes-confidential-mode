@@ -31,7 +31,9 @@ approved; `on-host-only` allows only your machine. While locked:
   call encrypted to the model's key and every reply signed by it. The gateway between you and the
   model cannot read the text. (On NEAR it still sees images, the model id, settings, headers, sizes
   and timing, and a gateway that swapped the reply key would be caught only afterwards.)
-- The plugin asks you the first time each tool would send data off the machine during a lock; an
+- The plugin asks you the first time each tool outside its on-host list runs during a lock. That list
+  is 14 tools (shell, code, files, skills, memory, todo and a few more), so every tool that could send
+  data off the machine asks, and so do some local ones such as Desktop pane and kanban tools. An
   allow lasts until you unlock, in that conversation only, so another chat, user or subagent is
   asked again (`confidential.tools.ask: each_call` asks on every call instead). When nobody can
   answer (yolo, approvals off, cron, one-shot runs), the tool is blocked. Tool servers on
@@ -46,10 +48,13 @@ JSON that carries the evidence; the evidence is signed by the enclave's hardware
 NEAR each reply carries the enclave's signature over the exact bytes, so anyone can re-check the JSON
 form offline with `hermes confidential replay`.
 
-**Two limits before you rely on this.** The agent can still run shell commands and code, and the
-plugin does not look inside them, so a command such as `curl` could send text anywhere; every receipt
-says so. And the receipt itself is written by the plugin on your machine, so someone else can trust
-only its signed evidence.
+**Three limits before you rely on this.** The attested tier admits only models served inside Tinfoil
+or NEAR enclaves, open-weight families such as Qwen, DeepSeek, Llama and gpt-oss; no Claude or GPT
+model can be in the tier, and because fallbacks are refused while locked, a vendor outage ends the
+turn instead of routing elsewhere. The agent can still run shell commands and code, and the plugin
+does not look inside them, so a command such as `curl` could send text anywhere; every receipt says
+so. And the receipt itself is written by the plugin on your machine, so someone else can trust only
+its signed evidence.
 
 ![Figure 2. With the plugin, shown for Tinfoil: preflight checks every configured route, side calls
 go to the verified enclave, fallback is refused, tools ask, memory stays on the host, shell and code
@@ -155,8 +160,8 @@ setup could not ask you.
 For NEAR AI Cloud, use `--vendor near --model Qwen/Qwen3.8-27B`.
 
 **4. Lock.** The preflight checks every route in your config first. If any would leave the tier, the
-lock is refused with a table naming each key to change. Once locked, each off-host tool asks you
-the first time that tool would send data off the machine, on both tiers.
+lock is refused with a table naming each key to change. Once locked, each tool outside the
+on-host list asks you the first time that tool runs, on both tiers.
 
 ```
 $ hermes confidential on attested
@@ -166,7 +171,7 @@ Details: hermes confidential status --verbose; docs/LIMITATIONS.md
 ```
 
 **5. Have a conversation.** Start `hermes` and ask something that needs the web. The first time each
-tool wants to send data off the machine, Hermes' approval panel shows the plugin's line:
+tool outside the on-host list runs, Hermes' approval panel shows the plugin's line:
 
 ```
 Confidential mode: web_search wants to send ~1 KB of this conversation off the machine; allowing once covers web_search in this conversation until this profile is unlocked
@@ -229,7 +234,7 @@ the change that would close each.
   another plugin could edit. Only the attached enclave evidence can be checked by someone else.
   ([section 6](docs/LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process))
 - **Tools ask once per lock in each conversation, then run without asking.** The plugin asks you the first time each tool
-  would send data off the machine during a lock; after Allow once, later calls to that tool in the
+  outside its on-host list runs during a lock; after Allow once, later calls to that tool in the
   same conversation run until you unlock, each with a ledger row. An answer an agent gave itself
   through a nested chat counts the same way. The grant lives in the process that asked, so a restart
   or a second process asks again. `confidential.tools.ask: each_call` asks on every call.

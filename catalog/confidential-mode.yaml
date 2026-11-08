@@ -12,8 +12,8 @@ description: >-
   on the attested tier encrypts request bodies to the verified enclave or model key and pins every
   inference connection to the TLS key of the attestation the plugin accepted (the attestation fetch itself
   is not pinned, by design), with headers, sizes and NEAR images still visible to the vendor; and asks you
-  the first time each tool would send data off the machine in each conversation during a lock, blocking
-  the call when nobody can answer. The plugin logs each model call's host and size, never its text, and
+  the first time each tool outside its 14-tool on-host list runs in each conversation during a lock,
+  blocking the call when nobody can answer. The plugin logs each model call's host and size, never its text, and
   renders a receipt whose attached enclave evidence replays offline; the rest of the receipt is the
   plugin's own record. The attested tier needs TINFOIL_API_KEY or NEAR_AI_API_KEY. Shell and code
   execution are not inspected for network access, and a side call that strays mid-turn is recorded, not
@@ -57,6 +57,8 @@ known_issues:
   - "If Hermes runs on someone else's machine, that operator sees every prompt; locked mode protects the road out of the Hermes process, not the process."
   - "hermes confidential replay uses the evidence's own trust root and capture time unless you pass --trusted-root and --as-of, identifies the repository by name only unless you pass --expected-repo-id and --expected-owner-id, and the first pin is trust on first use."
   - "There is no mixed 'attested or on-host' tier yet, so side jobs cannot run on an on-host model while the main model is attested."
+  - "The attested tier admits only models served inside Tinfoil or NEAR enclaves (open-weight families such as Qwen, DeepSeek, Llama and gpt-oss); no Claude or GPT model is in tier, and because fallbacks are refused while locked, a vendor outage ends the turn."
+  - "While locked, tool calls outside the on-host list are blocked rather than asked under yolo, approvals.mode off, cron, one-shot (-q, -z) and unattended runs, since nobody can answer; the on-host list is 14 tools, so some local Desktop pane and kanban tools ask or are blocked too."
   - "NEAR AI Cloud: streaming is refused; images reach NEAR's gateway in plaintext unless confidential.near.image_parts: refuse; the gateway reads model id, parameters, headers, sizes and timing, can read a reply by swapping the client key header (caught only afterwards), and instances share one key (docs/LIMITATIONS.md section 14)."
   - "An agent with terminal access on the same host can reach the approval prompt for a pin or a locked-allowlist tool by some routes; the ledger records every approval with its surface (docs/LIMITATIONS.md section 15)."
 capabilities:

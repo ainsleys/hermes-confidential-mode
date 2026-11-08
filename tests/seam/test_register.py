@@ -232,7 +232,7 @@ def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeyp
     assert "ask the user first, each call" in locking.locked_note(tiers.Tier.ON_HOST, "each_call")
     assert "each call" not in locking.locked_note(tiers.Tier.ON_HOST, "once_per_lock")
     verbose = plugin.slash("status --verbose")
-    assert "ask you the first time each would send data off the machine during a lock" in verbose and "Memory: on-host. Fallbacks: none." in verbose
+    assert "ask you the first time each runs during a lock" in verbose and "Memory: on-host. Fallbacks: none." in verbose
     assert "safe-worker" in verbose and "recorded after the fact" in verbose
     assert "on-host (runs without asking)" in verbose and "web_search" in verbose and "Preflight:" in verbose
     rec = Rec()
@@ -241,7 +241,7 @@ def test_locked_on_host_in_tier_turn_passes_with_the_locked_note(plugin, monkeyp
     assert result["final_response"] == "provider answered"
     assert len(rec.provider_calls) == 1
     assert "[confidential mode] This profile is locked (on-host-only)" in _sent_text(rec.provider_calls[0])
-    assert "the first time each tool would send data off the machine in this conversation" in \
+    assert "the first time each tool outside the on-host list runs in this conversation" in \
         _sent_text(rec.provider_calls[0])
     rows = [(e.kind, e.decision, e.verdict) for e in plugin.rt.ledger.tail(0)]
     assert ("lock", "locked", "in_tier") in rows
