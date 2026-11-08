@@ -23,10 +23,10 @@ from confidential_mode.state import ConfidentialState, InMemoryState
 from confidential_mode.tiers import Tier
 from confidential_mode.verify.base import VerificationResult, VerifyError
 
-from tests.hostile._harness_integrated import answer_choice, cm, rows  # noqa: F401
-from tests.seam._harness import no_lazy_installs  # noqa: F401  (fixture)
-from tests.seam.test_register import ON_HOST_URL, plugin  # noqa: F401  (fixture)
-from tests.unit.test_background_refresh import FakeAdapter, _result
+from ..hostile._harness_integrated import answer_choice, cm, rows  # noqa: F401
+from ..seam._harness import no_lazy_installs  # noqa: F401  (fixture)
+from ..seam.test_register import ON_HOST_URL, plugin  # noqa: F401  (fixture)
+from ..unit.test_background_refresh import FakeAdapter, _result
 
 from ._faults import (EACCES, ENOSPC, FaultPlan, chmod_ro, db_locked, disk_full, fail_replace, faulty_ledger,
                       tmp_leftovers, truncate)
@@ -360,8 +360,8 @@ def test_a_damaged_blob_is_named_missing_in_the_receipt_and_fails_the_replay(tmp
     pytest.importorskip("tinfoil.attestation.verify_tdx")
     from confidential_mode.receipts import build_receipt
     from confidential_mode.verify import replay_near
-    from tests.unit import test_near_real_capture as real
-    from tests.unit.test_near_evidence_blobs import _row, _verified_evidence
+    from ..unit import test_near_real_capture as real
+    from ..unit.test_near_evidence_blobs import _row, _verified_evidence
     ev = _verified_evidence(real.evidence())
     led = Ledger(tmp_path / "ledger.sqlite")
     led.append({"kind": "lock", "tier": "attested", "decision": "locked", "session_id": "s", "detail": {}})
@@ -499,7 +499,7 @@ def test_garbage_and_unknown_pins_versions_match_nothing_and_are_never_overwritt
 def test_supported_versions_still_match_beside_the_garbage(tmp_path):
     """Amendment 7 migration: "a version-2 file reads as version 3 in memory" and a v3 file matches its pins
     (the control for the garbage cases above)."""
-    from tests.unit.test_pins_v3 import LIVE, V170, _tinfoil
+    from ..unit.test_pins_v3 import LIVE, V170, _tinfoil
     p2 = tmp_path / "v2" / "pins.yaml"
     p2.parent.mkdir()
     p2.write_bytes(LIVE.read_bytes())

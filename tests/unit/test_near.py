@@ -19,6 +19,7 @@ from confidential_mode.verify import near, near_checks as nc, replay_near
 from confidential_mode.verify.base import VerifyError
 
 from ..near_world import BASE, HOST, MODEL, NOW, NearWorld, pub_hex
+from .. import near_world as _near_world
 
 MSG = [{"role": "user", "content": "hi"}]
 
@@ -65,7 +66,7 @@ def test_fingerprints_are_stable_across_verifies_and_change_with_the_compose(wor
     a, b = ad.verify(), ad.verify()
     assert (a.code_fingerprint, a.enclave_fingerprint) == (b.code_fingerprint, b.enclave_fingerprint)
     assert a.evidence["nonce"] != b.evidence["nonce"]           # a fresh client nonce each time
-    import tests.near_world as w
+    from .. import near_world as w
     old = w.MODEL_COMPOSE
     try:
         w.MODEL_COMPOSE = old.replace("vllm", "vllm2")
@@ -155,8 +156,8 @@ def test_unstreamed_send_is_hashed_signed_and_verified_as_provider_tee(world, tm
     hdr = world.chat_request_headers[0]
     assert hdr["x-no-aliasing"] == "true" and hdr["accept-encoding"] == "identity"
     # The row replays offline against the evidence.
-    rep = replay_near.replay_signed_send(d, r.evidence, model=MODEL, quote_verifier=__import__(
-        "tests.near_world", fromlist=["x"]).fake_quote_verifier, ita_roots=world.ita.roots)
+    rep = replay_near.replay_signed_send(d, r.evidence, model=MODEL, quote_verifier=_near_world.fake_quote_verifier,
+                                         ita_roots=world.ita.roots)
     assert rep["verdict"] == "pass" and rep["signature"]["provider_tee_verified"] is True
 
 

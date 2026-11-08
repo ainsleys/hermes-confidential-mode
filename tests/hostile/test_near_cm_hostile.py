@@ -305,7 +305,7 @@ def test_the_pin_prompt_escapes_and_tags_component_lines():
 # ── RTMR3 identity events: dstack's boot events only, once each ─────────────────────────────────
 
 def _with_events(monkeypatch, edit):
-    import tests.near_world as w
+    from .. import near_world as w
     orig = w.events_for
 
     def events(app_id, instance_id=None):
@@ -347,7 +347,7 @@ def test_no_identity_line_ever_says_none():
 
 
 def test_a_key_provider_id_that_is_not_hex_fails(monkeypatch, tmp_path):
-    import tests.near_world as w
+    from .. import near_world as w
     monkeypatch.setattr(w, "KEY_PROVIDER_INFO", '{"name":"kms","id":"not-hex"}')
     with pytest.raises(VerifyError, match="key-provider id is not hex"):
         NearWorld().adapter(tmp_path, encrypt=False).verify()

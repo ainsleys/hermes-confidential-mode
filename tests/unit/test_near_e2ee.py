@@ -49,7 +49,7 @@ def test_frozen_vectors_regenerate_from_the_guides_code_and_independently():
 
 def test_the_fake_gateways_independent_cipher_matches_the_vectors():
     """tests/near_cipher_ref.py (the synthetic model side) shares no code with near_e2ee."""
-    from tests import near_cipher_ref as ref
+    from .. import near_cipher_ref as ref
     assert ref.seal(MODEL_PUB, REQ_PLAINTEXT, eph=REQ_EPH, nonce=REQ_NONCE) == REQ_WIRE
     assert ref.open_(ref.ed_seed_to_x_secret(CLIENT_SEED), RESP_WIRE) == b"Paris"
     assert ref.open_(ref.ed_seed_to_x_secret(MODEL_SEED), e2.seal(MODEL_PUB, b"x")) == b"x"

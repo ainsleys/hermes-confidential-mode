@@ -66,7 +66,7 @@ def near(plugin, monkeypatch):
 
 
 def _approve(plugin):
-    from tests.near_world import cache_inner_composes
+    from ..near_world import cache_inner_composes
     cache_inner_composes(plugin.rt.pins.composes_dir)    # as `pins review` would: the service map is then pinned
     with bind_asker(lambda question, labels: "Approve"):
         return plugin.slash("pins approve")
@@ -90,7 +90,7 @@ def test_lock_needs_a_human_approved_pin_then_a_turn_is_signed_and_ledgered(plug
     assert pending.vendor == "near" and pending.router_repo == f"{HOST}#{MODEL}"
     assert pending.components and pending.components[0].startswith("gateway compose sha256:")
     asked = []
-    from tests.near_world import cache_inner_composes
+    from ..near_world import cache_inner_composes
     with bind_asker(lambda q, labels: asked.append(q) or "Approve"):
         assert plugin.slash("pins approve").startswith("Not asked: the service map"), "fail closed until fetched"
         assert asked == []
@@ -143,7 +143,7 @@ def test_changed_measurement_refuses_until_a_human_approves_it(plugin, near):
     _approve(plugin)
     assert plugin.slash("on attested").startswith("Locked")
     provider = _sub(plugin, "provider")
-    import tests.near_world as w
+    from .. import near_world as w
     old = w.MODEL_COMPOSE
     w.MODEL_COMPOSE = old.replace("vllm", "vllm-next")
     try:

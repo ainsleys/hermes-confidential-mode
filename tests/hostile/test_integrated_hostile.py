@@ -153,7 +153,7 @@ def test_hand_armed_fallback_and_provider_errors_never_reach_openrouter_withstoo
     reaches openrouter or the default transport."""
     import httpx
     import openai
-    from tests.seam._harness import arm_fallback_chain, rate_limit_429
+    from ..seam._harness import arm_fallback_chain, rate_limit_429
     _locked_on_host(plugin)
     errors = [rate_limit_429(), KeyError("x"), RuntimeError("weird"), httpx.ReadTimeout("t"),
               openai.APIConnectionError(request=httpx.Request("POST", h.ON_HOST_URL))]
@@ -415,7 +415,7 @@ def _restart(plugin, monkeypatch):
     """New PluginManager, same HERMES_HOME (what a Hermes restart does)."""
     import hermes_cli.plugins as plugins_mod
     from hermes_cli.plugins import PluginManager
-    from tests.seam.test_register import _evict_plugin_modules
+    from ..seam.test_register import _evict_plugin_modules
     plugin.mgr.unload()
     _evict_plugin_modules()
     mgr = PluginManager()

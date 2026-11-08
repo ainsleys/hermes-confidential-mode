@@ -9,8 +9,8 @@ import os
 
 import pytest
 
-from tests.seam.test_register import plugin  # noqa: F401  (fixture)
-from tests.seam._harness import no_lazy_installs  # noqa: F401  (fixture)
+from ..seam.test_register import plugin  # noqa: F401  (fixture)
+from ..seam._harness import no_lazy_installs  # noqa: F401  (fixture)
 
 OURS = "plugin_rule:confidential-mode:tool:web_search"
 FOREIGN = ["web_search", "plugin_rule:other-plugin:tool:web_search", "plugin_rule:web_search",
@@ -198,7 +198,7 @@ def test_a_lost_answer_row_does_not_let_a_session_grant_outlive_the_revoke(plugi
     """Review SF1, on the real ledger: Hermes holds a session approval under the rule key, and neither answer
     row reached the ledger. The revoke records and moves the key; the approval stops counting."""
     from tools import approval
-    from tests.seam.test_register import SK
+    from ..seam.test_register import SK
     rv = _sub(plugin, "revoke")
     assert plugin.slash("on on-host-only").startswith("Locked")
     approval.approve_session(SK, "plugin_rule:" + rv.rule_key(plugin.rt.revocations, "web_search"))

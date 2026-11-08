@@ -31,7 +31,7 @@ def test_the_status_is_found_anywhere_in_the_chain():
 
 
 def test_near_get_names_the_model_and_the_gateway(tmp_path):
-    from tests.near_world import BASE, NearWorld
+    from ..near_world import BASE, NearWorld
     world = NearWorld()
 
     def handler(request):

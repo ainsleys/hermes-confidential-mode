@@ -14,7 +14,7 @@ import pytest
 from confidential_mode import consent, review
 from confidential_mode.pins import PinStore, consent_key
 from confidential_mode.verify import near_checks as nc
-from tests.near_world import NearWorld
+from ..near_world import NearWorld
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures"
 GPU13 = json.loads((FIX / "near_real_capture" / "model_candidate_gpu13.json").read_text())["candidate"]
@@ -357,7 +357,7 @@ def test_no_baseline_shows_the_full_texts(tmp_path):
 
 
 def test_a_measured_compose_without_github_repo_fetches_nothing_and_cannot_be_approved(tmp_path, monkeypatch):
-    import tests.near_world as w
+    from .. import near_world as w
     from confidential_mode.pins import PinStoreError
     monkeypatch.setattr(w, "MODEL_COMPOSE", w.MODEL_COMPOSE.replace(
         "      - GITHUB_REPO=https://github.com/nearai/cvm-compose-files\\n", ""))

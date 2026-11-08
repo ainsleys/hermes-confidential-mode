@@ -12,7 +12,8 @@ from confidential_mode import consent, provider
 from confidential_mode.pins import (BACKUP_SUFFIX, SCHEMA_VERSION, PinStore, PinStoreError, consent_key,
                                     near_code_fingerprint)
 from confidential_mode.verify.base import VerificationResult
-from tests.near_world import INNER_SHA, MODEL, NearWorld, cache_inner_composes
+from ..near_world import INNER_SHA, MODEL, NearWorld, cache_inner_composes
+from .. import near_world as _near_world
 
 try:
     import hermes_yaml as yaml
@@ -426,7 +427,7 @@ def test_cli_replay_learns_sets(tmp_path):
     assert fps is None and len(approved) == 2 and "approved set" in source
     from confidential_mode.pins import set_match, views_from_cvms
     from confidential_mode.verify import replay_near
-    rr = replay_near.replay(res.evidence, quote_verifier=__import__("tests.near_world", fromlist=["x"]).fake_quote_verifier,
+    rr = replay_near.replay(res.evidence, quote_verifier=_near_world.fake_quote_verifier,
                             ita_roots=world.ita.roots)
     assert set_match(approved, vendor="near", code=rr.code_fingerprint, enclave=rr.enclave_fingerprint,
                      views=views_from_cvms(list(rr.cvms)))

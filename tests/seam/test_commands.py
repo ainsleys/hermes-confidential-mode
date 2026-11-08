@@ -296,7 +296,7 @@ def test_lock_refuses_when_hook_timeout_lets_the_recheck_be_skipped(plugin):
 
 def _receipt_with_scenario_evidence(plugin, tmp_path):
     """A receipt whose verify_ok row carries the scenario fake adapter's evidence (tests/scenario/_fakes.py)."""
-    from tests.scenario._fakes import FakeVendorAdapter, MockNet
+    from ..scenario._fakes import FakeVendorAdapter, MockNet
     r = FakeVendorAdapter(MockNet()).verify()
     plugin.rt.ledger.append({"kind": "verify_ok", "provider": "attested-tinfoil", "purpose": "verify",
                              "host": r.enclave_host, "detail": {

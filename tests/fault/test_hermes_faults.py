@@ -27,10 +27,10 @@ from confidential_mode.pins import PinStore
 from confidential_mode.state import ConfidentialState, InMemoryState
 from confidential_mode.tiers import Tier
 
-from tests.hostile._harness_integrated import answer_choice, cm, rows  # noqa: F401
-from tests.seam._harness import no_lazy_installs  # noqa: F401  (fixture)
-from tests.seam.test_register import BASE_CONFIG, ON_HOST_URL, plugin  # noqa: F401  (fixture)
-from tests.unit.test_background_refresh import FakeAdapter, _result
+from ..hostile._harness_integrated import answer_choice, cm, rows  # noqa: F401
+from ..seam._harness import no_lazy_installs  # noqa: F401  (fixture)
+from ..seam.test_register import BASE_CONFIG, ON_HOST_URL, plugin  # noqa: F401  (fixture)
+from ..unit.test_background_refresh import FakeAdapter, _result
 
 REMOTE = "https://llm.example.test/v1"
 
@@ -440,7 +440,7 @@ def test_a_near_send_from_a_thread_without_the_send_context_is_still_recorded(tm
     """Amendment 5: "every POST ... writes one send_signed row"; Amendment 5.1: purpose comes from sendctx when
     one is bound. Fault: the call runs on a thread with no context, as a Hermes worker might."""
     import openai
-    from tests.near_world import BASE, MODEL, NearWorld
+    from ..near_world import BASE, MODEL, NearWorld
     world = NearWorld()
     ad = world.adapter(tmp_path)
     got: list[dict] = []

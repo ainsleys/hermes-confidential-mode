@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.seam._harness import manager, no_lazy_installs  # noqa: F401  (fixtures)
+from ..seam._harness import manager, no_lazy_installs  # noqa: F401  (fixtures)
 
 from confidential_mode import provider as provider_mod
 from confidential_mode.consent import approve_pending_pin

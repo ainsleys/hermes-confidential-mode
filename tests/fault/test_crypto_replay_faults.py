@@ -287,8 +287,8 @@ def test_hermes_confidential_replay_exits_1_on_a_one_byte_edit_of_a_real_capture
     checked, whatever the evidence rows say"; Amendment 5.2: verify_chain "fails an item whose blobs holds ...
     bytes that are not its id". Real 2026-11-07 capture, real Intel quote verifier, offline."""
     pytest.importorskip("tinfoil.attestation.verify_tdx")
-    from tests.unit import test_near_real_capture as real
-    from tests.unit.test_near_evidence_blobs import _receipt, _verified_evidence
+    from ..unit import test_near_real_capture as real
+    from ..unit.test_near_evidence_blobs import _receipt, _verified_evidence
     _, doc = _receipt(tmp_path, _verified_evidence(real.evidence()))
     path = tmp_path / "receipt.json"
     path.write_text(json.dumps(doc))

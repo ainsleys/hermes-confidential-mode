@@ -33,12 +33,12 @@ import run_agent
 from hermes_cli.plugins import PluginContext
 from hermes_cli.plugins_manifest import PluginManifest
 
-from tests.scenario._fakes import (  # noqa: F401  (re-exported for the tests)
+from ..scenario._fakes import (  # noqa: F401  (re-exported for the tests)
     ENCLAVE, ENCLAVE_URL, ON_HOST_URL as NET_ON_HOST_URL, OPENROUTER_HOST, OPENROUTER_URL, REPO, MockNet,
     patch_hermes_http,
 )
-from tests.seam._harness import Rec, no_lazy_installs, provider_ok  # noqa: F401  (fixture)
-from tests.seam.test_register import BASE_CONFIG, ON_HOST_URL, SK, plugin  # noqa: F401  (fixture)
+from ..seam._harness import Rec, no_lazy_installs, provider_ok  # noqa: F401  (fixture)
+from ..seam.test_register import BASE_CONFIG, ON_HOST_URL, SK, plugin  # noqa: F401  (fixture)
 
 SECRET = "MERGER-TERMS-7731-CONFIDENTIAL"
 

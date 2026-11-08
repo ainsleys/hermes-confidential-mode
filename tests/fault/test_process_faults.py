@@ -27,10 +27,10 @@ from confidential_mode.locking import predicate_for
 from confidential_mode.pins import PinStore, PinStoreError
 from confidential_mode.verify.base import PreparedVerification
 
-from tests.hostile._harness_integrated import answer_choice, cm, rows  # noqa: F401
-from tests.seam._harness import no_lazy_installs  # noqa: F401  (fixture)
-from tests.seam.test_register import ON_HOST_URL, plugin  # noqa: F401  (fixture)
-from tests.unit.test_background_refresh import Clock, FakeAdapter, _result
+from ..hostile._harness_integrated import answer_choice, cm, rows  # noqa: F401
+from ..seam._harness import no_lazy_installs  # noqa: F401  (fixture)
+from ..seam.test_register import ON_HOST_URL, plugin  # noqa: F401  (fixture)
+from ..unit.test_background_refresh import Clock, FakeAdapter, _result
 
 P = provider_mod.PROFILE_NAME
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]

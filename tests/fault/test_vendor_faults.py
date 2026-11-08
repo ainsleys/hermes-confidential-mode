@@ -328,7 +328,7 @@ def test_a_model_key_rotated_mid_session_is_refused_until_restart(tmp_path):
 def test_a_wall_clock_jump_neither_extends_nor_ends_the_verification_ttl(tmp_path, monkeypatch, jump):
     """provider.VerificationCache._now: "never the wall clock or verified_at_host_clock" (TTL is monotonic);
     LIMITATIONS 8: no attested time. Fault: time.time() jumps by six hours after the verify."""
-    from tests.unit.test_background_refresh import FakeAdapter, _result
+    from ..unit.test_background_refresh import FakeAdapter, _result
     store = PinStore(tmp_path / "pins.yaml")
     store.apply(store.stage(_result()), approved_via="cli")
     cache = provider_mod.VerificationCache()

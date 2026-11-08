@@ -58,7 +58,7 @@ def test_the_ledger_moves_evidence_blobs_to_the_store_and_keeps_their_ids(tmp_pa
 def _worst_case(tmp_path):
     """Six allowlisted models, none with a service name list, two candidates each, every candidate with the
     longest real actions log seen (86 actions, 46 services): claims from the adapter's own verify()."""
-    from tests.near_world import NearWorld
+    from ..near_world import NearWorld
     names = [f"vendor/model-{i}" for i in range(6)]
     world = NearWorld(models=names)
     world.model_candidates = 2
