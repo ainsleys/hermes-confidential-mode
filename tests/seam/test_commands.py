@@ -199,8 +199,20 @@ def test_setup_terminal_asker_is_exact(plugin):
     choices = [{"value": "approve", "label": "Approve"}, {"value": "deny", "label": "Deny"}]
     assert commands.TerminalAsker(TTY("1\n"), io.StringIO()).ask_choice("q", choices) == "approve"
     assert commands.TerminalAsker(TTY("approve\n"), io.StringIO()).ask_choice("q", choices) == "approve"
-    assert commands.TerminalAsker(TTY("yes\n"), io.StringIO()).ask_choice("q", choices) is None
     assert commands.TerminalAsker(io.StringIO("1\n"), io.StringIO()).ask_choice("q", choices) is None  # not a tty
+    # Amendment 14: y/yes/n/no in any case answer an approve/deny prompt; anything else asks once more.
+    for text, want in (("y", "approve"), ("YES", "approve"), ("Yes", "approve"), ("n", "deny"), ("No", "deny"),
+                       ("2", "deny")):
+        assert commands.TerminalAsker(TTY(text + "\n"), io.StringIO()).ask_choice("q", choices) == want, text
+    out = io.StringIO()
+    assert commands.TerminalAsker(TTY("sure\ny\n"), out).ask_choice("q", choices) == "approve"
+    assert out.getvalue().count("Choice: ") == 1 and "Answer 1 or 2, y or n: " in out.getvalue()
+    out = io.StringIO()
+    assert commands.TerminalAsker(TTY("sure\nmaybe\ny\n"), out).ask_choice("q", choices) is None  # two misses
+    assert commands.TerminalAsker(TTY("sure\n"), io.StringIO()).ask_choice("q", choices) is None    # then EOF
+    assert commands.TerminalAsker(TTY(""), io.StringIO()).ask_choice("q", choices) is None
+    other = [{"value": "a"}, {"value": "b"}]                          # not an approve/deny prompt: no y/n
+    assert commands.TerminalAsker(TTY("y\ny\n"), io.StringIO()).ask_choice("q", other) is None
 
 
 ATTESTED_CONFIG = """\
@@ -670,11 +682,11 @@ def test_cli_pins_and_allow_use_the_exact_terminal_asker(plugin):
                                asker=commands.TerminalAsker(TTY(ANSWER[0]), io.StringIO()))
         return rc, out.getvalue()
 
-    ANSWER = ["yes\n"]
+    ANSWER = ["sure\nok\n"]
     plugin.rt.pins.stage(_result(plugin))
     rc, out = run("pins", pins_action=None)
     assert rc == 0 and "Pending pin: tinfoil" in out
-    rc, out = run("pins", pins_action="approve")                     # "yes" is not an exact choice
+    rc, out = run("pins", pins_action="approve")                     # neither answer is a choice
     assert rc == 1 and plugin.rt.pins.pending() is not None
     ANSWER[0] = "approve\n"
     rc, out = run("pins", pins_action="approve")

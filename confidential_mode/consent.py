@@ -673,7 +673,7 @@ def allow_tool(ctx: Any, allowlist: Any, ledger: Any, name: str, *, session_key:
                              "no_answer" if raw is None else str(_pick_repr(raw)), detail=detail))
         if refused:
             return SELF_APPROVAL_REPLY + f". {name} was not added."
-        return f"{name} was not added; it still needs approval each call."
+        return f"{name} was not added; {name} still asks before it runs while locked."
     try:
         allowlist.add(name)
     except Exception as exc:  # noqa: BLE001  FI-2: the grant is taken only once allowlist.yaml holds it

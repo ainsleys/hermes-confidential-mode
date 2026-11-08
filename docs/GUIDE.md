@@ -737,8 +737,10 @@ hermes confidential setup --model <tinfoil model id>
 ```
 
 Setup reports whether `TINFOIL_API_KEY` is set, verifies the router, shows the two fingerprints and the
-release tag, and asks you on the terminal to Approve or Deny. Only an exact choice, or its number,
-counts; on a non-interactive terminal there's no answer and no pin. Setup then prints a config block for
+release tag, and asks you on the terminal to Approve or Deny. The choice, its number, or `y`, `yes`,
+`n` or `no` in any case counts. Any other answer asks once more and then counts as no answer, which
+pins nothing; every Approve or Deny prompt in a terminal (`pins approve`, `allow`) works the same way.
+On a non-interactive terminal there's no answer and no pin. Setup then prints a config block for
 `config.yaml`. Setup never writes your config. `--vision-model` and `--aux-model` choose the vision and
 short-job models in the block, and `--no-verify` only prints the block.
 
