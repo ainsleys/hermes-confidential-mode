@@ -477,3 +477,49 @@ def test_a_compaction_with_a_long_reason_is_still_recorded(plugin):
     assert plugin.slash("on on-host-only").startswith("Locked")
     invoke_hook("post_compaction", session_id="s1", reason="r" * 300_000, kind="auto")
     assert rows(plugin)[-1].kind == "compaction"
+
+
+# ── issue #45: the gateway command check fails closed when the plugin's own code raises ─────────────────────
+
+def test_a_gateway_model_switch_is_refused_when_the_ledger_write_raises(plugin, monkeypatch):
+    """Issue #45: a failure in the plugin's own code after the text was recognised as a slash command (here
+    the ledger row) must not let a locked session switch its runtime. The row is written after the decision,
+    so a failed write cannot undo the refusal."""
+    assert plugin.slash("on on-host-only").startswith("Locked")
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(plugin.rt, "append", boom)
+    ev = type("E", (), {"text": "/model openrouter/x"})()
+    assert invoke_hook("pre_gateway_dispatch", event=ev) == [{"action": "rewrite", "text": "/confidential blocked model"}]
+    assert invoke_hook("pre_gateway_dispatch", event=type("E", (), {"text": "/help"})()) == []
+
+
+def test_a_gateway_model_switch_is_refused_when_the_lock_state_is_unreadable(plugin, monkeypatch):
+    assert plugin.slash("on on-host-only").startswith("Locked")
+
+    def boom():
+        raise RuntimeError("state unreadable")
+    monkeypatch.setattr(plugin.rt, "is_locked", boom)
+    ev = type("E", (), {"text": "/model openrouter/x"})()
+    assert invoke_hook("pre_gateway_dispatch", event=ev) == [{"action": "rewrite", "text": "/confidential blocked model"}]
+
+
+def test_a_gateway_model_switch_is_refused_when_the_command_resolver_raises_after_recognition(plugin, monkeypatch):
+    """Any other exception once the text is a slash command: read the lock state and refuse when locked. Here
+    the resolved name lookup itself fails inside the plugin (RUNTIME_SWITCH_COMMANDS replaced by an object whose
+    membership test raises), after the slash command was recognised."""
+    assert plugin.slash("on on-host-only").startswith("Locked")
+
+    class _Raises:
+        def __contains__(self, item):
+            raise RuntimeError("broken set")
+    monkeypatch.setattr(plugin.mod, "RUNTIME_SWITCH_COMMANDS", _Raises())
+    before = len(rows(plugin))
+    ev = type("E", (), {"text": "/model openrouter/x"})()
+    assert invoke_hook("pre_gateway_dispatch", event=ev) == [{"action": "rewrite", "text": "/confidential blocked model"}]
+    new = rows(plugin)[before:]
+    assert [(e.kind, e.decision) for e in new] == [("tool_refused", "hook_error")]
+    # unlocked: the same failure lets the command through, as the lock state says there is nothing to protect
+    assert plugin.slash("off").startswith("Unlocked")
+    assert invoke_hook("pre_gateway_dispatch", event=ev) == []

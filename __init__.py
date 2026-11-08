@@ -692,16 +692,30 @@ def _live_runtime_check(rt: Runtime, locking: Any, tier: Any, session_id: str) -
 
 
 def _pre_gateway_dispatch(rt: Runtime):
+    def locked_or_unreadable() -> bool:
+        try:
+            locked, _tier = rt.is_locked()
+        except Exception:  # noqa: BLE001
+            return True                            # unreadable lock state: refuse (fail closed)
+        return locked is not False
+
     def pre_gateway_dispatch(event: Any = None, **_kw: Any):
         """While locked, a gateway /model (or /moa) is rewritten to /confidential blocked <cmd>, which
-        replies with the refusal: the session's live runtime cannot be switched off-tier from chat."""
+        replies with the refusal: the session's live runtime cannot be switched off-tier from chat. Once the
+        text is recognised as a slash command the hook fails closed (issue #45): an exception in the plugin's
+        own code reads the lock state and refuses when locked or unreadable, and the ledger row is written
+        after the decision, so a failed write cannot undo the refusal."""
         try:
             text = getattr(event, "text", None)
             if not isinstance(text, str) or not text.lstrip().startswith("/"):
                 return None
             word = text.strip()[1:].split(None, 1)[0] if text.strip()[1:] else ""
             name = word.split("@", 1)[0].lower()
-            canonical, resolved = name, True
+        except Exception:  # noqa: BLE001
+            return None                            # not recognised as a slash command: nothing to protect
+        canonical, resolved = name, True
+        row: dict[str, Any] | None = None
+        try:
             try:
                 found = _cm("hermes_compat").resolve_command(name)
                 canonical = str(getattr(found, "name", None) or name).lower()
@@ -713,19 +727,25 @@ def _pre_gateway_dispatch(rt: Runtime):
                 return None                        # /confidential to unlock, and the escape hatches
             # Review finding 27: without resolve_command an alias of /model cannot be recognised, so while
             # locked every other slash command is refused (fail closed) instead of matching the typed word.
-            try:
-                locked, _tier = rt.is_locked()
-            except Exception:  # noqa: BLE001
-                locked = True                      # unreadable lock state: refuse (fail closed)
-            if locked is False:
+            if not locked_or_unreadable():
                 return None
-            rt.append({"kind": "tool_refused", "purpose": f"command:{canonical}",
-                       "decision": "runtime_switch" if resolved else "command_unresolved",
-                       "surface": "gateway", "detail": {"command": canonical, "resolved": resolved}})
-            return {"action": "rewrite",
-                    "text": f"/confidential blocked {canonical}" + ("" if resolved else " unresolved")}
+            row = {"kind": "tool_refused", "purpose": f"command:{canonical}",
+                   "decision": "runtime_switch" if resolved else "command_unresolved",
+                   "surface": "gateway", "detail": {"command": canonical, "resolved": resolved}}
+        except Exception as exc:  # noqa: BLE001
+            if not locked_or_unreadable():
+                return None
+            resolved = canonical == name and resolved
+            row = {"kind": "tool_refused", "purpose": f"command:{canonical}", "decision": "hook_error",
+                   "surface": "gateway", "detail": {"command": canonical, "resolved": resolved,
+                                                    "error_type": type(exc).__name__}}
+        rewrite = {"action": "rewrite",
+                   "text": f"/confidential blocked {canonical}" + ("" if resolved else " unresolved")}
+        try:
+            rt.append(row)
         except Exception:  # noqa: BLE001
-            return None
+            pass                                   # the refusal stands without its row
+        return rewrite
     return pre_gateway_dispatch
 
 
