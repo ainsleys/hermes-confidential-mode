@@ -394,7 +394,13 @@ def pin_is_the_cause(reason: Any) -> bool:
 KEY_REQUIREMENTS = "see Requirements in README.md"
 
 
-def key_fix(env_var: str) -> str:
+UNSCOPED_STEP = ("this process (a gateway serving several profiles) cannot read keys outside a profile's scope, so "
+                 "lock from a terminal (hermes confidential on attested), or give the key through model.api_key")
+
+
+def key_fix(env_var: str, state: str = "") -> str:
+    if state == KEY_UNSCOPED:
+        return f"{env_var} may be set, but {UNSCOPED_STEP}"
     return (f"set {env_var} ({KEY_REQUIREMENTS}): export the variable or add the variable to Hermes' env file, "
             "or give Hermes the key through model.api_key; a key added only with hermes auth is not visible to "
             "the plugin")
@@ -406,9 +412,16 @@ def missing_key_headline(report: "PreflightReport") -> str:
     keys = [i for i in report.failures() if i.key in ATTESTED_KEY_ENVS.values()]
     if not keys:
         return ""
-    what = " and ".join(f"{i.key} is {i.value_redacted}" for i in keys)
-    todo = " and ".join(i.key for i in keys)
-    head = f"Not locked: {what}; set {todo} ({KEY_REQUIREMENTS})."
+    unset = [i.key for i in keys if i.value_redacted != KEY_UNSCOPED]
+    unscoped = [i.key for i in keys if i.value_redacted == KEY_UNSCOPED]
+    parts = []
+    if unset:
+        parts.append(f"{' and '.join(unset)} {'is' if len(unset) == 1 else 'are'} not set; set "
+                     f"{' and '.join(unset)} ({KEY_REQUIREMENTS})")
+    if unscoped:
+        parts.append(f"{' and '.join(unscoped)} {'is' if len(unscoped) == 1 else 'are'} not readable in this "
+                     f"scope; {UNSCOPED_STEP}")
+    head = "Not locked: " + "; ".join(parts) + "."
     if len(keys) < len(report.failures()):
         head += " The preflight also found routes that would leave the tier."
     return head
@@ -756,7 +769,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             state = state if state in (KEY_SET, KEY_NOT_SET, KEY_UNSCOPED) else KEY_NOT_SET
             ok = state == KEY_SET
             # Not through add(): the key name reads as a secret there and every state would show "***".
-            items.append(PreflightItem(env_var, state, IN_TIER if ok else OFF_TIER, "" if ok else key_fix(env_var)))
+            items.append(PreflightItem(env_var, state, IN_TIER if ok else OFF_TIER, "" if ok else key_fix(env_var, state)))
 
     # attested profile presence
     if tier == Tier.ATTESTED:

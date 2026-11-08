@@ -886,3 +886,17 @@ def test_explicit_off_tier_routes_name_the_value_to_write_on_both_tiers():
             fix = item(r, key).fix
             assert want in fix and "openrouter (with" not in fix, (tier, key, fix)
         assert item(r, "model.provider").fix.startswith("set model.provider: ")
+
+
+def test_a_key_not_readable_in_this_scope_is_not_told_to_set_the_key():
+    """Review L2: on a gateway with no profile scope the key may be set; the headline and the row say so."""
+    r = run_preflight(Tier.ATTESTED, attested_pred(), attested_config(), plugin_aux_tasks=[], isolation="in_process",
+                      provider_lookup=lambda n: object() if n in PROFILES else None,
+                      attested_profile="attested-tinfoil", key_state=lambda p, env: pf.KEY_UNSCOPED)
+    head = pf.missing_key_headline(r)
+    assert head.startswith("Not locked: TINFOIL_API_KEY is not readable in this scope; this process"), head
+    assert "set TINFOIL_API_KEY (" not in head and "hermes confidential on attested" in head
+    assert item(r, "TINFOIL_API_KEY").fix.startswith("TINFOIL_API_KEY may be set, but this process")
+    r = run(attested_config(), tier=Tier.ATTESTED, pred=attested_pred(), profile="attested-tinfoil", keys=())
+    assert pf.missing_key_headline(r) == ("Not locked: TINFOIL_API_KEY is not set; set TINFOIL_API_KEY (see "
+                                          "Requirements in README.md).")
