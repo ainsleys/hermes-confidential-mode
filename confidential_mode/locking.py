@@ -489,7 +489,8 @@ def _lock_held(tier: Tier, base: dict, *, state, ledger, config, registry, plugi
             kind="preflight_fail", purpose="lock", verdict="off_tier", decision="refused",
             detail={"failures": [i.key for i in report.failures()][:100], "fingerprint": report.fingerprint}, **base))
         return LockResult(False, "Not locked: the preflight found routes that would leave the tier.\n"
-                          + _pf.format_report(report), tier=tier, report=report, fingerprint=report.fingerprint)
+                          + _pf.format_report(report, collapse=True), tier=tier, report=report,
+                          fingerprint=report.fingerprint)
 
     try:
         runtime = (live_runtime or live_main_runtime)()

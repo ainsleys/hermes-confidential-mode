@@ -830,3 +830,40 @@ def test_auto_side_calls_stay_in_tier_with_a_note_while_an_openrouter_or_nous_cr
     r = run_preflight(Tier.ON_HOST, on_host_pred(), base_config(), plugin_aux_tasks=[], isolation="in_process",
                       provider_lookup=lambda n: None, attested_profile=None)
     assert item(r, "auxiliary.compression.provider").value_redacted == "auto -> ollama"
+
+
+# ── Amendment 14: the collapsed table and the provider value each FIX names ──────────────────────────
+
+def test_a_fresh_config_collapses_the_inheriting_tasks_into_one_row_per_verdict():
+    r = run({}, tier=Tier.ATTESTED, keys=())
+    inheriting = [i for i in r.items if i.group == "inherit"]
+    assert len(inheriting) >= 15 and all(i.verdict == "off_tier" for i in inheriting)
+    full = format_report(r)
+    short = format_report(r, collapse=True)
+    assert all(i.key in full for i in inheriting)
+    assert not any(i.key in short for i in inheriting)
+    rows = [line for line in short.splitlines() if line.startswith("auxiliary.* (")]
+    assert len(rows) == 1 and f"auxiliary.* ({len(inheriting)} tasks)" in rows[0]
+    assert "inherit the main route" in rows[0] and "the main route is off_tier" in rows[0]
+    assert "check --verbose lists each task" in rows[0]
+    assert len(short.splitlines()) < len(full.splitlines()) - 10
+    assert short.splitlines()[0] == full.splitlines()[0]          # the same verdict and count
+
+
+def test_every_in_tier_provider_fix_names_the_value_to_write():
+    for tier, want in ((Tier.ATTESTED, "attested-tinfoil"), (Tier.ON_HOST, "custom")):
+        r = run({}, tier=tier, keys=())
+        text = format_report(r)
+        assert "an in-tier provider" not in text, text
+        assert want in item(r, "model.provider").fix
+        assert want in item(r, "auxiliary.title_generation.provider").fix
+    r = run(base_config(model={"provider": "attested-near", "default": "m"}), tier=Tier.ATTESTED,
+            pred=None, keys=())
+    fix = item(r, "auxiliary.title_generation.provider").fix
+    assert fix == "" or "set auxiliary.title_generation.provider: attested-near" in fix
+
+
+def test_a_passing_group_collapses_too():
+    r = run(base_config())
+    short = format_report(r, collapse=True)
+    assert r.ok and "auxiliary.* (" in short and "PASS" in short.splitlines()[0]

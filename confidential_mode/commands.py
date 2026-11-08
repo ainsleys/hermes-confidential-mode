@@ -43,7 +43,7 @@ HELP_LINES = (
     ("on <on-host-only|attested>", "lock this profile (the preflight runs first)"),
     ("off", "unlock, with the lock period's counts"),
     ("status [--verbose]", "lock state, pins, verification, installed commit; --verbose adds the tool list"),
-    ("check [tier]", "the preflight table"),
+    ("check [tier] [--verbose]", "the preflight table; --verbose lists each auxiliary task"),
     ("pins", "approved pins, the pending pin, tool grants"),
     ("pins approve", "approve the pending pin (asks you)"),
     ("pins review", "terminal only: hermes confidential pins review (fetches the review bundle)"),
@@ -399,12 +399,13 @@ def interactive_attested_ok(rt: Any, wait_seconds: float = INTERACTIVE_VERIFY_WA
     return call
 
 
-def check_text(rt: Any, tier: Optional[str]) -> str:
-    return check_result(rt, tier)[0]
+def check_text(rt: Any, tier: Optional[str], *, verbose: bool = False) -> str:
+    return check_result(rt, tier, verbose=verbose)[0]
 
 
-def check_result(rt: Any, tier: Optional[str]) -> tuple[str, bool]:
-    """(the preflight table, whether it passed). `hermes confidential check` exits 1 unless it passed."""
+def check_result(rt: Any, tier: Optional[str], *, verbose: bool = False) -> tuple[str, bool]:
+    """(the preflight table, whether it passed). `hermes confidential check` exits 1 unless it passed. The
+    table is collapsed unless ``verbose`` (Amendment 14)."""
     try:
         locked, locked_tier = rt.is_locked()
     except Exception:  # noqa: BLE001
@@ -419,7 +420,7 @@ def check_result(rt: Any, tier: Optional[str]) -> tuple[str, bool]:
     config = rt.load_config()
     report = _locking.run_tier_preflight(t, config=config, attested_ok=interactive_attested_ok(rt),
                                          check_keys=True)
-    text = _pf.format_report(report)
+    text = _pf.format_report(report, collapse=not verbose)
     try:
         summary = _pf.auto_summary(report, _pf.auto_chain_readable(lambda p, e: _pf.key_state(p, e, config)))
     except Exception:  # noqa: BLE001
@@ -543,7 +544,9 @@ def handle_slash(rt: Any, raw_args: str, *, session_id: str = "", session_key: s
             return "Usage: /confidential status [--verbose]"
         return status_text(rt, session_key=skey, verbose=bool(rest))
     if cmd == "check":
-        return check_text(rt, rest[0] if rest else None)
+        verbose = any(a in ("--verbose", "-v") for a in rest)
+        names = [a for a in rest if a not in ("--verbose", "-v")]
+        return check_text(rt, names[0] if names else None, verbose=verbose)
     if cmd == "pins":
         if not rest:
             return pins_text(rt, session_key=skey)
@@ -1352,6 +1355,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
                        help="which attested vendor to set up (default tinfoil)")
         p = sub.add_parser("check", help="run the lock preflight and print the table")
         p.add_argument("--tier", default=None, choices=[t.value for t in Tier])
+        p.add_argument("--verbose", "-v", action="store_true",
+                       help="one row per auxiliary task, not one row per verdict")
         p = sub.add_parser("watch", help="stream the ledger (works unlocked)")
         from . import watch
         watch.setup_parser(p)
@@ -1406,7 +1411,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
             if action in CLI_VERBS:
                 return cli_verb(rt, action, args)
             if action == "check":
-                text, ok = check_result(rt, getattr(args, "tier", None))
+                text, ok = check_result(rt, getattr(args, "tier", None),
+                                        verbose=bool(getattr(args, "verbose", False)))
                 print(text)
                 return 0 if ok else 1
             if action == "watch":

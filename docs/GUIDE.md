@@ -455,17 +455,19 @@ hermes confidential check --tier attested
 ```
 
 `check` runs the preflight and prints one row per route: the config key, its value, a verdict, and for
-a failure the exact key to change. In chat, `/confidential check [tier]`. An excerpt on a typical
-OpenRouter setup:
+a failure the exact key to change and the value to write. The auxiliary tasks left to inherit the main
+route share one row per verdict, such as `auxiliary.* (18 tasks)`; `check --verbose` prints one row
+per task. A missing vendor key is the first row. In chat, `/confidential check [tier] [--verbose]`. An
+excerpt on a typical OpenRouter setup:
 
 ```
 confidential preflight: tier=attested FAIL (26 item(s)) fingerprint=3b1b1f8f92a4
 KEY                                      VALUE                                     VERDICT   FIX
 model.provider                           openrouter                                off_tier  set model.provider/model.base_url to an in-tier route (provider openrouter is not an attested profile)
 fallback_providers[0]                    provider=openrouter, model=deepseek/d...  off_tier  remove fallback_providers entries while locked
-auxiliary.vision.provider                auto                                      off_tier  set auxiliary.vision.provider (or auxiliary.vision.base_url) explicitly to an in-tier vision route; ...
+auxiliary.vision.provider                auto                                      off_tier  set auxiliary.vision.provider (or auxiliary.vision.base_url) explicitly: attested-tinfoil (or attested-near), with a vision model; ...
 auxiliary.compression.provider           deepinfra                                 off_tier  set auxiliary.compression.provider/auxiliary.compression.base_url to an in-tier route (provider deepinfra is not an attested profile)
-auxiliary.title_generation.provider      auto -> openrouter                        off_tier  inherits the main route: fix model.provider, or pin auxiliary.title_generation.provider to an in-tier provider
+auxiliary.* (17 tasks)                   inherit the main route                    off_tier  the main route is off_tier: fix model.provider, or set auxiliary.<task>.provider: attested-tinfoil (or attested-near) (check --verbose lists each task)
 ...
 memory.provider                          honcho                                    off_tier  set memory.provider: "" (built-in on-host memory) while locked
 plugins.isolation                        (default in_process)                      in_tier

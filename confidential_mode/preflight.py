@@ -47,7 +47,7 @@ _CODEX = frozenset({"openai-codex", "codex"})
 _ON_HOST_TTS = frozenset({"neutts", "kittentts", "piper", "none"})
 #: Hermes resolves an unset/empty tts.provider to "edge" (tools/tts_tool.py:105,145-148), a hosted service.
 _TTS_DEFAULT = "edge"
-_VISION_FIX = ("set {p}.provider (or {p}.base_url) explicitly to an in-tier vision route; Hermes describes "
+_VISION_FIX = ("set {p}.provider (or {p}.base_url) explicitly: {hint}, with a vision model; Hermes describes "
                "gateway inbound images through vision even without a tool call, and 'auto' walks "
                "openrouter -> nous -> deepinfra when the main model cannot take images")
 _ABSENT = object()
@@ -101,6 +101,7 @@ class PreflightItem:
     value_redacted: str
     verdict: str          # one of VERDICTS
     fix: str = ""         # one line naming the YAML key to change; "" when passing
+    group: str = ""       # "inherit": an auxiliary task that inherits the main route (Amendment 14)
 
 
 @dataclass(frozen=True)
@@ -412,6 +413,27 @@ def _attested_providers_in_use(config: Mapping, tasks: Sequence[str], plugins: M
     return [p for p in ATTESTED_KEY_ENVS if p in names]
 
 
+ON_HOST_EXAMPLE_URL = "http://127.0.0.1:11434/v1"
+
+
+def provider_value_hint(tier: Tier, main_provider: str) -> str:
+    """The provider value a FIX tells you to write (Amendment 14): the main provider's name when it is a
+    provider the tier can use, else the tier's own values."""
+    p = _s(main_provider).lower()
+    if tier == Tier.ATTESTED:
+        return p if p in ATTESTED_KEY_ENVS else "attested-tinfoil (or attested-near)"
+    if p and p not in _AUTO and p not in _CODEX and p != _MOA and p != "main":
+        return f"{p} (with a base_url on this machine)"
+    return f"custom, with base_url {ON_HOST_EXAMPLE_URL} or another server on this machine"
+
+
+def _main_provider_fix(tier: Tier) -> str:
+    if tier == Tier.ATTESTED:
+        return ("model.provider: attested-tinfoil or attested-near (hermes confidential setup prints the whole "
+                "block)")
+    return f"model.provider: custom and model.base_url: {ON_HOST_EXAMPLE_URL} (a model server on this machine)"
+
+
 def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plugin_aux_tasks: Sequence[Any],
                   isolation: Any = _ABSENT, provider_lookup: Callable[[str], object | None],
                   attested_profile: str | None, builtin_aux_tasks: Sequence[str] | None = None,
@@ -436,18 +458,20 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     ctx = _Ctx(tier, predicate)
     items: list[PreflightItem] = []
 
-    def add(key: str, value: Any, verdict: str, fix: str = "") -> None:
-        items.append(PreflightItem(key, redact_value(key, value), verdict, "" if verdict in PASSING else fix))
+    def add(key: str, value: Any, verdict: str, fix: str = "", group: str = "") -> None:
+        items.append(PreflightItem(key, redact_value(key, value), verdict, "" if verdict in PASSING else fix,
+                                   group))
 
     # main
     block = _main_block(config)
     main_verdict, main_reason, main_provider = _main_route(ctx, config)
     if main_provider in _CODEX:
-        main_fix = "set model.provider to an in-tier provider; openai-codex runs turns in an app-server subprocess the middleware never sees"
+        main_fix = (f"set {_main_provider_fix(tier)}; openai-codex runs turns in an app-server subprocess the "
+                    "middleware never sees")
     elif main_provider == _MOA:
-        main_fix = "set model.provider to an in-tier provider; moa is not allowed while locked"
+        main_fix = f"set {_main_provider_fix(tier)}; moa is not allowed while locked"
     elif main_provider in _AUTO:
-        main_fix = "set model.provider explicitly to an in-tier provider"
+        main_fix = f"set {_main_provider_fix(tier)}"
     elif pin_is_the_cause(main_reason):
         main_fix = PIN_FIX
     else:
@@ -485,7 +509,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             # Hermes ignores a non-dict block (treats it as auto); never let junk pass silently.
             add(f"{prefix}", raw_block, OFF_TIER, f"{prefix} must be a mapping with provider/model/base_url")
         if task == "vision" and provider in _AUTO and not base_url:
-            add(f"{prefix}.provider", cfg.get("provider") or "auto", OFF_TIER, _VISION_FIX.format(p=prefix))
+            add(f"{prefix}.provider", cfg.get("provider") or "auto", OFF_TIER, _VISION_FIX.format(p=prefix, hint=provider_value_hint(tier, main_provider)))
         elif (provider in _AUTO or provider == "main") and not base_url:
             # "auto"/"" resolve to the main route (text tasks); "main" is the main route for every task.
             shown = f"{cfg.get('provider') or 'auto'} -> {main_provider or 'auto'}"
@@ -495,7 +519,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                 shown += " (no OpenRouter or Nous credential readable)"
             add(f"{prefix}.provider", shown, main_verdict,
                 INHERIT_FIX if pin_is_the_cause(main_reason) else
-                f"inherits the main route: fix model.provider, or pin {prefix}.provider to an in-tier provider")
+                f"inherits the main route: fix model.provider, or set {prefix}.provider: "
+                f"{provider_value_hint(tier, main_provider)}", group="inherit")
         else:
             if provider == "main":  # "main" + base_url: main provider identity on an explicit endpoint
                 cfg = {**cfg, "provider": main_provider}
@@ -515,7 +540,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
                 continue
             ep = _s(entry.get("provider")).lower()
             if ep in _AUTO:
-                add(key, entry, OFF_TIER, f"give {key}.provider an explicit in-tier provider or remove the entry")
+                add(key, entry, OFF_TIER, f"set {key}.provider: {provider_value_hint(tier, main_provider)}, or "
+                                          "remove the entry")
                 continue
             v, reason = _route_item_verdict(ctx, entry, f"{purpose}:fallback")
             add(key, entry, v, PIN_FIX if pin_is_the_cause(reason) else
@@ -913,16 +939,60 @@ def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[: max(0, width - 3)] + "..."
 
 
-def format_report(report: PreflightReport, *, value_width: int = 40, key_width: int = 44) -> str:
-    """Fixed-width table: KEY, VALUE (redacted), VERDICT, FIX. Fix text is not clipped."""
-    kw = min(key_width, max([3] + [len(i.key) for i in report.items]))
-    vw = min(value_width, max([5] + [len(i.value_redacted) for i in report.items]))
+#: The rows a collapsed table prints first: a missing vendor key is the first thing to fix (Amendment 14).
+KEY_ROW_KEYS = frozenset(ATTESTED_KEY_ENVS.values())
+VERBOSE_HINT = "check --verbose lists each task"
+
+
+def _grouped(items: Sequence[PreflightItem]) -> list[PreflightItem]:
+    """Collapse the rows of auxiliary tasks that inherit the main route into one row per verdict, placed where
+    the first such row was (Amendment 14)."""
+    groups: dict[str, list[PreflightItem]] = {}
+    for i in items:
+        if i.group == "inherit":
+            groups.setdefault(i.verdict, []).append(i)
+    out: list[PreflightItem] = []
+    done: set[str] = set()
+    for i in items:
+        if i.group != "inherit":
+            out.append(i)
+            continue
+        if i.verdict in done:
+            continue
+        done.add(i.verdict)
+        rows = groups[i.verdict]
+        if len(rows) == 1:
+            out.append(i)
+            continue
+        fix = ""
+        if i.verdict not in PASSING:
+            first = rows[0].fix
+            fix = (f"the main route is {i.verdict}: "
+                   + ("fix the main route first" if first == INHERIT_FIX else
+                      first.replace("inherits the main route: ", "").replace(rows[0].key, "auxiliary.<task>.provider"))
+                   + f" ({VERBOSE_HINT})")
+        out.append(PreflightItem(f"auxiliary.* ({len(rows)} tasks)", "inherit the main route", i.verdict, fix,
+                                 "inherit"))
+    return out
+
+
+def format_report(report: PreflightReport, *, value_width: int = 40, key_width: int = 44,
+                  collapse: bool = False) -> str:
+    """Fixed-width table: KEY, VALUE (redacted), VERDICT, FIX. Fix text is not clipped. ``collapse`` (the
+    default of `check` and of a refused lock; Amendment 14) prints the vendor-key rows first and one row per
+    verdict for the auxiliary tasks that inherit the main route."""
+    items = list(report.items)
+    if collapse:
+        items = _grouped(items)
+        items = [i for i in items if i.key in KEY_ROW_KEYS] + [i for i in items if i.key not in KEY_ROW_KEYS]
+    kw = min(key_width, max([3] + [len(i.key) for i in items]))
+    vw = min(value_width, max([5] + [len(i.value_redacted) for i in items]))
     dw = max(len(v) for v in VERDICTS)
     status = "PASS" if report.ok else f"FAIL ({len(report.failures())} item(s))"
     lines = [f"confidential preflight: tier={report.tier.value} {status} fingerprint={report.fingerprint[:12]}",
              f"{'KEY':<{kw}}  {'VALUE':<{vw}}  {'VERDICT':<{dw}}  FIX",
              f"{'-' * kw}  {'-' * vw}  {'-' * dw}  ---"]
-    for i in report.items:
+    for i in items:
         lines.append(f"{_clip(i.key, kw):<{kw}}  {_clip(i.value_redacted, vw):<{vw}}  {i.verdict:<{dw}}  {i.fix}".rstrip())
     return "\n".join(lines)
 
