@@ -493,3 +493,76 @@ def test_an_aux_call_refused_by_the_provider_gate_writes_one_send_refused_row(pl
         with pytest.raises(Exception):
             client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "x"}])
     assert len([e for e in plugin.rt.ledger.tail(0) if e.kind == "send_refused"]) == 1   # the gate writes its own
+
+
+# ── Amendment 14: one model's attestation endpoint fails ───────────────────────────────────────────
+
+VISION = "Qwen/Qwen3-VL-test"
+
+
+def _fail_model_reports(plugin, world, failing: str, status: int = 503):
+    """The fake gateway answers HTTP ``status`` for ``failing``'s attestation report; every other request as
+    the world serves it."""
+    import httpx
+    from urllib.parse import parse_qs
+
+    def handler(request):
+        q = {k: v[0] for k, v in parse_qs(request.url.query.decode()).items()}
+        if request.url.path.startswith("/v1/attestation/") and q.get("model") == failing:
+            world.requests.append((request.method, request.url.path, request.url.query.decode()))
+            return httpx.Response(status, json={"error": {"message": "unavailable", "type": "server"}})
+        return world.handler(request)
+    ad = plugin.rt.near_adapter
+    ad._transport_factory = lambda: httpx.MockTransport(handler)
+    ad._attest_transport = None
+
+
+def _setup_near(plugin, model, vision):
+    import io
+    out = io.StringIO()
+    code = _sub(plugin, "commands").cli_setup_near(
+        plugin.rt, argparse.Namespace(model=model, vision_model=vision, no_verify=False), out=out)
+    return code, out.getvalue()
+
+
+def test_setup_reports_a_vision_model_whose_attestation_is_unavailable_and_continues(plugin, near):
+    _fail_model_reports(plugin, near, VISION)
+    code, out = _setup_near(plugin, MODEL, VISION)
+    assert code == 0, out
+    assert f"{VISION}: attestation unavailable (HTTP 503 from NEAR); vision left unset.\n" in out
+    assert f"Verified {HOST}#{MODEL}:" in out                 # the main model verified on its own
+    import hermes_yaml
+    cfg = hermes_yaml.safe_load(out[out.index("# Add to config.yaml"):out.index("Then run")])
+    assert "vision" not in cfg["auxiliary"] and cfg["confidential"]["near"]["models"] == [MODEL]
+    assert f"# vision left unset: {VISION}: attestation unavailable (HTTP 503 from NEAR)." in out
+    assert "auxiliary.vision is unset" in out
+    pending = plugin.rt.pins.pending()
+    assert pending is not None and pending.router_repo == f"{HOST}#{MODEL}"   # the pin names the verified model
+
+
+def test_setup_stops_when_the_main_model_attestation_is_unavailable(plugin, near):
+    _fail_model_reports(plugin, near, MODEL)
+    code, out = _setup_near(plugin, MODEL, VISION)
+    assert code == 1
+    assert f"{MODEL}: attestation unavailable (HTTP 503 from NEAR); setup stopped" in out
+    assert "Next step: try again in a few minutes, or choose another model with --model <id>." in out
+    assert "# Add to config.yaml" not in out and plugin.rt.pins.pending() is None
+
+
+def test_setup_rejects_a_model_id_near_does_not_attest(plugin, near):
+    _fail_model_reports(plugin, near, "not-a-real-model", status=404)
+    code, out = _setup_near(plugin, "not-a-real-model", VISION)
+    assert code == 1 and "not-a-real-model: attestation unavailable (HTTP 404 from NEAR)" in out
+    assert "Next step: check the model id" in out
+
+
+def test_check_and_on_name_the_model_whose_attestation_is_unavailable(plugin, near):
+    plugin.cfg.write_text(NEAR_CONFIG.replace(f"models: [{MODEL}]", f"models: [{MODEL}, {VISION}]")
+                          .replace(f"    model: {MODEL}\nconfidential", f"    model: {VISION}\nconfidential"))
+    plugin.rt.near_adapter.models = [MODEL, VISION]
+    _fail_model_reports(plugin, near, VISION)
+    want = f"{VISION}: attestation unavailable (HTTP 503 from NEAR); try again in a few minutes"
+    got = plugin.slash("check attested")
+    assert want in got, got
+    out = plugin.slash("on attested")
+    assert out.startswith("Not locked") and want in out

@@ -103,7 +103,7 @@ import openai
 
 from .. import sendctx
 from . import near_checks as nc
-from .base import PreparedVerification, VerificationResult, VerifyError
+from .base import PreparedVerification, VendorHTTPError, VerificationResult, VerifyError
 
 logger = logging.getLogger(__name__)
 
@@ -980,12 +980,17 @@ class NearAdapter:
         with client.stream("GET", url, params=params, headers={"accept": "application/json", **(headers or {})}) as r:
             body = r.read()
             der = _peer_der(r)
+        model = params.get("model") if isinstance(params, Mapping) else None
+        subject = str(model) if model else f"NEAR gateway {self.host}"
         if r.status_code != 200:
-            raise VerifyError(f"GET {path} returned HTTP {r.status_code}")
+            # Amendment 14: the vendor, the model (or the gateway), the status and one next step.
+            raise VendorHTTPError(vendor="NEAR", subject=subject, status=r.status_code, path=path,
+                                  subject_kind="model" if model else "gateway")
         try:
             return json.loads(body), der
         except ValueError as exc:
-            raise VerifyError(f"GET {path} returned invalid JSON") from exc
+            raise VerifyError(f"{subject}: GET {path} returned invalid JSON from NEAR; try again in a few "
+                              "minutes") from exc
 
     def capture(self, nonce: str) -> tuple[dict, dict | None]:
         """The public attestation responses for ``nonce`` (network). Raises VerifyError."""
@@ -1020,7 +1025,8 @@ class NearAdapter:
             with client.stream("GET", jwks_url) as r:
                 body = r.read()
             if r.status_code != 200:
-                raise VerifyError(f"Intel JWKS returned HTTP {r.status_code}")
+                raise VendorHTTPError(vendor="Intel Trust Authority", subject="Intel attestation signing keys",
+                                      status=r.status_code, path=jwks_url, subject_kind="key set")
             raw["jwks"], raw["jwks_url_fetched"] = json.loads(body), jwks_url
         except VerifyError:
             raise

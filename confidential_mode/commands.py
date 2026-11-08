@@ -102,7 +102,7 @@ def _near_verification_line(cache: Any, clock: Callable[[], float]) -> str:
                 f"{result.router_repo}, code {_short(result.code_fingerprint)} enclave "
                 f"{_short(result.enclave_fingerprint)}, gateway TCB {claims.get('tcb_status') or 'unknown'}")
     if error:
-        return f"NEAR verification: failed ({error[:120]})"
+        return f"NEAR verification: failed ({error[:300]})"
     return ""
 
 
@@ -112,7 +112,7 @@ def _tinfoil_verification_line(result: Any, error: Any, clock: Callable[[], floa
                 f"code {_short(result.code_fingerprint)} enclave {_short(result.enclave_fingerprint)}"
                 f"{' release ' + result.release_tag if result.release_tag else ''}")
     if error:
-        return f"Last verification: failed ({error[:120]})"
+        return f"Last verification: failed ({error[:300]})"
     return "Last verification: never in this process (host clock)"
 
 
@@ -782,8 +782,17 @@ NEAR_VISION_NOTE = (
     "  #   vision: {{provider: attested-tinfoil, model: {tinfoil_vision}}}   # needs TINFOIL_API_KEY and a Tinfoil pin")
 
 
-def near_config_block(model: str, vision_model: str = DEFAULT_NEAR_VISION_MODEL, *,
-                      tinfoil_vision_model: str = DEFAULT_VISION_MODEL) -> str:
+NEAR_VISION_UNSET_NOTE = (
+    "  # vision left unset: {reason}. The attested preflight refuses this block until auxiliary.vision\n"
+    "  # is set. Run setup again once NEAR attests {vision}, or route vision through attested-tinfoil:\n"
+    "  #   vision: {{provider: attested-tinfoil, model: {tinfoil_vision}}}   # needs TINFOIL_API_KEY and a Tinfoil pin")
+
+
+def near_config_block(model: str, vision_model: Optional[str] = DEFAULT_NEAR_VISION_MODEL, *,
+                      tinfoil_vision_model: str = DEFAULT_VISION_MODEL, vision_unset_reason: str = "",
+                      unset_vision: str = "") -> str:
+    """The NEAR config block. ``vision_model`` None leaves auxiliary.vision out of the block, with a note
+    naming ``vision_unset_reason`` (setup could not attest ``unset_vision``; Amendment 14)."""
     try:
         tasks = list(dict.fromkeys(_pf.builtin_aux_task_names()
                                    + [e if isinstance(e, str) else e.get("key") for e in _locking._plugin_aux(None)]))
@@ -795,9 +804,14 @@ def near_config_block(model: str, vision_model: str = DEFAULT_NEAR_VISION_MODEL,
              "model:", f"  provider: {name}", f"  default: {model}", "fallback_providers: []", "auxiliary:"]
     for task in tasks:
         if task == "vision":
+            if vision_model is None:
+                lines.append(NEAR_VISION_UNSET_NOTE.format(reason=vision_unset_reason or "not attested",
+                                                           vision=unset_vision or "the vision model",
+                                                           tinfoil_vision=tinfoil_vision_model))
+                continue
             lines.append(NEAR_VISION_NOTE.format(tinfoil_vision=tinfoil_vision_model))
         lines += [f"  {task}:", f"    provider: {name}", f"    model: {vision_model if task == 'vision' else model}"]
-    models = sorted({model, vision_model})
+    models = sorted({model} | ({vision_model} if vision_model else set()))
     lines += ["memory:", '  provider: ""', "voice:", "  auto_tts: false", "confidential:", "  near:",
               "    # every model id Hermes may send to NEAR. A NEAR pin's identity is this list, so changing it",
               "    # needs a new pin.",
@@ -808,26 +822,86 @@ def near_config_block(model: str, vision_model: str = DEFAULT_NEAR_VISION_MODEL,
     return "\n".join(lines)
 
 
+def near_model_failure(model: str, exc: BaseException) -> str:
+    """One line for a NEAR model that did not verify (Amendment 14): the model, the vendor, the HTTP status
+    when there is one, and why."""
+    from .verify.base import VendorHTTPError
+    if isinstance(exc, VendorHTTPError):
+        if exc.subject == model:
+            return f"{model}: attestation unavailable (HTTP {exc.status} from {exc.vendor})"
+        return f"{model}: not attested, because {exc.subject} answered HTTP {exc.status} ({exc.vendor})"
+    return f"{model}: attestation did not verify ({str(exc)[:200]})"
+
+
+def attest_near_models(adapter: Any, models: list) -> tuple[list, dict]:
+    """Attest each model on its own (gateway and that model's reports, appraised as a lock would) without
+    publishing anything: (models that verified, {model: the VerifyError}). The adapter's model list is
+    restored afterwards. Amendment 14: one model whose attestation endpoint fails leaves the others usable."""
+    from .verify.base import VerifyError
+    saved = list(getattr(adapter, "models", []) or [])
+    ok: list = []
+    bad: dict = {}
+    try:
+        for m in dict.fromkeys(models):
+            adapter.models = [m]
+            try:
+                prepared = adapter.prepare_verification()
+            except VerifyError as exc:
+                bad[m] = exc
+                continue
+            except Exception as exc:  # noqa: BLE001
+                bad[m] = VerifyError(f"{type(exc).__name__}: {exc}")
+                continue
+            try:
+                prepared.discard()
+            except Exception:  # noqa: BLE001
+                pass
+            ok.append(m)
+    finally:
+        adapter.models = saved
+    return ok, bad
+
+
 KEY_NOT_SET_TEXT = "NOT set (export it or add it to Hermes' env file)"
 
 
 def cli_setup_near(rt: Any, args: Any, out=None) -> int:
-    """`hermes confidential setup --vendor near`: attest the NEAR gateway and the chosen model, approve the
-    first pin on this terminal, print a config block. No API key is needed to attest (NEAR documents the
-    attestation endpoints as public); one is needed for inference and signatures. auxiliary.vision goes
-    through attested-near with a NEAR vision model, under a note that images are plaintext to the gateway
-    (NEAR_VISION_NOTE)."""
+    """`hermes confidential setup --vendor near`: attest the NEAR gateway with each chosen model on its own,
+    approve the first pin on this terminal, print a config block. No API key is needed to attest (NEAR
+    documents the attestation endpoints as public); one is needed for inference and signatures.
+    auxiliary.vision goes through attested-near with a NEAR vision model, under a note that images are
+    plaintext to the gateway (NEAR_VISION_NOTE). A vision model that does not verify is left out of the
+    block, with a note; a main model that does not verify stops setup (Amendment 14)."""
     out = out or sys.stdout
     model = getattr(args, "model", None) or DEFAULT_NEAR_MODEL
     vision = getattr(args, "vision_model", None) or DEFAULT_NEAR_VISION_MODEL
     key_set = bool(_provider_module(rt).api_key_for(_locking.NEAR_API_KEY_ENV))
     out.write(f"{_locking.NEAR_API_KEY_ENV}: {'set' if key_set else KEY_NOT_SET_TEXT}\n")
+    block_vision: Optional[str] = vision
+    unset_reason = ""
     if not getattr(args, "no_verify", False):
         adapter = getattr(rt, "near_adapter", None)
         if adapter is None:
             out.write("The attested-near provider is not registered; see `hermes confidential status`.\n")
             return 1
-        adapter.models = sorted(set(adapter.models) | {model, vision})
+        verified, failed = attest_near_models(adapter, [model, vision])
+        for m, exc in failed.items():
+            line = near_model_failure(m, exc)
+            if m == model:
+                out.write(f"{line}; setup stopped, because {m} is the main model.\n")
+            else:
+                out.write(f"{line}; vision left unset.\n")
+        if model in failed:
+            from .verify.base import VendorHTTPError
+            exc = failed[model]
+            step = (exc.next_step if isinstance(exc, VendorHTTPError) else
+                    "check that NEAR runs and attests this model (docs/GUIDE.md, Models)")
+            out.write(f"Next step: {step}, or choose another model with --model <id>. No config block was "
+                      "printed.\n")
+            return 1
+        if vision in failed:
+            block_vision, unset_reason = None, near_model_failure(vision, failed[vision])
+        adapter.models = sorted(verified)
         cache = _provider_module(rt).verification_cache
         cache.invalidate(_locking.NEAR_PROFILE_NAME)
         ok, reason, result = cache.ensure(_locking.NEAR_PROFILE_NAME, wait_seconds=INTERACTIVE_VERIFY_WAIT_SECONDS)
@@ -846,9 +920,12 @@ def cli_setup_near(rt: Any, args: Any, out=None) -> int:
             from .consent import approve_pending_pin
             out.write(approve_pending_pin(TerminalAsker(), rt.pins, rt.ledger, session_key="cli-setup",
                                           session_id="", platform="cli-setup") + "\n")
-    out.write("auxiliary.vision goes through attested-near: images leave in plaintext to NEAR's gateway, and "
-              "the text around them is encrypted. The note in the block says how to refuse them instead.\n")
-    out.write(near_config_block(model, vision) + "\n")
+    if block_vision is not None:
+        out.write("auxiliary.vision goes through attested-near: images leave in plaintext to NEAR's gateway, and "
+                  "the text around them is encrypted. The note in the block says how to refuse them instead.\n")
+    out.write(near_config_block(model, block_vision, vision_unset_reason=unset_reason, unset_vision=vision) + "\n")
+    if block_vision is None:
+        out.write("auxiliary.vision is unset: set auxiliary.vision as the note in the block says before you lock.\n")
     out.write("Then run `hermes confidential check --tier attested` and `/confidential on attested`.\n")
     return 0
 

@@ -1027,6 +1027,14 @@ says each image leaves in plaintext to NEAR's gateway, and names the two ways to
 `confidential.near.image_parts: refuse`, or a vision model on `attested-tinfoil`, which needs
 `TINFOIL_API_KEY` and a Tinfoil pin. An on-host vision route is off-tier on the attested tier.
 
+Setup attests the gateway with each model on its own, so one model whose attestation endpoint fails
+leaves the other usable. Each failure prints one line naming the model, the vendor and the HTTP
+status, such as `Qwen/Qwen3-VL-30B-A3B-Instruct: attestation unavailable (HTTP 503 from NEAR); vision
+left unset.` A vision model that fails is left out of the block, with a comment saying how to set
+`auxiliary.vision` before you lock. A main model that fails stops setup with one next step: try again
+in a few minutes for a 5xx status, or check the model id for a 404. `check` and `on` name the model
+and the status the same way in the failing row.
+
 Set `NEAR_AI_API_KEY` for inference and install `pynacl`. `scripts/near_first_contact.py` runs the
 same checks and one signed send, and prints no secrets.
 

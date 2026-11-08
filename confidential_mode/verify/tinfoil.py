@@ -101,7 +101,7 @@ from typing import Any, Callable
 import httpx
 
 from . import _sdkpatch
-from .base import PreparedVerification, VerificationResult, VerifyError
+from .base import PreparedVerification, VendorHTTPError, VerificationResult, VerifyError, http_status_in
 
 VENDOR = "tinfoil"
 PROBE_TIMEOUT_SECONDS = 10.0  # the bodiless TLS probe at verification (confidential.tinfoil.tls_probe)
@@ -303,6 +303,10 @@ class TinfoilAdapter:
                 try:
                     host = discover()
                 except Exception as exc:
+                    status = http_status_in(exc)
+                    if status is not None:
+                        raise VendorHTTPError(vendor="Tinfoil", subject="Tinfoil router discovery", status=status,
+                                              subject_kind="router") from exc
                     raise VerifyError(f"router discovery failed: {type(exc).__name__}: {exc}") from exc
                 if not host or not isinstance(host, str):
                     raise VerifyError("router discovery returned no host")
@@ -634,6 +638,10 @@ class TinfoilAdapter:
         except VerifyError:
             raise
         except Exception as exc:
+            status = http_status_in(exc)
+            if status is not None:   # Amendment 14: the vendor, the router, the status and one next step
+                raise VendorHTTPError(vendor="Tinfoil", subject=f"Tinfoil router {self._enclave or '(unresolved)'}",
+                                      status=status, subject_kind="router") from exc
             raise VerifyError(f"attestation failed: {type(exc).__name__}: {exc}") from exc
 
     def commit_verification(self, prepared: PreparedVerification, *, hold: bool) -> VerificationResult:

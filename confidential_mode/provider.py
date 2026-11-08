@@ -828,7 +828,7 @@ def _emit(e: _Entry, event: dict) -> bool:
 
 
 def _fail_reason(err: str | None) -> str:
-    return "attested verification failed" + (f" ({err[:160]})" if err else "")
+    return "attested verification failed" + (f" ({err[:300]})" if err else "")
 
 
 def _hold(adapter, reason: str) -> None:
