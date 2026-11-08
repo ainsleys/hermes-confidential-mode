@@ -83,8 +83,7 @@ class _Doc:
 def sdk(monkeypatch):
     """The SDK's fetch points the capture hooks wrap, replaced by offline fakes (no network). ``gates`` lets a
     test hold a thread between two fetches; ``boom`` makes one fetch raise."""
-    from tinfoil import client as tf_client
-    from tinfoil import sigstore as tf_sigstore
+    from tinfoil import client as tf_client, sigstore as tf_sigstore
     state = {"gates": {}, "boom": set()}
 
     def gate(name):
@@ -118,8 +117,8 @@ def sdk(monkeypatch):
 def _verify(host: str, out: dict) -> None:
     """One SDK verification as TinfoilAdapter runs it (tinfoil.py _guarded_verify_locked): the SDK's fetches,
     inside capture_sink() and overrides(_capture_hooks())."""
-    from tinfoil import client as tf_client
-    from tinfoil import sigstore as tf_sigstore
+    from tinfoil import client as tf_client, sigstore as tf_sigstore
+
     from confidential_mode.verify.tinfoil import _capture_hooks
     with _sdkpatch.capture_sink() as sink:
         out["sink"] = sink

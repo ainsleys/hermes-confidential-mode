@@ -12,9 +12,9 @@ import sys
 import types
 from pathlib import Path
 
+import hermes_cli
 import pytest
 
-import hermes_cli
 from confidential_mode import hermes_compat as hc
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -375,6 +375,7 @@ def test_a_missing_approval_function_asks_nobody_and_binds_nothing(monkeypatch, 
     them neither shows the prompt nor leaves the plugin's ids bound for Hermes' later approvals."""
     import tools.approval as approval
     import tools.approval_context as ac
+
     from confidential_mode import gate_tools
     asked, bound = [], []
     if missing != "request_tool_approval":
@@ -398,6 +399,7 @@ def test_yolo_on_with_approval_mode_missing_reads_as_unattended(monkeypatch):
     unattended refusal text even while yolo is on."""
     import tools.approval as approval
     import tools.approval_context as ac
+
     from confidential_mode import gate_tools
     monkeypatch.setattr(approval, "_yolo_active", lambda: True)
     monkeypatch.setattr(approval, "_presence", lambda cb=None: (None, True, False, False))

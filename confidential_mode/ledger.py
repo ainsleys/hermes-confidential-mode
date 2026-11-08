@@ -16,9 +16,10 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 
 PLUGIN_STORAGE_NAME = "confidential-mode"
 LEDGER_FILENAME = "ledger.sqlite"
@@ -253,7 +254,7 @@ class BlobStore:
         """Delete blobs (and stale temporary files) not in ``referenced`` and older than ``older_than``
         seconds. Returns the ids deleted."""
         now = time.time() if now is None else now
-        gone = []
+        gone: list = []
         try:
             entries = list(self.root.iterdir())
         except OSError:
@@ -515,7 +516,7 @@ class Ledger:
         committed = False
         try:
             for blob_id, text in to_write.items():
-                if store.put(blob_id, text):
+                if store.put(blob_id, text):  # type: ignore[union-attr]  # to_write is empty without a store
                     created.append(blob_id)
             with self._lock:
                 db = self._db()
@@ -535,11 +536,11 @@ class Ledger:
                             pass
                         self._conn = None
                     raise
-                row_id = int(cur.lastrowid)
+                row_id = int(cur.lastrowid)  # type: ignore[arg-type]  # set by the INSERT above
         except BaseException:
             if not committed:   # no row lists them: remove what this append wrote
                 for blob_id in created:
-                    store.delete(blob_id)
+                    store.delete(blob_id)  # type: ignore[union-attr]  # created is empty without a store
             raise
         if to_write and not self._gc_done:
             self._gc_done = True
@@ -572,7 +573,7 @@ class Ledger:
             rows = self._db().execute(sql, tuple(params)).fetchall()
         out = []
         for r in rows:
-            rec = dict(zip(_COLUMNS, r))
+            rec = dict(zip(_COLUMNS, r, strict=False))
             try:
                 rec["detail"] = json.loads(rec["detail"] or "{}")
             except ValueError:

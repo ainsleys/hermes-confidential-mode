@@ -26,8 +26,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 from .gate_tools import Route
 
@@ -56,11 +57,11 @@ SELF_APPROVAL_REPLY = ("Refused: a Hermes tool started this process, so the agen
                        "itself. Approve from a terminal you opened outside Hermes")
 
 
-def _self_approval(error: Optional[str]) -> bool:
+def _self_approval(error: str | None) -> bool:
     return bool(error) and str(error).startswith(SelfApprovalRefused.__name__ + ":")
 
 
-def _guard(asker: Any) -> Optional[str]:
+def _guard(asker: Any) -> str | None:
     """selfapproval.self_approval_reason() for this asker: every asker path checks it before asking (the chat
     surface's ctx included) and refuses when the marker names another process. An agent that unsets the
     marker, assembles the command at run time, or attaches through the gateway socket can still approve
@@ -81,7 +82,7 @@ def _refuse_on_event_loop(what: str) -> None:
         "called on an event loop, ask_choice would return None and look like a denial.")
 
 
-def _ask(ctx: Any, question: str, choices: list) -> tuple[Optional[str], Optional[str]]:
+def _ask(ctx: Any, question: str, choices: list) -> tuple[str | None, str | None]:
     """(raw_pick, error). An exception from the surface counts as no answer."""
     try:
         return ctx.ask_choice(question, choices), None
@@ -122,7 +123,7 @@ def _short(fp: Any) -> str:
 
 
 UNKNOWN = "unknown"
-Observer = Callable[[Any], Optional[str]]
+Observer = Callable[[Any], str | None]
 
 
 def _value(pending: Any, name: str) -> Any:
@@ -143,16 +144,16 @@ def _text(v: Any) -> str:
     return UNKNOWN if v in (None, "") else str(v)
 
 
-def _published_epoch(v: Any) -> Optional[float]:
+def _published_epoch(v: Any) -> float | None:
     if v in (None, ""):
         return None
     if isinstance(v, (int, float)):
         return float(v)
     if isinstance(v, datetime):
-        return (v if v.tzinfo else v.replace(tzinfo=timezone.utc)).timestamp()
+        return (v if v.tzinfo else v.replace(tzinfo=UTC)).timestamp()
     try:
         dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
-        return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+        return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp()
     except ValueError:
         return None
 
@@ -195,7 +196,7 @@ def _change_line(pending: Any) -> str:
             f"to {_text(_value(pending, 'platform'))}")
 
 
-def _observations(pending: Any, observers: Optional[list]) -> list[str]:
+def _observations(pending: Any, observers: list | None) -> list[str]:
     if not observers:
         return ["independent observations: none configured"]
     lines = []
@@ -209,8 +210,8 @@ def _observations(pending: Any, observers: Optional[list]) -> list[str]:
     return lines or [f"independent observations: none reported ({len(observers)} configured)"]
 
 
-def pin_question(pending: Any, *, observers: Optional[list] = None, now: Optional[float] = None,
-                 approved: Optional[tuple] = None) -> str:
+def pin_question(pending: Any, *, observers: list | None = None, now: float | None = None,
+                 approved: tuple | None = None) -> str:
     """The text a human judges before trusting an enclave build (Miller-frame review, "Pin prompt").
     Every field falls back to "unknown" so the prompt works with older PendingPin shapes. ``approved`` is
     PinStore.approved_set() for the pending identity: (entries, unseen flags)."""
@@ -280,8 +281,9 @@ def _display(value: Any) -> str:
     return render_vendor(value)
 
 
-_COMPONENT_LABELS = {"app_id": "app_id", "compose": "compose sha256:", "os_image": "OS image", "kms_id": "KMS key sha256:",
-                     "services": "service map sha256:", "cm_image_running": "compose-manager image reported by the log"}
+_COMPONENT_LABELS = {"app_id": "app_id", "compose": "compose sha256:", "os_image": "OS image",
+                     "kms_id": "KMS key sha256:", "services": "service map sha256:",
+                     "cm_image_running": "compose-manager image reported by the log"}
 
 
 def _component_text(name: str, value: Any) -> str:
@@ -328,7 +330,7 @@ def _entry_lines(n: int, ent: Any) -> list[str]:
     return lines
 
 
-def _approved_lines(approved: Optional[tuple]) -> list[str]:
+def _approved_lines(approved: tuple | None) -> list[str]:
     if approved is None:
         return ["Approved set: not available from this pin store"]
     entries, unseen = approved
@@ -336,7 +338,7 @@ def _approved_lines(approved: Optional[tuple]) -> list[str]:
         return ["Approved set: none (TRUST ON FIRST USE for this identity)"]
     from .pins import UNSEEN_VERIFICATIONS
     lines = [f"Approved set ({len(entries)} {'entry' if len(entries) == 1 else 'entries'}; all stay approved):"]
-    for ent, old in zip(entries, unseen):
+    for ent, old in zip(entries, unseen, strict=False):
         code = str(_field(ent, "code_fingerprint", "") or "")
         line = (f"  {_display(str(_field(ent, 'cvm_role', '') or ''))} code {_short(code)} enclave "
                 f"{_short(_field(ent, 'enclave_fingerprint'))}, approved {_text(_field(ent, 'approved_at'))} via "
@@ -357,7 +359,7 @@ NEAR_ABLITERATED_NOTE = ("The compose-manager log reports services named \"...-a
                          "plugin lists these services for that reason.")
 
 
-def _near_pin_question(pending: Any, *, observers: Optional[list] = None, approved: Optional[tuple] = None) -> str:
+def _near_pin_question(pending: Any, *, observers: list | None = None, approved: tuple | None = None) -> str:
     """NEAR has no release tag or Sigstore bundle: the prompt shows the identity (host and model allowlist),
     every entry to approve with what it pins, the whole approved set, and, separately, what the
     compose-manager logs reported (Amendments 5, 5.2, 7)."""
@@ -418,7 +420,7 @@ def _same_batch(a: Any, b: Any) -> bool:
     return consent_key(a) == consent_key(b)
 
 
-def _approved_set(store: Any, pending: Any) -> Optional[tuple]:
+def _approved_set(store: Any, pending: Any) -> tuple | None:
     get = getattr(store, "approved_set", None)
     if not callable(get):
         return None
@@ -477,8 +479,8 @@ def _tags_missing_why(pending: Any) -> str:
 
 
 def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, session_id: str,
-                        platform: str, observers: Optional[list] = None, reviewed_by: Optional[str] = None,
-                        review_note: Optional[str] = None) -> str:
+                        platform: str, observers: list | None = None, reviewed_by: str | None = None,
+                        review_note: str | None = None) -> str:
     """Ask the human to approve every pending batch, oldest first; apply a batch only on an explicit
     Approve and only if it is still the one the human saw (by consent key). Writes one ``pin_applied`` row
     per approved entry. ``reviewed_by`` and ``review_note`` (from --reviewed-by and --note) are recorded on
@@ -505,8 +507,8 @@ def approve_pending_pin(ctx: Any, store: Any, ledger: Any, *, session_key: str, 
 
 
 def _approve_batch(ctx: Any, store: Any, ledger: Any, pending: Any, *, session_key: str, session_id: str,
-                   platform: str, observers: Optional[list], reviewed_by: Optional[str],
-                   review_note: Optional[str]) -> str:
+                   platform: str, observers: list | None, reviewed_by: str | None,
+                   review_note: str | None) -> str:
     vendor = str(_field(pending, "vendor", "") or "")
     unpinned = _unpinned_services(pending)
     if unpinned:
@@ -587,12 +589,13 @@ def _approve_batch(ctx: Any, store: Any, ledger: Any, pending: Any, *, session_k
             + f" (code {_short(base['code_fingerprint'])}, enclave {_short(base['enclave_fingerprint'])}).")
 
 
-def _apply(store: Any, pending: Any, surface: str, *, reviewed_by: Optional[str] = None,
-           review_note: Optional[str] = None) -> Any:
+def _apply(store: Any, pending: Any, surface: str, *, reviewed_by: str | None = None,
+           review_note: str | None = None) -> Any:
     """store.apply(pending, approved_via=surface[, reviewed_by, review_note]) with the keywords the store
     takes, else store.apply(pending). Decided by signature, not by catching TypeError, so an error inside
     apply is never retried."""
     import inspect
+    params: Mapping[str, inspect.Parameter]
     try:
         params = inspect.signature(store.apply).parameters
         var_kw = any(p.kind is p.VAR_KEYWORD for p in params.values())
@@ -635,6 +638,7 @@ def _grant_failure_detail(exc: BaseException, allowlist: Any) -> dict:
     """Path-free detail for an allow whose allowlist.yaml write failed (FI-2)."""
     import errno as _errno
     from pathlib import Path as _Path
+
     from .filelock import LockBusy
     code = getattr(exc, "errno", None)
     out = {"reason_code": "grant_not_recorded", "error_type": type(exc).__name__,
@@ -642,7 +646,7 @@ def _grant_failure_detail(exc: BaseException, allowlist: Any) -> dict:
     if isinstance(code, int):
         out["errno"] = _errno.errorcode.get(code, str(code))
     elif getattr(exc, "errno_name", None):
-        out["errno"] = exc.errno_name
+        out["errno"] = exc.errno_name  # type: ignore[attr-defined]  # present: getattr above
     if isinstance(exc, LockBusy):
         out["file"] = exc.lock_path.name
     else:

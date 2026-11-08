@@ -1,5 +1,6 @@
 # Runs the plugin's test suite inside a Hermes checkout at the pinned commit, as docs/RUNNING_TESTS.md
-# describes, and validates the plugin with Hermes' own validator. No secrets are used: TINFOIL_API_KEY and
+# describes, validates the plugin with Hermes' own validator, and checks it with ruff and mypy (versions
+# pinned below and in pyproject.toml's dev extra). No secrets are used: TINFOIL_API_KEY and
 # NEAR_AI_API_KEY are unset, so no test contacts a vendor, and tests/live is excluded.
 #
 # Network: the install steps need PyPI, GitHub and uv's Python downloads; the test run needs none.
@@ -35,9 +36,44 @@ env:
   HERMES_REPOSITORY: NousResearch/hermes-agent
   HERMES_SHA: 84a0301415edd6d1385207ec96e4d7f2b6c1fcd9
   UV_VERSION: "0.13.7"
+  RUFF_VERSION: "0.17.4"
+  MYPY_VERSION: "2.4.1"
   PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
+  lint:
+    name: lint and types (ruff, mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the plugin
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          path: hermes-confidential-mode
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install Python 3.11
+        run: uv python install 3.11
+
+      - name: Install the plugin's dependencies (mypy reads their types; Hermes is not needed)
+        run: |
+          uv venv --python 3.11 "$GITHUB_WORKSPACE/venv"
+          uv pip install --python "$GITHUB_WORKSPACE/venv/bin/python" \
+            -r "$GITHUB_WORKSPACE/hermes-confidential-mode/pyproject.toml"
+
+      - name: ruff
+        working-directory: hermes-confidential-mode
+        run: uvx "ruff@$RUFF_VERSION" check --no-cache .
+
+      - name: mypy
+        working-directory: hermes-confidential-mode
+        run: uvx --from "mypy==$MYPY_VERSION" mypy --python-executable "$GITHUB_WORKSPACE/venv/bin/python"
+
   suite:
     name: suite (Python ${{ matrix.python }})
     runs-on: ubuntu-latest

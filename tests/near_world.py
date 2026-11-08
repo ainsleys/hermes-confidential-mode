@@ -50,7 +50,7 @@ def _name(cn: str) -> x509.Name:
 
 
 def _cert(subject_key, issuer_key, subject: str, issuer: str, *, ca: bool) -> x509.Certificate:
-    start = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    start = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
     b = (x509.CertificateBuilder().subject_name(_name(subject)).issuer_name(_name(issuer))
          .public_key(subject_key.public_key()).serial_number(x509.random_serial_number())
          .not_valid_before(start).not_valid_after(start + dt.timedelta(days=3650))
@@ -241,8 +241,8 @@ def tls_cert() -> tuple[bytes, str]:
     cert = _cert(key, key, HOST, HOST, ca=False) if False else (
         x509.CertificateBuilder().subject_name(_name(HOST)).issuer_name(_name("Test LE"))
         .public_key(key.public_key()).serial_number(1)
-        .not_valid_before(dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
-        .not_valid_after(dt.datetime(2036, 1, 1, tzinfo=dt.timezone.utc)).sign(key, hashes.SHA256()))
+        .not_valid_before(dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
+        .not_valid_after(dt.datetime(2036, 1, 1, tzinfo=dt.UTC)).sign(key, hashes.SHA256()))
     der = cert.public_bytes(serialization.Encoding.DER)
     spki = cert.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
     return der, hashlib.sha256(spki).hexdigest()

@@ -39,10 +39,10 @@ _PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
+from hermes_cli.config import get_config_path  # noqa: E402
+
 from confidential_mode import consent  # noqa: E402  ImportError until W4 merges is expected
 from confidential_mode.verify.base import VerificationResult  # noqa: E402
-
-from hermes_cli.config import get_config_path  # noqa: E402
 
 SK = "t4:hostile:consent"
 AFFIRMATIVE_HINTS = ("approve", "allow", "yes", "pin", "accept", "trust")
@@ -257,20 +257,20 @@ def _label_variant(value, label):
 
 ANSWER_VARIANTS = {
     "label": _label_variant,
-    "trailing_space": lambda v, l: v + " ",
-    "leading_space": lambda v, l: " " + v,
-    "upper": lambda v, l: v.upper(),
-    "shown_text": lambda v, l: f"{l} — pin the new enclave measurement",
-    "int_1": lambda v, l: 1,
-    "true": lambda v, l: True,
-    "float_1": lambda v, l: 1.0,
-    "list": lambda v, l: [v],
-    "dict": lambda v, l: {"value": v},
-    "bytes": lambda v, l: v.encode(),
-    "str_subclass": lambda v, l: type("S", (str,), {"__eq__": lambda s, o: True, "__hash__": str.__hash__})("x"),
-    "none": lambda v, l: None,
-    "empty": lambda v, l: "",
-    "sentinel_skip": lambda v, l: "\x00skipped",
+    "trailing_space": lambda v, label: v + " ",
+    "leading_space": lambda v, label: " " + v,
+    "upper": lambda v, label: v.upper(),
+    "shown_text": lambda v, label: f"{label} — pin the new enclave measurement",
+    "int_1": lambda v, label: 1,
+    "true": lambda v, label: True,
+    "float_1": lambda v, label: 1.0,
+    "list": lambda v, label: [v],
+    "dict": lambda v, label: {"value": v},
+    "bytes": lambda v, label: v.encode(),
+    "str_subclass": lambda v, label: type("S", (str,), {"__eq__": lambda s, o: True, "__hash__": str.__hash__})("x"),
+    "none": lambda v, label: None,
+    "empty": lambda v, label: "",
+    "sentinel_skip": lambda v, label: "\x00skipped",
 }
 
 
@@ -720,8 +720,9 @@ def test_allow_tool_cannot_lift_off_tier_mcp_block(tmp_path):
 
 def _allowlist(**kw):
     import model_tools  # noqa: F401  registry populated
-    from confidential_mode import gate_tools
     from tools.registry import registry
+
+    from confidential_mode import gate_tools
     return gate_tools.build_allowlist(registry, **kw)
 
 

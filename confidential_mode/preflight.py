@@ -22,11 +22,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
-from .tiers import Destination, Tier, TierPredicate, Verdict, host_of
+from .tiers import Destination, Tier, TierPredicate, Verdict
 
 IN_TIER, ON_HOST, DISABLED, OFF_TIER, MISSING = "in_tier", "on_host", "disabled", "off_tier", "missing"
 VERDICTS = (IN_TIER, ON_HOST, DISABLED, OFF_TIER, MISSING)
@@ -252,7 +253,8 @@ def _main_route(ctx: _Ctx, config: Mapping) -> tuple[str, str, str]:
     block = _main_block(config)
     provider = _s(block.get("provider")).lower()
     if provider in _AUTO:
-        return OFF_TIER, "main provider unset/auto: Hermes auto-detects and aux tasks may walk the discovery chain", provider
+        return (OFF_TIER, "main provider unset/auto: Hermes auto-detects and aux tasks may walk the discovery chain",
+                provider)
     if provider == _MOA:
         return OFF_TIER, "MoA runs advisor calls before the middleware", provider
     if provider in _CODEX:
@@ -363,7 +365,7 @@ def auto_chain_readable(key_state: Callable[[str, str], str]) -> list[str]:
     return found
 
 
-def auto_summary(report: "PreflightReport", readable: list[str]) -> str:
+def auto_summary(report: PreflightReport, readable: list[str]) -> str:
     """`check`'s one summary line: how many side calls are on auto, and the credential that would matter if
     Hermes' fall-through could run. '' when no side call is on auto or no such credential is readable."""
     n = sum(1 for i in report.items if i.key.startswith("auxiliary.") and i.key.endswith(".provider")
@@ -406,7 +408,7 @@ def key_fix(env_var: str, state: str = "") -> str:
             "the plugin")
 
 
-def missing_key_headline(report: "PreflightReport") -> str:
+def missing_key_headline(report: PreflightReport) -> str:
     """The refusal's first line when a vendor key row fails (Amendment 14), else ''. A missing key is not a
     route problem, so it is named first and by itself."""
     keys = [i for i in report.failures() if i.key in ATTESTED_KEY_ENVS.values()]
@@ -479,7 +481,8 @@ def route_fix(tier: Tier, prefix: str, provider: str, base_url: str, reason: str
         if text.startswith("host "):          # the host is off this machine (tiers.OnHostPredicate)
             return f"set {prefix}.base_url to a server on this machine, such as {ON_HOST_EXAMPLE_URL} ({reason})"
         if text.startswith("base_url"):       # the URL itself is unusable (tiers.strict_host)
-            return f"rewrite {prefix}.base_url as a plain http:// or https:// URL, such as {ON_HOST_EXAMPLE_URL} ({reason})"
+            return (f"rewrite {prefix}.base_url as a plain http:// or https:// URL, "
+                    f"such as {ON_HOST_EXAMPLE_URL} ({reason})")
     return f"set {prefix}.provider: {value} ({reason})"
 
 
@@ -609,7 +612,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     if d_provider in _AUTO and not d_base:
         d_verdict = main_verdict
         shown = f"(inherit) -> {main_provider or 'auto'}"
-        d_fix = INHERIT_FIX if pin_is_the_cause(main_reason) else "delegation inherits the main route: fix model.provider"
+        d_fix = (INHERIT_FIX if pin_is_the_cause(main_reason)
+                 else "delegation inherits the main route: fix model.provider")
     else:
         d_cfg = {"provider": d_provider or "custom", "base_url": d_base, "model": deleg.get("model"),
                  "api_mode": deleg.get("api_mode")}
@@ -639,7 +643,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     auto_tts = isinstance(voice, Mapping) and _truthy(voice.get("auto_tts"))
     raw_provider = _s(tts.get("provider")).lower()
     effective = raw_provider or _TTS_DEFAULT
-    named = tts.get("providers") if isinstance(tts.get("providers"), Mapping) else {}
+    named = cast(Mapping, tts.get("providers")) if isinstance(tts.get("providers"), Mapping) else {}
     named_cfg = named.get(raw_provider) if isinstance(named.get(raw_provider), Mapping) else None
     engine_on_host = raw_provider in _ON_HOST_TTS or (named_cfg is not None and "command" in named_cfg)
     enabled_raw = tts.get("enabled", _ABSENT)
@@ -714,7 +718,7 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
     # Hermes SKIPS, fail-open, when it overruns plugins.hook_callback_timeout (hermes_cli/plugins_dispatch.py
     # _HOOK_TIMEOUT_BOUNDED_HOOKS, plugins.py _resolve_hook_callback_timeout). <= 0 runs hooks synchronously
     # (safe); a positive value below HOOK_TIMEOUT_FLOOR_SECONDS lets the recheck be skipped.
-    pcfg = config.get("plugins") if isinstance(config.get("plugins"), Mapping) else {}
+    pcfg = cast(Mapping, config.get("plugins")) if isinstance(config.get("plugins"), Mapping) else {}
     t_key = "plugins.hook_callback_timeout"
     raw_t = pcfg.get("hook_callback_timeout", _ABSENT)
     t_fix = (f"remove {t_key} or set it to at least {HOOK_TIMEOUT_FLOOR_SECONDS:g} (seconds) while locked; a "
@@ -774,7 +778,8 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             state = state if state in (KEY_SET, KEY_NOT_SET, KEY_UNSCOPED) else KEY_NOT_SET
             ok = state == KEY_SET
             # Not through add(): the key name reads as a secret there and every state would show "***".
-            items.append(PreflightItem(env_var, state, IN_TIER if ok else OFF_TIER, "" if ok else key_fix(env_var, state)))
+            items.append(PreflightItem(env_var, state, IN_TIER if ok else OFF_TIER,
+                                       "" if ok else key_fix(env_var, state)))
 
     # attested profile presence
     if tier == Tier.ATTESTED:
@@ -845,7 +850,7 @@ def _near_encryption_items(config: Mapping, tasks: Sequence[str], plugins: Mappi
         for i, entry in enumerate(chain if isinstance(chain, list) else []):
             if isinstance(entry, Mapping) and _s(entry.get("provider")).lower() == _NEAR:
                 routes.append((f"auxiliary.{task}.fallback_chain[{i}].api_mode", entry.get("api_mode")))
-    deleg = config.get("delegation") if isinstance(config.get("delegation"), Mapping) else {}
+    deleg = cast(Mapping, config.get("delegation")) if isinstance(config.get("delegation"), Mapping) else {}
     if _s(deleg.get("provider")).lower() == _NEAR:
         routes.append(("delegation.api_mode", deleg.get("api_mode")))
     if not routes:
@@ -854,7 +859,8 @@ def _near_encryption_items(config: Mapping, tasks: Sequence[str], plugins: Mappi
         if _s(mode).lower() not in _CHAT_MODES:
             add(key, mode, OFF_TIER, f"remove {key} or set it to chat_completions: NEAR encrypts chat completions "
                                      "only, and the attested-near transport refuses every other API")
-    near_cfg = (config.get("confidential") or {}).get("near") if isinstance(config.get("confidential"), Mapping) else None
+    near_cfg = ((config.get("confidential") or {}).get("near")
+                if isinstance(config.get("confidential"), Mapping) else None)
     near_cfg = near_cfg if isinstance(near_cfg, Mapping) else {}
     # One rule for both switches: absent or exactly true passes; any other value is refused. (The adapter
     # reads them as "on unless exactly false", so every disagreement between the two is fail-closed.)
@@ -875,7 +881,8 @@ def _near_encryption_items(config: Mapping, tasks: Sequence[str], plugins: Mappi
         add("confidential.near.encrypt", configured, IN_TIER)
     running_tls = getattr(adapter, "require_tls_binding", None)
     if tls is not True or running_tls is False:
-        add("confidential.near.require_tls_binding", tls if running_tls is not False else f"{tls} (running adapter: off)",
+        add("confidential.near.require_tls_binding",
+            tls if running_tls is not False else f"{tls} (running adapter: off)",
             OFF_TIER, "remove confidential.near.require_tls_binding (default true) or set it to true, then restart "
                       "Hermes: without it no NEAR connection is pinned to the attested gateway certificate")
     else:
@@ -892,7 +899,8 @@ def _near_encryption_items(config: Mapping, tasks: Sequence[str], plugins: Mappi
             "set confidential.near.image_parts to disclose (images leave as plaintext to NEAR's gateway, "
             "recorded per send) or refuse (images are refused before sending), or remove it (default disclose)")
     try:
-        ready = adapter.encryption_ready() if callable(getattr(adapter, "encryption_ready", None)) else None
+        ready = (adapter.encryption_ready()  # type: ignore[union-attr]  # callable() below rules out None
+                 if callable(getattr(adapter, "encryption_ready", None)) else None)
         if ready is None:
             from .verify.near_e2ee import available
             ready = available()
@@ -1044,7 +1052,8 @@ def format_report(report: PreflightReport, *, value_width: int = 40, key_width: 
              f"{'KEY':<{kw}}  {'VALUE':<{vw}}  {'VERDICT':<{dw}}  FIX",
              f"{'-' * kw}  {'-' * vw}  {'-' * dw}  ---"]
     for i in items:
-        lines.append(f"{_clip(i.key, kw):<{kw}}  {_clip(i.value_redacted, vw):<{vw}}  {i.verdict:<{dw}}  {i.fix}".rstrip())
+        lines.append(f"{_clip(i.key, kw):<{kw}}  {_clip(i.value_redacted, vw):<{vw}}  "
+                     f"{i.verdict:<{dw}}  {i.fix}".rstrip())
     return "\n".join(lines)
 
 
@@ -1117,7 +1126,7 @@ def plugin_isolation(config: Mapping) -> Any:
     return "" if value is None else value  # explicit null is treated like "" (missing), not as absent
 
 
-def resolved_terminal_backend() -> Optional[str]:
+def resolved_terminal_backend() -> str | None:
     """The terminal backend Hermes resolves for the current profile, the way its tools do:
     ``tools.terminal_tool._get_env_config()["env_type"]``, which bridges ``terminal.*`` from config.yaml
     first and reads the per-profile terminal scope on multiplexed surfaces. Falls back to the scope-aware

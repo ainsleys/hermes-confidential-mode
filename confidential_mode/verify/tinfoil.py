@@ -95,14 +95,15 @@ import secrets
 import tempfile
 import threading
 import time
+from collections.abc import Callable
+from datetime import UTC
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
 from . import _sdkpatch
-from .base import (PreparedVerification, VendorHTTPError, VerificationResult, VerifyError, http_error_in,
-                   http_source)
+from .base import PreparedVerification, VendorHTTPError, VerificationResult, VerifyError, http_error_in, http_source
 
 VENDOR = "tinfoil"
 PROBE_TIMEOUT_SECONDS = 10.0  # the bodiless TLS probe at verification (confidential.tinfoil.tls_probe)
@@ -166,7 +167,7 @@ def ehbp_request_key(transport) -> str | None:
     try:
         layer, seen = [transport], set()
         for _ in range(8):
-            nxt = []
+            nxt: list = []
             for t in layer:
                 if t is None or id(t) in seen:
                     continue
@@ -186,7 +187,7 @@ def ehbp_request_key(transport) -> str | None:
 class _SyncView(httpx.BaseTransport):
     """Forwards to the adapter's CURRENT verified sync pool; close() is a no-op for the pool."""
 
-    def __init__(self, adapter: "TinfoilAdapter"):
+    def __init__(self, adapter: TinfoilAdapter):
         self._adapter = adapter
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -206,7 +207,7 @@ class _SyncView(httpx.BaseTransport):
 class _AsyncView(httpx.AsyncBaseTransport):
     """Forwards to the running loop's CURRENT verified async pool; aclose() is a no-op for the pool."""
 
-    def __init__(self, adapter: "TinfoilAdapter"):
+    def __init__(self, adapter: TinfoilAdapter):
         self._adapter = adapter
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -794,7 +795,7 @@ class TinfoilAdapter:
                 pass
         if err is not None:
             raise err
-        return winner
+        return winner  # type: ignore[return-value]  # set on the one branch that leaves err None
 
     def async_http_for_loop(self) -> httpx.AsyncClient:
         """A non-closing view over the running loop's verified async pool. The pool is attested once
@@ -840,7 +841,9 @@ def _is_pinned(transport) -> bool:
 
 def _transport_chain(transport, limit: int = 12):
     """Every transport reachable from ``transport`` through the SDK's and ehbp's ``_inner`` links."""
-    seen, out, node = set(), [], transport
+    seen: set[int] = set()
+    out: list = []
+    node = transport
     while node is not None and id(node) not in seen and len(out) < limit:
         seen.add(id(node))
         out.append(node)
@@ -848,7 +851,7 @@ def _transport_chain(transport, limit: int = 12):
     return out
 
 
-def _chain(exc: BaseException):
+def _chain(exc: BaseException | None):
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
@@ -857,8 +860,8 @@ def _chain(exc: BaseException):
 
 
 def _iso_now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    from datetime import datetime
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _has_body(request) -> bool:
@@ -871,9 +874,9 @@ def _has_body(request) -> bool:
 # ── per-send records ────────────────────────────────────────────────────────────────────────────
 import contextvars as _contextvars  # noqa: E402
 
-_SEND_RECORDS: "_contextvars.ContextVar[list | None]" = _contextvars.ContextVar("confidential_send_records",
+_SEND_RECORDS: _contextvars.ContextVar[list | None] = _contextvars.ContextVar("confidential_send_records",
                                                                                 default=None)
-_LAST_SEND: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar("confidential_last_send", default=None)
+_LAST_SEND: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar("confidential_last_send", default=None)
 
 
 def _record_send(rec: dict) -> None:
@@ -1015,8 +1018,7 @@ def _b64(data: bytes) -> str:
 def _capture_hooks() -> dict:
     """Per-thread wrappers around the SDK's own fetch points (call through, then record the bytes)."""
     from cryptography.hazmat.primitives import serialization
-    from tinfoil import client as tf_client
-    from tinfoil import sigstore as tf_sigstore
+    from tinfoil import client as tf_client, sigstore as tf_sigstore
     from tinfoil.attestation import collateral_tdx, verify_sev
     from tinfoil.attestation.cert_utils import certs_to_pem
 

@@ -27,7 +27,8 @@ instance_ids_seen, approved_by, approved_at, approved_via, approval_rule_key, re
 
 Match rule: a result matches when every CVM it reports has an approved entry with equal fingerprints.
 A Tinfoil record migrated from version 2 matches exactly as before. A NEAR record migrated from version 2
-matches nothing, so NEAR asks once after the upgrade; approving the new entries removes it. Before the first version-3 save of a version-2 file, pins.yaml.v2.bak is
+matches nothing, so NEAR asks once after the upgrade; approving the new entries removes it. Before the first
+version-3 save of a version-2 file, pins.yaml.v2.bak is
 written. A version-3 file is never written back as version 2; any other version matches nothing.
 
 Only consent.py (a person's answer) and provider._auto_apply (Tinfoil, replace only) call apply().
@@ -42,10 +43,11 @@ import json
 import os
 import tempfile
 import threading
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Literal, cast, overload
 
 from .hermes_compat import yaml_module
 from .verify.base import VerificationResult
@@ -86,7 +88,7 @@ class PinStoreError(Exception):
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _sha(text: str) -> str:
@@ -239,7 +241,7 @@ def _prompt_context(result: VerificationResult) -> dict:
     out: dict = {"platform": None, "release_published_at": None, "rekor_log_index": None,
                  "hardware_measurements_verified": False, "components": ()}
     try:
-        claims = ev.get("claims") if isinstance(ev.get("claims"), dict) else {}
+        claims = cast(dict, ev.get("claims")) if isinstance(ev.get("claims"), dict) else {}
         comps = claims.get("components")
         full = claims.get("components_full")
         if isinstance(full, dict) and isinstance(ev.get("blobs"), dict):   # NEAR v2: the full list is a blob
@@ -331,8 +333,8 @@ def views_from_cvms(cvms: Any, blobs: Mapping | None = None) -> list[CvmView]:
 
 def result_views(result: VerificationResult) -> list[CvmView]:
     ev = result.evidence if isinstance(result.evidence, dict) else {}
-    claims = ev.get("claims") if isinstance(ev.get("claims"), dict) else {}
-    blobs = ev.get("blobs") if isinstance(ev.get("blobs"), dict) else {}
+    claims = cast(dict, ev.get("claims")) if isinstance(ev.get("claims"), dict) else {}
+    blobs = cast(dict, ev.get("blobs")) if isinstance(ev.get("blobs"), dict) else {}
     return views_from_cvms(claims.get("cvms"), blobs)
 
 
@@ -459,6 +461,12 @@ class PinFile:
     identities: list = field(default_factory=list)
     on_disk_version: int | None = None        # what the file said when read (None: no file)
 
+    @overload
+    def identity(self, vendor: str, router_repo: str, *, create: Literal[True]) -> Identity: ...
+
+    @overload
+    def identity(self, vendor: str, router_repo: str, *, create: bool = False) -> Identity | None: ...
+
     def identity(self, vendor: str, router_repo: str, *, create: bool = False) -> Identity | None:
         for i in self.identities:
             if i.key == (vendor, router_repo):
@@ -501,7 +509,7 @@ def _from_v2(data: dict) -> PinFile:
     if isinstance(last, dict):
         try:
             kw = _batch_from(last)
-            idn = pf.identity(kw["vendor"], kw["router_repo"])
+            idn = pf.identity(kw["vendor"], kw["router_repo"])  # type: ignore[assignment]  # None checked next
             if idn is not None:
                 ent = PinEntry(vendor=kw["vendor"], router_repo=kw["router_repo"],
                                code_fingerprint=kw["code_fingerprint"], enclave_fingerprint=kw["enclave_fingerprint"],
@@ -531,7 +539,8 @@ def _from_v3(data: dict) -> PinFile:
                        verifications=int(d.get("verifications") or 0),
                        approved=[_entry_from(e) for e in approved], pending=[_entry_from(e) for e in pending],
                        pending_batch=_batch_from(d["pending_batch"]) if d.get("pending_batch") else None,
-                       last_applied_key=d.get("last_applied_key") if isinstance(d.get("last_applied_key"), str) else None)
+                       last_applied_key=(d.get("last_applied_key")
+                                         if isinstance(d.get("last_applied_key"), str) else None))
         for e in idn.approved + idn.pending:
             if e.key != idn.key:
                 raise PinStoreError("an entry names another identity")
@@ -789,7 +798,8 @@ class PinStore:
             if stored is not None and stored.consent_key == new.consent_key:
                 new = replace(new, staged_at=stored.staged_at,
                               models_seen=tuple(dict.fromkeys(stored.models_seen + new.models_seen)))
-                if new == stored and all(a.observed == b.observed for a, b in zip(new.entries, stored.entries)):
+                if new == stored and all(a.observed == b.observed
+                                         for a, b in zip(new.entries, stored.entries, strict=False)):
                     return stored
             idn.pending, idn.pending_batch = list(new.entries), _batch_to(new)
             self.save_file(pf)
@@ -869,7 +879,8 @@ class PinStore:
                 raise PinStoreError("pending pin changed since it was shown; not applied")
             if approved_by == "policy" and idn.concurrent:
                 raise PinStoreError("policy never adds to an approved set; a person must approve this")
-            unpinned = [e.cvm_role for e in stored.entries if e.vendor == "near" and str(e.cvm_role).startswith("model:")
+            unpinned = [e.cvm_role for e in stored.entries
+                        if e.vendor == "near" and str(e.cvm_role).startswith("model:")
                         and e.components is not None and SERVICES not in e.pinned]
             if unpinned:
                 # Fail closed (Amendment 7): a NEAR model entry is approved only with its service map pinned,

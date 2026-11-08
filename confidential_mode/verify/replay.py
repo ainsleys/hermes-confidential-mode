@@ -19,10 +19,9 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
-import json
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -140,11 +139,11 @@ def _sdk_version() -> str:
 
 def _as_datetime(value) -> datetime:
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        return datetime.fromtimestamp(float(value), tz=UTC)
     if isinstance(value, str):
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
     raise ValueError(f"unusable time {value!r}")
 
 
@@ -205,7 +204,7 @@ class _CryptoProxy:
         store = self._real.X509Store()
         when = _sdkpatch.pinned_now()
         if when is not None:
-            store.set_time(when.astimezone(timezone.utc).replace(tzinfo=None))
+            store.set_time(when.astimezone(UTC).replace(tzinfo=None))
         return store
 
 
@@ -397,7 +396,7 @@ def replay(evidence: dict, *, expected_repo: str | None = TINFOIL_ROUTER_REPO,
         when = _as_datetime(as_of if as_of is not None else (evidence.get("captured_at")
                                                              or evidence.get("captured_at_unix")))
     except Exception:
-        when = datetime.now(timezone.utc)
+        when = datetime.now(UTC)
         checks.failed("hardware_signature", "evidence: no usable captured_at / as_of")
         return _result(checks, out, when)
     try:
@@ -415,7 +414,7 @@ def _result(checks: _Checks, out: dict, when: datetime) -> ReplayResult:
     vals = dict(checks.values)
     ok = all(v is True or (isinstance(v, str) and (v.startswith("n/a:") or v in REPO_IDENTITY_PASSING))
              for k, v in vals.items() if k not in INFORMATIONAL_CHECKS)
-    return ReplayResult(ok=ok, checks=vals, as_of=when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+    return ReplayResult(ok=ok, checks=vals, as_of=when.astimezone(UTC).isoformat().replace("+00:00", "Z"),
                         sdk_version=_sdk_version(), **out)
 
 
@@ -468,10 +467,10 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
         checks.failed("hardware_signature", f"evidence: schema is not {EVIDENCE_SCHEMA}")
         return
     from tinfoil import sigstore as tf_sigstore
+    from tinfoil.attestation import Document
     from tinfoil.attestation.attestation_sev import verify_sev_attestation_v2
     from tinfoil.attestation.attestation_tdx import verify_tdx_attestation_v2, verify_tdx_hardware
     from tinfoil.attestation.bundle import verify_certificate
-    from tinfoil.attestation import Document
     from tinfoil.attestation.types import PredicateType
 
     attempts: list = []
@@ -501,7 +500,8 @@ def _replay(ev: dict, checks: _Checks, out: dict, when: datetime, trust_root_dir
         indep = sev_check.check(doc.body, vcek, as_of=when)
         if not indep.ok:
             checks.failed("sev_check", indep.reason)
-        elif (indep.tls_key_fp, indep.hpke_public_key) != (claims.get("tls_public_key_fp"), claims.get("hpke_public_key")):
+        elif ((indep.tls_key_fp, indep.hpke_public_key)
+              != (claims.get("tls_public_key_fp"), claims.get("hpke_public_key"))):
             checks.failed("sev_check", "report_data keys differ from the keys recorded at capture")
             indep = None
 

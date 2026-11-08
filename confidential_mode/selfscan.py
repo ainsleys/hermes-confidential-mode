@@ -35,7 +35,8 @@ line ends. Refused:
   sed and perl without ``-i``, and the git subcommands that only read (log, diff, show, status, ...).
 
 A state file is ``pins.yaml``, ``ledger.sqlite``, ``allowlist.yaml`` or ``grants_revoked.json`` (with their
-lock, journal and backup siblings; Amendment 10 adds the last and the ``.lock`` files of the revoke path), or ``state.json`` inside a ``plugin-data`` directory; a glob that could match one counts.
+lock, journal and backup siblings; Amendment 10 adds the last and the ``.lock`` files of the revoke path), or
+``state.json`` inside a ``plugin-data`` directory; a glob that could match one counts.
 A state path counts when it is relative (the working directory is not known here), lies inside a
 ``plugin-data`` directory, or lies inside the Hermes home outside this plugin's source tree. The plugin's
 data directory is a ``plugin-data`` directory whose next segment names confidential mode (or a glob), or
@@ -61,8 +62,8 @@ import os
 import re
 import shlex
 import tokenize
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional
 
 PLUGIN_SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -89,7 +90,8 @@ WRAPPERS = frozenset({"sudo", "doas", "env", "exec", "command", "builtin", "nohu
                       "arch", "then", "do", "else", "if", "while", "until"})
 SUBST = "__confidential_mode_substitution__"
 _RE_PYTHON = re.compile(r"^(python|pypy)(\d+(\.\d+)*)?(\.exe)?$")
-_STATE_NAMES = re.compile(r"^(pins\.yaml(\.lock|\.v2\.bak)?|ledger\.sqlite(-wal|-shm|-journal)?|allowlist\.yaml(\.lock)?"
+_STATE_NAMES = re.compile(r"^(pins\.yaml(\.lock|\.v2\.bak)?|ledger\.sqlite(-wal|-shm|-journal)?"
+                          r"|allowlist\.yaml(\.lock)?"
                           r"|grants_revoked\.json(\.lock)?)$")   # Amendment 10: the revoke files and their locks
 _STATE_PLAIN = ("pins.yaml", "pins.yaml.lock", "pins.yaml.v2.bak", "ledger.sqlite", "ledger.sqlite-wal",
                 "ledger.sqlite-shm", "ledger.sqlite-journal", "allowlist.yaml", "allowlist.yaml.lock",
@@ -115,7 +117,7 @@ _MAX_SCRIPT_BYTES = 1_000_000
 
 def _ansi_c_text(text: str) -> str:
     """$'\\x63onfidential' -> confidential (the decoded text, unquoted)."""
-    def dec(m: "re.Match") -> str:
+    def dec(m: re.Match) -> str:
         try:
             return m.group(1).encode("latin-1", "backslashreplace").decode("unicode_escape")
         except Exception:  # noqa: BLE001
@@ -125,7 +127,7 @@ def _ansi_c_text(text: str) -> str:
 
 def _ansi_c_quoted(text: str) -> str:
     """$'...' -> '...' with the escapes decoded, so shlex sees one single-quoted word."""
-    def dec(m: "re.Match") -> str:
+    def dec(m: re.Match) -> str:
         try:
             body = m.group(1).encode("latin-1", "backslashreplace").decode("unicode_escape")
         except Exception:  # noqa: BLE001
@@ -273,7 +275,11 @@ def _tokens(text: str) -> list[str]:
 
 def _commands(tokens: list[str]) -> list[tuple[list[str], list[str], list[str]]]:
     """Split tokens into simple commands: (words, redirection targets, here-strings)."""
-    out, words, targets, here, i = [], [], [], [], 0
+    out: list[tuple[list[str], list[str], list[str]]] = []
+    words: list[str] = []
+    targets: list[str] = []
+    here: list[str] = []
+    i = 0
     while i < len(tokens):
         t = tokens[i]
         if t in _SEPARATORS or (set(t) <= set(";&|()\n") and t not in _REDIRECTS):
@@ -318,7 +324,7 @@ def _command_position(words: list[str], i: int) -> bool:
     return True
 
 
-def _program_index(words: list[str], test) -> Optional[int]:
+def _program_index(words: list[str], test) -> int | None:
     """The index of the first word in command position whose basename passes ``test``."""
     for i, w in enumerate(words):
         if test(_base(w)) and _command_position(words, i):
@@ -366,7 +372,7 @@ def _slash_line(text: str) -> bool:
     return any(re.match(r"^\s*/confidential(\s|$)", line, re.IGNORECASE) for line in text.split("\n"))
 
 
-def _read_script(word: str) -> Optional[str]:
+def _read_script(word: str) -> str | None:
     for base in (os.environ.get("TERMINAL_CWD") or "", os.getcwd()):
         try:
             p = Path(os.path.expanduser(word))
@@ -381,7 +387,7 @@ def _read_script(word: str) -> Optional[str]:
     return None
 
 
-def _script_arg(words: list[str], k: int) -> Optional[str]:
+def _script_arg(words: list[str], k: int) -> str | None:
     """The script a python or shell command at words[k] runs (its first non-option argument), or None."""
     for w in words[k + 1:]:
         if w in ("-c", "-m", "-") or re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", w):
@@ -392,7 +398,7 @@ def _script_arg(words: list[str], k: int) -> Optional[str]:
     return None
 
 
-def _python_command_reason(words: list[str], stdin_code: list[str], written: dict, depth: int) -> Optional[str]:
+def _python_command_reason(words: list[str], stdin_code: list[str], written: dict, depth: int) -> str | None:
     """``words`` starts with a Python interpreter."""
     i = 1
     while i < len(words):
@@ -426,7 +432,7 @@ def _python_command_reason(words: list[str], stdin_code: list[str], written: dic
     return None
 
 
-def _loose_cli(text: str) -> Optional[str]:
+def _loose_cli(text: str) -> str | None:
     """The CLI forms anywhere in text a shell will run as data (a pipe, a written script)."""
     loose = [t for t in _tokens(re.sub(r"['\"\\]", "", text)) if t not in _SEPARATORS]
     if _hermes_invocation(loose) or any(_alias_invocation(loose[i:]) for i in range(len(loose))) or _slash_line(text):
@@ -453,7 +459,7 @@ def _read_only(words: list[str]) -> bool:
     return True
 
 
-def _copy_reason(words: list[str]) -> Optional[str]:
+def _copy_reason(words: list[str]) -> str | None:
     """cp, mv, install, rsync, ln, scp: the destination (last operand or -t DIR) is a write; a source is a
     read, except for mv (moving a state file away) and ln (a link to the data directory)."""
     cmd = _base(words[0])
@@ -479,7 +485,7 @@ def _copy_reason(words: list[str]) -> Optional[str]:
     return None
 
 
-def shell_reason(text: str, depth: int = 0, *, cli_only: bool = False) -> Optional[str]:
+def shell_reason(text: str, depth: int = 0, *, cli_only: bool = False) -> str | None:
     """Why this shell text reaches the confidential command, the package or a state file, or None.
     ``cli_only`` checks only the command forms (for an argument that may be a command line)."""
     if not isinstance(text, str) or not text.strip() or depth > _MAX_DEPTH:
@@ -638,7 +644,7 @@ def _py_writes(code: str, bare: str) -> bool:
     return True
 
 
-def python_reason(code: str, depth: int = 0) -> Optional[str]:
+def python_reason(code: str, depth: int = 0) -> str | None:
     """Why this Python code imports the package, runs the confidential command or names a state file."""
     if not isinstance(code, str) or not code.strip() or depth > _MAX_DEPTH:
         return None
@@ -682,7 +688,7 @@ def file_tool_paths(args) -> Iterable[str]:
             yield m.group(1) or m.group(2)
 
 
-def file_tool_reason(args) -> Optional[str]:
+def file_tool_reason(args) -> str | None:
     if any(is_state_path(p) or in_plugin_data(p) for p in file_tool_paths(args)):
         return "targets a confidential-mode state file"
     return None

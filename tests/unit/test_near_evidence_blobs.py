@@ -14,7 +14,7 @@ pytest.importorskip("tinfoil.attestation.verify_tdx")
 from confidential_mode import commands  # noqa: E402
 from confidential_mode.ledger import MAX_DETAIL_BYTES, BlobStore, Ledger, LedgerError  # noqa: E402
 from confidential_mode.receipts import build_receipt, verify_chain  # noqa: E402
-from confidential_mode.verify import near, near_checks as nc, replay_near  # noqa: E402
+from confidential_mode.verify import near, replay_near  # noqa: E402
 
 from . import test_near_real_capture as real  # noqa: E402
 

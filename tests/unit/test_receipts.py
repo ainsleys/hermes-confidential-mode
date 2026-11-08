@@ -17,7 +17,12 @@ from confidential_mode import receipts  # noqa: E402
 from confidential_mode.ledger import FORBIDDEN_DETAIL_KEYS, KINDS, Ledger  # noqa: E402
 from confidential_mode.pins import PinStore  # noqa: E402
 from confidential_mode.receipts import (  # noqa: E402
-    CHAIN_GENESIS, CLOSING_PARAGRAPH, build_receipt, forbidden_keys_in, render, verify_chain,
+    CHAIN_GENESIS,
+    CLOSING_PARAGRAPH,
+    build_receipt,
+    forbidden_keys_in,
+    render,
+    verify_chain,
 )
 from confidential_mode.verify.base import VerificationResult  # noqa: E402
 

@@ -9,19 +9,32 @@ from __future__ import annotations
 
 import pytest
 
-from ._harness import (  # noqa: F401  (fixtures)
-    MODES, PROVIDER_TEXT, Rec, arm_fallback_chain, assert_clean_refusal, build_agent, manager,
-    no_lazy_installs, rate_limit_429, register, status_error_500,
-)
-
 from confidential_mode import gate_llm
 from confidential_mode.gate_llm import (
-    TEXT_INTERNAL_ERROR, TEXT_PIN_CHANGED, TEXT_PROVIDER_ERROR, LlmGate, build_middleware, off_tier_text,
+    TEXT_INTERNAL_ERROR,
+    TEXT_PIN_CHANGED,
+    TEXT_PROVIDER_ERROR,
+    LlmGate,
+    build_middleware,
+    off_tier_text,
 )
 from confidential_mode.ledger import Ledger
 from confidential_mode.state import ConfidentialState, InMemoryState
 from confidential_mode.tiers import Destination, Tier, Verdict
 
+from ._harness import (  # noqa: F401  (fixtures)
+    MODES,
+    PROVIDER_TEXT,
+    Rec,
+    arm_fallback_chain,
+    assert_clean_refusal,
+    build_agent,
+    manager,
+    no_lazy_installs,
+    rate_limit_429,
+    register,
+    status_error_500,
+)
 
 # ---------------------------------------------------------------------------------------------
 # Fakes for W2/W3 collaborators

@@ -18,18 +18,32 @@ from types import SimpleNamespace
 
 import pytest
 
-from ..seam._harness import manager, no_lazy_installs  # noqa: F401  (fixtures)
-
 from confidential_mode import provider as provider_mod
 from confidential_mode.consent import approve_pending_pin
 from confidential_mode.gate_llm import TEXT_PROVIDER_ERROR
 from confidential_mode.receipts import CLOSING_PARAGRAPH, render, verify_chain
 from confidential_mode.tiers import Tier
 
+from ..seam._harness import manager, no_lazy_installs  # noqa: F401  (fixtures)
 from ._fakes import (
-    ATTESTED_MODEL, ENCLAVE, ENCLAVE_URL, HPKE_KEY, ON_HOST_ADDR, ON_HOST_MODEL, ON_HOST_URL, OPENROUTER_URL, PROFILE,
-    REPLY, REPO, TLS_FP,
-    FakeCtx, MockNet, Plugin, attested_config, on_host_config, patch_hermes_http,
+    ATTESTED_MODEL,
+    ENCLAVE,
+    ENCLAVE_URL,
+    HPKE_KEY,
+    ON_HOST_ADDR,
+    ON_HOST_MODEL,
+    ON_HOST_URL,
+    OPENROUTER_URL,
+    PROFILE,
+    REPLY,
+    REPO,
+    TLS_FP,
+    FakeCtx,
+    MockNet,
+    Plugin,
+    attested_config,
+    on_host_config,
+    patch_hermes_http,
 )
 
 SID = "demo-session-1"
@@ -53,10 +67,10 @@ def _reset_permanent_state(approval):
 
 @pytest.fixture
 def world(tmp_path, monkeypatch, manager):  # noqa: F811
-    import providers as _providers
     import hermes_cli.auth as _auth
-    from agent import auxiliary_client as _aux
     import model_tools  # noqa: F401  (registers the built-in tools)
+    import providers as _providers
+    from agent import auxiliary_client as _aux
     from tools import approval, approval_context, terminal_tool
     from tools.registry import registry
 

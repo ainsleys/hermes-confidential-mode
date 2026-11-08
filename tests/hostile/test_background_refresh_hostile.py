@@ -15,8 +15,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from confidential_mode import provider as provider_mod  # noqa: E402
-from confidential_mode import receipts  # noqa: E402
+from confidential_mode import (
+    provider as provider_mod,  # noqa: E402
+    receipts,  # noqa: E402
+)
 from confidential_mode.pins import PinStore  # noqa: E402
 from confidential_mode.verify.base import VerifyError  # noqa: E402
 
@@ -139,6 +141,7 @@ def test_a_send_prepared_before_a_held_commit_is_refused_at_the_pool(tmp_path):
     refused when a verification was committed with a hold in between (checked with the pool choice)."""
     pytest.importorskip("nacl")
     import httpx
+
     from ..near_world import BASE, MODEL
     world, ad, _gate, _entered, _blocking = _blocking_world(tmp_path)
     ad.verify()
@@ -172,6 +175,7 @@ def test_a_background_commit_with_the_same_key_and_certificate_does_not_refuse_a
     """N1: only the values an exchange was prepared with matter, not the verification object."""
     pytest.importorskip("nacl")
     import httpx
+
     from ..near_world import BASE, MODEL
     world, ad, _gate, _entered, _blocking = _blocking_world(tmp_path)
     ad.verify()

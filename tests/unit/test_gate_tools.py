@@ -9,8 +9,18 @@ from types import SimpleNamespace
 import pytest
 
 from confidential_mode.gate_tools import (
-    ON_HOST_TOOLS, PATTERN_KEY_PREFIX, Allowlist, Origin, Route, args_kb, build_allowlist,
-    build_post_approval_response, build_pre_tool_call, default_delegation_ok, format_allowlist, rule_key_for,
+    ON_HOST_TOOLS,
+    PATTERN_KEY_PREFIX,
+    Allowlist,
+    Origin,
+    Route,
+    args_kb,
+    build_allowlist,
+    build_post_approval_response,
+    build_pre_tool_call,
+    default_delegation_ok,
+    format_allowlist,
+    rule_key_for,
 )
 
 
@@ -260,8 +270,10 @@ def test_hermes_terminal_backend_reads_hermes_resolution_then_the_cached_environ
     """Second review, items 4 and 5: the check reads the backend the way Hermes' tools do, then the environment
     Hermes cached for the task, which the tools reuse without re-reading the backend."""
     from types import SimpleNamespace
-    from confidential_mode.gate_tools import cached_remote_environments, hermes_terminal_backend
+
     from tools import terminal_tool
+
+    from confidential_mode.gate_tools import cached_remote_environments, hermes_terminal_backend
     monkeypatch.delenv("TERMINAL_ENV", raising=False)
     monkeypatch.setattr(terminal_tool, "_active_environments", {})
     assert hermes_terminal_backend("t-none") == "local" and cached_remote_environments() == []
@@ -453,7 +465,6 @@ def test_bypass_text_names_the_cause():
 
 
 def test_answer_for_another_call_does_not_count():
-    from confidential_mode.gate_tools import ApprovalDecisions
     r = Rig(answer=None, hermes_approved=True)
     r.decisions.record("some-other-call", "once")
     assert refused(r.run("web_search")) and r.ran() == []

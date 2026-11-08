@@ -7,7 +7,8 @@ step runs is Hermes' own work; the plugin cannot report on it (README, Install).
 
 The lines are written only to a terminal (stderr is a TTY), and only on the first start of each installed
 commit, so an ordinary start stays quiet. ``CONFIDENTIAL_MODE_PROGRESS=1`` shows them on every start, with or
-without a terminal, and ``CONFIDENTIAL_MODE_PROGRESS=0`` never. No line carries a secret: phase names and counts only. Nothing here
+without a terminal, and ``CONFIDENTIAL_MODE_PROGRESS=0`` never. No line carries a secret: phase names and
+counts only. Nothing here
 raises.
 """
 from __future__ import annotations
@@ -16,8 +17,9 @@ import contextlib
 import os
 import sys
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any
 
 ENV = "CONFIDENTIAL_MODE_PROGRESS"
 PREFIX = "confidential-mode: "
@@ -32,7 +34,7 @@ def _stream_is_tty(stream: Any) -> bool:
         return False
 
 
-def wanted(data_dir: Optional[Path], commit: str, *, environ=None, stream=None) -> bool:
+def wanted(data_dir: Path | None, commit: str, *, environ=None, stream=None) -> bool:
     """Whether to show the lines: forced by the environment variable, else only on a TTY for a commit that
     has not started here before."""
     env = (environ if environ is not None else os.environ).get(ENV, "").strip()
@@ -48,7 +50,7 @@ def wanted(data_dir: Optional[Path], commit: str, *, environ=None, stream=None) 
         return True
 
 
-def remember(data_dir: Optional[Path], commit: str) -> None:
+def remember(data_dir: Path | None, commit: str) -> None:
     """Record that this commit has started here (mode 0600). Never raises."""
     if data_dir is None:
         return

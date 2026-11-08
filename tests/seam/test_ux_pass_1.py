@@ -4,15 +4,14 @@ refusal text, the approval size with an image, the 0600 data files, and receipts
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
 import stat
 import time
 
+from ._harness import no_lazy_installs  # noqa: F401  (fixture)
 from .test_commands import ATTESTED_CONFIG, _result, _sub
 from .test_register import plugin  # noqa: F401  (fixture)
-from ._harness import no_lazy_installs  # noqa: F401  (fixture)
 
 
 def _cli(plugin):

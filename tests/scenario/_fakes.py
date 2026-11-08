@@ -25,11 +25,14 @@ from typing import Any
 
 import httpx
 
-from confidential_mode import preflight as pf
-from confidential_mode import provider as provider_mod
+from confidential_mode import preflight as pf, provider as provider_mod
 from confidential_mode.gate_llm import build_middleware
 from confidential_mode.gate_tools import (
-    ApprovalDecisions, build_allowlist, build_post_approval_response, build_pre_tool_call, build_tool_execution,
+    ApprovalDecisions,
+    build_allowlist,
+    build_post_approval_response,
+    build_pre_tool_call,
+    build_tool_execution,
     format_allowlist,
 )
 from confidential_mode.ledger import Ledger

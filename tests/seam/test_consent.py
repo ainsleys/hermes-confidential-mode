@@ -14,7 +14,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from hermes_cli.config import get_config_path
 
 from confidential_mode.consent import ConsentContextError, allow_tool, approve_pending_pin
@@ -80,7 +79,7 @@ def hermes(monkeypatch):
     discover_plugins()
     ctx = PluginContext(PluginManifest(name="cm-consent-seam", source="user"), get_plugin_manager())
     approval_events = []
-    handles = [ctx.register_hook(h, (lambda h: lambda **kw: approval_events.append(h))(h))
+    handles = [ctx.register_hook(h, (lambda h: lambda **kw: approval_events.append(h))(h))  # noqa: B023 - h is bound by the outer lambda
                for h in ("pre_approval_request", "post_approval_response")]
     try:
         yield SimpleNamespace(ctx=ctx, cfg=cfg, approval_events=approval_events)
@@ -344,8 +343,8 @@ def test_refuses_to_run_on_an_event_loop(hermes):
 # ---- allow_tool -----------------------------------------------------------------------------------
 
 def _allowlist():
-    from tools.registry import registry
     import model_tools  # noqa: F401
+    from tools.registry import registry
     return build_allowlist(registry, mcp_configs={}, mcp_tool_servers={})
 
 

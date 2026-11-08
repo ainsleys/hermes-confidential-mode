@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import contextlib
 import threading
-from datetime import datetime, timezone
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 _local = threading.local()
 _install_lock = threading.Lock()
@@ -86,7 +87,7 @@ def install(owner, attr: str) -> None:
             def fn(*a, **kw):
                 return _dispatch(k, raw, *a, **kw)
             fn.__name__ = getattr(raw, "__name__", attr)
-            fn.__wrapped__ = raw
+            fn.__wrapped__ = raw  # type: ignore[attr-defined]  # functools.wraps sets the same attribute
             setattr(owner, attr, fn)
             _installed[k] = fn
 
@@ -161,7 +162,7 @@ class PinnableDatetime(datetime):
 @contextlib.contextmanager
 def pinned_clock(when: datetime) -> Iterator[None]:
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
+        when = when.replace(tzinfo=UTC)
     prev = getattr(_local, "pinned_now", None)
     _local.pinned_now = when
     try:

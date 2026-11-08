@@ -16,9 +16,9 @@ import json
 import os
 import pty
 import shutil
-import tempfile
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 

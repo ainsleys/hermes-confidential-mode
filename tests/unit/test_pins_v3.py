@@ -9,11 +9,18 @@ from pathlib import Path
 import pytest
 
 from confidential_mode import consent, provider
-from confidential_mode.pins import (BACKUP_SUFFIX, SCHEMA_VERSION, PinStore, PinStoreError, consent_key,
-                                    near_code_fingerprint)
+from confidential_mode.pins import (
+    BACKUP_SUFFIX,
+    SCHEMA_VERSION,
+    PinStore,
+    PinStoreError,
+    consent_key,
+    near_code_fingerprint,
+)
 from confidential_mode.verify.base import VerificationResult
-from ..near_world import INNER_SHA, MODEL, NearWorld, cache_inner_composes
+
 from .. import near_world as _near_world
+from ..near_world import INNER_SHA, MODEL, NearWorld, cache_inner_composes
 
 try:
     import hermes_yaml as yaml
@@ -240,6 +247,7 @@ def test_a_migrated_near_record_matches_nothing_so_near_asks_once(tmp_path):
 
 def test_a_gateway_entry_shared_by_two_identities_retires_per_identity(tmp_path):
     from types import SimpleNamespace
+
     from confidential_mode import commands
     world, res1 = _near(tmp_path)
     store, ledger = PinStore(tmp_path / "pins.yaml"), Ledger()
@@ -311,6 +319,7 @@ def test_hand_written_approved_entry_without_consent_row_does_not_count(tmp_path
 
 def test_retired_entry_re_added_by_hand_does_not_count(tmp_path):
     from types import SimpleNamespace
+
     from confidential_mode import commands
     world, res = _near(tmp_path)
     store, ledger = PinStore(tmp_path / "pins.yaml"), Ledger()
@@ -473,6 +482,7 @@ def test_a_marked_pin_applied_row_grants_nothing(tmp_path):
 def test_retire_warns_when_its_row_is_stored_with_the_marker(tmp_path):
     """FI-6 (review item 2): the 'could not be written' warning on retire is kept for a marked row."""
     from types import SimpleNamespace
+
     from confidential_mode import commands
     from confidential_mode.ledger import Ledger as RealLedger
     ledger = RealLedger(tmp_path / "ledger.sqlite")

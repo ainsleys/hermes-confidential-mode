@@ -14,7 +14,7 @@ process itself) runs the client's slash command.
 from __future__ import annotations
 
 import os
-from typing import Mapping, Optional
+from collections.abc import Mapping
 
 TOOL_PROCESS_ENV = "XDG_CONFIDENTIAL_MODE_TOOL_PROCESS"
 
@@ -27,7 +27,7 @@ def mark_tool_process() -> None:
         pass
 
 
-def self_approval_reason(environ: Optional[Mapping] = None, pid: Optional[int] = None) -> Optional[str]:
+def self_approval_reason(environ: Mapping | None = None, pid: int | None = None) -> str | None:
     """Why this process must not ask for an approval, or None."""
     environ = os.environ if environ is None else environ
     pid = os.getpid() if pid is None else int(pid)

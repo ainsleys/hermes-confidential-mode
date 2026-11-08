@@ -8,8 +8,6 @@ runs the unpatched sigstore-python path on a junk bundle, offline, in an isolate
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
 import json
 import subprocess
 import sys
@@ -20,11 +18,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from confidential_mode.verify import policy_check as pc  # noqa: E402
 from test_replay import (  # noqa: E402
-    CAPTURED_AT, COMMIT, DIGEST, OWNER_ID, REPO, REPO_ID, TAG, code_statement, fake_sigstore, fulcio_cert_der,
+    COMMIT,
+    DIGEST,
+    OWNER_ID,
+    REPO,
+    REPO_ID,
+    TAG,
+    code_statement,
+    fake_sigstore,  # noqa: F401 - a pytest fixture, taken by name below
+    fulcio_cert_der,
     signed_bundle,
 )
+
+from confidential_mode.verify import policy_check as pc  # noqa: E402
 
 ROOT = b"{}"  # never parsed by these stand-ins except where stated
 

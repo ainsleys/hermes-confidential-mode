@@ -11,15 +11,13 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import time
 
 import pytest
-
 from hermes_cli.plugin_choices import bind_asker
 
-from .test_register import plugin  # noqa: F401  (fixture)
-from ._harness import no_lazy_installs  # noqa: F401  (fixture)
 from ..near_world import BASE, HOST, MODEL, NOW, NearWorld, fake_quote_verifier
+from ._harness import no_lazy_installs  # noqa: F401  (fixture)
+from .test_register import plugin  # noqa: F401  (fixture)
 
 NEAR_CONFIG = f"""\
 plugins:
@@ -300,6 +298,7 @@ def test_a_withheld_reply_is_not_resent_by_hermes_retry_loop(plugin, near):
     assert len(refused) == 1 and refused[0].purpose == "main", [(e.purpose, e.detail) for e in refused]
     assert refused[0].detail["reason_code"] == "provider_error"
     from agent.error_classifier import classify_api_error
+
     from confidential_mode.verify.near import NearRefusal
     c = classify_api_error(NearRefusal("NEAR response withheld"), provider="attested-near", model=MODEL)
     assert c.retryable is False and c.should_fallback is False
@@ -503,8 +502,9 @@ VISION = "Qwen/Qwen3-VL-test"
 def _fail_model_reports(plugin, world, failing: str, status: int = 503):
     """The fake gateway answers HTTP ``status`` for ``failing``'s attestation report; every other request as
     the world serves it."""
-    import httpx
     from urllib.parse import parse_qs
+
+    import httpx
 
     def handler(request):
         q = {k: v[0] for k, v in parse_qs(request.url.query.decode()).items()}

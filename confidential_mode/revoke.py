@@ -15,9 +15,11 @@ writes Hermes' approval tables (catalog rule 9). It withdraws them instead by ch
 under: every revoke appends a record to ``grants_revoked.json``, and from then on the gate asks under
 ``confidential-mode:tool@<generation>:<tool>``, where the generation names the latest record covering the
 tool. A session or always answer Hermes holds for the older key then matches nothing the plugin asks for.
-A command_allowlist entry under any other key is the user's or another plugin's, and is left alone. The key prefix is a convention, not something Hermes
+A command_allowlist entry under any other key is the user's or another plugin's, and is left alone. The key
+prefix is a convention, not something Hermes
 enforces: Hermes forms the key from the rule_key a caller chooses, so another plugin could write an entry
-under this prefix, and revoke would remove that entry too (which only narrows). Revoking narrows and never widens, so it asks nobody
+under this prefix, and revoke would remove that entry too (which only narrows). Revoking narrows and never
+widens, so it asks nobody
 and runs under the self-approval marker.
 
 How a running gateway sees a revoke made in another process (the ``hermes confidential`` CLI): the
@@ -40,7 +42,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, cast
 
 REVOCATIONS_FILE = "grants_revoked.json"
 MAX_RECORDS = 200
@@ -65,12 +67,12 @@ def tool_name_problem(name: Any) -> str:
     return ""
 
 
-def _parse(entry: Any) -> Optional[tuple[str, str]]:
+def _parse(entry: Any) -> tuple[str, str] | None:
     from .gate_tools import parse_pattern_key
     return parse_pattern_key(entry)
 
 
-def _is_ours(entry: Any, tools: Optional[set[str]]) -> bool:
+def _is_ours(entry: Any, tools: set[str] | None) -> bool:
     """A Hermes key the plugin asked under (any generation), for one of ``tools`` (None = any tool)."""
     parsed = _parse(entry)
     return parsed is not None and (tools is None or parsed[0] in tools)
@@ -85,7 +87,7 @@ def file_lock(path: Any):
         yield
 
 
-def allowed_on_disk(path: Any, lock_id: str) -> Optional[set[str]]:
+def allowed_on_disk(path: Any, lock_id: str) -> set[str] | None:
     """The ``allowed`` names in allowlist.yaml when the file belongs to ``lock_id``, else None."""
     data = _read_json(Path(path)) if path is not None else None
     if not isinstance(data, dict) or not lock_id or data.get("lock_id") != lock_id \
@@ -110,7 +112,7 @@ def _atomic_write_json(path: Path, data: Any) -> None:
         raise
 
 
-def _read_json(path: Optional[Path]) -> Any:
+def _read_json(path: Path | None) -> Any:
     if path is None:
         return None
     try:
@@ -121,7 +123,7 @@ def _read_json(path: Optional[Path]) -> Any:
 
 # ── allowlist.yaml (written by `allow <tool>`) ──────────────────────────────────────────────────
 
-def remove_allowlist_grants(path: Optional[Path], lock_id: str, tools: Optional[set[str]]) -> list[str]:
+def remove_allowlist_grants(path: Path | None, lock_id: str, tools: set[str] | None) -> list[str]:
     """Remove ``tools`` (None = every name) from ``allowed`` in allowlist.yaml, only when the file belongs
     to ``lock_id``. Every other key of the file is kept. Returns the names removed."""
     if path is None or not lock_id:
@@ -150,7 +152,7 @@ def _command_allowlist(config: Any) -> list:
     return raw if isinstance(raw, list) else []
 
 
-def remove_command_allowlist_grants(tools: Optional[set[str]]) -> tuple[list[str], list[str]]:
+def remove_command_allowlist_grants(tools: set[str] | None) -> tuple[list[str], list[str]]:
     """Remove the plugin's keys for ``tools`` (None = every plugin key) from command_allowlist in config.yaml:
     read the user's file with ``read_raw_config``, drop only entries ``gate_tools.parse_pattern_key`` reads as
     the plugin's own rule key, and save with ``save_config``; nothing is written when there is none. Returns
@@ -172,16 +174,16 @@ def remove_command_allowlist_grants(tools: Optional[set[str]]) -> tuple[list[str
         raise RevokeError("config.yaml was not updated (a managed install, or the file is not writable); "
                           f"delete the line{'s' if len(left) > 1 else ''} {', '.join(left)} under "
                           "command_allowlist in config.yaml by hand")
-    return sorted({_parse(e)[0] for e in ours}), foreign
+    return sorted({_parse(e)[0] for e in ours}), foreign  # type: ignore[index]  # ours: entries _parse read
 
 
 # ── revocation records: every process, and the rule-key generation ───────────────────────────────
 
-def revocations_path(allowlist_path: Optional[Path]) -> Optional[Path]:
+def revocations_path(allowlist_path: Path | None) -> Path | None:
     return Path(allowlist_path).parent / REVOCATIONS_FILE if allowlist_path is not None else None
 
 
-def _records(path: Optional[Path]) -> list[dict]:
+def _records(path: Path | None) -> list[dict]:
     return _records_of(_read_json(path))
 
 
@@ -215,13 +217,13 @@ def latest_of(data: Any) -> dict[str, tuple[int, str]]:
                 put(name, value[0], value[1])
     for i, rec in enumerate(_records_of(data)):
         seq = rec.get("seq") if isinstance(rec.get("seq"), int) else i + 1
-        names = rec.get("tools") if isinstance(rec.get("tools"), list) else [ALL]
+        names = cast(list, rec.get("tools")) if isinstance(rec.get("tools"), list) else [ALL]
         for name in names:
             put(name, seq, rec.get("id"))
     return out
 
 
-def append_record(path: Optional[Path], tools: Optional[set[str]]) -> str:
+def append_record(path: Path | None, tools: set[str] | None) -> str:
     """Append one record (and update the ``latest`` map) under the file lock; returns its id."""
     if path is None:
         return ""
@@ -259,7 +261,7 @@ class RevocationWatcher:
     generation this process has seen, and an unreadable file with nothing seen gives a generation of this
     process alone, so no older grant matches. Never raises."""
 
-    def __init__(self, path: Optional[Path], drop_added=None):
+    def __init__(self, path: Path | None, drop_added=None):
         self.path = path
         self.drop_added = drop_added
         self.applied: set[str] = set()
@@ -271,7 +273,7 @@ class RevocationWatcher:
 
     def _file_stamp(self):
         try:
-            st = os.stat(self.path)
+            st = os.stat(self.path)  # type: ignore[arg-type]  # no path: the TypeError reads as no stamp
             return st.st_mtime_ns, st.st_size
         except Exception:  # noqa: BLE001
             return None
@@ -330,7 +332,7 @@ class RevocationWatcher:
         try:
             fresh = self.refresh()
             for rec in fresh:
-                names = rec.get("tools") if isinstance(rec.get("tools"), list) else [ALL]
+                names = cast(list, rec.get("tools")) if isinstance(rec.get("tools"), list) else [ALL]
                 tools = None if ALL in names else {n for n in names if isinstance(n, str)}
                 if self.drop_added is not None:
                     with contextlib.suppress(Exception):
@@ -353,7 +355,7 @@ class RevocationWatcher:
 _UNREADABLE = object()
 
 
-def rule_key(watcher: Optional[RevocationWatcher], tool: str) -> str:
+def rule_key(watcher: RevocationWatcher | None, tool: str) -> str:
     """The rule key the gate asks Hermes under for ``tool`` (gate_tools.rule_key_for with the generation)."""
     from .gate_tools import rule_key_for
     return rule_key_for(tool, watcher.generation(tool) if watcher is not None else "")
@@ -361,7 +363,7 @@ def rule_key(watcher: Optional[RevocationWatcher], tool: str) -> str:
 
 # ── the command ─────────────────────────────────────────────────────────────────────────────────
 
-def _drop_cached_added(rt: Any, tools: Optional[set[str]]) -> list[str]:
+def _drop_cached_added(rt: Any, tools: set[str] | None) -> list[str]:
     al = getattr(rt, "_allowlist", None)
     if al is None:
         return []
@@ -387,7 +389,7 @@ _ROTATED = ("A session or always answer Hermes holds for {what} no longer applie
             "a new approval key.")
 
 
-def _drop_lock_grants(rt: Any, tools: Optional[set[str]]) -> list[str]:
+def _drop_lock_grants(rt: Any, tools: set[str] | None) -> list[str]:
     grants = getattr(rt, "lock_grants", None)
     if grants is None:
         return []
@@ -400,7 +402,7 @@ def _drop_lock_grants(rt: Any, tools: Optional[set[str]]) -> list[str]:
 _GRANT_TRACE_KINDS = ("grant_revoked", "tool_asked", "tool_allowed")
 
 
-def granted_since_last_revoke(ledger: Any, tools: Optional[set[str]]) -> Optional[set[str]]:
+def granted_since_last_revoke(ledger: Any, tools: set[str] | None) -> set[str] | None:
     """The tools (of ``tools``, or any tool when None) that may hold a grant: a ``tool_asked`` or
     ``tool_allowed`` ledger row after the latest revoke that moved their rule key (Amendment 14). Every grant
     starts with an ask of the plugin's own prompt, and the gate refuses the call when that ask's
@@ -439,7 +441,7 @@ def granted_since_last_revoke(ledger: Any, tools: Optional[set[str]]) -> Optiona
     return {t for t, row in touched.items() if (tools is None or t in tools) and row > max(cut.get(t, 0), every)}
 
 
-def hermes_holds_grant(rt: Any, tools: Optional[set[str]]) -> bool:
+def hermes_holds_grant(rt: Any, tools: set[str] | None) -> bool:
     """Whether Hermes holds, in this process, a session or always approval under the rule key the gate asks
     under now for one of ``tools`` (any tool when None), in any approval session. Read-only; True when
     Hermes' tables cannot be read (the caller then revokes as before)."""
@@ -461,7 +463,7 @@ def hermes_holds_grant(rt: Any, tools: Optional[set[str]]) -> bool:
         return True
 
 
-def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id: str = "",
+def revoke(rt: Any, tool: str | None, *, revoke_all: bool = False, session_id: str = "",
            surface: str = "") -> tuple[str, str]:
     """(status, message); status is REVOKED, NOTHING or FAILED. Removes the plugin's grants for ``tool``
     (or all of them) from allowlist.yaml, command_allowlist and this process's lock grants, and appends a
@@ -470,13 +472,14 @@ def revoke(rt: Any, tool: Optional[str], *, revoke_all: bool = False, session_id
     ``grant_revoked`` ledger row. FAILED when any step did not take effect; the message then starts with the
     failure."""
     from .gate_tools import lock_id_for
+    tools: set[str] | None
     if revoke_all:
         tools, what = None, "every confidential-mode tool grant"
     else:
         problem = tool_name_problem(tool)
         if problem:
             return FAILED, f"Usage: /confidential revoke <tool>|--all ({problem})"
-        tools, what = {tool}, tool
+        tools, what = {cast(str, tool)}, cast(str, tool)   # tool_name_problem refuses None
     try:
         locked, _ = rt.is_locked()
     except Exception:  # noqa: BLE001

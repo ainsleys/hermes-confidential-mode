@@ -17,6 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from datetime import UTC
+
 from confidential_mode.client import ConfidentialClient, ConfidentialRefused, RefusingClient  # noqa: E402
 from confidential_mode.verify.base import VerifyError  # noqa: E402
 
@@ -137,7 +139,7 @@ def test_getattr_delegates_to_sync_openai(client, rec):
     assert isinstance(client._client, httpx.Client)
     assert client.models is client._sync.models
     with pytest.raises(AttributeError):
-        client.consume_reference_usage  # MoA probe must read as absent
+        client.consume_reference_usage  # noqa: B018 - the attribute read is the test; MoA probe must read as absent
     assert client.chat.completions.with_raw_response is not None  # delegated to sync completions
 
 
@@ -188,7 +190,7 @@ def test_refusing_client_raises_in_sync_and_async_modes():
         with pytest.raises(ConfidentialRefused):
             call()
     with pytest.raises(AttributeError):
-        r.consume_reference_usage
+        r.consume_reference_usage  # noqa: B018 - the attribute read is the test
     assert r.is_closed() is False
     r.close()
     assert r.is_closed() is True
@@ -487,16 +489,17 @@ def _ehbp_like(handler_label, rec, *, nonce=True, fail=False, der=None):
 def test_send_records_hpke_key_and_response_decrypted(tmp_path, monkeypatch, rec, mode):
     from confidential_mode.verify import tinfoil as tmod
     _stub_sdk(monkeypatch, rec)
+    from datetime import datetime, timedelta
+
     from cryptography import x509 as _x
     from cryptography.hazmat.primitives import hashes as _h, serialization as _s
     from cryptography.hazmat.primitives.asymmetric import ec as _ec
     from cryptography.x509.oid import NameOID as _N
-    from datetime import datetime, timedelta, timezone
     key = _ec.generate_private_key(_ec.SECP256R1())
     nm = _x.Name([_x.NameAttribute(_N.COMMON_NAME, "router.example")])
     der = (_x.CertificateBuilder().subject_name(nm).issuer_name(nm).public_key(key.public_key()).serial_number(1)
-           .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
-           .not_valid_after(datetime.now(timezone.utc) + timedelta(days=1)).sign(key, _h.SHA256())
+           .not_valid_before(datetime.now(UTC) - timedelta(days=1))
+           .not_valid_after(datetime.now(UTC) + timedelta(days=1)).sign(key, _h.SHA256())
            .public_bytes(_s.Encoding.DER))
 
     def fake_sync(self):
@@ -634,9 +637,11 @@ def test_stream_closed_before_done_is_marked_not_guessed(tmp_path, monkeypatch, 
 
 def test_hpke_key_used_is_the_key_the_ehbp_transport_encrypts_to():
     """Second review, minor item: the key is read from the SDK's EHBP transport, not from SDK state."""
-    from ehbp.transport import EHBPTransport
-    from confidential_mode.verify.tinfoil import ehbp_request_key
     from types import SimpleNamespace as NS
+
+    from ehbp.transport import EHBPTransport
+
+    from confidential_mode.verify.tinfoil import ehbp_request_key
     ehbp = EHBPTransport.from_public_key_hex("22" * 32, inner=httpx.MockTransport(lambda r: httpx.Response(200)))
     chain = NS(_inner=NS(_inner=NS(_inner=ehbp, _client=object()), _client=object()))   # host-bound -> ... -> EHBP
     assert ehbp_request_key(chain) == "22" * 32

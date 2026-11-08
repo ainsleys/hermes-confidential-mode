@@ -79,6 +79,7 @@ def test_a_model_key_changed_in_the_appraisal_never_puts_plaintext_on_the_wire(t
     verify (LIMITATIONS 6: the process is the trust boundary, so this checks only that no plaintext leaves and
     nothing unauthenticated comes back)."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     from ..near_world import pub_hex
     world = NearWorld()
     ad, client, rows, _ = _setup(world, tmp_path)

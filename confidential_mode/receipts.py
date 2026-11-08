@@ -36,9 +36,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, cast
 
 from ._version import PLUGIN_COMMIT, PLUGIN_VERSION
 from .ledger import DETAIL_TOO_LARGE_KEY, FORBIDDEN_DETAIL_KEYS, is_truncated
@@ -96,7 +97,8 @@ CLOSING_PARAGRAPH = (
     "calls (title generation, compaction, memory prefetch, vision, and plugin auxiliary tasks), which can "
     "leave the locked tier while the profile is locked, for example after a runtime model or provider "
     "switch, and are recorded here after the fact, not prevented. The ledger is a file on this host and is "
-    "not protected against code running in the same Hermes process: another plugin can write rows that look exactly like this "
+    "not protected against code running in the same Hermes process: another plugin can write rows that "
+    "look exactly like this "
     "plugin's own. The hash chain is a checksum over this document that anyone holding the file can "
     "recompute; it detects edits only when compared with a chain head recorded somewhere else when the "
     "receipt was rendered, and it says nothing about whether the ledger was complete or its rows genuine. "
@@ -118,7 +120,8 @@ NEAR_CLOSING = (
     "Instances of one model share one signing key, so a signature does not name the instance that answered."
 )
 
-SELF_REPORT_NOTE = ("This receipt is a self-report by the plugin from its ledger on this host. Only the attached evidence "
+SELF_REPORT_NOTE = ("This receipt is a self-report by the plugin from its ledger on this host. "
+                    "Only the attached evidence "
                     "blobs (JSON form) can be checked by a third party, by replaying them offline.")
 CHAIN_HEAD_NOTE = ("Record this chain head somewhere other than this machine now; later edits to this receipt are "
                    "detectable only against a copy kept elsewhere.")
@@ -135,7 +138,8 @@ class ReceiptError(ValueError):
 # ── row collection ──────────────────────────────────────────────────────────────────────────────
 
 def _all_rows(ledger, since_id: int = 0, page: int = 1000) -> list:
-    out, last = [], since_id
+    out: list = []
+    last = since_id
     while True:
         batch = ledger.tail(last, limit=page)
         if not batch:
@@ -149,7 +153,8 @@ def _all_rows(ledger, since_id: int = 0, page: int = 1000) -> list:
 def _rows_from(ledger, start: int, *, stop_after: int | None = None, until=None, page: int = 1000) -> list:
     """Rows with id >= start, oldest first, read a page at a time; stops past ``stop_after`` or at the first
     row for which ``until(row)`` is true (that row included)."""
-    out, cursor = [], max(0, start - 1)
+    out: list = []
+    cursor = max(0, start - 1)
     while True:
         limit = page if stop_after is None else max(1, min(page, stop_after - cursor))
         batch = ledger.tail(cursor, limit=limit)
@@ -422,7 +427,7 @@ def _near_sends(rows: list[dict], evidence: list[dict]) -> tuple[list[dict], dic
     out = []
     for r in signed:
         d = r["detail"] if isinstance(r["detail"], Mapping) else {}
-        sig = d.get("signature") if isinstance(d.get("signature"), Mapping) else {}
+        sig = cast(Mapping, d.get("signature")) if isinstance(d.get("signature"), Mapping) else {}
         rep = replayed.get(r["id"]) or {"verdict": "not_run", "reason": "", "provider_tee": False}
         live_tee = bool(d.get("fully_attested") is True)
         out.append({"row": r["id"], "purpose": r["purpose"], "model": r["model"], "chat_id": d.get("chat_id"),
@@ -476,9 +481,9 @@ def _lock_info(rows: list[dict]) -> dict:
 def verify_facts(row: Mapping) -> dict:
     """Repo, platform, enclave host, fingerprints and committed keys of a verify row, from its detail and
     (preferred) its evidence blob. Missing values are None."""
-    d = row.get("detail") if isinstance(row.get("detail"), Mapping) else {}
-    ev = d.get("evidence") if isinstance(d.get("evidence"), Mapping) else {}
-    claims = ev.get("claims") if isinstance(ev.get("claims"), Mapping) else {}
+    d = cast(Mapping, row.get("detail")) if isinstance(row.get("detail"), Mapping) else {}
+    ev = cast(Mapping, d.get("evidence")) if isinstance(d.get("evidence"), Mapping) else {}
+    claims = cast(Mapping, ev.get("claims")) if isinstance(ev.get("claims"), Mapping) else {}
     pick = lambda *vals: next((v for v in vals if v not in (None, "")), None)  # noqa: E731
     return {
         "repo": pick(ev.get("repo"), d.get("router_repo"), d.get("repo")),
@@ -519,8 +524,8 @@ def replay_status(row: Mapping, checker_id: str) -> dict:
     """What a verify row's evidence replays under (plan review finding 7). The vendor SDK result is the
     live result the row records (verify_ok pass, verify_fail fail) unless the row records a replay result;
     the restated policy check is n/a unless the checker file exists AND the row records its result."""
-    d = row.get("detail") if isinstance(row.get("detail"), Mapping) else {}
-    ev = d.get("evidence") if isinstance(d.get("evidence"), Mapping) else {}
+    d = cast(Mapping, row.get("detail")) if isinstance(row.get("detail"), Mapping) else {}
+    ev = cast(Mapping, d.get("evidence")) if isinstance(d.get("evidence"), Mapping) else {}
     f = verify_facts(row)
     if is_unverified_entry(row):
         sdk = "n/a"
@@ -571,7 +576,8 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
         sent_ts = float(started) if isinstance(started, (int, float)) and not isinstance(started, bool) else r["ts"]
         cands = [v for v in verifies
                  if (bound is None or v["id"] <= bound)
-                 and (not (r["host"] and verify_facts(v)["enclave_host"]) or verify_facts(v)["enclave_host"] == r["host"])]
+                 and (not (r["host"] and verify_facts(v)["enclave_host"])
+                      or verify_facts(v)["enclave_host"] == r["host"])]
         v = cands[-1] if cands else None
         entry = {"send": r["id"], "verify": None, "ttl_seconds": ttl_seconds, "ttl_source": ttl_source,
                  "window_start": None, "window_end": None, "covered": False, "verify_unverified_entry": None}
@@ -597,7 +603,7 @@ def _send_coverage(rows: list[dict], ttl_seconds: float, ttl_source: str) -> lis
             h = verify_facts(v)["hpke_public_key"] if v is not None else None
             entry["verify_hpke_public_key"] = h
             # Every exchange of the call counts (an SDK retry may have used another key), not only the last.
-            sends = d.get("sends") if isinstance(d.get("sends"), list) else []
+            sends = cast(list, d.get("sends")) if isinstance(d.get("sends"), list) else []
             used = [s.get("hpke_key_used") for s in sends if isinstance(s, Mapping)] or [entry["hpke_key_used"]]
             used = [u for u in used if u not in (None, "")]
             if h is None or not used:
@@ -655,7 +661,7 @@ def build_receipt(ledger, session_id: str, *, pins: Any = None, on_host_extra_ho
                      if r["kind"] == "send_observed" and r.get("tier") == "attested" and r["host"]]
     evidence = [_evidence_item(ledger, r) for r in rows
                 if r["kind"] in ("verify_ok", "verify_fail") and isinstance(r["detail"].get("evidence"), Mapping)]
-    doc = {
+    doc: dict[str, Any] = {
         "format": RECEIPT_FORMAT,
         "version": RECEIPT_VERSION,
         "header": {
@@ -758,7 +764,7 @@ def ts_text(ts: Any) -> str:
     if ts is None:
         return "(unknown) " + CLOCK_LABEL
     try:
-        dt = datetime.fromtimestamp(float(ts), timezone.utc)
+        dt = datetime.fromtimestamp(float(ts), UTC)
     except (TypeError, ValueError, OverflowError, OSError):
         return "(invalid) " + CLOCK_LABEL
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z {CLOCK_LABEL}"
@@ -816,7 +822,8 @@ def _verify_body(r: Mapping, status: Mapping | None = None) -> str:
     full = lambda v: _p(v) or "?"  # noqa: E731
     if k in ("verify_ok", "verify_fail"):
         f = verify_facts(r)
-        bits = ["UNVERIFIED ENTRY (no evidence or incomplete capture; proves nothing)"] if is_unverified_entry(r) else []
+        bits = (["UNVERIFIED ENTRY (no evidence or incomplete capture; proves nothing)"]
+                if is_unverified_entry(r) else [])
         if d.get("accepted") is False:
             # Amendment 9: a background verification the pins did not accept was never used for a send.
             bits.append("NOT ACCEPTED (the pins did not match this build; never used for a send)")
@@ -897,7 +904,8 @@ def render_text(doc: Mapping) -> str:
     if period["since"] is not None:
         for p in h["locked_periods"]:
             until = ts_text(p["until"]) if p["until"] is not None else "still locked at the last row"
-            add(f"Locked period: {_p(p['tier']) or '?'} from {ts_text(p['since'])} to {until}  (lock row #{p['lock_row']})")
+            add(f"Locked period: {_p(p['tier']) or '?'} from {ts_text(p['since'])} to {until}  "
+                f"(lock row #{p['lock_row']})")
     else:
         add("Locked period: no lock row covers this session")
     if h["providers"]:
@@ -1020,7 +1028,8 @@ def render_text(doc: Mapping) -> str:
                       f"{_p(r['provider']) or '?'}/{_p(r['model']) or '?'}")
     if sec.get("notices"):
         section("Notices", sec["notices"],
-                lambda r: f"{_p(r['decision']) or 'notice'}  {_p(r['purpose']) or '?'}  host={_p(r['host']) or '(none)'}  "
+                lambda r: f"{_p(r['decision']) or 'notice'}  {_p(r['purpose']) or '?'}  "
+                          f"host={_p(r['host']) or '(none)'}  "
                           f"{_p((r['detail'] or {}).get('note') or (r['detail'] or {}).get('notice')) or ''}".rstrip())
 
     near = h.get("near")
@@ -1038,7 +1047,8 @@ def render_text(doc: Mapping) -> str:
                 add(f"      {_p(c['replay_reason'] or c['live_reason'])}")
             if c.get("near_e2ee"):
                 add(f"      request body sent as ciphertext for fields {_p(', '.join(c['e2ee_fields'])) or '(none)'} "
-                    f"(plugin self-report); encrypted to model key {_p(c.get('model_pub')) or '?'} (plugin self-report)")
+                    f"(plugin self-report); encrypted to model key {_p(c.get('model_pub')) or '?'} "
+                    "(plugin self-report)")
                 if c.get("plaintext_keys"):
                     add(f"      left in plaintext besides the model id: {_p(', '.join(c['plaintext_keys']))}")
                 if c.get("plaintext_parts_note"):

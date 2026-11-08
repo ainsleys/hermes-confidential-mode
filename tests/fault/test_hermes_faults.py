@@ -15,17 +15,13 @@ import threading
 import time
 
 import pytest
-
 from hermes_cli.middleware import _run_execution_chain
 from hermes_cli.plugins import invoke_hook
 
 from confidential_mode import consent, provider as provider_mod
-from confidential_mode.gate_llm import TEXT_PROVIDER_ERROR, LlmGate
+from confidential_mode.gate_llm import TEXT_PROVIDER_ERROR
 from confidential_mode.ledger import Ledger
-from confidential_mode.locking import predicate_for
 from confidential_mode.pins import PinStore
-from confidential_mode.state import ConfidentialState, InMemoryState
-from confidential_mode.tiers import Tier
 
 from ..hostile._harness_integrated import answer_choice, cm, rows  # noqa: F401
 from ..seam._harness import no_lazy_installs  # noqa: F401  (fixture)
@@ -415,6 +411,7 @@ def test_a_raising_secret_scope_never_makes_create_client_raise(tmp_path, monkey
     """INTERFACES W2: "create_client NEVER raises and NEVER returns None (fail-open otherwise)"; provider.api_key_for
     reads the key "through Hermes' secret scope"."""
     import agent.secret_scope as ss
+
     from confidential_mode.client import ConfidentialClient, RefusingClient
 
     def get_secret(name, *a, **k):
@@ -440,6 +437,7 @@ def test_a_near_send_from_a_thread_without_the_send_context_is_still_recorded(tm
     """Amendment 5: "every POST ... writes one send_signed row"; Amendment 5.1: purpose comes from sendctx when
     one is bound. Fault: the call runs on a thread with no context, as a Hermes worker might."""
     import openai
+
     from ..near_world import BASE, MODEL, NearWorld
     world = NearWorld()
     ad = world.adapter(tmp_path)

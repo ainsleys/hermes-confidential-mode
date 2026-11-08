@@ -994,7 +994,7 @@ def test_concurrent_many_turns_off_tier_never_leak(monkeypatch, manager):
         t.start()
     for t in threads:
         t.join(60)
-    for i, (host, rec, agent) in enumerate(pairs):
+    for i, (host, rec, _agent) in enumerate(pairs):
         if host == off_host:
             assert rec.provider_calls == [], f"LEAK: off-tier agent {i} sent"
             assert results[i]["final_response"] != H.PROVIDER_TEXT

@@ -21,14 +21,13 @@ import threading
 import httpx
 import openai
 import pytest
-
-from confidential_mode.verify.base import VerifyError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from confidential_mode.verify import near
+from confidential_mode.verify.base import VerifyError
 from confidential_mode.verify.near import TLSPinMismatch, pinned_ssl_context
 
 from ..near_world import BASE, MODEL, NearWorld, tls_cert
@@ -40,7 +39,7 @@ MSG = [{"role": "user", "content": "hi"}]
 
 def _server_cert(tmp_path):
     """A test CA and a server leaf for localhost (a leaf shape platform trust stores accept too)."""
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     ca_key = ec.generate_private_key(ec.SECP256R1())
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "confidential-mode test CA")])
     ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name).public_key(ca_key.public_key())

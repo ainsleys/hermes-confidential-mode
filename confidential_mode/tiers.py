@@ -1,9 +1,18 @@
 """Frozen shared types for tiers (C1). Predicates are added by W3 below the marker."""
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import ipaddress
+import re
+import socket
+import threading
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 
 class Tier(str, Enum):
@@ -35,16 +44,6 @@ class TierPredicate(Protocol):
 
 
 # --- W3 adds predicates below this line -------------------------------------
-
-import contextlib
-import contextvars
-import ipaddress
-import re
-import socket
-import threading
-import time
-from typing import Any, Callable, Iterable, Optional
-from urllib.parse import urlsplit
 
 #: Names that are on-host without an IP literal. No DNS is consulted for these names. The machine's own host
 #: name is the one name that is resolved (see :func:`own_hostname_is_loopback`). Any other hostname is
@@ -160,7 +159,7 @@ def zone_problem(host: str) -> str:
     return ""
 
 
-def _ip_of(host: str) -> Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+def _ip_of(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     if not isinstance(host, str) or not host:
         return None
     try:
@@ -224,7 +223,7 @@ def extra_host_problem(entry: Any) -> str:
 def _norm_hosts(hosts: Iterable[str]) -> set[str]:
     """The valid exact entries of ``hosts``, normalised. Invalid entries are dropped (fail closed);
     the on-host preflight lists each dropped entry as a failing row."""
-    out = set()
+    out: set[str] = set()
     if isinstance(hosts, str):  # a bare string is not a list of hosts
         return out
     for h in hosts or ():
@@ -261,7 +260,7 @@ def _listed(host: str, listed: set[str]) -> bool:
 
 def _resolve_all(name: str) -> list[str]:
     infos = socket.getaddrinfo(name, None)
-    return [info[4][0] for info in infos]
+    return [info[4][0] for info in infos]  # type: ignore[misc]  # sockaddr[0] is the address text for IPv4 and IPv6
 
 
 #: own host name -> (answer, monotonic time of the answer). A False answer (including a timeout) is kept for
@@ -271,7 +270,7 @@ _OWN_HOSTNAME_TIMEOUT_SECONDS = 2.0
 _OWN_HOSTNAME_TTL_SECONDS = 60.0
 _OWN_HOSTNAME_LOCK = threading.Lock()
 #: True inside ``cached_lookups_only()``: the own-host-name check answers from the cache only (Amendment 13).
-_CACHED_ONLY: "contextvars.ContextVar[bool]" = contextvars.ContextVar("confidential_mode_cached_lookups_only",
+_CACHED_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar("confidential_mode_cached_lookups_only",
                                                                       default=False)
 
 

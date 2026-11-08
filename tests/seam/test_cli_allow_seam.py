@@ -14,8 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .test_register import plugin  # noqa: F401  (fixture)
 from ._harness import no_lazy_installs  # noqa: F401  (fixture)
+from .test_register import plugin  # noqa: F401  (fixture)
 
 
 def _hermes_tty(plugin, *argv, answer: str):
@@ -70,12 +70,13 @@ def test_cli_allow_of_a_tool_only_the_gateway_registered_says_so(plugin, monkeyp
     the CLI refuses and says to allow the tool from chat. A tool the lock never recorded: the CLI says no
     allow can help and that a relock from chat records gateway-only tools."""
     import importlib
+
     from tools.registry import registry
     schema = {"name": "mcp_docs_search", "description": "x", "parameters": {"type": "object", "properties": {}}}
     # A real MCP handler, as tools/mcp_tool_registration.py builds one: its module is tools.mcp_tool_handlers,
     # which registers nothing on import, so the CLI must not fall back to a full tool discovery for it.
     handlers = importlib.import_module("tools.mcp_tool_handlers")
-    handler = getattr(handlers, "_make_tool_handler")("docs", "search", 30.0)
+    handler = handlers._make_tool_handler("docs", "search", 30.0)
     registry.register(name="mcp_docs_search", toolset="mcp-docs", schema=schema, handler=handler)
     cache = plugin.home / "cache" / "tool_discovery_cache.json"
     try:

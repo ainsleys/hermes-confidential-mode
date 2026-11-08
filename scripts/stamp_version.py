@@ -30,7 +30,8 @@ def git(*args: str) -> str:
 
 def current_commit() -> str:
     sha = git("rev-parse", "--short", "HEAD")
-    changes = [l for l in git("status", "--porcelain").splitlines() if not l.endswith("confidential_mode/_version.py")]
+    changes = [line for line in git("status", "--porcelain").splitlines()
+               if not line.endswith("confidential_mode/_version.py")]
     return f"{sha}-dirty" if changes else sha
 
 

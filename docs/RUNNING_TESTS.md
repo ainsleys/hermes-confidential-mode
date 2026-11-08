@@ -73,6 +73,26 @@ A quicker check that every file compiles on 3.11:
 
 `compileall` writes `__pycache__` directories beside the sources; delete them afterwards.
 
+## Lint and types
+
+`pyproject.toml` configures ruff (rules E, F, W, I, B and UP, 120 columns) and mypy (`check_untyped_defs`,
+with Hermes and the vendor SDKs treated as untyped). Both are pinned: ruff 0.17.4 and mypy 2.4.1, the
+versions in the `dev` extra and in the workflow's `lint` job. Run them from the plugin checkout; neither
+needs Hermes:
+
+    cd ~/hermes-confidential-mode
+    uvx ruff@0.17.4 check --no-cache .
+    uvx --from mypy==2.4.1 mypy --python-executable <dir>/.venv/bin/python --cache-dir=/dev/null
+
+`--python-executable` names an environment that has the plugin's dependencies (httpx, openai,
+cryptography and the rest of `pyproject.toml`), so mypy reads their types; the test environment above
+works. mypy checks `confidential_mode/` and `scripts/`. The root `__init__.py` is not checked: the
+checkout directory is its package, and its name need not be a Python identifier. `--no-cache` and
+`--cache-dir=/dev/null` keep both tools from writing cache directories into the checkout.
+
+An ignore comment in the source names the rule it silences and says why, for example
+`# type: ignore[union-attr]  # once_per_lock() needs lock_grants`.
+
 ## PyNaCl, for NEAR request encryption
 
 The plugin encrypts NEAR requests with PyNaCl. PyNaCl is a Python binding to the libsodium library.

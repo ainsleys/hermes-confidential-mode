@@ -52,6 +52,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -118,8 +119,9 @@ def main(argv=None) -> int:
             with sendctx.send_context(session_id="near-first-contact", purpose="main", tier="attested"):
                 for stream in (False, True):
                     try:
-                        out = client.chat.completions.create(model=models[0], messages=PROMPT, max_tokens=16,
-                                                             stream=stream)
+                        out: Any = client.chat.completions.create(
+                            model=models[0], messages=PROMPT, max_tokens=16,  # type: ignore[arg-type]  # plain dicts
+                            stream=stream)
                         if stream:
                             n = sum(len((c.choices[0].delta.content or "").encode()) for c in out if c.choices)
                         else:

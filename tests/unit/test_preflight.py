@@ -5,7 +5,11 @@ import pytest
 
 from confidential_mode import preflight as pf
 from confidential_mode.preflight import (
-    BUILTIN_AUX_TASKS_SNAPSHOT, PreflightReport, config_fingerprint, format_report, run_preflight,
+    BUILTIN_AUX_TASKS_SNAPSHOT,
+    PreflightReport,
+    config_fingerprint,
+    format_report,
+    run_preflight,
 )
 from confidential_mode.tiers import AttestedPredicate, OnHostPredicate, Tier, Verdict, ZdrPredicate
 
@@ -335,10 +339,11 @@ def test_key_state_reads_every_source_and_never_shows_the_value(monkeypatch, tmp
     opened (catalog rule 11); an unscoped read (a multiplexed gateway with no scope) is "not readable in this
     scope"."""
     import json as _json
-    import os as _os
-    from confidential_mode import preflight
+
     import agent.secret_scope as scope
     import hermes_constants
+
+    from confidential_mode import preflight
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
     monkeypatch.delenv("TINFOIL_API_KEY", raising=False)
     cfg = attested_config()
@@ -458,7 +463,7 @@ def test_format_report_table_shape():
     assert header.split() == ["KEY", "VALUE", "VERDICT", "FIX"]
     vcol = header.index("VERDICT")
     fcol = header.index("FIX")
-    for line, it in zip(lines[3:], r.items):
+    for line, it in zip(lines[3:], r.items, strict=False):
         assert line[vcol:vcol + len(it.verdict)] == it.verdict
         if it.fix:
             assert line[fcol:] == it.fix

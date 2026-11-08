@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, cast
 
 from .client import ConfidentialClient, ConfidentialRefused, RefusingClient, openai_kwargs_from
 from .pins import PinStore
@@ -312,7 +313,8 @@ class VerificationCache:
         e.result, e.verified_mono, e.last_error, e.failed_mono = res, float(at), None, None
         return True
 
-    def ensure(self, provider: str, *, wait_seconds: float | None = None) -> tuple[bool, str, VerificationResult | None]:
+    def ensure(self, provider: str, *,
+               wait_seconds: float | None = None) -> tuple[bool, str, VerificationResult | None]:
         """(ok, reason, result). ok iff a fresh result exists and the pins match it. Re-attests once if
         the cached result is stale or missing (subject to the failure backoff), waiting at most
         ``verify_wait_seconds``; on timeout it refuses while the attestation continues in the
@@ -342,7 +344,8 @@ class VerificationCache:
                     return False, _fail_reason(e.last_error), None
                 if e.observed_result is not result:
                     e.observed_result = result
-                    _background(e, "observe", lambda r=result: e.pins.observe(r))   # its fsync is off e.lock
+                    _background(e, "observe",  # its fsync is off e.lock
+                                lambda r=result: e.pins.observe(r))  # type: ignore[misc]  # r binds this result
                 if e.pins.match(result) is True:
                     if not _consent_recorded(e, result):
                         _hold(e.adapter, REASON_NO_CONSENT)
@@ -389,7 +392,8 @@ class VerificationCache:
                     _release(e.adapter)
                     return True, "attested enclave verified; platform-only pin applied by policy", result
         if _needs_composes(staged) and hasattr(e.pins, "prefetch_composes"):
-            _background(e, "prefetch", lambda s=staged: _prefetch(provider, e, s))
+            _background(e, "prefetch",
+                        lambda s=staged: _prefetch(provider, e, s))  # type: ignore[misc]  # s binds this pin
         if _ckey(staged) != _ckey(before):  # a new pending batch, not a re-stage or a display refresh
             _emit(e, {"kind": "pin_staged", "provider": provider, "purpose": "verify",
                       "host": result.enclave_host,
@@ -647,8 +651,8 @@ def _auto_apply(provider: str, e: _Entry, pending) -> bool:
     if getattr(pending, "vendor", None) not in AUTO_APPLY_VENDORS:
         return False
     try:
-        e.pins.apply(pending, approved_via=AUTO_PLATFORM_ONLY, approval_rule_key="confidential-mode:pin:auto-platform-only",
-                     approved_by="policy")
+        e.pins.apply(pending, approved_via=AUTO_PLATFORM_ONLY,
+                     approval_rule_key="confidential-mode:pin:auto-platform-only", approved_by="policy")
     except Exception as exc:
         logger.warning("attested: platform-only auto-approval failed: %s", exc)
         return False
@@ -681,6 +685,7 @@ def _consent_recorded(e: _Entry, result: VerificationResult) -> bool:
         entries = e.pins.matching_entries(result) if hasattr(e.pins, "matching_entries") else None
     except Exception:
         entries = None
+    keys: list[tuple]
     if entries:
         keys = [(result.vendor, x.router_repo, x.cvm_role, x.code_fingerprint, x.enclave_fingerprint)
                 for x in entries]
@@ -738,6 +743,7 @@ def _scan_consent(e: _Entry) -> None:
                         e.consented[(d.get("vendor") or None, code, enclave)] = False
                         e.consented[(None, code, enclave)] = False
                 continue
+            key: tuple
             if d.get("router_repo") and d.get("cvm_role"):
                 key = (d.get("vendor") or None, d["router_repo"], d["cvm_role"], d.get("code_fingerprint"),
                        d.get("enclave_fingerprint"))
@@ -764,6 +770,7 @@ def _policy_check_detail(evidence) -> dict:
         return {"ok": None, "reason": "n/a: NEAR evidence carries no Sigstore release bundle"}
     try:
         from pathlib import Path as _P
+
         from .verify import policy_check
         ev = evidence or {}
         rel, tr, bundle = ev.get("release") or {}, ev.get("trusted_root") or {}, ev.get("sigstore_bundle")
@@ -899,9 +906,9 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
     cache = cache if cache is not None else verification_cache
     ProviderProfile = _profile_base()
 
-    class AttestedTinfoilProfile(ProviderProfile):
+    class AttestedTinfoilProfile(ProviderProfile):  # type: ignore[misc, valid-type]  # Hermes' class, imported at call
         def create_client(self, **client_kwargs: Any):
-            return _create_client(self, cache, client_kwargs)
+            return _create_client(self, cache, client_kwargs)  # type: ignore[arg-type]  # cache is set above
 
         def get_model_context_length(self, model: str) -> int | None:
             # Returning an int pre-empts Hermes' context-window probes (GET {base_url}/models, POST
@@ -930,9 +937,10 @@ def make_profile(adapter, pins: PinStore, ttl_seconds: float = DEFAULT_TTL_SECON
                    verify_wait_seconds=verify_wait_seconds, refresh_lead_seconds=refresh_lead_seconds)
     if consent_ledger is None and ledger is not None and callable(getattr(ledger, "tail", None)):
         consent_ledger = ledger
-    cache.entry(name).consent_ledger = consent_ledger
-    cache.entry(name).auto_approve_platform_only = bool(auto_approve_platform_only)
-    cache.entry(name).profile = profile
+    entry = cast(_Entry, cache.entry(name))   # registered just above
+    entry.consent_ledger = consent_ledger
+    entry.auto_approve_platform_only = bool(auto_approve_platform_only)
+    entry.profile = profile
     return profile
 
 
@@ -984,7 +992,7 @@ def classify_refusal(error, **_context):
     return None
 
 
-def _refusal_recorder(profile, cache: "VerificationCache | None" = None):
+def _refusal_recorder(profile, cache: VerificationCache | None = None):
     """The ledger hook for a provider-gate refusal: one send_refused row with stage provider_gate, skipped
     inside the llm gate (which writes its own). NEAR uses its adapter's record_refusal; Tinfoil writes the
     same row through the cache entry's ledger sink. None when neither exists."""
@@ -1000,7 +1008,7 @@ def _refusal_recorder(profile, cache: "VerificationCache | None" = None):
         try:
             if getattr(exc, "ledgered", False) is True:
                 return
-            exc.ledgered = True
+            exc.ledgered = True  # type: ignore[attr-defined]  # marks the exception so it is ledgered once
             from . import sendctx
             ctx = sendctx.current() or {}
             if ctx.get("refusals_ledgered_by") == "llm_gate":
@@ -1190,8 +1198,10 @@ def register_near_profile(ctx, *, config: dict | None = None, data_dir: Path | s
         tcb = near("accepted_tcb_statuses", default=list(DEFAULT_ACCEPTED_TCB))
         adapter = NearAdapter(
             data_dir=data_dir, base_url=str(near("base_url", default=DEFAULT_BASE_URL)), models=near_models(config),
-            require_provider_tee=require_tee, require_tls_binding=near("require_tls_binding", default=True) is not False,
-            accepted_tcb_statuses=[t for t in tcb if isinstance(t, str)] if isinstance(tcb, list) else DEFAULT_ACCEPTED_TCB,
+            require_provider_tee=require_tee,
+            require_tls_binding=near("require_tls_binding", default=True) is not False,
+            accepted_tcb_statuses=(
+                [t for t in tcb if isinstance(t, str)] if isinstance(tcb, list) else DEFAULT_ACCEPTED_TCB),
             signature_wait_seconds=float(near("signature_wait_seconds", default=DEFAULT_SIGNATURE_WAIT_SECONDS)),
             encrypt=encrypt, reverify_backoff_seconds=float(near("reverify_backoff_seconds", default=30.0)),
             image_parts=image_parts_from(config))

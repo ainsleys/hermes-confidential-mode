@@ -15,9 +15,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import httpx
+
+if TYPE_CHECKING:
+    import openai
 
 # Keyword arguments Hermes may pass to create_client() that are safe to forward to openai.OpenAI.
 # api_key/base_url are handled explicitly; http_client is never forwarded (the secure view replaces it).
@@ -43,7 +47,7 @@ def openai_kwargs_from(client_kwargs: dict) -> dict:
 
 
 class _Completions:
-    def __init__(self, owner: "ConfidentialClient"):
+    def __init__(self, owner: ConfidentialClient):
         self._owner = owner
 
     def create(self, **kwargs):
@@ -58,7 +62,7 @@ class _Completions:
 
 
 class _Chat:
-    def __init__(self, owner: "ConfidentialClient"):
+    def __init__(self, owner: ConfidentialClient):
         self._owner = owner
         self.completions = _Completions(owner)
 
@@ -78,7 +82,7 @@ class ConfidentialClient:
         self._kw = dict(openai_kwargs or {})
         self._kw.setdefault("max_retries", 0)
         self._view = adapter.sync_http_view()
-        import openai   # imported on first client, not at plugin load (ux-pass-1: start-up time)
+        import openai  # imported on first client, not at plugin load (ux-pass-1: start-up time)
         self._sync = openai.OpenAI(api_key=api_key or "tinfoil", base_url=base_url, http_client=self._view,
                                    **self._kw)
         self._async_by_loop: dict[int, tuple[asyncio.AbstractEventLoop, openai.AsyncOpenAI]] = {}
@@ -174,7 +178,7 @@ class RefusingClient:
         self._client = httpx.Client(transport=_RefusingTransport(reason, on_refuse))
         self._closed = False
 
-    def with_options(self, **_kwargs) -> "RefusingClient":
+    def with_options(self, **_kwargs) -> RefusingClient:
         return self
 
     def is_closed(self) -> bool:

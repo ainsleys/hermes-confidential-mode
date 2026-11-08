@@ -18,8 +18,8 @@ from confidential_mode import sendctx
 from confidential_mode.verify import near, near_checks as nc, replay_near
 from confidential_mode.verify.base import VerifyError
 
-from ..near_world import BASE, HOST, MODEL, NOW, NearWorld, pub_hex
 from .. import near_world as _near_world
+from ..near_world import BASE, HOST, MODEL, NOW, NearWorld, pub_hex
 
 MSG = [{"role": "user", "content": "hi"}]
 

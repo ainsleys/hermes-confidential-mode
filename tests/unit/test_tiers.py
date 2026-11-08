@@ -4,7 +4,14 @@ import socket
 import pytest
 
 from confidential_mode.tiers import (
-    AttestedPredicate, Destination, OnHostPredicate, Tier, Verdict, ZdrPredicate, host_of, is_on_host,
+    AttestedPredicate,
+    Destination,
+    OnHostPredicate,
+    Tier,
+    Verdict,
+    ZdrPredicate,
+    host_of,
+    is_on_host,
 )
 
 

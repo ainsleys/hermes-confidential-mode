@@ -6,12 +6,11 @@ import importlib
 import json
 
 import pytest
-
 from hermes_cli.plugin_choices import bind_asker
 
+from ._harness import no_lazy_installs  # noqa: F401  (fixture)
 from .test_commands import _hermes
 from .test_register import plugin  # noqa: F401  (fixture)
-from ._harness import no_lazy_installs  # noqa: F401  (fixture)
 
 KEY = "plugin_rule:confidential-mode:tool:web_search"
 

@@ -27,10 +27,9 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
-import run_agent
 import hermes_cli.plugins as plugins_mod
+import pytest
+import run_agent
 from hermes_cli.plugins import PluginContext, PluginManager
 from hermes_cli.plugins_manifest import PluginManifest
 
@@ -306,6 +305,7 @@ def test_remote_terminal_backend_refuses_the_lock_with_the_key_to_change(plugin,
     # A terminal environment Hermes still caches from a remote backend also refuses the lock (second review,
     # item 4): the tools would keep using it.
     from types import SimpleNamespace
+
     from tools import terminal_tool
     plugin.cfg.write_text(BASE_CONFIG)           # no terminal section: the environment variable decides
     monkeypatch.setattr(terminal_tool, "_active_environments", {"default": SimpleNamespace(env_type="ssh")})

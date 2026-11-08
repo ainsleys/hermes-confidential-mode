@@ -14,8 +14,17 @@ import pytest
 from confidential_mode.verify import near, near_checks as nc
 from confidential_mode.verify.base import VerifyError
 
-from ..near_world import (CM_IMAGE, CM_IMAGE_SWAPPED, MODEL, NOW, NearWorld, cm_attestation, events_for,
-                          fake_quote_verifier, model_app_id)
+from ..near_world import (
+    CM_IMAGE,
+    CM_IMAGE_SWAPPED,
+    MODEL,
+    NOW,
+    NearWorld,
+    cm_attestation,
+    events_for,
+    fake_quote_verifier,
+    model_app_id,
+)
 
 
 def _bend(world: NearWorld, fn):
@@ -291,8 +300,9 @@ def test_render_vendor_keeps_everything_visible_and_cuts_nothing():
 
 
 def test_the_pin_prompt_escapes_and_tags_component_lines():
-    from confidential_mode.consent import _near_pin_question
     from types import SimpleNamespace
+
+    from confidential_mode.consent import _near_pin_question
     pending = SimpleNamespace(components=("gateway compose sha256:ab\x1b[1A\x1b[2K", "reported: x\ny *bold*"),
                               router_repo="h#m", platform="tdx", previous=None, code_fingerprint="c",
                               previous_enclave_fingerprint=None, enclave_fingerprint="e", code_changed=True,
@@ -322,7 +332,7 @@ def _ev(name, payload, et=0x08000001):
 
 @pytest.mark.parametrize("edit,needle", [
     (lambda evs: evs + [_ev("app-id", "ee" * 20)], "repeats the app-id event"),
-    (lambda evs: evs[:2] + [_ev("key-provider", '{"name":"kms","id":"00"}'.encode().hex())] + evs[2:],
+    (lambda evs: evs[:2] + [_ev("key-provider", b'{"name":"kms","id":"00"}'.hex())] + evs[2:],
      "repeats the key-provider event"),
     (lambda evs: [e for e in evs if e["event"] != "os-image-hash"] + [_ev("os-image-hash", "ee" * 32)],
      "os-image-hash event comes after system-ready"),
@@ -355,6 +365,7 @@ def test_a_key_provider_id_that_is_not_hex_fails(monkeypatch, tmp_path):
 
 def test_a_long_service_list_folds_into_a_count_and_pins_prints_every_line(tmp_path):
     from types import SimpleNamespace
+
     from confidential_mode import commands
     from confidential_mode.consent import MAX_REPORTED_LINES, _near_pin_question
     from confidential_mode.pins import PinStore

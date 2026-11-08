@@ -45,6 +45,7 @@ def _one_refusal_row(rows, before, text):
 
 def _client(ad):
     import openai
+
     from confidential_mode.verify.near import DEFAULT_BASE_URL
     return openai.OpenAI(api_key=KEY, base_url=DEFAULT_BASE_URL, http_client=ad.sync_http_view(), max_retries=0)
 

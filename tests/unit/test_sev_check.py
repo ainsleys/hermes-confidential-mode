@@ -9,7 +9,7 @@ import hashlib
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from confidential_mode.verify import sev_check  # noqa: E402
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures" / "real_capture_sev" / "evidence.json"
-AS_OF = datetime(2026, 11, 6, 17, 0, tzinfo=timezone.utc)
+AS_OF = datetime(2026, 11, 6, 17, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -131,9 +131,9 @@ def test_chain_tampering_fails(ev, case, needle):
     elif case == "other_ark":
         kw["ark_pem"] = sev_check.ASK_PEM  # any cert that is not the pinned ARK
     elif case == "expired":
-        when = datetime(2034, 1, 1, tzinfo=timezone.utc)
+        when = datetime(2034, 1, 1, tzinfo=UTC)
     elif case == "before_issue":
-        when = datetime(2026, 8, 1, tzinfo=timezone.utc)  # before the VCEK's notBefore
+        when = datetime(2026, 8, 1, tzinfo=UTC)  # before the VCEK's notBefore
     res = sev_check.check(ev["attestation"]["body"], vcek, as_of=when, **kw)
     assert not res.ok and needle in res.reason, res.reason
 

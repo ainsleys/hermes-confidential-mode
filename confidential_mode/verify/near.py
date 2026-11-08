@@ -12,7 +12,8 @@ Attestation requests carry no API key (NEAR documents them as public). The bytes
 (schema ``confidential-mode/near-evidence/v2``; v1 still appraises under v1 rules) and appraised by
 ``appraise()``, the same function the offline replay runs (verify/replay_near.py). Any failed required
 check raises VerifyError. Large strings (each app_compose, each compose_manager_attestation, each TDX
-quote and each Intel Trust Authority token) sit in the evidence's ``blobs`` by SHA-256; the ledger moves them to ``<data_dir>/evidence/blobs/`` and keeps
+quote and each Intel Trust Authority token) sit in the evidence's ``blobs`` by SHA-256; the ledger moves them
+to ``<data_dir>/evidence/blobs/`` and keeps
 ``blob_refs``, and a JSON receipt embeds them again (ledger.py, receipts.py).
 
 What the checks establish, and with which key:
@@ -69,9 +70,11 @@ Request encryption (``encrypt``, config confidential.near.encrypt, default true;
 POST that leaves is chat completions, rebuilt as a new request whose body has every field of NEAR's table
 sealed to the one verified model key (``model_public_key``), with a fresh Ed25519 client key held on the
 exchange. Non-text content parts (images) leave as plaintext beside the sealed text and are recorded
-(``image_parts`` "disclose", the default) or refused ("refuse"). Streaming, unlisted top-level text (structured settings such as
+(``image_parts`` "disclose", the default) or refused ("refuse"). Streaming, unlisted top-level text
+(structured settings such as
 ``reasoning: {"effort": "low", "summary": "auto"}`` pass when their shape is one near_e2ee.STRUCTURED_KEYS
-allows) and every other POST raise VerifyError before sending. The digests are over the ciphertext bytes, which is what NEAR signs (live probe,
+allows) and every other POST raise VerifyError before sending. The digests are over the ciphertext bytes,
+which is what NEAR signs (live probe,
 2026-11-07). The reply is buffered, hashed and finished first; it is decrypted and handed over only when
 the send is fully attested (a verified provider_tee signature over those digests, on the attested TLS
 connection). HTTP 421 means the gateway no longer accepts the model key: the adapter holds and asks the
@@ -92,12 +95,12 @@ import ssl
 import threading
 import time
 import weakref
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
-from urllib.parse import quote as _urlquote
-from urllib.parse import urlsplit
+from typing import Any, cast
+from urllib.parse import quote as _urlquote, urlsplit
 
 import httpx
 import openai
@@ -134,7 +137,7 @@ CM_NOT_RUN_V1 = "n/a: not run (evidence schema v1 carries no compose-manager att
 # ── evidence ────────────────────────────────────────────────────────────────────────────────────
 
 def _tcb_info(report: Mapping) -> Mapping:
-    info = report.get("info") if isinstance(report.get("info"), Mapping) else {}
+    info = cast(Mapping, report.get("info")) if isinstance(report.get("info"), Mapping) else {}
     tcb = info.get("tcb_info")
     if isinstance(tcb, str):
         tcb = json.loads(tcb)
@@ -187,7 +190,7 @@ def trim_report(report: Mapping, blobs: dict) -> dict:
     """The fields of one NEAR report the checks use. Large texts go into ``blobs`` by SHA-256: the
     app_compose (its id is the compose hash) and, for a model candidate, the whole
     compose_manager_attestation as canonical JSON (its id is recorded under ``compose_manager.blob``)."""
-    info = report.get("info") if isinstance(report.get("info"), Mapping) else {}
+    info = cast(Mapping, report.get("info")) if isinstance(report.get("info"), Mapping) else {}
     app_compose = _tcb_info(report).get("app_compose")
     compose_hash = None
     if isinstance(app_compose, str):
@@ -196,7 +199,8 @@ def trim_report(report: Mapping, blobs: dict) -> dict:
     out = {
         "signing_address": report.get("signing_address"), "signing_algo": report.get("signing_algo"),
         "request_nonce": report.get("request_nonce"), "report_data": report.get("report_data"),
-        "intel_quote_b64": base64.b64encode(bytes.fromhex(quote_hex)).decode("ascii") if isinstance(quote_hex, str) else None,
+        "intel_quote_b64": (base64.b64encode(bytes.fromhex(quote_hex)).decode("ascii")
+                            if isinstance(quote_hex, str) else None),
         "event_log_imr3": nc.imr3_events(report.get("event_log") or []),
         "compose_hash": compose_hash, "app_name": info.get("app_name"), "app_id": info.get("app_id"),
         "instance_id": info.get("instance_id"), "os_image_hash": info.get("os_image_hash"),
@@ -220,7 +224,7 @@ def trim_report(report: Mapping, blobs: dict) -> dict:
 
 
 def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.fromtimestamp(ts, tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def build_evidence(raw: Mapping, *, base_url: str, models: list[str], nonce: str, captured_at_unix: float,
@@ -244,7 +248,7 @@ def build_evidence(raw: Mapping, *, base_url: str, models: list[str], nonce: str
         except Exception as exc:
             errors.append(f"model_report[{model}]: {type(exc).__name__}: {exc}"[:300])
             model_reports[model] = []
-    ita = {"gateway_token": None, "model_tokens": {}, "jwks_url": None}
+    ita: dict[str, Any] = {"gateway_token": None, "model_tokens": {}, "jwks_url": None}
     for key, resp in (raw.get("ita") or {}).items():
         if not isinstance(resp, Mapping):
             continue
@@ -262,7 +266,7 @@ def build_evidence(raw: Mapping, *, base_url: str, models: list[str], nonce: str
         "models": list(models),
         "captured_at": _iso(captured_at_unix), "captured_at_unix": captured_at_unix,
         "gateway": gateway, "model_reports": model_reports, "blobs": blobs, "blob_refs": sorted(blobs), "ita": ita,
-        "jwks": raw.get("jwks") if isinstance(raw.get("jwks"), Mapping) else None,
+        "jwks": cast(Mapping, raw.get("jwks")) if isinstance(raw.get("jwks"), Mapping) else None,
         "jwks_url_fetched": raw.get("jwks_url_fetched"),
         "tls_observation": dict(tls_observation) if tls_observation else None,
     }
@@ -333,7 +337,7 @@ def _app_name(composes: Mapping, h: str | None) -> str:
 def verified_blobs(evidence: Mapping) -> dict:
     """The evidence's blobs whose SHA-256 is their id (a blob that does not hash to its id is dropped, so
     every check that needs it fails)."""
-    blobs = evidence.get("blobs") if isinstance(evidence.get("blobs"), Mapping) else {}
+    blobs = cast(Mapping, evidence.get("blobs")) if isinstance(evidence.get("blobs"), Mapping) else {}
     return {k: v for k, v in blobs.items()
             if isinstance(k, str) and isinstance(v, str) and nc.sha256_hex(v.encode("utf-8")) == k}
 
@@ -414,7 +418,8 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
     v1 = evidence.get("schema") == EVIDENCE_SCHEMA_V1
     nonce = str(evidence.get("nonce") or "")
     if v1:
-        composes = evidence.get("app_composes") if isinstance(evidence.get("app_composes"), Mapping) else {}
+        composes = (cast(Mapping, evidence.get("app_composes"))
+                    if isinstance(evidence.get("app_composes"), Mapping) else {})
         for k in nc.CM_CHECK_KEYS:
             checks[k] = CM_NOT_RUN_V1
     else:
@@ -427,7 +432,7 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
     def ident(rep: Mapping) -> dict | None:
         return None if v1 else nc.rtmr3_identity(rep)
 
-    gw = evidence.get("gateway") if isinstance(evidence.get("gateway"), Mapping) else None
+    gw = cast(Mapping, evidence.get("gateway")) if isinstance(evidence.get("gateway"), Mapping) else None
     try:
         if gw is None:
             raise nc.CheckError("no gateway report captured")
@@ -440,7 +445,8 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
         checks["gateway_quote"] = f"fail: {exc}"[:320]
         return done(checks["gateway_quote"])
 
-    obs = evidence.get("tls_observation") if isinstance(evidence.get("tls_observation"), Mapping) else None
+    obs = (cast(Mapping, evidence.get("tls_observation"))
+           if isinstance(evidence.get("tls_observation"), Mapping) else None)
     fp = (gw.get("tls_cert_fingerprint") or "").lower()
     if obs and obs.get("spki_sha256"):
         checks["gateway_tls_binding"] = True if fp and str(obs["spki_sha256"]).lower() == fp else \
@@ -450,7 +456,7 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
     else:
         checks["gateway_tls_binding"] = "n/a: TLS binding not required by config"
 
-    ita = evidence.get("ita") if isinstance(evidence.get("ita"), Mapping) else {}
+    ita = cast(Mapping, evidence.get("ita")) if isinstance(evidence.get("ita"), Mapping) else {}
     try:
         keys = nc.jwks_keys(evidence.get("jwks") or {}, roots=roots, at=nc.utc(at))
         checks["ita_jwks"] = True
@@ -469,7 +475,8 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
             out["tcb_status"] = status if isinstance(status, str) else None
             if status not in tuple(accepted_tcb):
                 raise nc.CheckError(f"TCB status {status!r} not accepted ({', '.join(accepted_tcb)})")
-            rd = t.get("attester_runtime_data") if isinstance(t.get("attester_runtime_data"), Mapping) else {}
+            rd = (cast(Mapping, t.get("attester_runtime_data"))
+                  if isinstance(t.get("attester_runtime_data"), Mapping) else {})
             if str(rd.get("caller_nonce") or "").lower() != nonce.lower():
                 raise nc.CheckError("ITA runtime data does not carry the client nonce")
             if str(rd.get("signing_address") or "").lower() != out["gateway_signer"] or \
@@ -538,7 +545,7 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
         for m in models:
             for i, (c, q) in enumerate(model_quotes.get(m, [])):
                 cvms.append(_cvm(f"model:{m}", c, idents.get((m, i)), cm_results.get((m, i)), quote=q))
-        code = {"gateway": [gw.get("compose_hash")],
+        code: dict[str, Any] = {"gateway": [gw.get("compose_hash")],
                 "models": {m: sorted({c.get("compose_hash") for c, _ in model_quotes.get(m, [])}) for m in models}}
         if not v1:
             # v2: the code fingerprint also pins each CVM's app_id, OS image and KMS key as RTMR3 records them.
@@ -551,7 +558,8 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
         out["code_fingerprint"] = nc.sha256_hex(nc.canonical(code).encode("utf-8"))
         out["enclave_fingerprint"] = nc.sha256_hex(nc.canonical(enclave).encode("utf-8"))
         out["identity"] = identity_for(str(evidence.get("enclave_host") or ""), models)
-        comps = [f"gateway compose sha256:{str(gw.get('compose_hash'))[:16]}...{_app_name(composes, gw.get('compose_hash'))}"]
+        comps = [f"gateway compose sha256:{str(gw.get('compose_hash'))[:16]}..."
+                 f"{_app_name(composes, gw.get('compose_hash'))}"]
         for m in models:
             for h in code["models"][m]:
                 comps.append(f"model {m} compose sha256:{str(h)[:16]}...{_app_name(composes, h)}")
@@ -560,8 +568,8 @@ def appraise(evidence: Mapping, *, as_of: float | None = None, quote_verifier: n
                 comps += _cvm_lines(c)
         out["components"] = tuple(comps)
         out["cvms"] = tuple(cvms)
-        claims = evidence.get("claims") if isinstance(evidence.get("claims"), Mapping) else None
-        if claims and (claims.get("code_fingerprint"), claims.get("enclave_fingerprint")) != (
+        stated = cast(Mapping, evidence.get("claims")) if isinstance(evidence.get("claims"), Mapping) else None
+        if stated and (stated.get("code_fingerprint"), stated.get("enclave_fingerprint")) != (
                 out["code_fingerprint"], out["enclave_fingerprint"]):
             checks["fingerprints"] = "fail: recomputed fingerprints differ from the evidence's claims"
         else:
@@ -581,7 +589,8 @@ def _compose_manager_checks(checks: dict, evidence: Mapping, blobs: Mapping, mod
     for model in models:
         for i, (cand, q) in enumerate(model_quotes.get(model, [])):
             where = f"{model}[{i}]"
-            ref = cand.get("compose_manager") if isinstance(cand.get("compose_manager"), Mapping) else None
+            ref = (cast(Mapping, cand.get("compose_manager"))
+                   if isinstance(cand.get("compose_manager"), Mapping) else None)
             text = blobs.get(ref.get("blob")) if ref else None
             if text is None:
                 why = ("its report carries no compose_manager_attestation" if ref is None else
@@ -640,8 +649,8 @@ def evidence_claims(evidence: Mapping, a: Appraisal) -> dict:
     """The claims a verify_ok row carries. With v2 evidence (a ``blobs`` dict) each CVM's whole service map
     and the full component list go into the blobs ({"$blob": id}), so a row stays small whatever the
     allowlist; ``components`` keeps the condensed lines and ``components_full`` points at the full list."""
-    gw = evidence.get("gateway") if isinstance(evidence.get("gateway"), Mapping) else {}
-    blobs = evidence.get("blobs") if isinstance(evidence.get("blobs"), dict) else None
+    gw = cast(Mapping, evidence.get("gateway")) if isinstance(evidence.get("gateway"), Mapping) else {}
+    blobs = cast(dict, evidence.get("blobs")) if isinstance(evidence.get("blobs"), dict) else None
     cvms = [dict(c) for c in a.cvms]
     claims = {"code_fingerprint": a.code_fingerprint, "enclave_fingerprint": a.enclave_fingerprint,
               "release_tag": None, "identity": a.identity, "tls_public_key_fp": gw.get("tls_cert_fingerprint"),
@@ -692,7 +701,7 @@ def _refusal(exc: BaseException) -> NearRefusal:
     return exc if isinstance(exc, NearRefusal) else NearRefusal(str(exc) or type(exc).__name__)
 
 
-def _refuse(adapter: "NearAdapter", exc: BaseException, stage: str, *, ex: "_Exchange | None" = None,
+def _refuse(adapter: NearAdapter, exc: BaseException, stage: str, *, ex: _Exchange | None = None,
             request: httpx.Request | None = None) -> NearRefusal:
     """The NearRefusal for ``exc``, ledgered as a send_refused row (NearAdapter.record_refusal)."""
     refusal = _refusal(exc)
@@ -754,11 +763,11 @@ def pinned_ssl_context(expected_spki: Callable[[], str | None], *,
             result = orig_handshake()
             check(obj.getpeercert(True))
             return result
-        obj.do_handshake = do_handshake
+        obj.do_handshake = do_handshake  # type: ignore[method-assign]  # the pin check wraps the handshake
         return obj
 
-    ctx.wrap_socket = wrap_socket
-    ctx.wrap_bio = wrap_bio
+    ctx.wrap_socket = wrap_socket  # type: ignore[method-assign]  # the pin check wraps the context's own
+    ctx.wrap_bio = wrap_bio  # type: ignore[method-assign]
     return ctx
 
 
@@ -881,7 +890,7 @@ class NearAdapter:
                 self._attest_transport = self._transport_factory()
             return self._attest_transport
 
-    def _check_current(self, ex: "_Exchange | None") -> None:
+    def _check_current(self, ex: _Exchange | None) -> None:
         """Caller holds the adapter lock. The hold check, made again together with the pool choice: a send
         that passed the first check before a verification was committed with a hold is refused here, and an
         exchange built on an accepted verification that was replaced since is refused (S09, atomic)."""
@@ -901,7 +910,8 @@ class NearAdapter:
         keys = (a.model_signers.get(model) if (a and model) else None) or []
         return keys[0] if len(keys) == 1 else None
 
-    def _acquire(self, ex: "_Exchange | None" = None, *, check: bool = False) -> tuple[httpx.BaseTransport, Callable[[], None]]:
+    def _acquire(self, ex: _Exchange | None = None, *,
+                 check: bool = False) -> tuple[httpx.BaseTransport, Callable[[], None]]:
         """The current send pool, counted as in use until the returned release() is called (once). With
         ``check`` the hold and the exchange's verification are checked under the same lock."""
         with self._lock:
@@ -969,7 +979,7 @@ class NearAdapter:
                     self._inflight[id(t)] = n
                 else:
                     self._inflight.pop(id(t), None)
-                    for i, (loop, r) in enumerate(self._retired_async):
+                    for i, (_loop, r) in enumerate(self._retired_async):
                         if r is t:
                             close = self._retired_async.pop(i)
                             break
@@ -1240,7 +1250,7 @@ class NearAdapter:
                 logger.warning("confidential-mode: could not invalidate the NEAR verification", exc_info=True)
         return True
 
-    def begin_exchange(self, request: httpx.Request) -> "_Exchange | None":
+    def begin_exchange(self, request: httpx.Request) -> _Exchange | None:
         """Classify one request before it is sent. Returns None for a request that carries no conversation
         (GET), an _Exchange for a signable POST (whose ``request`` is what to send), and raises VerifyError
         for anything refused. While encrypting, the only POST that leaves is chat completions, encrypted;
@@ -1287,7 +1297,7 @@ class NearAdapter:
         return ex
 
     def _encrypt(self, request: httpx.Request, parsed: Any, model: str | None, stream: bool,
-                 ex: "_Exchange") -> tuple[httpx.Request, bytes]:
+                 ex: _Exchange) -> tuple[httpx.Request, bytes]:
         """A new request carrying the encrypted body (plan section 3). Any failure raises VerifyError
         before a byte is sent; nothing is ever sent in plaintext instead."""
         from . import near_e2ee as e2
@@ -1356,7 +1366,7 @@ class NearAdapter:
             client.close()
             release_pool()
 
-    def finish_exchange(self, ex: "_Exchange") -> dict:
+    def finish_exchange(self, ex: _Exchange) -> dict:
         """Fetch (when the body ended), judge and ledger one exchange. Returns the row detail."""
         sig: dict = {"status": "not_fetched", "reason": ex.end_reason or ""}
         if ex.completed and ex.status == 200 and ex.chat_id:
@@ -1370,7 +1380,8 @@ class NearAdapter:
             sig = {"status": "missing", "reason": f"interrupted stream ({ex.end_reason or 'closed before its end'}): "
                                                   "NEAR records no signature"}
         else:
-            sig = {"status": "missing", "reason": f"the response did not complete ({ex.end_reason or 'closed before its end'})"}
+            sig = {"status": "missing",
+                   "reason": f"the response did not complete ({ex.end_reason or 'closed before its end'})"}
         a = self._appraisal
         data = sig.get("json") if sig.get("status") == "fetched" else None
         check = nc.check_signature(data, model=ex.model, request_sha256=ex.request_sha256,
@@ -1454,7 +1465,7 @@ class NearAdapter:
             except Exception:
                 logger.warning("confidential-mode: could not ledger a NEAR %s row", row.get("kind"), exc_info=True)
 
-    def record_refusal(self, refusal: BaseException, *, stage: str, ex: "_Exchange | None" = None,
+    def record_refusal(self, refusal: BaseException, *, stage: str, ex: _Exchange | None = None,
                        request: httpx.Request | None = None) -> None:
         """Write one ``send_refused`` row (the llm gate's refusal kind) for a refusal this transport raises,
         before sending (``stage`` "before_send") or after the reply arrived ("after_receive"), so the
@@ -1464,7 +1475,7 @@ class NearAdapter:
         try:
             if getattr(refusal, "ledgered", False) is True:
                 return
-            refusal.ledgered = True
+            refusal.ledgered = True  # type: ignore[attr-defined]  # marks the refusal so it is ledgered once
             ctx = (ex.context if ex is not None else None) or sendctx.current() or {}
             if ctx.get("refusals_ledgered_by") == "llm_gate":
                 return
@@ -1482,7 +1493,7 @@ class NearAdapter:
                             model = parsed.get("model") if isinstance(parsed, dict) else None
                     except Exception:
                         pass
-            detail = {"vendor": VENDOR, "source": "near_transport",
+            detail: dict[str, Any] = {"vendor": VENDOR, "source": "near_transport",
                       "reason_code": "near_refused_" + stage, "reason": (str(refusal) or type(refusal).__name__)[:300],
                       "stage": stage, "endpoint": path}
             status = getattr(refusal, "status_code", None)
@@ -1752,7 +1763,7 @@ class _Exchange:
             except ValueError:
                 continue  # an incomplete line; the next chunk completes it
             if self.responses_api and isinstance(value, Mapping):
-                value = value.get("response") if isinstance(value.get("response"), Mapping) else None
+                value = cast(Mapping, value.get("response")) if isinstance(value.get("response"), Mapping) else None
             if isinstance(value, Mapping) and isinstance(value.get("id"), str) and value["id"]:
                 self.chat_id = value["id"]
                 self._buf.clear()
@@ -1784,7 +1795,7 @@ class _Exchange:
         self.adapter.finish_exchange(self)
 
 
-def _drain_after_done(ex: "_Exchange", nxt: Callable[[], bytes]) -> None:
+def _drain_after_done(ex: _Exchange, nxt: Callable[[], bytes]) -> None:
     """The consumer stopped at ``data: [DONE]`` (the OpenAI SDK does) and closed the body: read the rest of
     the wire bytes so the digest covers the whole body NEAR signed. Bounded by the body itself."""
     try:
@@ -1796,7 +1807,7 @@ def _drain_after_done(ex: "_Exchange", nxt: Callable[[], bytes]) -> None:
         ex.end_reason = f"{type(exc).__name__} while draining after [DONE]"
 
 
-def _already_read(response: httpx.Response, ex: "_Exchange") -> bool:
+def _already_read(response: httpx.Response, ex: _Exchange) -> bool:
     """A transport that hands back a response whose body is already in memory (httpx reads a body given as
     bytes at construction): hash that body, already content-decoded, and complete the exchange."""
     try:
@@ -1828,7 +1839,7 @@ def _error_body(body: bytes) -> dict:
     return {"error": {k: str(err.get(k))[:300] for k in ("type", "code", "message") if err.get(k) is not None}}
 
 
-def _release_sealed(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Response) -> httpx.Response:
+def _release_sealed(adapter: NearAdapter, ex: _Exchange, response: httpx.Response) -> httpx.Response:
     """The tail of an encrypted exchange, after the body was buffered, hashed, completed and finished
     (signature fetched and judged). Only one outcome hands a body to the caller: HTTP 200, a send that
     is fully attested (a verified provider_tee signature over these ciphertext digests, on the attested
@@ -1876,7 +1887,7 @@ def _release_sealed(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Res
         ex.client_key = None
 
 
-def _send_failed(adapter: "NearAdapter", ex: "_Exchange", exc: BaseException) -> NearRefusal | None:
+def _send_failed(adapter: NearAdapter, ex: _Exchange, exc: BaseException) -> NearRefusal | None:
     """A send that raised before a response arrived still gets its row. A TLS pin mismatch also drops the
     pooled connections and asks for a re-verify (bounded by the backoff)."""
     pin = next((e for e in _chain(exc) if isinstance(e, TLSPinMismatch)), None)
@@ -1897,7 +1908,7 @@ def _send_failed(adapter: "NearAdapter", ex: "_Exchange", exc: BaseException) ->
     return None
 
 
-def _chain(exc: BaseException):
+def _chain(exc: BaseException | None):
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
@@ -1905,14 +1916,14 @@ def _chain(exc: BaseException):
         exc = exc.__cause__ or exc.__context__
 
 
-def _sealed_sync(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Response) -> httpx.Response:
+def _sealed_sync(adapter: NearAdapter, ex: _Exchange, response: httpx.Response) -> httpx.Response:
     ex.keep_body = True
     try:
         if hasattr(response, "_content"):           # a body already in memory, already content-decoded
             ex._decoder = None
             ex._take(response._content)
         else:
-            for chunk in response.stream:
+            for chunk in cast(httpx.SyncByteStream, response.stream):
                 ex.feed(chunk)
         ex.complete()
     except BaseException as exc:
@@ -1929,14 +1940,14 @@ def _sealed_sync(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Respon
     return _release_sealed(adapter, ex, response)
 
 
-async def _sealed_async(adapter: "NearAdapter", ex: "_Exchange", response: httpx.Response, finish) -> httpx.Response:
+async def _sealed_async(adapter: NearAdapter, ex: _Exchange, response: httpx.Response, finish) -> httpx.Response:
     ex.keep_body = True
     try:
         if hasattr(response, "_content"):
             ex._decoder = None
             ex._take(response._content)
         else:
-            async for chunk in response.stream:
+            async for chunk in cast(httpx.AsyncByteStream, response.stream):
                 ex.feed(chunk)
         ex.complete()
     except BaseException as exc:
@@ -1953,7 +1964,7 @@ async def _sealed_async(adapter: "NearAdapter", ex: "_Exchange", response: httpx
     return _release_sealed(adapter, ex, response)
 
 
-def _signature_step_bound(adapter: "NearAdapter") -> float:
+def _signature_step_bound(adapter: NearAdapter) -> float:
     """The async wait for finish(): the fetch loop's deadline plus one last GET at its own timeout."""
     w = adapter.signature_wait_seconds
     return w + 4 * max(1.0, w) + 5.0
@@ -2021,34 +2032,35 @@ class _SyncView(httpx.BaseTransport):
             release_pool()
             ex.finish()
             return response
-        inner = response.stream
+        inner = cast(httpx.SyncByteStream, response.stream)
+        exn: _Exchange = ex   # set: the ex is None case returned above
 
         class _Hashing(httpx.SyncByteStream):
             def __init__(self_inner):
-                self_inner._it = None
+                self_inner._it: Any = None
 
             def __iter__(self_inner):
                 self_inner._it = iter(inner)
                 try:
                     for chunk in self_inner._it:
-                        ex.feed(chunk)
+                        exn.feed(chunk)
                         yield chunk
                 except GeneratorExit:
                     raise  # the consumer let go; close() decides
                 except BaseException as exc:
-                    ex.finish(f"{type(exc).__name__} while reading the body")
+                    exn.finish(f"{type(exc).__name__} while reading the body")
                     raise
-                ex.complete()
-                ex.finish()
+                exn.complete()
+                exn.finish()
 
             def close(self_inner):
                 try:
-                    if not ex.completed and ex.saw_done and self_inner._it is not None:
-                        _drain_after_done(ex, lambda: next(self_inner._it))
+                    if not exn.completed and exn.saw_done and self_inner._it is not None:
+                        _drain_after_done(exn, lambda: next(self_inner._it))
                     inner.close()
                 finally:
                     release_pool()
-                    ex.finish(None if ex.completed else "closed before its end")
+                    exn.finish(None if exn.completed else "closed before its end")
         response.stream = _Hashing()
         return response
 
@@ -2110,39 +2122,40 @@ class _AsyncView(httpx.AsyncBaseTransport):
         if _already_read(response, ex):
             await asyncio.wait_for(asyncio.to_thread(ex.finish), bound)
             return response
-        inner = response.stream
+        inner = cast(httpx.AsyncByteStream, response.stream)
+        exn: _Exchange = ex   # set: the ex is None case returned above
 
         class _Hashing(httpx.AsyncByteStream):
             def __init__(self_inner):
-                self_inner._it = None
+                self_inner._it: Any = None
 
             async def __aiter__(self_inner):
                 self_inner._it = inner.__aiter__()
                 try:
                     async for chunk in self_inner._it:
-                        ex.feed(chunk)
+                        exn.feed(chunk)
                         yield chunk
                 except GeneratorExit:
                     raise
                 except BaseException as exc:
                     await finish(f"{type(exc).__name__} while reading the body")
                     raise
-                ex.complete()
+                exn.complete()
                 await finish()
 
             async def aclose(self_inner):
                 try:
-                    if not ex.completed and ex.saw_done and self_inner._it is not None:
+                    if not exn.completed and exn.saw_done and self_inner._it is not None:
                         try:
                             while True:
-                                ex.feed(await self_inner._it.__anext__())
+                                exn.feed(await self_inner._it.__anext__())
                         except StopAsyncIteration:
-                            ex.complete()
+                            exn.complete()
                         except Exception as exc:
-                            ex.end_reason = f"{type(exc).__name__} while draining after [DONE]"
+                            exn.end_reason = f"{type(exc).__name__} while draining after [DONE]"
                     await inner.aclose()
                 finally:
-                    await finish(None if ex.completed else "closed before its end")
+                    await finish(None if exn.completed else "closed before its end")
         response.stream = _Hashing()
         return response
 

@@ -10,13 +10,12 @@ import json
 import os
 import sqlite3
 import time
-from types import SimpleNamespace
 
 import pytest
 
 from confidential_mode import consent, provider as provider_mod
 from confidential_mode.gate_llm import TEXT_STATE_UNREADABLE, LlmGate, off_tier_text
-from confidential_mode.ledger import BlobStore, Ledger, LedgerError
+from confidential_mode.ledger import Ledger
 from confidential_mode.locking import predicate_for
 from confidential_mode.pins import PinStore, PinStoreError
 from confidential_mode.state import ConfidentialState, InMemoryState
@@ -27,9 +26,18 @@ from ..hostile._harness_integrated import answer_choice, cm, rows  # noqa: F401
 from ..seam._harness import no_lazy_installs  # noqa: F401  (fixture)
 from ..seam.test_register import ON_HOST_URL, plugin  # noqa: F401  (fixture)
 from ..unit.test_background_refresh import FakeAdapter, _result
-
-from ._faults import (EACCES, ENOSPC, FaultPlan, chmod_ro, db_locked, disk_full, fail_replace, faulty_ledger,
-                      tmp_leftovers, truncate)
+from ._faults import (
+    EACCES,
+    ENOSPC,
+    FaultPlan,
+    chmod_ro,
+    db_locked,
+    disk_full,
+    fail_replace,
+    faulty_ledger,
+    tmp_leftovers,
+    truncate,
+)
 
 P = provider_mod.PROFILE_NAME
 LOST = provider_mod.REASON_VERIFY_ROW_LOST[:60]   # _fail_reason clips the reason at 160 characters
@@ -360,6 +368,7 @@ def test_a_damaged_blob_is_named_missing_in_the_receipt_and_fails_the_replay(tmp
     pytest.importorskip("tinfoil.attestation.verify_tdx")
     from confidential_mode.receipts import build_receipt
     from confidential_mode.verify import replay_near
+
     from ..unit import test_near_real_capture as real
     from ..unit.test_near_evidence_blobs import _row, _verified_evidence
     ev = _verified_evidence(real.evidence())

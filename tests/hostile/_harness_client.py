@@ -21,16 +21,16 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import os
 import socket
 import sys
 import threading
 import time as _real_time
 import types
 import weakref
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 import pytest
@@ -156,7 +156,7 @@ class NonClosingView(httpx.BaseTransport):
         self.closed = True
 
 
-_LOOP_SERIALS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_LOOP_SERIALS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _SERIAL = [0]
 
 
@@ -288,9 +288,7 @@ class StubAdapter:
 
 def load_contract():
     """Import the W2 contract names. ImportError here means W2 has not merged yet."""
-    from confidential_mode import client as client_mod
-    from confidential_mode import pins as pins_mod
-    from confidential_mode import provider as provider_mod
+    from confidential_mode import client as client_mod, pins as pins_mod, provider as provider_mod
     from confidential_mode.verify import base as base_mod
     return types.SimpleNamespace(
         client_mod=client_mod, provider_mod=provider_mod, pins_mod=pins_mod, base_mod=base_mod,
@@ -583,10 +581,10 @@ _SCRUB_ENV = (
 def hermes(tmp_path, monkeypatch):
     """Fresh HERMES_HOME + isolated provider/auth/plugin/aux-cache state (as tests/spikes do). Returns a
     register(profile) function that installs the W2 profile into Hermes' provider registry."""
-    import hermes_yaml as yaml
-    import providers as _providers
     import hermes_cli.auth as _auth
     import hermes_cli.plugins as _plugins
+    import hermes_yaml as yaml
+    import providers as _providers
     from agent import auxiliary_client as _aux
 
     home = tmp_path / ".hermes"

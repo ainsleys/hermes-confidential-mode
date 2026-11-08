@@ -21,20 +21,23 @@ Added here only what those do not provide:
 from __future__ import annotations
 
 import importlib
-import json
 import threading
 import time
-from types import SimpleNamespace
 
 import httpx
 import pytest
-
 import run_agent
 from hermes_cli.plugins import PluginContext
 from hermes_cli.plugins_manifest import PluginManifest
 
 from ..scenario._fakes import (  # noqa: F401  (re-exported for the tests)
-    ENCLAVE, ENCLAVE_URL, ON_HOST_URL as NET_ON_HOST_URL, OPENROUTER_HOST, OPENROUTER_URL, REPO, MockNet,
+    ENCLAVE,
+    ENCLAVE_URL,
+    ON_HOST_URL as NET_ON_HOST_URL,
+    OPENROUTER_HOST,
+    OPENROUTER_URL,
+    REPO,
+    MockNet,
     patch_hermes_http,
 )
 from ..seam._harness import Rec, no_lazy_installs, provider_ok  # noqa: F401  (fixture)

@@ -21,11 +21,10 @@ import pytest
 
 from confidential_mode import consent, filelock, provider as provider_mod
 from confidential_mode.gate_llm import LlmGate
-from confidential_mode.gate_tools import ApprovalDecisions, Allowlist, build_pre_tool_call, build_tool_execution
+from confidential_mode.gate_tools import Allowlist, ApprovalDecisions, build_pre_tool_call, build_tool_execution
 from confidential_mode.ledger import Ledger
 from confidential_mode.locking import predicate_for
 from confidential_mode.pins import PinStore, PinStoreError
-from confidential_mode.verify.base import PreparedVerification
 
 from ..hostile._harness_integrated import answer_choice, cm, rows  # noqa: F401
 from ..seam._harness import no_lazy_installs  # noqa: F401  (fixture)

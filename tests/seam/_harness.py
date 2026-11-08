@@ -23,8 +23,8 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-import run_agent  # noqa: E402
 import hermes_cli.plugins as plugins_mod  # noqa: E402
+import run_agent  # noqa: E402
 from hermes_cli.plugins import PluginContext, PluginManager  # noqa: E402
 from hermes_cli.plugins_manifest import PluginManifest  # noqa: E402
 

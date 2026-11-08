@@ -25,7 +25,10 @@ Rules every accessor follows (INTERFACES Amendment 15):
 from __future__ import annotations
 
 import importlib
-from typing import Any, Callable
+
+# typing, not collections.abc: tests/unit/test_hermes_compat.py allows only __future__, importlib and typing
+# at load.
+from typing import Any, Callable  # noqa: UP035
 
 HERMES_VERIFIED_COMMIT = "84a0301"
 
@@ -84,9 +87,7 @@ def approval_keys(session_key: str | None = None) -> tuple[set, set]:
     Used by ``commands.hermes_approval_keys`` (``/confidential status`` grant lines, ``revoke``'s check for a
     grant Hermes still holds). Missing: raises ImportError; ``remembered_grants`` lists nothing and
     ``revoke.hermes_holds_grant`` returns True (the revoke records and moves the rule key)."""
-    from tools.approval import _lock
-    from tools.approval import _permanent_set
-    from tools.approval import _session_approved
+    from tools.approval import _lock, _permanent_set, _session_approved
     with _lock:
         permanent = set(_permanent_set())
         if session_key is None:
@@ -106,9 +107,8 @@ def approval_state_functions() -> tuple[Callable[[], bool], Callable[[], str], C
     Used by ``gate_tools._hermes_approval_state``, which resolves all three before reading any. Missing (any
     of the three): raises ImportError; ``hermes_bypass_active`` returns True (block) and
     ``hermes_bypass_is_interactive`` False (the unattended refusal text)."""
-    from tools.approval import _yolo_active
+    from tools.approval import _presence, _yolo_active
     from tools.approval_context import _get_approval_mode
-    from tools.approval import _presence
     return _yolo_active, _get_approval_mode, _presence
 
 
@@ -144,8 +144,7 @@ def request_tool_approval_functions() -> tuple[Callable[..., dict], Callable[...
     so a missing reset can never leave the plugin's ids bound for Hermes' later approvals. Missing (any of the
     three): raises ImportError before any context is set or anyone is asked; the tool gate refuses the call."""
     from tools.approval import request_tool_approval
-    from tools.approval_context import set_current_observability_context
-    from tools.approval_context import reset_current_observability_context
+    from tools.approval_context import reset_current_observability_context, set_current_observability_context
     return request_tool_approval, set_current_observability_context, reset_current_observability_context
 
 
@@ -189,8 +188,7 @@ def cached_terminal_environments() -> list:
 
     Used by ``gate_tools.cached_remote_environments`` (the lock is refused while a remote one exists).
     Missing: raises ImportError; the caller raises and the lock is refused."""
-    from tools.terminal_tool import _active_environments
-    from tools.terminal_tool import _env_lock
+    from tools.terminal_tool import _active_environments, _env_lock
     with _env_lock:
         return list(_active_environments.items())
 

@@ -10,7 +10,8 @@ from __future__ import annotations
 import sys
 import time
 from collections import deque
-from typing import Any, Callable, Iterable, Optional, TextIO
+from collections.abc import Callable
+from typing import Any, TextIO
 
 COLUMNS = (("TIME", 8), ("SESSION", 12), ("PURPOSE", 24), ("HOST", 30), ("BYTES", 8), ("VERDICT/DECISION", 0))
 RED, YELLOW, DIM, RESET = "\x1b[31m", "\x1b[33m", "\x1b[2m", "\x1b[0m"
@@ -76,7 +77,7 @@ def header() -> str:
 def format_row(ev: Any, *, color: bool = False) -> str:
     ts = time.strftime("%H:%M:%S", time.localtime(ev.ts or 0))
     cells = (ts, ev.session_id or "-", ev.purpose or "-", ev.host or "-", _bytes(ev.bytes), verdict_text(ev))
-    line = "  ".join(f"{_clip(c, w):<{w}}" if w else _clip(c, 0) for c, (_, w) in zip(cells, COLUMNS))
+    line = "  ".join(f"{_clip(c, w):<{w}}" if w else _clip(c, 0) for c, (_, w) in zip(cells, COLUMNS, strict=False))
     if not color:
         return line.rstrip()
     sev = severity(ev)
@@ -105,8 +106,8 @@ def latest(ledger: Any, limit: int, *, page: int = 1000) -> tuple[list, int]:
 
 
 def run(ledger: Any, *, once: bool = False, limit: int = 50, interval: float = 1.0,
-        out: Optional[TextIO] = None, color: Optional[bool] = None,
-        sleep: Callable[[float], None] = time.sleep, max_polls: Optional[int] = None) -> int:
+        out: TextIO | None = None, color: bool | None = None,
+        sleep: Callable[[float], None] = time.sleep, max_polls: int | None = None) -> int:
     """Print the last ``limit`` rows, then (unless ``once``) poll ``Ledger.tail`` for new rows until
     interrupted. Returns the id of the last row printed."""
     out = out or sys.stdout

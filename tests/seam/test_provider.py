@@ -126,12 +126,12 @@ def _stub_sdk(monkeypatch, rec: Recorder, sdk_state: dict):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    import hermes_yaml as yaml
-    import providers as _providers
+    import agent.process_bootstrap as _bootstrap
     import hermes_cli.auth as _auth
     import hermes_cli.plugins as _plugins
+    import hermes_yaml as yaml
+    import providers as _providers
     from agent import auxiliary_client as _aux
-    import agent.process_bootstrap as _bootstrap
 
     home = tmp_path / ".hermes"
     (home / "plugins").mkdir(parents=True)
@@ -310,8 +310,8 @@ def test_one_async_attestation_per_event_loop(env):
 def test_failing_verifier_yields_refusing_client_and_no_request_anywhere(env, monkeypatch):
     env["sdk"]["fail"] = "attestation report signature invalid (simulated)"
     profile = env["register"]()
-    from openai import OpenAI
     import agent.retry_utils as retry_utils
+    from openai import OpenAI
     monkeypatch.setattr(retry_utils, "jittered_backoff", lambda *a, **k: 0.0)  # keep Hermes' retries fast
     provider_mod.verification_cache.entry(PROFILE).failure_backoff_seconds = 3600  # timing-independent
     built = _count_create_client(monkeypatch, profile)
@@ -611,7 +611,7 @@ def test_register_with_ctx_defaults_to_the_plugin_ledger(env, monkeypatch, tmp_p
         made.append(path)
         real_init(self, path if path is not None else tmp_path / "default.sqlite", **kw)
     monkeypatch.setattr(Ledger, "__init__", init)
-    profile = provider_mod.register_provider_profile(object(), config=env["cfg"], data_dir=tmp_path / "pd")
+    provider_mod.register_provider_profile(object(), config=env["cfg"], data_dir=tmp_path / "pd")
     assert made == [None]  # Ledger() with its default path, like the plugin's own
     assert provider_mod.verification_cache.entry(PROFILE).consent_ledger is not None
 
@@ -669,7 +669,7 @@ def test_verification_pending_is_distinguishable_and_the_wait_can_be_extended(en
     mp = _pytest.MonkeyPatch()
     mp.setattr(tinfoil_client.SecureClient, "verify", slow)
     try:
-        profile = env["register"]()
+        env["register"]()
         v = provider_mod.attested_ok(PROFILE, wait_seconds=0.2)
         assert v.in_tier is False and provider_mod.is_verification_pending(v.reason)
         assert provider_mod.DEFAULT_VERIFY_WAIT_SECONDS == 20.0

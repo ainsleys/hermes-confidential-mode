@@ -3,9 +3,9 @@ compose files of the gpu13 capture, the fetch and hash check, "text not fetched"
 services joining the pinned components only once their tags can be shown."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
-import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +14,7 @@ import pytest
 from confidential_mode import consent, review
 from confidential_mode.pins import PinStore, consent_key
 from confidential_mode.verify import near_checks as nc
+
 from ..near_world import NearWorld
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures"
@@ -234,6 +235,7 @@ def test_tinfoil_entries_keep_the_release_and_compare_urls(tmp_path):
 
 def test_cli_parser_routes_review_retire_and_approve_flags(tmp_path, monkeypatch):
     import argparse
+
     from confidential_mode import commands
     captured = {}
     ctx = SimpleNamespace(register_cli_command=lambda name, help, setup, handler, description="": captured.update(
@@ -250,7 +252,6 @@ def test_cli_parser_routes_review_retire_and_approve_flags(tmp_path, monkeypatch
     for sha, data in TEXTS.items():
         review.store_compose(store.composes_dir, sha, data)
     args = parser.parse_args(["pins", "approve", "--reviewed-by", "agent b", "--note", "Q1 no"])
-    asked = []
 
     class TTY(io.StringIO):
         def isatty(self):
@@ -357,8 +358,9 @@ def test_no_baseline_shows_the_full_texts(tmp_path):
 
 
 def test_a_measured_compose_without_github_repo_fetches_nothing_and_cannot_be_approved(tmp_path, monkeypatch):
-    from .. import near_world as w
     from confidential_mode.pins import PinStoreError
+
+    from .. import near_world as w
     monkeypatch.setattr(w, "MODEL_COMPOSE", w.MODEL_COMPOSE.replace(
         "      - GITHUB_REPO=https://github.com/nearai/cvm-compose-files\\n", ""))
     world = NearWorld()

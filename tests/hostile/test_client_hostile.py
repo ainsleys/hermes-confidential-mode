@@ -17,9 +17,7 @@ import httpx
 import pytest
 
 from . import _harness_client as h
-from ._harness_client import (  # noqa: F401 - fixtures
-    _wire, adapters, clock, cm, hermes, setup,
-)
+from ._harness_client import _wire, adapters, clock, cm, hermes, setup  # noqa: F401 - fixtures
 
 TTL = 300.0
 

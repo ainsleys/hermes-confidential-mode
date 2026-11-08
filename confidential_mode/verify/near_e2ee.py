@@ -68,8 +68,9 @@ import hmac
 import json
 import re
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, cast
 
 SOURCE_URL = "https://docs.near.ai/cloud/guides/e2ee-chat-completions"
 SOURCE_READ = "2026-11-07"
@@ -161,7 +162,7 @@ def plaintext_parts_note(parts: Mapping | None) -> str | None:
     """The sentence the ledger row and the receipt show, or None when no part left in plaintext."""
     if not isinstance(parts, Mapping) or not parts.get("count"):
         return None
-    types = parts.get("types") if isinstance(parts.get("types"), Mapping) else {}
+    types = cast(Mapping, parts.get("types")) if isinstance(parts.get("types"), Mapping) else {}
     n = int(parts["count"])
     if set(types) <= IMAGE_PART_TYPES:
         return f"{n} image part(s) left this host in plaintext to NEAR's gateway"
@@ -245,7 +246,7 @@ class ClientKey:
     _x25519_secret: bytes = field(repr=False)
 
     @classmethod
-    def generate(cls) -> "ClientKey":
+    def generate(cls) -> ClientKey:
         _nacl()
         from nacl.bindings import crypto_sign_ed25519_sk_to_curve25519
         from nacl.signing import SigningKey
@@ -254,7 +255,7 @@ class ClientKey:
         return cls(public_hex=pub.hex(), _x25519_secret=crypto_sign_ed25519_sk_to_curve25519(bytes(sk) + pub))
 
     @classmethod
-    def from_seed(cls, seed: bytes) -> "ClientKey":
+    def from_seed(cls, seed: bytes) -> ClientKey:
         """Deterministic key from a 32-byte Ed25519 seed (known-answer tests only)."""
         _nacl()
         from nacl.bindings import crypto_sign_ed25519_sk_to_curve25519
@@ -286,7 +287,7 @@ def is_wire(value: Any) -> bool:
             and bool(_HEX.fullmatch(value)))
 
 
-def open(client: "ClientKey | bytes", wire_hex: str) -> bytes:  # noqa: A001 - the plan's name; no builtin open here
+def open(client: ClientKey | bytes, wire_hex: str) -> bytes:  # noqa: A001 - the plan's name; no builtin open here
     """Decrypt one wire-format field with the client's key (a ClientKey or its X25519 secret)."""
     b = _nacl()
     if not is_wire(wire_hex):
@@ -404,6 +405,7 @@ def _image_ref(value: Any, where: str) -> Any:
     """An image reference that may leave in plaintext: a ``data:image/...;base64,`` URI, alone or as
     ``{"url": <that>, "detail": low|high|auto}``. Anything else (a remote URL, which would name a host and a
     path, or any other key) is refused."""
+    url: Any
     if isinstance(value, str):
         url, extra = value, {}
     elif isinstance(value, Mapping):
@@ -540,7 +542,8 @@ def _tools(tools: Any, model_pub: str, report: _Report) -> list:
     out = []
     for i, tool in enumerate(tools):
         w = f"tools[{i}]"
-        if not isinstance(tool, Mapping) or tool.get("type") != "function" or not isinstance(tool.get("function"), Mapping):
+        if (not isinstance(tool, Mapping) or tool.get("type") != "function"
+                or not isinstance(tool.get("function"), Mapping)):
             raise E2EEError(f"{w} is not a function tool; NEAR's table covers function tools only; refused")
         new: dict = {}
         for key, value in tool.items():
@@ -570,7 +573,8 @@ def _tools(tools: Any, model_pub: str, report: _Report) -> list:
 def _tool_choice(choice: Any, model_pub: str, report: _Report) -> Any:
     if choice is None or choice in ("auto", "none", "required"):
         return choice
-    if isinstance(choice, Mapping) and choice.get("type") == "function" and isinstance(choice.get("function"), Mapping) \
+    if isinstance(choice, Mapping) and choice.get("type") == "function" \
+            and isinstance(choice.get("function"), Mapping) \
             and set(choice) <= {"type", "function"} and set(choice["function"]) <= {"name"}:
         return {"type": "function",
                 "function": {"name": _seal_str(model_pub, choice["function"].get("name"),

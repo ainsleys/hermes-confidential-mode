@@ -11,12 +11,10 @@ import sys
 import time
 import types
 
-import pytest
-
 from hermes_cli.plugin_choices import bind_asker
 
-from .test_register import BASE_CONFIG, plugin  # noqa: F401  (fixture)
 from ._harness import no_lazy_installs  # noqa: F401  (fixture)
+from .test_register import BASE_CONFIG, plugin  # noqa: F401  (fixture)
 
 
 def _sub(plugin, name):
@@ -253,6 +251,7 @@ def test_attested_lock_message_and_refusal_reason_without_network(plugin, monkey
 
 def test_gateway_model_switch_is_refused_while_locked(plugin):
     from types import SimpleNamespace as NS
+
     from hermes_cli.plugins import invoke_hook
     assert invoke_hook("pre_gateway_dispatch", event=NS(text="/model openrouter:x")) == []      # unlocked
     assert plugin.slash("on on-host-only").startswith("Locked")
@@ -270,6 +269,7 @@ def test_gateway_commands_fail_closed_when_resolve_command_is_unavailable(plugin
     so while locked every slash command except /confidential is refused (it used to match the typed word)."""
     import types
     from types import SimpleNamespace as NS
+
     from hermes_cli.plugins import invoke_hook
     assert plugin.slash("on on-host-only").startswith("Locked")
     monkeypatch.setitem(sys.modules, "hermes_cli.commands", types.ModuleType("hermes_cli.commands"))
@@ -567,7 +567,6 @@ def test_setup_block_gives_vision_and_side_jobs_suitable_models(plugin, capsys, 
 
 
 def test_setup_prints_the_resolved_enclave_line(plugin):
-    import io
     commands = _sub(plugin, "commands")
     block = commands.config_block(plugin.rt, "m", enclave="router-3.inf6.tinfoil.sh")
     assert block.rstrip().endswith("  tinfoil:\n    # the router this setup verified and pinned; without it each "
@@ -591,8 +590,8 @@ def _hermes(plugin, *argv, stdin=None):
 def test_cli_on_and_off_in_another_process_govern_the_running_gateway(plugin, monkeypatch):
     """`hermes confidential on/off` in a separate process (the scripted demo) writes the same ctx.state; the
     loaded plugin (the 'gateway') reads it fresh on its next turn and its allowlist follows the new lock."""
-    from .test_register import ON_HOST_URL, REMOTE_URL, build_agent
     from ._harness import Rec
+    from .test_register import ON_HOST_URL, REMOTE_URL, build_agent
     proc = _hermes(plugin, "on", "on-host-only")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert proc.stdout.startswith("Locked to this machine (on-host-only)") and len(proc.stdout.splitlines()) == 3
@@ -812,7 +811,7 @@ def test_off_while_unlocked_says_so_and_records_nothing(plugin):
 
 
 def test_every_verify_fail_row_shows_a_reason_in_watch(plugin):
-    watch = _sub(plugin, "watch")
+    _sub(plugin, "watch")
     plugin.rt.ledger.append({"kind": "verify_fail", "purpose": "verify", "host": "h",
                              "detail": {"error": "m: attestation unavailable (HTTP 503 from NEAR)"}})
     plugin.rt.ledger.append({"kind": "verify_fail", "purpose": "verify", "host": "h", "detail": {}})

@@ -20,8 +20,9 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any
 
 from . import preflight as _pf
 from .ledger import LedgerEvent
@@ -44,7 +45,8 @@ ZDR_REASON = "zero-retention tier not implemented"
 TOOLS_TEXT = ("Tools outside the plugin's 14-tool on-host list (web, browser, messaging, media and other off-host "
               "tools, and some local Desktop and kanban tools) ask you the first time each runs during a lock "
               "(every call with confidential.tools.ask: each_call); under yolo, approvals off or an unattended run "
-              "those asks become blocks. Off-tier remote MCP servers, scheduled jobs and routed delegation are blocked.")
+              "those asks become blocks. Off-tier remote MCP servers, scheduled jobs and routed delegation are "
+              "blocked.")
 AUX_TEXT = ("Not prevented, only recorded after the fact: Hermes' auxiliary model calls (session titles, "
             "compression, memory prefetch, vision, smart approvals, MCP sampling, background review) cannot be "
             "stopped by a plugin. The plugin checks the configured and live model runtime before each turn and "
@@ -93,7 +95,7 @@ ASK_KINDS = frozenset({"tool_asked"})
 class LockResult:
     ok: bool
     message: str
-    tier: Optional[Tier] = None
+    tier: Tier | None = None
     report: Any = None            # PreflightReport
     allowlist: Any = None         # gate_tools.Allowlist
     allowlist_text: str = ""
@@ -156,7 +158,7 @@ def structural_predicate(tier: Tier | str, *, config: Mapping | None = None,
 
 # ── preflight ────────────────────────────────────────────────────────────────────────────────────
 
-def _plugin_aux(plugin_aux_tasks: Optional[Sequence[Any]]) -> list:
+def _plugin_aux(plugin_aux_tasks: Sequence[Any] | None) -> list:
     if plugin_aux_tasks is not None:
         return list(plugin_aux_tasks)
     try:
@@ -167,11 +169,11 @@ def _plugin_aux(plugin_aux_tasks: Optional[Sequence[Any]]) -> list:
 
 def run_tier_preflight(tier: Tier | str, *, config: Mapping | None = None,
                        predicate: TierPredicate | None = None,
-                       plugin_aux_tasks: Optional[Sequence[Any]] = None,
+                       plugin_aux_tasks: Sequence[Any] | None = None,
                        provider_lookup: Callable[[str], Any] | None = None,
                        attested_ok: Callable[[str], Verdict] | None = None,
                        profile_base_url: Callable[[str], Any] | None = None,
-                       builtin_aux_tasks: Optional[Sequence[str]] = None,
+                       builtin_aux_tasks: Sequence[str] | None = None,
                        terminal_env: Any = None, check_keys: bool = False):
     """PreflightReport for ``tier`` over Hermes' loaded config (read-only). ``terminal_env``: the resolved
     terminal backend; None => ``preflight.resolved_terminal_backend()`` (how Hermes' tools resolve it).
@@ -190,8 +192,8 @@ def run_tier_preflight(tier: Tier | str, *, config: Mapping | None = None,
 
 
 def fingerprint_matches(recorded: Any, config: Mapping, *, plugin_aux_tasks: Sequence[Any] = (),
-                        builtin_aux_tasks: Optional[Sequence[str]] = None, terminal_env: Any = None,
-                        current: Optional[str] = None) -> bool:
+                        builtin_aux_tasks: Sequence[str] | None = None, terminal_env: Any = None,
+                        current: str | None = None) -> bool:
     """Whether the fingerprint recorded at lock still describes ``config``. A lock recorded under the
     version-1 layout (before the terminal backend joined the fingerprint) matches its version-1
     fingerprint, so upgrading the plugin is not itself a config change (second review, item 1). The
@@ -346,7 +348,7 @@ LIVE_RUNTIME_UNREADABLE_TEXT = (
     "This turn was not sent. Update the plugin, or run /confidential off.")
 
 
-def live_main_runtime() -> Optional[dict]:
+def live_main_runtime() -> dict | None:
     """The live main runtime Hermes published for this context (agent/turn_context.py
     _publish_runtime_main -> agent.auxiliary_client.set_runtime_main, a ContextVar; hook workers run on a
     copied context, so pre_llm_call sees the turn's value). "auto" auxiliary tasks resolve to THIS, not to
@@ -391,14 +393,14 @@ def classify_live_runtime(tier: Tier | str, runtime: Mapping, *, config: Mapping
 # ── lock / unlock ────────────────────────────────────────────────────────────────────────────────
 
 def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, registry: Any = None,
-         plugin_aux_tasks: Optional[Sequence[Any]] = None,
+         plugin_aux_tasks: Sequence[Any] | None = None,
          provider_lookup: Callable[[str], Any] | None = None,
          attested_ok: Callable[[str], Verdict] | None = None,
          profile_base_url: Callable[[str], Any] | None = None,
-         builtin_aux_tasks: Optional[Sequence[str]] = None,
+         builtin_aux_tasks: Sequence[str] | None = None,
          allowlist_builder: Callable[..., Any] | None = None, allowlist_path: Any = None,
          verification: Callable[[str], Any] | None = None, session_id: str = "", surface: str = "",
-         live_runtime: Callable[[], Optional[dict]] | None = None,
+         live_runtime: Callable[[], dict | None] | None = None,
          cached_environments: Callable[[], list] | None = None,
          clock: Callable[[], float] = time.time, progress: Any = None, command_form: str = "") -> LockResult:
     """Lock the profile to ``tier`` or refuse with the reason. Never raises for a refusal. ``command_form``
@@ -409,7 +411,7 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
         names = ", ".join(t.value for t in Tier)
         return LockResult(False, f"Not locked: unknown tier {tier!r} (one of: {names}).")
 
-    base = dict(session_id=session_id or "", tier=tier.value, surface=surface or None)
+    base: dict[str, Any] = dict(session_id=session_id or "", tier=tier.value, surface=surface or None)
     if tier is Tier.ZDR:
         _append(ledger, LedgerEvent(kind="preflight_fail", purpose="lock", verdict="off_tier", decision="refused",
                                     detail={"reason": ZDR_REASON}, **base))
@@ -438,7 +440,7 @@ def lock(tier: Tier | str, *, state, ledger, config: Mapping | None = None, regi
 
 
 def _transition_refused(what: str, exc: Any, ledger: Any, base: dict, *, tier: Any = None,
-                        command_form: str = "") -> "LockResult":
+                        command_form: str = "") -> LockResult:
     """The refusal of a lock or unlock that could not take the transition lock: a read-only data directory is
     named as such (purpose ``<what>:data_dir``), an unusable lock file by its error (``<what>:lockfile``), and
     a held lock as another transition in progress (``<what>:busy``). The ledger row carries no path."""
@@ -469,6 +471,7 @@ def _transition_lock(allowlist_path: Any):
     """filelock.exclusive on ``lock-transition.lock`` beside allowlist.yaml (the pins-style bounded lock), or a
     thread lock alone when no allowlist path is given (in-memory tests). Not reentrant."""
     from pathlib import Path
+
     from .filelock import ATTEMPTS, INTERVAL_SECONDS, LockBusy, exclusive
     if allowlist_path is None:
         @contextlib.contextmanager
@@ -632,7 +635,7 @@ def period_counts(ledger: Any, since: float | None, *, page: int = 1000) -> dict
 
 
 def unlock(*, state, ledger, session_id: str = "", surface: str = "",
-           clear_cache: Callable[[], None] | None = None, clock: Callable[[], float] = time.time,
+           clear_cache: Callable[[], object] | None = None, clock: Callable[[], float] = time.time,
            allowlist_path: Any = None) -> LockResult:
     """Clear the lock (also repairs unreadable lock state) and print the lock period's counts. Holds the
     transition lock (FI-5), so an unlock never runs while a lock is in progress, and removes allowlist.yaml
@@ -708,10 +711,10 @@ def _clear_verification_cache() -> None:
 # ── per-turn recheck ─────────────────────────────────────────────────────────────────────────────
 
 def recheck(*, state, ledger, config: Mapping | None = None, session_id: str = "",
-            plugin_aux_tasks: Optional[Sequence[Any]] = None,
+            plugin_aux_tasks: Sequence[Any] | None = None,
             provider_lookup: Callable[[str], Any] | None = None,
             profile_base_url: Callable[[str], Any] | None = None,
-            builtin_aux_tasks: Optional[Sequence[str]] = None) -> Optional[str]:
+            builtin_aux_tasks: Sequence[str] | None = None) -> str | None:
     """None when unlocked or the locked config is unchanged; otherwise the block message (and the
     session is marked breached, ledgered once per session). Read-only, no network."""
     locked, tier = state.locked()       # StateError propagates: the caller fails closed

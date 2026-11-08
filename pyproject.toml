@@ -30,7 +30,59 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff==0.17.4", "mypy==2.4.1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+# The code is written to about 115 columns; 120 is the nearest limit that leaves it as it is.
+line-length = 120
+target-version = "py311"
+extend-exclude = ["tests/spikes"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    # Tier, Origin and Route subclass (str, Enum). StrEnum changes str() and format() of each member,
+    # and receipts, the ledger and status text print them.
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests import pytest fixtures by name from shared harness modules and take them as parameters, which
+# ruff reads as a redefinition of the import.
+"tests/**" = [
+    "F811",
+    # Assertions keep the exact user-facing sentence, and fixtures keep captured hex values, whole on one
+    # line, so a search for the text finds the test.
+    "E501",
+    # Fault and hostile tests assert that a step refuses or fails, not which exception class it raises.
+    "B017",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["confidential_mode"]
+# Keep the existing wrapped style: several names per line, aliases beside the other names.
+split-on-trailing-comma = false
+combine-as-imports = true
+
+[tool.mypy]
+python_version = "3.11"
+files = ["confidential_mode", "scripts"]
+# The repository root is itself a package (the plugin's register(ctx)); its directory name is not an
+# identifier, so module names are taken from the root instead of from the parent directory.
+explicit_package_bases = true
+mypy_path = "."
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# Hermes is installed as an editable import hook that mypy cannot follow; the vendor SDKs ship no types.
+module = [
+    "hermes_cli.*", "agent.*", "tools.*", "providers.*", "providers", "plugins.*", "gateway.*",
+    "hermes_yaml", "hermes_constants", "tinfoil.*", "tinfoil_ehbp.*", "sigstore.*", "sigstore_models.*",
+    "nacl.*", "yaml", "OpenSSL.*",
+]
+ignore_missing_imports = true

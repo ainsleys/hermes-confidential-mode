@@ -7,8 +7,8 @@ from __future__ import annotations
 import importlib
 from types import SimpleNamespace
 
-from .test_register import plugin  # noqa: F401  (fixture)
 from ._harness import no_lazy_installs  # noqa: F401  (fixture)
+from .test_register import plugin  # noqa: F401  (fixture)
 
 BASE = "http://127.0.0.1:11434/v1"
 
@@ -58,7 +58,7 @@ def test_each_main_send_shows_request_and_response_sizes(plugin):
     assert [e.decision for e in rows] == ["attempt", "allowed"] * 3
     lines = _send_lines(plugin, "sess-sz")
     assert len(lines) == 3, lines
-    for line, row_pair in zip(lines, zip(rows[0::2], rows[1::2])):
+    for line, row_pair in zip(lines, zip(rows[0::2], rows[1::2], strict=False), strict=False):
         attempt, result = row_pair
         assert f"rows #{attempt.id} attempt, #{result.id} result" in line, line
         assert f"request {result.bytes} bytes, response " in line and "response size unknown" not in line, line

@@ -40,10 +40,11 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, cast
 
 # The contract's on-host set (docs/INTERFACES.md, "W4 gate_tools.py, consent.py"). Exactly these.
 ON_HOST_TOOLS: frozenset[str] = frozenset({
@@ -65,6 +66,7 @@ STATE_FILE_TOOLS: frozenset[str] = frozenset({"write_file", "patch"})
 # attaches through the gateway socket can still approve.
 from .selfapproval import TOOL_PROCESS_ENV, mark_tool_process  # noqa: E402,F401
 
+
 def _strings(value: Any, depth: int = 0) -> Iterable[str]:
     if depth > 8:
         return
@@ -79,7 +81,7 @@ def _strings(value: Any, depth: int = 0) -> Iterable[str]:
             yield from _strings(v, depth + 1)
 
 
-def invokes_confidential_cli(args: Any, tool: Optional[str] = None) -> Optional[str]:
+def invokes_confidential_cli(args: Any, tool: str | None = None) -> str | None:
     """Why the call would run the plugin's own CLI, import its package or write its state files, or None
     (selfscan.py has the forms, Amendment 9). terminal strings are read as shell, execute_code strings as
     Python, and process_manage input (a shell or a Python prompt may be reading it) as both; with no tool
@@ -154,11 +156,11 @@ class ToolInfo:
     toolset: str
     origin: Origin
     route: Route
-    mcp_server: Optional[str] = None   # raw server name for MCP tools
-    mcp_transport: Optional[str] = None  # "url" | "stdio" | "unknown" for MCP tools
-    mcp_host: Optional[str] = None       # host_of(url) for URL servers
+    mcp_server: str | None = None   # raw server name for MCP tools
+    mcp_transport: str | None = None  # "url" | "stdio" | "unknown" for MCP tools
+    mcp_host: str | None = None       # host_of(url) for URL servers
     reason: str = ""                     # why this route (verdict reason for MCP URL servers)
-    mode: Optional[str] = None           # reserved for MODE_TOOLS (see above); None = plain route
+    mode: str | None = None           # reserved for MODE_TOOLS (see above); None = plain route
 
 
 @dataclass
@@ -167,23 +169,23 @@ class Allowlist:
     tools: dict[str, ToolInfo]
     built_at: float = field(default_factory=time.time)
     added: set[str] = field(default_factory=set)
-    added_path: Optional[Path] = None   # allowlist.yaml; additions persist there (Amendment 3)
+    added_path: Path | None = None   # allowlist.yaml; additions persist there (Amendment 3)
     # Pinned at lock (Amendment 3 addendum): name -> (toolset, handler object). Holding the handler keeps
     # its id from being reused. A live entry whose toolset or handler differs => unclassified.
     pins: dict[str, tuple[str, Any]] = field(default_factory=dict, repr=False)
     registry: Any = field(default=None, repr=False)
     # Re-read at call time for MCP tools so a server re-pointed after lock is re-judged (fail closed).
-    mcp_config_loader: Optional[Callable[[], Mapping[str, Any]]] = field(default=None, repr=False)
+    mcp_config_loader: Callable[[], Mapping[str, Any]] | None = field(default=None, repr=False)
     predicate: Any = field(default=None, repr=False)
     lock_id: str = ""                    # identity of the lock this allowlist belongs to (F5/F6)
     # name -> (toolset, handler module, handler qualname) as persisted at lock; set on a restart rebuild
-    persisted_identity: Optional[dict[str, tuple[str, str, str]]] = field(default=None, repr=False)
+    persisted_identity: dict[str, tuple[str, str, str]] | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
-    def get(self, name: str) -> Optional[ToolInfo]:
+    def get(self, name: str) -> ToolInfo | None:
         return self.tools.get(name)
 
-    def current(self, name: str) -> Optional[ToolInfo]:
+    def current(self, name: str) -> ToolInfo | None:
         """The lock-time classification, only if the live registry entry is still the one pinned
         (same toolset, same handler object) and, for MCP tools, re-judged on the live config with the
         stricter of the two routes. None => unclassified => block."""
@@ -201,7 +203,8 @@ class Allowlist:
             try:
                 cfgs = self.mcp_config_loader() or {}
                 fresh = classify_tool(name, info.toolset, origin=Origin.MCP, mcp_server=info.mcp_server,
-                                      mcp_config=cfgs.get(info.mcp_server), predicate=self.predicate)
+                                      mcp_config=cfgs.get(info.mcp_server),  # type: ignore[arg-type]  # MCP tools name a server
+                                      predicate=self.predicate)
             except Exception:
                 return None
             if _ROUTE_STRICTNESS[fresh.route] > _ROUTE_STRICTNESS[info.route]:
@@ -246,7 +249,7 @@ class Allowlist:
                 self.added = new
 
     # -- persistence (Amendment 4 F5/F6) ------------------------------------------------------------
-    def persist(self, path: Optional[Path] = None, *, added: Optional[Iterable[str]] = None) -> None:
+    def persist(self, path: Path | None = None, *, added: Iterable[str] | None = None) -> None:
         """Write the lock's tool identities (name, toolset, handler module, qualname) and the
         human-approved additions (``added``, default the in-memory set), tagged with ``lock_id``. Called at
         lock and after each add. JSON (a YAML subset): Hermes ships ruamel via hermes_yaml, not PyYAML."""
@@ -282,10 +285,10 @@ class Allowlist:
             raise
 
     @classmethod
-    def load_persisted(cls, path: Optional[Path], registry: Any, *, lock_id: str, predicate: Any = None,
-                       mcp_configs: Optional[Mapping[str, Mapping[str, Any]]] = None,
-                       mcp_tool_servers: Optional[Mapping[str, str]] = None,
-                       plugin_tool_names: Optional[Iterable[str]] = None) -> "Allowlist":
+    def load_persisted(cls, path: Path | None, registry: Any, *, lock_id: str, predicate: Any = None,
+                       mcp_configs: Mapping[str, Mapping[str, Any]] | None = None,
+                       mcp_tool_servers: Mapping[str, str] | None = None,
+                       plugin_tool_names: Iterable[str] | None = None) -> Allowlist:
         """Rebuild the allowlist after a restart. Only tools persisted at THIS lock (matching
         ``lock_id``) whose live toolset, handler module and qualname still match are classified;
         everything else is unclassified (block/refuse) until a relock. A missing, corrupt or
@@ -298,7 +301,8 @@ class Allowlist:
             return empty
         identity: dict[str, tuple[str, str, str]] = {}
         for t in data.get("tools") or []:
-            if isinstance(t, dict) and all(isinstance(t.get(k), str) for k in ("name", "toolset", "module", "qualname")):
+            if isinstance(t, dict) and all(isinstance(t.get(k), str)
+                                           for k in ("name", "toolset", "module", "qualname")):
                 identity[t["name"]] = (t["toolset"], t["module"], t["qualname"])
         fresh = build_allowlist(registry, predicate=predicate, mcp_configs=mcp_configs,
                                 mcp_tool_servers=mcp_tool_servers, plugin_tool_names=plugin_tool_names,
@@ -311,12 +315,12 @@ class Allowlist:
         fresh.tools = keep
         fresh.lock_id = lock_id
         fresh.persisted_identity = identity
-        allowed = data.get("allowed") if isinstance(data.get("allowed"), list) else []
+        allowed = cast(list, data.get("allowed")) if isinstance(data.get("allowed"), list) else []
         fresh.added = {n for n in allowed if isinstance(n, str) and n in keep and keep[n].route is Route.ASK}
         return fresh
 
 
-def clear_persisted(path: Optional[Path], *, lock_id: str = "") -> None:
+def clear_persisted(path: Path | None, *, lock_id: str = "") -> None:
     """Unlock: drop the lock's persisted allowlist and its additions (Amendment 4 F6). With ``lock_id``, only
     a file written for that lock (or an unreadable one) is removed: a file another process wrote for a newer
     lock is kept. Without it (unreadable lock state), the file is removed."""
@@ -373,7 +377,7 @@ def _read_json_or_yaml(path: Path) -> Any:
         return json.loads(text)
     except ValueError:
         try:
-            from . import hermes_compat   # a hand-edited YAML file
+            from . import hermes_compat  # a hand-edited YAML file
             return hermes_compat.hermes_yaml().safe_load(text)
         except Exception:
             return None
@@ -406,7 +410,8 @@ def ensure_builtin_tools(progress: Any = None) -> None:
     (INTERFACES Amendment 11): Hermes may rewrite its tool-discovery cache when the cache is stale, and the
     imported modules register their exit handlers (Hermes' browser module registers one that, at exit, closes the
     browsers this process opened and stops browser processes whose owning Hermes process is gone; a running
-    gateway's browsers have a live owner and are left alone). Idempotent; never raises. ``progress``: a progress.Progress for the "discovering tools" line."""
+    gateway's browsers have a live owner and are left alone). Idempotent; never raises. ``progress``: a
+    progress.Progress for the "discovering tools" line."""
     try:
         from tools.registry import discover_builtin_tools, registry
         if progress is None or not getattr(progress, "enabled", False):
@@ -419,11 +424,10 @@ def ensure_builtin_tools(progress: Any = None) -> None:
         pass
 
 
-def ensure_tools_for_lock(path: Optional[Path], progress: Any = None) -> None:
+def ensure_tools_for_lock(path: Path | None, progress: Any = None) -> None:
     """Import only the built-in tool modules the lock recorded (allowlist.yaml's ``module`` fields), for a
     rebuild in a process that has not imported them (`hermes confidential allow`, `status --verbose`). Unlike
     ensure_builtin_tools this never touches Hermes' tool-discovery cache. Never raises."""
-    import importlib
     import sys
     data = _read_json_or_yaml(Path(path)) if path is not None else None
     tools = data.get("tools") if isinstance(data, dict) else None
@@ -525,7 +529,7 @@ def _handler_module(handler: Any) -> str:
     return str(getattr(current, "__module__", "") or "")
 
 
-def _mcp_transport(cfg: Optional[Mapping[str, Any]]) -> str:
+def _mcp_transport(cfg: Mapping[str, Any] | None) -> str:
     if not isinstance(cfg, Mapping):
         return "unknown"
     if "url" in cfg:          # same test Hermes uses to pick HTTP over stdio
@@ -558,12 +562,14 @@ def _mcp_url_route(server: str, url: Any, predicate: Any) -> tuple[Route, str, s
         return Route.BLOCK_MCP_URL, "", f"could not classify url ({type(exc).__name__})"
 
 
-def classify_tool(name: str, toolset: str, *, origin: Origin, mcp_server: Optional[str] = None,
-                  mcp_config: Optional[Mapping[str, Any]] = None, predicate: Any = None) -> ToolInfo:
+def classify_tool(name: str, toolset: str, *, origin: Origin, mcp_server: str | None = None,
+                  mcp_config: Mapping[str, Any] | None = None, predicate: Any = None) -> ToolInfo:
     if origin is Origin.MCP:
         transport = _mcp_transport(mcp_config)
         if transport == "url":
-            route, host, reason = _mcp_url_route(mcp_server or "", mcp_config.get("url"), predicate)
+            route, host, reason = _mcp_url_route(mcp_server or "",
+                                                 mcp_config.get("url"),  # type: ignore[union-attr]  # "url": a config
+                                                 predicate)
             return ToolInfo(name, toolset, origin, route, mcp_server, transport, host, reason)
         if transport == "stdio":
             # A child process on this host: allowed per contract (Amendment 3), disclosed as the same class of
@@ -583,10 +589,10 @@ def classify_tool(name: str, toolset: str, *, origin: Origin, mcp_server: Option
     return ToolInfo(name, toolset, origin, route)
 
 
-def build_allowlist(registry: Any, *, mcp_configs: Optional[Mapping[str, Mapping[str, Any]]] = None,
-                    mcp_tool_servers: Optional[Mapping[str, str]] = None,
-                    plugin_tool_names: Optional[Iterable[str]] = None, predicate: Any = None,
-                    added_path: Optional[Path] = None) -> Allowlist:
+def build_allowlist(registry: Any, *, mcp_configs: Mapping[str, Mapping[str, Any]] | None = None,
+                    mcp_tool_servers: Mapping[str, str] | None = None,
+                    plugin_tool_names: Iterable[str] | None = None, predicate: Any = None,
+                    added_path: Path | None = None) -> Allowlist:
     """Classify every tool in ``registry.get_all_entries()``. The keyword arguments default to Hermes'
     live state (see the module docstring); tests pass fakes. ``predicate`` is the active
     TierPredicate (confidential_mode.tiers); it classifies MCP server URLs. None = OnHostPredicate().
@@ -674,7 +680,7 @@ def rule_key_for(tool_name: str, generation: str = "") -> str:
     return f"{RULE_KEY_PREFIX}{tool_name}"
 
 
-def parse_pattern_key(pattern_key: Any) -> Optional[tuple[str, str]]:
+def parse_pattern_key(pattern_key: Any) -> tuple[str, str] | None:
     """(tool, generation) for a Hermes pattern key the plugin asked under (``plugin_rule:`` plus a rule key of
     rule_key_for), else None. The generation is "" for the key before any revoke."""
     if not isinstance(pattern_key, str) or not pattern_key.startswith(PATTERN_KEY_STEM):
@@ -713,7 +719,7 @@ def hermes_bypass_active(tool_name: str) -> bool:
         return True
 
 
-def hermes_remembered_grant(tool_name: str, rule_key: Optional[str] = None) -> bool:
+def hermes_remembered_grant(tool_name: str, rule_key: str | None = None) -> bool:
     """True when Hermes holds a session/always grant for our rule key (``rule_key``, default the key before any
     revoke) in this session.
     The plugin_rule: prefix trap: the grant is stored under the PREFIXED key; is_approved(sk, rule_key)
@@ -821,7 +827,7 @@ def _load_delegation_config() -> dict:
 
 
 def _keys_ok(obj: Mapping[str, Any], allowed: frozenset[str]) -> bool:
-    for key, value in obj.items():
+    for key in obj:
         if not isinstance(key, str) or key not in allowed:
             return False
         if _norm_key(key) in DELEGATION_ROUTE_KEYS:   # cannot happen with the sets above; belt and braces
@@ -839,7 +845,7 @@ def default_delegation_ok(args: Mapping[str, Any], *,
         cfg = load_config() or {}
         if not isinstance(cfg, Mapping):
             return False
-        norm = {}
+        norm: dict = {}
         for key, value in cfg.items():
             norm.setdefault(_norm_key(key), []).append(value)
         backends = norm.get("backend", [])
@@ -942,7 +948,7 @@ def ask_message(tool_name: str, nbytes: int, once_per_lock: bool = False) -> str
 
 
 def _event(kind: str, *, tool_name: str, session_id: str, decision: str, detail: dict,
-           nbytes: Optional[int] = None, surface: Optional[str] = None) -> dict:
+           nbytes: int | None = None, surface: str | None = None) -> dict:
     return {
         "ts": time.time(), "session_id": session_id or "", "kind": kind, "purpose": f"tool:{tool_name}",
         "provider": "", "host": "", "model": "", "bytes": nbytes, "tier": None, "verdict": None,
@@ -1011,7 +1017,7 @@ class LockGrants:
         self._grants: dict[tuple[str, tuple[str, str], str], Any] = {}
 
     @staticmethod
-    def _scope(scope: Any) -> Optional[tuple[str, str]]:
+    def _scope(scope: Any) -> tuple[str, str] | None:
         """The scope as a key, or None when it names no conversation (both parts empty) or is malformed."""
         try:
             key, sid = scope
@@ -1021,7 +1027,7 @@ class LockGrants:
             return None
         return (key, sid)
 
-    def grant(self, lock_id: str, scope: tuple[str, str], tool: str, row_id: Any) -> None:
+    def grant(self, lock_id: str, scope: Any, tool: str, row_id: Any) -> None:
         scope = self._scope(scope)
         if not lock_id or scope is None or not isinstance(tool, str) or not tool:
             return
@@ -1030,7 +1036,7 @@ class LockGrants:
                 del self._grants[key]          # grants of an earlier lock end with that lock
             self._grants[(lock_id, scope, tool)] = row_id
 
-    def get(self, lock_id: str, scope: tuple[str, str], tool: str) -> Any:
+    def get(self, lock_id: str, scope: Any, tool: str) -> Any:
         """The answering row id, or _MISSING when this conversation has no grant for the tool in this lock."""
         scope = self._scope(scope)
         if not lock_id or scope is None:
@@ -1038,7 +1044,7 @@ class LockGrants:
         with self._lock:
             return self._grants.get((lock_id, scope, tool), _MISSING)
 
-    def drop(self, tools: Optional[set] = None) -> list[str]:
+    def drop(self, tools: set | None = None) -> list[str]:
         with self._lock:
             gone = sorted({k[2] for k in self._grants if tools is None or k[2] in tools})
             for key in [k for k in self._grants if tools is None or k[2] in tools]:
@@ -1071,7 +1077,7 @@ class _Policy:
     """The classification both enforcement points share."""
 
     def __init__(self, allowlist, bypass_active, delegation_ok, remembered, terminal_backend=None,
-                 lock_grants: Optional[LockGrants] = None, ask_mode: Optional[Callable[[], str]] = None):
+                 lock_grants: LockGrants | None = None, ask_mode: Callable[[], str] | None = None):
         self._allowlist = allowlist
         self._bypass_fn = bypass_active
         self._takes_name = _accepts_positional(bypass_active)
@@ -1096,7 +1102,7 @@ class _Policy:
         return self._allowlist() if callable(self._allowlist) else self._allowlist
 
     def bypass(self, tool_name: str) -> bool:
-        return bool(self._bypass_fn(tool_name) if self._takes_name else self._bypass_fn())  # type: ignore[call-arg]
+        return bool(self._bypass_fn(tool_name) if self._takes_name else self._bypass_fn())
 
     def on_host_decision(self, info: ToolInfo, args: dict, task_id: str = "") -> CallDecision:
         # Review finding 2 (INTERFACES Amendment 6): a terminal-backend tool is on-host only on the local
@@ -1169,7 +1175,8 @@ class _Policy:
         n = max(1, math.ceil(nbytes / 1024))
         once = self.once_per_lock()
         if once:
-            row = self.lock_grants.get(al.lock_id, grant_scope(session_id), tool_name)
+            row = self.lock_grants.get(  # type: ignore[union-attr]  # once_per_lock() needs lock_grants
+                al.lock_id, grant_scope(session_id), tool_name)
             if row is not _MISSING:
                 return CallDecision("run", "lock_grant", kb=n, grant_row=row)
         return CallDecision("ask", "remembered" if self.remembered(tool_name) else "ask",
@@ -1298,11 +1305,11 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
                         ledger: Any, bypass_active: Callable[[str], bool] = hermes_bypass_active,
                         delegation_ok: Callable[[dict], bool] = default_delegation_ok,
                         remembered: Callable[[str], bool] = hermes_remembered_grant,
-                        decisions: Optional[ApprovalDecisions] = None,
-                        terminal_backend: Optional[Callable[[str], str]] = None,
+                        decisions: ApprovalDecisions | None = None,
+                        terminal_backend: Callable[[str], str] | None = None,
                         rule_key: Callable[[str], str] = rule_key_for,
-                        lock_grants: Optional[LockGrants] = None,
-                        ask_mode: Optional[Callable[[], str]] = None) -> Callable[..., Optional[dict]]:
+                        lock_grants: LockGrants | None = None,
+                        ask_mode: Callable[[], str] | None = None) -> Callable[..., dict | None]:
     """``pre_tool_call`` callback: blocks every refuse decision (ledgered tool_refused) and, for an
     off-host tool, returns the approve directive with the "~N KB" message (ledgered tool_asked).
     The directive only ASKS: Hermes' CLI grants on any answer except the exact string "deny"
@@ -1320,8 +1327,8 @@ def build_pre_tool_call(is_locked: Callable[[], Any], allowlist: Allowlist | Cal
     pol = _policy(allowlist, bypass_active, delegation_ok, remembered, terminal_backend, lock_grants, ask_mode)
     dec = decisions if decisions is not None else DEFAULT_DECISIONS
 
-    def pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
-                      tool_call_id: str = "", task_id: str = "", **_kw: Any) -> Optional[dict]:
+    def pre_tool_call(tool_name: str = "", args: dict | None = None, session_id: str = "",
+                      tool_call_id: str = "", task_id: str = "", **_kw: Any) -> dict | None:
         mark_tool_process()
         try:
             locked = _lock_state(is_locked)
@@ -1397,15 +1404,15 @@ def _try_ledger(ledger, kind, tool_name, session_id, decision, args, detail, sur
 
 
 def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Callable[[], Allowlist],
-                         ledger: Any, decisions: Optional[ApprovalDecisions] = None, *,
+                         ledger: Any, decisions: ApprovalDecisions | None = None, *,
                          bypass_active: Callable[[str], bool] = hermes_bypass_active,
                          delegation_ok: Callable[[dict], bool] = default_delegation_ok,
                          remembered: Callable[[str], bool] = hermes_remembered_grant,
                          ask: Callable[..., dict] = hermes_request_approval,
-                         terminal_backend: Optional[Callable[[str], str]] = None,
+                         terminal_backend: Callable[[str], str] | None = None,
                          rule_key: Callable[[str], str] = rule_key_for,
-                         lock_grants: Optional[LockGrants] = None,
-                         ask_mode: Optional[Callable[[], str]] = None) -> Callable[..., Any]:
+                         lock_grants: LockGrants | None = None,
+                         ask_mode: Callable[[], str] | None = None) -> Callable[..., Any]:
     """``tool_execution`` middleware: the ENFORCEMENT line, for ctx.register_middleware("tool_execution", fn).
 
     Off-host tool => ``next_call`` only on an explicit once/session/always recorded by
@@ -1486,14 +1493,15 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         choice = dec.pop(key) if key is not None else _MISSING
         if choice is not _MISSING:                 # pre_tool_call asked (model_tools order)
             if type(choice) is str and choice in _ALLOW_CHOICES:
-                if dec.pop_ledgered(key):
-                    row = dec.pop_row(key)
+                if dec.pop_ledgered(key):  # type: ignore[arg-type]  # a choice was found, so key is set
+                    row = dec.pop_row(key)  # type: ignore[arg-type]
                 else:                              # the hook's tool_allowed row could not be written
                     row = _allowed_row(tool_name, args, session_id, base, choice)
                 _grant_for_lock(tool_name, choice, row, session_id)
                 return run()                       # tool_allowed was ledgered by post_approval_response
             return _unexpected(tool_name, args, session_id, base, choice,
-                               answered=dec.pop_ledgered(key) and _refusal_ledgered(choice))
+                               answered=dec.pop_ledgered(key)  # type: ignore[arg-type]  # key is set here
+                               and _refusal_ledgered(choice))
         if d.decision == "remembered":
             ledger.append(_event("tool_allowed", tool_name=tool_name, session_id=session_id, decision="remembered",
                                  nbytes=args_bytes(args), surface="middleware", detail={**base, "kb": d.kb}))
@@ -1541,7 +1549,8 @@ def build_tool_execution(is_locked: Callable[[], Any], allowlist: Allowlist | Ca
         raises: a grant that cannot be made only means the next call asks again."""
         try:
             if choice == "once" and pol.once_per_lock():
-                pol.lock_grants.grant(pol.allowlist().lock_id, grant_scope(session_id), tool_name, row_id)
+                pol.lock_grants.grant(  # type: ignore[union-attr]  # once_per_lock() needs lock_grants
+                    pol.allowlist().lock_id, grant_scope(session_id), tool_name, row_id)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1573,7 +1582,7 @@ def _choice_repr(choice: Any) -> Any:
 
 
 def build_post_approval_response(is_locked: Callable[[], Any], ledger: Any,
-                                 decisions: Optional[ApprovalDecisions] = None) -> Callable[..., None]:
+                                 decisions: ApprovalDecisions | None = None) -> Callable[..., None]:
     """``post_approval_response`` observer: ledgers tool_allowed / tool_refused for OUR approve
     directives only (pattern_key ``plugin_rule:confidential-mode:tool:<name>``), and records the exact
     choice in ``decisions`` (default DEFAULT_DECISIONS) for build_tool_execution. Only the exact strings

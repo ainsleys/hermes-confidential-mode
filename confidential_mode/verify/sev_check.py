@@ -19,7 +19,8 @@ import base64
 import gzip
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 # AMD Genoa root (ARK) and SEV signing (ASK) certificates, public, from AMD KDS. Pinned by the SHA-256
 # of their DER encoding; cross-checked 2026-11-07 against tinfoil 0.14.2's embedded copy
@@ -184,7 +185,7 @@ def check(report_b64: str, vcek_der: bytes, *, as_of: datetime | None = None, co
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import ec
         from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
-        when = as_of or datetime.now(timezone.utc)
+        when = as_of or datetime.now(UTC)
         raw = base64.b64decode(report_b64, validate=True)
         r = gzip.decompress(raw) if compressed else raw
         if len(r) != REPORT_SIZE:
@@ -213,7 +214,8 @@ def check(report_b64: str, vcek_der: bytes, *, as_of: datetime | None = None, co
         for name, parts in tcbs.items():
             for comp, floor in MIN_TCB.items():
                 if parts[comp] < floor:
-                    raise SevCheckError(f"{name} TCB {comp}={parts[comp]:#x} below the {MIN_TCB_DATED} minimum {floor:#x}")
+                    raise SevCheckError(f"{name} TCB {comp}={parts[comp]:#x} below the {MIN_TCB_DATED} "
+                                        f"minimum {floor:#x}")
         if tcbs["current"] != tcbs["committed"]:
             raise SevCheckError("current TCB differs from committed TCB (provisional firmware)")
 
@@ -235,7 +237,7 @@ def check(report_b64: str, vcek_der: bytes, *, as_of: datetime | None = None, co
         pub = vcek.public_key()
         if not isinstance(pub, ec.EllipticCurvePublicKey) or pub.curve.name != "secp384r1":
             raise SevCheckError("VCEK key is not P-384")
-        exts = {e.oid.dotted_string: getattr(e.value, "value", None) for e in vcek.extensions}
+        exts: dict[str, Any] = {e.oid.dotted_string: getattr(e.value, "value", None) for e in vcek.extensions}
         if exts.get(_PRODUCT_OID) != b"\x16\x05Genoa":
             raise SevCheckError("VCEK product name is not Genoa")
         for comp, oid in _VCEK_OIDS.items():

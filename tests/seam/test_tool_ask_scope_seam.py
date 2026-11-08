@@ -10,13 +10,21 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-
 from hermes_cli.config import get_config_path
 from tools import approval, approval_context
 
 from confidential_mode.gate_tools import (
-    ASK_EACH_CALL, ASK_ONCE_PER_LOCK, ApprovalDecisions, LockGrants, ask_mode_from, build_allowlist,
-    _MISSING, build_post_approval_response, build_pre_tool_call, build_tool_execution, grant_scope,
+    _MISSING,
+    ASK_EACH_CALL,
+    ASK_ONCE_PER_LOCK,
+    ApprovalDecisions,
+    LockGrants,
+    ask_mode_from,
+    build_allowlist,
+    build_post_approval_response,
+    build_pre_tool_call,
+    build_tool_execution,
+    grant_scope,
 )
 from confidential_mode.ledger import Ledger
 from confidential_mode.tiers import Tier

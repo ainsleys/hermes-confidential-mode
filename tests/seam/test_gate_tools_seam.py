@@ -14,13 +14,19 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
 from hermes_cli.config import get_config_path
 from tools import approval, approval_context
 
 from confidential_mode.gate_tools import (
-    ON_HOST_TOOLS, ApprovalDecisions, Origin, Route, build_allowlist, build_post_approval_response,
-    build_pre_tool_call, build_tool_execution, rule_key_for,
+    ON_HOST_TOOLS,
+    ApprovalDecisions,
+    Origin,
+    Route,
+    build_allowlist,
+    build_post_approval_response,
+    build_pre_tool_call,
+    build_tool_execution,
+    rule_key_for,
 )
 from confidential_mode.ledger import Ledger
 from confidential_mode.tiers import Tier
@@ -44,8 +50,7 @@ def hermes(monkeypatch, tmp_path):
     import model_tools  # noqa: F401  (imports and registers the built-in tools)
     from hermes_cli.plugins import PluginContext, discover_plugins, get_plugin_manager
     from hermes_cli.plugins_manifest import PluginManifest
-    from tools import mcp_tool as mcp_core
-    from tools import terminal_tool
+    from tools import mcp_tool as mcp_core, terminal_tool
     from tools.registry import registry
 
     for name in ("HERMES_INTERACTIVE", "HERMES_GATEWAY_SESSION", "HERMES_EXEC_ASK", "HERMES_SESSION_PLATFORM",

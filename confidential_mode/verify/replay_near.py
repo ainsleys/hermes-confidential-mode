@@ -1,5 +1,6 @@
 """Offline replay of NEAR AI Cloud evidence (schemas confidential-mode/near-evidence/v1 and v2; v1 under v1
-rules) and of the signed responses a receipt records. No network: the TDX quotes are re-verified with tinfoil 0.14.2's verifier
+rules) and of the signed responses a receipt records. No network: the TDX quotes are re-verified with tinfoil
+0.14.2's verifier
 against the Intel SGX Root CA it embeds, the Intel Trust Authority JWTs against the captured JWKS whose
 x5c chains must end at a root pinned in near_checks.ITA_ROOT_SHA256, and each response signature against
 the signing key the replayed evidence binds, over the payload rebuilt from the digests in the row.
@@ -10,7 +11,8 @@ row. ``replay_receipt(doc)`` does both for every NEAR row of a receipt (JSON for
 but the receipt.
 
 v2 evidence keeps its large strings (each app_compose, each compose_manager_attestation, each TDX quote
-and each Intel Trust Authority token) as blobs by SHA-256. A ledger row holds only ``blob_refs``; a JSON receipt carries the texts beside the evidence
+and each Intel Trust Authority token) as blobs by SHA-256. A ledger row holds only ``blob_refs``; a JSON
+receipt carries the texts beside the evidence
 (``blobs``), and ``with_blobs`` joins them for replay. A blob that is missing or does not hash to its id
 fails the check that needs it.
 
@@ -19,11 +21,12 @@ What a replay can NOT establish is in ``NOT_ESTABLISHED`` (returned with every r
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from datetime import UTC
+from typing import Any, cast
 
-from . import near as _near
-from . import near_checks as nc
+from . import near as _near, near_checks as nc
 
 EVIDENCE_SCHEMA = _near.EVIDENCE_SCHEMA
 EVIDENCE_SCHEMAS = _near.EVIDENCE_SCHEMAS
@@ -145,9 +148,9 @@ def _as_unix(as_of, evidence) -> float:
     if isinstance(as_of, (int, float)) and not isinstance(as_of, bool):
         return float(as_of)
     if isinstance(as_of, str) and as_of:
-        from datetime import datetime, timezone
+        from datetime import datetime
         dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
-        return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+        return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp()
     try:
         return float((evidence or {}).get("captured_at_unix") or 0)
     except (TypeError, ValueError, AttributeError):
@@ -156,16 +159,16 @@ def _as_unix(as_of, evidence) -> float:
 
 def replay_signed_send(detail: Mapping, evidence: Mapping | None, *, model: str | None = None,
                        require_provider_tee: bool | None = None, quote_verifier=None, ita_roots=None,
-                       replayed: "NearReplayResult | None" = None) -> dict:
+                       replayed: NearReplayResult | None = None) -> dict:
     """Judge one send_signed row from the receipt alone: the evidence must replay, the signature must
     verify under the key that evidence binds, over the payload rebuilt from the row's digests and the
     request's model id, and the kind must be the one the policy requires. Never raises."""
-    out = {"verdict": "fail", "reason": "", "kind": None, "evidence_ok": False, "signature": None}
+    out: dict[str, Any] = {"verdict": "fail", "reason": "", "kind": None, "evidence_ok": False, "signature": None}
     try:
         if not isinstance(detail, Mapping):
             out["reason"] = "row has no detail"
             return out
-        sig = detail.get("signature") if isinstance(detail.get("signature"), Mapping) else {}
+        sig = cast(Mapping, detail.get("signature")) if isinstance(detail.get("signature"), Mapping) else {}
         out["kind"] = sig.get("signature_kind")
         if sig.get("status") != "fetched":
             out["reason"] = f"no signature recorded ({sig.get('status') or 'none'}: {sig.get('reason') or ''})".strip()
@@ -198,7 +201,7 @@ def replay_signed_send(detail: Mapping, evidence: Mapping | None, *, model: str 
 
 
 def evidence_by_nonce(doc: Mapping) -> dict:
-    out = {}
+    out: dict = {}
     for item in (doc.get("evidence") or []) if isinstance(doc, Mapping) else []:
         ev = item.get("evidence") if isinstance(item, Mapping) else None
         if isinstance(ev, Mapping) and ev.get("schema") in EVIDENCE_SCHEMAS and ev.get("nonce"):
@@ -215,7 +218,7 @@ def replay_receipt(doc: Mapping, *, quote_verifier=None, ita_roots=None) -> dict
     for row in (doc.get("rows") or []) if isinstance(doc, Mapping) else []:
         if not isinstance(row, Mapping) or row.get("kind") != "send_signed":
             continue
-        d = row.get("detail") if isinstance(row.get("detail"), Mapping) else {}
+        d = cast(Mapping, row.get("detail")) if isinstance(row.get("detail"), Mapping) else {}
         ev = by_nonce.get(d.get("attestation_nonce"))
         nonce = d.get("attestation_nonce")
         if ev is not None and nonce not in cache:

@@ -87,7 +87,7 @@ def lock_path_for(path: Any) -> Path:
 
 
 @contextlib.contextmanager
-def exclusive(lock_path: Any, *, thread_lock: threading.Lock | None = None):
+def exclusive(lock_path: Any, *, thread_lock: threading.Lock | threading.RLock | None = None):
     """Hold ``lock_path`` exclusively, or raise LockBusy after ATTEMPTS tries INTERVAL_SECONDS apart. A lock
     file that cannot be opened for append is opened read-only (flock accepts a read-only descriptor on local
     filesystems). Any failure to open or flock the file other than "held" raises LockUnusable (fail closed,
@@ -103,14 +103,14 @@ def exclusive(lock_path: Any, *, thread_lock: threading.Lock | None = None):
         try:
             import fcntl
         except ImportError:
-            fcntl = None   # Windows: thread lock only (DISCLOSURE, Processes and threads)
+            fcntl = None  # type: ignore[assignment]  # Windows: thread lock only (DISCLOSURE, Processes and threads)
         if fcntl is not None:
             try:
                 lock_path.parent.mkdir(parents=True, exist_ok=True)
                 fh = open(lock_path, "a")
             except OSError:
                 try:
-                    fh = open(lock_path, "r")
+                    fh = open(lock_path)
                 except OSError as exc:
                     fh = None
                     raise LockUnusable(lock_path, _errno_name(exc)) from None

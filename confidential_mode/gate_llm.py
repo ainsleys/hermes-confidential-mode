@@ -25,9 +25,10 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from .ledger import LedgerEvent
@@ -312,6 +313,7 @@ class LlmGate:
                         nbytes=request_bytes(request), decision="observed")
             with self.send_context(dest, context, None):
                 return next_call(request)
+        tier = cast(Tier, tier)   # locked: converted by Tier(tier) above
 
         if self.turn_check is not None:
             found = self.turn_check(context, tier)
@@ -420,7 +422,7 @@ class LlmGate:
                 raise
             if isinstance(original, InterruptedError):
                 raise
-            detail = {"reason_code": "provider_error", "error_type": type(original).__name__}
+            detail: dict[str, Any] = {"reason_code": "provider_error", "error_type": type(original).__name__}
             if type(original).__name__ == "ConfidentialRefused":
                 # The attested client's own refusal (client.py): its reason is the plugin's text, never content.
                 why = str(original)[:300]

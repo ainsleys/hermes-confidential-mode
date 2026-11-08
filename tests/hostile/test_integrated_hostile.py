@@ -153,6 +153,7 @@ def test_hand_armed_fallback_and_provider_errors_never_reach_openrouter_withstoo
     reaches openrouter or the default transport."""
     import httpx
     import openai
+
     from ..seam._harness import arm_fallback_chain, rate_limit_429
     _locked_on_host(plugin)
     errors = [rate_limit_429(), KeyError("x"), RuntimeError("weird"), httpx.ReadTimeout("t"),
@@ -415,6 +416,7 @@ def _restart(plugin, monkeypatch):
     """New PluginManager, same HERMES_HOME (what a Hermes restart does)."""
     import hermes_cli.plugins as plugins_mod
     from hermes_cli.plugins import PluginManager
+
     from ..seam.test_register import _evict_plugin_modules
     plugin.mgr.unload()
     _evict_plugin_modules()
@@ -635,7 +637,7 @@ def test_pins_yaml_duplicate_keys_fail_closed_withstood(plugin, net, monkeypatch
     h.answer_choice(plugin, monkeypatch, "approve")
     assert plugin.slash("pins approve").startswith("Pinned")
     text = plugin.rt.pins.path.read_text()
-    line = next(l for l in text.splitlines() if l.strip().startswith("code_fingerprint:"))
+    line = next(ln for ln in text.splitlines() if ln.strip().startswith("code_fingerprint:"))
     plugin.rt.pins.path.write_text(text.replace(line, line + "\n" + line, 1))
     provider.verification_cache.invalidate(provider.PROFILE_NAME)
     assert provider.attested_ok(provider.PROFILE_NAME).in_tier is False

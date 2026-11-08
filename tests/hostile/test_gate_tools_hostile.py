@@ -47,10 +47,10 @@ _PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
-from confidential_mode import gate_tools  # noqa: E402  ImportError until W4 merges is expected
-
 from hermes_cli.config import get_config_path  # noqa: E402
 from tools import approval, approval_context  # noqa: E402
+
+from confidential_mode import gate_tools  # noqa: E402  ImportError until W4 merges is expected
 
 SK = "t4:hostile:gate"
 SID = "t4-session"
@@ -875,7 +875,7 @@ def test_remembered_grant_under_our_rule_key_is_honoured_and_ledgered(hermes, sc
     (plugin_rule:confidential-mode:tool:<name>) is honoured, ledgered tool_allowed decision 'remembered'."""
     probe(hermes, "_t4_net")
     g = lock(hermes)
-    key = f"plugin_rule:confidential-mode:tool:_t4_net"
+    key = "plugin_rule:confidential-mode:tool:_t4_net"
     if scope == "session":
         approval.approve_session(SK, key)
     else:

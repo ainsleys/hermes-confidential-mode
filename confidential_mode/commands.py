@@ -28,11 +28,10 @@ import re
 import shlex
 import sys
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable, Mapping
+from typing import Any, cast
 
-from . import preflight as _pf
-from . import locking as _locking
-from . import revoke as _revoke
+from . import locking as _locking, preflight as _pf, revoke as _revoke
 from .tiers import Tier
 
 PROFILE_NAME = _locking.PROFILE_NAME
@@ -139,10 +138,13 @@ def _pin_lines(rt: Any) -> list[str]:
     for rec in every:
         role = getattr(rec, "cvm_role", None)
         role_text = f" {render_if_needed(role)}" if role not in (None, "router") else ""
-        lines.append(f"Pinned: {rec.vendor} {render_if_needed(rec.router_repo)}{role_text} code {_short(rec.code_fingerprint)} "
-                     f"enclave {_short(rec.enclave_fingerprint)} release {render_if_needed(rec.release_tag or '(untagged)')} "
+        lines.append(f"Pinned: {rec.vendor} {render_if_needed(rec.router_repo)}{role_text} "
+                     f"code {_short(rec.code_fingerprint)} "
+                     f"enclave {_short(rec.enclave_fingerprint)} "
+                     f"release {render_if_needed(rec.release_tag or '(untagged)')} "
                      f"(approved {rec.approved_at} via {rec.approved_via}"
-                     + (f", reviewed by {render_if_needed(rec.reviewed_by)}" if getattr(rec, "reviewed_by", None) else "")
+                     + (f", reviewed by {render_if_needed(rec.reviewed_by)}"
+                        if getattr(rec, "reviewed_by", None) else "")
                      + f"; previous {_short(rec.previous)})")
     if not batches:
         lines.append("Pending pin: none")
@@ -155,14 +157,15 @@ def _pin_lines(rt: Any) -> list[str]:
         for ent in ents:
             if getattr(ent, "cvm_role", None) not in (None, "router"):
                 lines.append(f"  entry {render_if_needed(ent.cvm_role)} code {_short(ent.code_fingerprint, 16)} "
-                             f"enclave {_short(ent.enclave_fingerprint, 16)} pins {', '.join(ent.pinned) or '(whole result)'}")
+                             f"enclave {_short(ent.enclave_fingerprint, 16)} "
+                             f"pins {', '.join(ent.pinned) or '(whole result)'}")
         if pend.components:
             lines.append("Pending pin components (every line; \"reported\" lines are shown for review, not pinned):")
             lines.extend(f"  {render_vendor(c)}" for c in pend.components)
     return lines
 
 
-def hermes_approval_keys(session_key: Optional[str] = None) -> tuple[set, set]:
+def hermes_approval_keys(session_key: str | None = None) -> tuple[set, set]:
     """(Hermes' permanent approval keys, its session approval keys for ``session_key``, or for every session
     when None). Read-only, under Hermes' own lock (hermes_compat.approval_keys); raises when Hermes' tables
     cannot be read."""
@@ -238,7 +241,7 @@ def pending_pin_note(rt: Any) -> str:
     """'' unless a pin update is waiting for approval. Said by the lock reply and by status, because a lock can
     succeed on an approved instance while NEAR runs another instance of the same model that is pending: a
     send NEAR routes to the pending instance is then refused."""
-    pins = getattr(rt, "pins", None)
+    pins: Any = getattr(rt, "pins", None)
     try:
         batches = pins.pending_all() if callable(getattr(pins, "pending_all", None)) else \
             [p for p in [pins.pending()] if p] if pins is not None else []
@@ -272,7 +275,8 @@ def status_text(rt: Any, *, session_key: str = "", clock: Callable[[], float] = 
     """``form`` "terminal" prints commands in the terminal form (Amendment 14)."""
     cmd = lambda verb: _locking.command_text(verb, form)  # noqa: E731
     lines: list[str] = []
-    locked = tier = None
+    locked: Any = None
+    tier: Any = None
     try:
         locked, tier = rt.is_locked()
         if locked:
@@ -369,7 +373,7 @@ def _live_runtime_line(rt: Any) -> str:
 
 def pins_text(rt: Any, *, session_key: str = "") -> str:
     lines = _pin_lines(rt)
-    history = []
+    history: list = []
     try:
         last = 0
         while True:
@@ -407,7 +411,7 @@ def interactive_attested_ok(rt: Any, wait_seconds: float = INTERACTIVE_VERIFY_WA
     return call
 
 
-def check_text(rt: Any, tier: Optional[str], *, verbose: bool = False, form: str = "") -> str:
+def check_text(rt: Any, tier: str | None, *, verbose: bool = False, form: str = "") -> str:
     return check_result(rt, tier, verbose=verbose, form=form)[0]
 
 
@@ -438,7 +442,7 @@ def default_check_tier(rt: Any, config: Any) -> tuple[str, str]:
     return Tier.ATTESTED.value, "the default when the config names no attested or on-host main route"
 
 
-def check_result(rt: Any, tier: Optional[str], *, verbose: bool = False, form: str = "") -> tuple[str, bool]:
+def check_result(rt: Any, tier: str | None, *, verbose: bool = False, form: str = "") -> tuple[str, bool]:
     """(the preflight table, whether it passed). `hermes confidential check` exits 1 unless it passed. The
     table is collapsed unless ``verbose`` (Amendment 14). With no tier, the first line names the tier
     checked and why."""
@@ -475,7 +479,7 @@ def receipts_text(rt: Any, session: str, *, fmt: str = "text") -> str:
     """Delegate to confidential_mode.receipts.render (W6), imported lazily; placeholder if absent."""
     try:
         mod = importlib.import_module(__package__ + ".receipts")
-        render = getattr(mod, "render")
+        render = mod.render
     except (ImportError, AttributeError):
         return RECEIPTS_PLACEHOLDER
     if not session:
@@ -488,6 +492,7 @@ def receipts_text(rt: Any, session: str, *, fmt: str = "text") -> str:
         return (f"{NO_SUCH_SESSION} {session!r}. Check the id: hermes confidential watch shows recent rows "
                 "with their session ids.")
     import inspect
+    sig_params: Mapping[str, inspect.Parameter]
     try:
         sig_params = inspect.signature(render).parameters
     except (TypeError, ValueError):
@@ -517,7 +522,7 @@ class _AcceptsAll:
         return True
 
 
-def verify_ttl_seconds(config: Any) -> Optional[float]:
+def verify_ttl_seconds(config: Any) -> float | None:
     """``confidential.verify_ttl_seconds`` as the provider reads it, or None when unset/unusable (the
     receipt then states its own default)."""
     raw = _locking._cfg(config or {}, "confidential", "verify_ttl_seconds")
@@ -672,7 +677,7 @@ def _approve_flags(args: list) -> dict:
 
 
 def retire_text(rt: Any, fingerprint: str, *, session_id: str = "", surface: str = "unknown",
-                identity: Optional[str] = None) -> str:
+                identity: str | None = None) -> str:
     """`pins retire <fingerprint>`: remove one approved entry, write a pin_retired row, and clear the
     in-process consent cache so the entry's earlier pin_applied row no longer counts."""
     from .pins import PinStoreError
@@ -712,8 +717,8 @@ def retire_text(rt: Any, fingerprint: str, *, session_id: str = "", surface: str
 
 
 def register_slash(ctx: Any, rt: Any) -> None:
-    def confidential(raw_args: str = "", session_id: Optional[str] = None, session_key: Optional[str] = None,
-                     platform: Optional[str] = None) -> str:
+    def confidential(raw_args: str = "", session_id: str | None = None, session_key: str | None = None,
+                     platform: str | None = None) -> str:
         # Sync on purpose: consent's ask_choice must run on the gateway's executor thread.
         try:
             return handle_slash(rt, raw_args, session_id=session_id or "", session_key=session_key or "",
@@ -742,7 +747,7 @@ class TerminalAsker:
         self.stdout = stdout or sys.stdout
         self.environ = environ if environ is not None else os.environ
 
-    def ask_choice(self, question: str, choices: list) -> Optional[str]:
+    def ask_choice(self, question: str, choices: list) -> str | None:
         from .consent import SelfApprovalRefused
         from .selfapproval import self_approval_reason
         reason = self_approval_reason(self.environ)
@@ -773,7 +778,7 @@ class TerminalAsker:
         return None
 
     @staticmethod
-    def _pick(answer: str, values: list, yes_no: bool) -> Optional[str]:
+    def _pick(answer: str, values: list, yes_no: bool) -> str | None:
         """A choice value, its number, or (on an approve/deny prompt) y, yes, n or no in any case
         (Amendment 14). Anything else is None."""
         if answer in values:
@@ -808,7 +813,7 @@ _GROUP_COMMENTS = {
 
 
 def config_block(rt: Any, model: str, *, vision_model: str = DEFAULT_VISION_MODEL,
-                 aux_model: str = DEFAULT_AUX_MODEL, enclave: Optional[str] = None) -> str:
+                 aux_model: str = DEFAULT_AUX_MODEL, enclave: str | None = None) -> str:
     try:
         tasks = list(dict.fromkeys(_pf.builtin_aux_task_names()
                                    + [e if isinstance(e, str) else e.get("key") for e in _locking._plugin_aux(None)]))
@@ -874,7 +879,7 @@ NEAR_VISION_UNSET_NOTE = (
     "  #   vision: {{provider: attested-tinfoil, model: {tinfoil_vision}}}   # needs TINFOIL_API_KEY and a Tinfoil pin")
 
 
-def near_config_block(model: str, vision_model: Optional[str] = DEFAULT_NEAR_VISION_MODEL, *,
+def near_config_block(model: str, vision_model: str | None = DEFAULT_NEAR_VISION_MODEL, *,
                       tinfoil_vision_model: str = DEFAULT_VISION_MODEL, vision_unset_reason: str = "",
                       unset_vision: str = "") -> str:
     """The NEAR config block. ``vision_model`` None leaves auxiliary.vision out of the block, with a note
@@ -957,7 +962,7 @@ def setup_next_steps(rt: Any, *, vendor: str, key_env: str, key_set: bool, verif
     steps.append("Merge the block above into config.yaml.")
     if vision_unset:
         steps.append("Set auxiliary.vision as the note in the block says.")
-    pins = getattr(rt, "pins", None)
+    pins: Any = getattr(rt, "pins", None)
     try:
         pending = [b for b in (pins.pending_all() if callable(getattr(pins, "pending_all", None))
                                else [pins.pending()]) if b is not None and getattr(b, "vendor", vendor) == vendor]
@@ -988,7 +993,7 @@ def cli_setup_near(rt: Any, args: Any, out=None) -> int:
     vision = getattr(args, "vision_model", None) or DEFAULT_NEAR_VISION_MODEL
     key_set = bool(_provider_module(rt).api_key_for(_locking.NEAR_API_KEY_ENV))
     out.write(f"{_locking.NEAR_API_KEY_ENV}: {'set' if key_set else KEY_NOT_SET_TEXT}\n")
-    block_vision: Optional[str] = vision
+    block_vision: str | None = vision
     unset_reason = ""
     if not getattr(args, "no_verify", False):
         adapter = getattr(rt, "near_adapter", None)
@@ -1116,11 +1121,12 @@ def _near_replay_module():
 
 
 def _call_replay(replay_fn: Callable[..., Any], evidence: dict, *, expected_repo: str,
-                 expected_fingerprints: Optional[tuple], trusted_root: Optional[str], as_of: Optional[str],
-                 expected_repo_id: Optional[str] = None, expected_owner_id: Optional[str] = None):
+                 expected_fingerprints: tuple | None, trusted_root: str | None, as_of: str | None,
+                 expected_repo_id: str | None = None, expected_owner_id: str | None = None):
     """Call replay with the keyword arguments it accepts. Returns (result, notes) where notes lists the
     identity checks this replay version cannot do (they are then done here, on the result fields)."""
     import inspect
+    params: Mapping[str, inspect.Parameter]
     try:
         params = inspect.signature(replay_fn).parameters
         var_kw = any(p.kind is p.VAR_KEYWORD for p in params.values())
@@ -1162,23 +1168,23 @@ def _call_replay(replay_fn: Callable[..., Any], evidence: dict, *, expected_repo
     return replay_fn(evidence, **kwargs), notes
 
 
-def _row_vendor(doc: dict, row_id: Any) -> Optional[str]:
+def _row_vendor(doc: dict, row_id: Any) -> str | None:
     for row in doc.get("rows") or []:
         if isinstance(row, dict) and row.get("id") == row_id:
-            d = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+            d = cast(dict, row.get("detail")) if isinstance(row.get("detail"), dict) else {}
             return d.get("vendor")
     return None
 
 
-def _row_claims(doc: dict, row_id: Any) -> tuple[Optional[str], Optional[str]]:
+def _row_claims(doc: dict, row_id: Any) -> tuple[str | None, str | None]:
     for row in doc.get("rows") or []:
         if isinstance(row, dict) and row.get("id") == row_id:
-            d = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+            d = cast(dict, row.get("detail")) if isinstance(row.get("detail"), dict) else {}
             return d.get("code_fingerprint"), d.get("enclave_fingerprint")
     return None, None
 
 
-def _parse_fingerprints(value: Optional[str]) -> Optional[tuple[str, str]]:
+def _parse_fingerprints(value: str | None) -> tuple[str, str] | None:
     if not value:
         return None
     code, sep, enclave = value.partition(":")
@@ -1188,14 +1194,14 @@ def _parse_fingerprints(value: Optional[str]) -> Optional[tuple[str, str]]:
     return code, enclave
 
 
-def _default_pins_path(rt: Any) -> Optional[str]:
+def _default_pins_path(rt: Any) -> str | None:
     pins = getattr(rt, "pins", None) if rt is not None else None
     path = getattr(pins, "path", None)
     return str(path) if path else None
 
 
-def _expected_for_row(*, flag: Optional[tuple], pin_records: Optional[Any], pins_path: Optional[str],
-                      vendor: str, expected_repo: str, claimed: tuple) -> tuple[Optional[tuple], str, list]:
+def _expected_for_row(*, flag: tuple | None, pin_records: Any | None, pins_path: str | None,
+                      vendor: str, expected_repo: str, claimed: tuple) -> tuple[tuple | None, str, list]:
     """(expected fingerprints, source text, approved set). Order: --expected-fingerprints, the human-approved
     pins for (vendor, expected repo), and only then the receipt's own claim (which checks the self-report
     against itself and is labelled so). ``pin_records`` is a list of approved entries (or the older mapping).
@@ -1232,7 +1238,7 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
         return 2
     pins_arg = getattr(args, "pins", None)
     pins_path = pins_arg or _default_pins_path(rt)
-    pin_records: Optional[dict] = None
+    pin_records: list | dict | None = None
     pins_note = ""
     if pins_path and not flag_fps:
         try:
@@ -1245,7 +1251,7 @@ def cli_replay(args: Any, out=None, replay_fn: Callable[..., Any] | None = None,
                 out.write(f"Cannot read pins {pins_arg!r}: {type(exc).__name__}: {exc}\n")
                 return 2
             pins_note = f" (could not read {pins_path}: {type(exc).__name__})"
-    path = getattr(args, "receipt", None)
+    path: Any = getattr(args, "receipt", None)   # a required argument
     try:
         with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
@@ -1469,7 +1475,8 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
         rt.progress = previous
     out.write(terminal_text(text).rstrip() + "\n")
     if action == "allow":
-        return 0 if text.endswith("added to the allowlist for this lock.") or text.endswith("is already allowed.") else 1
+        allowed = text.endswith("added to the allowlist for this lock.") or text.endswith("is already allowed.")
+        return 0 if allowed else 1
     if ok_prefix:
         # `pins approve` with nothing pending is a no-op, not a failure
         return 0 if text.startswith(ok_prefix) or text.startswith("No pin update is waiting") else 1
@@ -1481,7 +1488,8 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
 def register_cli(ctx: Any, rt: Any) -> None:
     def setup_fn(parser: argparse.ArgumentParser) -> None:
         sub = parser.add_subparsers(dest="confidential_action")
-        p = sub.add_parser("setup", help="verify the Tinfoil enclave (or, with --vendor near, NEAR AI Cloud), approve the first pin, print a config block")
+        p = sub.add_parser("setup", help="verify the Tinfoil enclave (or, with --vendor near, NEAR AI Cloud), "
+                                         "approve the first pin, print a config block")
         p.add_argument("--model", default=None, help="model id to put in the printed config block")
         p.add_argument("--vision-model", default=None,
                        help=f"vision-capable model for auxiliary.vision (default {DEFAULT_VISION_MODEL}; with "
@@ -1513,7 +1521,8 @@ def register_cli(ctx: Any, rt: Any) -> None:
                                         "builds the review bundle; 'retire <fingerprint>' removes an approved entry")
         p.add_argument("pins_action", nargs="?", choices=["approve", "review", "retire"], default=None)
         p.add_argument("fingerprint", nargs="?", default=None, help="for retire: 8 or more hex digits of a fingerprint")
-        p.add_argument("--reviewed-by", default=None, help="for approve: who reviewed the bundle (recorded on the entries)")
+        p.add_argument("--reviewed-by", default=None,
+                       help="for approve: who reviewed the bundle (recorded on the entries)")
         p.add_argument("--note", default=None, help="for approve: the reviewer's verdict (recorded on the entries)")
         p.add_argument("--json", action="store_true", help="for review: the bundle as JSON")
         p.add_argument("--no-fetch", action="store_true", help="for review: use cached inner compose files only")

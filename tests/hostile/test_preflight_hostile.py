@@ -19,8 +19,7 @@ import re
 import pytest
 
 from confidential_mode import preflight  # ImportError until W3 merges is expected
-from confidential_mode.preflight import (config_fingerprint, format_report, load_core_config,
-                                         plugin_aux_task_names, run_preflight)
+from confidential_mode.preflight import config_fingerprint, format_report, load_core_config, run_preflight
 from confidential_mode.tiers import AttestedPredicate, OnHostPredicate, Tier, Verdict, ZdrPredicate
 
 ON_HOST_URL = "http://127.0.0.1:11434/v1"
@@ -132,7 +131,8 @@ def predicate_for(tier, profiles):
 
 def run(tier, cfg, monkeypatch=None, *, plugin_tasks=(), profiles=None):
     tasks = list(plugin_tasks)
-    lookup = (lambda name, *a, **k: (profiles or {}).get(name))
+    def lookup(name, *a, **k):
+        return (profiles or {}).get(name)
     kwargs = dict(plugin_aux_tasks=tasks, isolation=preflight.plugin_isolation(cfg),
                   provider_lookup=lookup, attested_profile=ATTESTED if tier == Tier.ATTESTED else None)
     snapshot = copy.deepcopy(cfg)

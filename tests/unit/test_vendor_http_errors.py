@@ -112,6 +112,7 @@ def test_a_github_proxy_error_names_the_proxy(tinfoil_sdk, monkeypatch, tmp_path
 
 def test_router_discovery_says_discovery(tmp_path):
     import urllib.error
+
     from confidential_mode.verify.tinfoil import TinfoilAdapter
 
     def discover():

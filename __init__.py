@@ -24,7 +24,8 @@ import logging
 import os
 import threading
 from collections import OrderedDict, deque
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ TURN_CHECK_WAIT_SECONDS = 60.0   # how long a second caller waits for the rechec
 TURN_CHECK_DEFERRED = ("", "deferred")
 NO_SESSION = "(no session)"
 
-_RUNTIME: Optional["Runtime"] = None   # the last registered runtime (commands, tests)
+_RUNTIME: Runtime | None = None   # the last registered runtime (commands, tests)
 
 
 def _cm(name: str):
@@ -88,7 +89,7 @@ class Runtime:
         self.revocations: Any = None             # revoke.RevocationWatcher (Amendment 10)
         self._lock = threading.Lock()
         self._aux_seen: deque = deque(maxlen=512)
-        self.last_live: Optional[dict] = None      # last live main runtime seen by pre_llm_call (status)
+        self.last_live: dict | None = None      # last live main runtime seen by pre_llm_call (status)
         # Amendment 9: the lock (its locked_since) whose first plaintext image part was already noticed,
         # and the sessions whose next reply gets the one-line notice.
         self.image_notice_lock: Any = _NO_LOCK
@@ -98,7 +99,7 @@ class Runtime:
         # Amendment 13 (S17): the per-turn recheck, keyed by (session id, turn id, lock id, tier), shared by
         # the pre_llm_call hook and the llm gate so the work runs once per turn whichever of the two runs
         # first; each value is a _TurnCheck, which a second caller waits on while the first computes.
-        self._turn_checks: "OrderedDict[tuple[str, str, str, str], Any]" = OrderedDict()
+        self._turn_checks: OrderedDict[tuple[str, str, str, str], Any] = OrderedDict()
         self._turn_lock = threading.Lock()
 
     # ── shared collaborators ──────────────────────────────────────────────────────────────────
@@ -178,7 +179,7 @@ class Runtime:
         return allowlist
 
     def turn_check(self, session_id: str, turn_id: str, tier: Any, *,
-                   lookups: bool = True) -> Optional[tuple[str, str]]:
+                   lookups: bool = True) -> tuple[str, str] | None:
         """The full per-turn recheck (Amendment 13, S17): the structural preflight recheck
         (``locking.recheck``, which writes the ``config_changed`` / ``preflight_failed`` breach rows) and the
         live-runtime check (``live_runtime_off_tier`` / ``live_runtime_unreadable`` rows, mark_breached).
@@ -226,7 +227,7 @@ class Runtime:
             entry.done.set()
             return result
 
-    def _turn_check_scoped(self, session_id: str, tier: Any, lookups: bool, tiers: Any) -> Optional[tuple[str, str]]:
+    def _turn_check_scoped(self, session_id: str, tier: Any, lookups: bool, tiers: Any) -> tuple[str, str] | None:
         if lookups:
             return self._turn_check_uncached(session_id, tier)
         try:
@@ -235,7 +236,7 @@ class Runtime:
         except tiers.LookupDeferred:
             return TURN_CHECK_DEFERRED
 
-    def _turn_check_uncached(self, session_id: str, tier: Any) -> Optional[tuple[str, str]]:
+    def _turn_check_uncached(self, session_id: str, tier: Any) -> tuple[str, str] | None:
         try:
             locking = _cm("locking")
         except Exception:  # noqa: BLE001
@@ -328,7 +329,8 @@ class _ChangedConfigPredicate:
 # ── registration steps ───────────────────────────────────────────────────────────────────────────
 
 def _locked_now(rt: Runtime) -> bool:
-    """True only when the persisted state reads locked on the attested tier. Never raises (unreadable counts as not locked,
+    """True only when the persisted state reads locked on the attested tier. Never raises (unreadable counts
+    as not locked,
     which stops the background refresh; the gates fail closed on their own)."""
     try:
         locked, tier = rt.is_locked()
@@ -649,7 +651,7 @@ def _pre_llm_call(rt: Runtime):
     return pre_llm_call
 
 
-def _live_runtime_check(rt: Runtime, locking: Any, tier: Any, session_id: str) -> Optional[str]:
+def _live_runtime_check(rt: Runtime, locking: Any, tier: Any, session_id: str) -> str | None:
     """Amendment 4 F1(a): the live main runtime (what "auto" aux tasks and the main call use) must be in-tier.
     It is published at agent/turn_context.py:1140, before this hook (:1236); turn-start compaction (:1245),
     memory prefetch (:1264) and titling (:1271) all run after it and are skipped when it blocks."""
@@ -728,7 +730,7 @@ def _pre_gateway_dispatch(rt: Runtime):
     return pre_gateway_dispatch
 
 
-def _bytes_of(request: Any, chars: Any) -> Optional[int]:
+def _bytes_of(request: Any, chars: Any) -> int | None:
     n = _cm("gate_llm").request_bytes(request) if request is not None else None
     if n is None and isinstance(chars, int) and not isinstance(chars, bool):
         n = chars
@@ -753,7 +755,7 @@ def _observe(rt: Runtime, *, purpose: str, provider: Any, base_url: Any, model: 
         tier_value = tier.value
         try:
             v = locking.structural_predicate(tier, config=rt.load_config()).classify(dest)
-            off, reason = not (v.in_tier is True), v.reason
+            off, reason = v.in_tier is not True, v.reason
             host = v.host or host
         except Exception as exc:  # noqa: BLE001
             off, reason = True, f"tier check failed ({type(exc).__name__})"

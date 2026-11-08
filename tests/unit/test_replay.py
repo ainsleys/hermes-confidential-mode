@@ -20,7 +20,7 @@ import json
 import socket
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,14 +31,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 tinfoil_client = pytest.importorskip("tinfoil.client")
 
 import httpx  # noqa: E402
+import tinfoil.github as tf_github  # noqa: E402
+import tinfoil.sigstore as tf_sigstore  # noqa: E402
 from cryptography import x509  # noqa: E402
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, x25519  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature  # noqa: E402
 from cryptography.x509.oid import NameOID  # noqa: E402
-
-import tinfoil.github as tf_github  # noqa: E402
-import tinfoil.sigstore as tf_sigstore  # noqa: E402
 from tinfoil.attestation import attestation_tdx, collateral_tdx, verify_sev  # noqa: E402
 from tinfoil.attestation.types import Measurement, PredicateType  # noqa: E402
 
@@ -50,7 +49,7 @@ ENCLAVE = "router.tinfoil.invalid"
 REPO = "tinfoilsh/confidential-model-router"
 TAG = "v1.2.3"
 DIGEST = "ab" * 32
-CAPTURED_AT = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+CAPTURED_AT = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
 FIXTURE_KEY = b"test-only sigstore stand-in"
 SNP = bytes(range(48))
 RTMR1, RTMR2 = "22" * 48, "33" * 48
@@ -235,7 +234,7 @@ def signed_bundle(statement: dict, *, repo: str, tag: str | None, cert_repo: str
                              "mac": hmac.new(FIXTURE_KEY, payload, "sha256").hexdigest()}}
 
 
-def code_statement(digest=DIGEST, snp=SNP.hex()):
+def code_statement(digest=DIGEST, snp=SNP.hex()):  # noqa: B008 - SNP is a module constant
     return {"_type": "https://in-toto.io/Statement/v1", "subject": [{"name": "x", "digest": {"sha256": digest}}],
             "predicateType": PredicateType.SNP_TDX_MULTIPLATFORM_v1.value,
             "predicate": {"snp_measurement": snp, "tdx_measurement": {"rtmr1": RTMR1, "rtmr2": RTMR2}}}
@@ -489,6 +488,7 @@ def test_replay_puts_the_sdk_clock_and_crypto_back(captured, offline, fake_sigst
     """The clock and crypto rebinds last for the replay only (rule 9 grey area): afterwards each SDK module
     attribute is the library's own again."""
     from datetime import datetime as real_datetime
+
     from tinfoil.attestation import cert_utils, collateral_tdx, verify_sev
     before = (collateral_tdx.datetime, cert_utils.datetime, verify_sev.crypto)
     assert before[0] is real_datetime and before[1] is real_datetime
@@ -588,6 +588,7 @@ def test_replay_network_ban_is_thread_scoped(offline):
 def test_replay_network_ban_covers_urllib3_and_httpx(offline):
     """Review finding 21: python-tuf's default fetcher is urllib3, and httpx is on the import path too."""
     import asyncio
+
     import httpx
     import urllib3
     attempts = []
@@ -659,8 +660,9 @@ def tdx_world(monkeypatch, fake_sigstore, tmp_path):
     pem, crl = _pem_chain()
     nxt = (CAPTURED_AT + timedelta(days=30)).isoformat()
     b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
-    from confidential_mode.verify.tinfoil import store_trust_root
     import sigstore as _sg
+
+    from confidential_mode.verify.tinfoil import store_trust_root
     root = (Path(_sg.__file__).parent / "_store" / "https%3A%2F%2Ftuf-repo-cdn.sigstore.dev" /
             "trusted_root.json").read_bytes()
     sha, path = store_trust_root(tmp_path / "trust-roots", root)
@@ -875,6 +877,7 @@ def test_repo_identity_ids_requested_but_absent_from_the_certificate(captured, o
 
 def test_policy_check_module_has_no_tinfoil_import_and_runs_isolated(captured, tmp_path):
     import subprocess
+
     from confidential_mode.verify import policy_check
     src = Path(policy_check.__file__).read_text()
     import re

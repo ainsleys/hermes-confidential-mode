@@ -338,7 +338,7 @@ def test_vendor_only_pin_store_does_not_match_other_vendor(cm, tmp_path):
 def test_stale_pending_apply_applies_exactly_what_it_names(cm, tmp_path):
     store = _fresh(cm, tmp_path)
     p_a = store.stage(_res(cm, **A))
-    p_b = store.stage(_res(cm, **B))
+    store.stage(_res(cm, **B))
     assert h.contains(store.pending(), h.FP_CODE_2), "pending() is not the latest staged pin"
     try:
         h.apply(store, p_a)

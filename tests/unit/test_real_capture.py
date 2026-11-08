@@ -23,7 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytest.importorskip("tinfoil.client")
 
-from confidential_mode.verify import policy_check, replay as replay_mod  # noqa: E402
+from confidential_mode.verify import policy_check  # noqa: E402
 from confidential_mode.verify.replay import replay  # noqa: E402
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures" / "real_capture_sev"

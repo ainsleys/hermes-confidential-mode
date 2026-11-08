@@ -21,10 +21,10 @@ from __future__ import annotations
 import contextvars
 import threading
 from collections import OrderedDict
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator, Optional
 
-_CTX: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar("confidential_send_context", default=None)
+_CTX: contextvars.ContextVar[dict | None] = contextvars.ContextVar("confidential_send_context", default=None)
 
 
 @contextmanager
@@ -38,7 +38,7 @@ def send_context(**fields) -> Iterator[dict]:
 
 
 #: Session and tier of recent auxiliary calls by Hermes' relay request id, noted by pre_auxiliary_call.
-_AUX_NOTES: "OrderedDict[str, dict]" = OrderedDict()
+_AUX_NOTES: OrderedDict[str, dict] = OrderedDict()
 _AUX_LOCK = threading.Lock()
 MAX_AUX_NOTES = 256
 
@@ -57,7 +57,7 @@ def note_aux(api_request_id: str, **fields) -> None:
         pass
 
 
-def aux_current() -> Optional[dict]:
+def aux_current() -> dict | None:
     """The send context of the auxiliary call running in this context, or None. Hermes binds one relay
     context per auxiliary call (agent/auxiliary_client.py ``_RELAY_AUX_CALL_CONTEXT``, a ContextVar
     copied into the provider worker thread, Hermes 84a0301); its task gives the purpose. Never raises."""
@@ -78,7 +78,7 @@ def aux_current() -> Optional[dict]:
     return out
 
 
-def current() -> Optional[dict]:
+def current() -> dict | None:
     """The send context in effect: an auxiliary call's (``aux_current``) when one is running, else the
     one the gate set, else None."""
     aux = aux_current()
@@ -88,7 +88,7 @@ def current() -> Optional[dict]:
     return dict(value) if isinstance(value, dict) else None
 
 
-_RECORDS: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar("confidential_send_records",
+_RECORDS: contextvars.ContextVar[list | None] = contextvars.ContextVar("confidential_send_records",
                                                                             default=None)
 
 

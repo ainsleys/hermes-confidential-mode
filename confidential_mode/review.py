@@ -12,8 +12,10 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, cast
 
 # The brief's rules come before any vendor text, and they are fixed: the bundle never lets vendor text
 # change them.
@@ -76,13 +78,13 @@ def composes_dir(data_dir: Path | str) -> Path:
     return Path(data_dir).joinpath(*COMPOSES_SUBDIR)
 
 
-def github_repo(url: Any) -> Optional[str]:
+def github_repo(url: Any) -> str | None:
     """"owner/repo" from a GITHUB_REPO value such as https://github.com/nearai/cvm-compose-files, or None."""
     m = _GITHUB_REPO_URL.fullmatch(str(url or "").strip())
     return m.group(1) if m and ".." not in m.group(1) else None
 
 
-def repo_of_app_compose(app_compose: Optional[str]) -> Optional[str]:
+def repo_of_app_compose(app_compose: str | None) -> str | None:
     """The one GITHUB_REPO a measured app_compose names, as owner/repo, or None (none, several, or not
     github.com)."""
     f = outer_fields(app_compose)
@@ -91,7 +93,7 @@ def repo_of_app_compose(app_compose: Optional[str]) -> Optional[str]:
     return repos.pop() if len(repos) == 1 and None not in repos else None
 
 
-def compose_url(commit: str, file: str, repo: Optional[str]) -> Optional[str]:
+def compose_url(commit: str | None, file: str | None, repo: str | None) -> str | None:
     """The raw GitHub URL of ``file`` at ``commit`` in ``repo`` (owner/repo from the measured GITHUB_REPO),
     or None when any of them is not a plain commit id, repo path or repository (vendor strings never reach
     a URL unchecked)."""
@@ -104,7 +106,7 @@ def compose_url(commit: str, file: str, repo: Optional[str]) -> Optional[str]:
     return COMPOSE_URL.format(repo=repo, commit=commit, file=file)
 
 
-def cached_compose(cdir: Optional[Path], sha256: str) -> Optional[str]:
+def cached_compose(cdir: Path | None, sha256: str | None) -> str | None:
     """The cached text whose SHA-256 is ``sha256``, or None (missing, unreadable, or not that hash)."""
     if cdir is None or not (isinstance(sha256, str) and _SHA256.fullmatch(sha256)):
         return None
@@ -160,8 +162,8 @@ def _http_get(url: str, *, timeout: float = 20.0, accept: str = "*/*") -> bytes:
 Fetcher = Callable[[str], bytes]
 
 
-def fetch_compose(cdir: Path, commit: str, file: str, sha256: str, *, repo: Optional[str] = None,
-                  fetch: Optional[Fetcher] = None) -> tuple[Optional[str], Optional[str]]:
+def fetch_compose(cdir: Path, commit: str | None, file: str | None, sha256: str | None, *, repo: str | None = None,
+                  fetch: Fetcher | None = None) -> tuple[str | None, str | None]:
     """(text, error). The cached copy when present; else GET the raw file, check its SHA-256 against the
     log's file_sha256, and cache it. Never raises."""
     text = cached_compose(cdir, sha256)
@@ -186,7 +188,7 @@ def fetch_compose(cdir: Path, commit: str, file: str, sha256: str, *, repo: Opti
 
 
 def _yaml_load(text: str) -> Any:
-    from .hermes_compat import yaml_module   # hermes_yaml, or PyYAML for standalone use
+    from .hermes_compat import yaml_module  # hermes_yaml, or PyYAML for standalone use
     return yaml_module().safe_load(text)
 
 
@@ -245,7 +247,7 @@ def service_tags(text: str) -> dict[str, list[str]]:
     return out
 
 
-def map_tags(services_map: Optional[Mapping], cdir: Optional[Path]) -> tuple[Optional[dict], list]:
+def map_tags(services_map: Mapping | None, cdir: Path | None) -> tuple[dict | None, list]:
     """Tags for every entry of a per-service map, from cached texts only (no network). Returns (tags, missing):
     tags is {map key: [tags]} when every file the map names is cached and parses, else None; missing lists
     {file, commit, file_sha256, reason} for each file that is not."""
@@ -264,7 +266,7 @@ def map_tags(services_map: Optional[Mapping], cdir: Optional[Path]) -> tuple[Opt
                             "reason": TEXT_NOT_FETCHED})
             continue
         try:
-            parsed[sha] = service_tags(text)
+            parsed[sha] = service_tags(text)  # type: ignore[index]  # a str: cached_compose found it
         except Exception as exc:  # noqa: BLE001
             missing.append({"file": v.get("file"), "commit": v.get("commit"), "file_sha256": sha,
                             "reason": f"text does not parse as a compose file ({type(exc).__name__})"})
@@ -355,7 +357,7 @@ _ENV_LINE = {"GITHUB_REPO": re.compile(r"\bGITHUB_REPO\s*[=:]\s*\"?([^\s\"]+)"),
              "CM_MIN_TAG_AGE_HOURS": re.compile(r"\bCM_MIN_TAG_AGE_HOURS\s*[=:]\s*\"?([^\s\"]+)")}
 
 
-def outer_fields(app_compose: Optional[str]) -> Optional[dict]:
+def outer_fields(app_compose: str | None) -> dict | None:
     """The reviewable fields of one measured app_compose (dstack's JSON), or None when it does not parse."""
     if not isinstance(app_compose, str):
         return None
@@ -365,7 +367,7 @@ def outer_fields(app_compose: Optional[str]) -> Optional[dict]:
         return None
     if not isinstance(doc, Mapping):
         return None
-    dc = doc.get("docker_compose_file") if isinstance(doc.get("docker_compose_file"), str) else ""
+    dc = cast(str, doc.get("docker_compose_file")) if isinstance(doc.get("docker_compose_file"), str) else ""
     out: dict = {k: doc.get(k) for k in MANIFEST_FLAGS}
     out["allowed_envs"] = sorted(str(x) for x in doc.get("allowed_envs") or [])
     out["pre_launch_script"] = doc.get("pre_launch_script")
@@ -376,13 +378,13 @@ def outer_fields(app_compose: Optional[str]) -> Optional[dict]:
     return out
 
 
-def _diff(old: Optional[str], new: Optional[str], old_name: str, new_name: str) -> Optional[list]:
+def _diff(old: str | None, new: str | None, old_name: str, new_name: str) -> list | None:
     if not isinstance(old, str) or not isinstance(new, str):
         return None
     return list(difflib.unified_diff(old.splitlines(), new.splitlines(), old_name, new_name, lineterm="", n=2))
 
 
-def _field_changes(old: Optional[dict], new: Optional[dict]) -> list:
+def _field_changes(old: dict | None, new: dict | None) -> list:
     names = MANIFEST_FLAGS + ("allowed_envs", "GITHUB_REPO", "CM_MIN_TAG_AGE_HOURS", "pre_launch_script", "images")
     out = []
     for n in names:
@@ -397,14 +399,14 @@ def _field_changes(old: Optional[dict], new: Optional[dict]) -> list:
 
 # ── commit metadata ────────────────────────────────────────────────────────────────────────────────
 
-def commit_meta(cdir: Path, commit: str, *, repo: Optional[str] = None, fetch: Optional[Fetcher] = None,
+def commit_meta(cdir: Path, commit: str | None, *, repo: str | None = None, fetch: Fetcher | None = None,
                 allow_fetch: bool = True) -> dict:
     """{author, date, committer, message (first line), url} from GitHub's commit API, cached beside the
     compose texts; {"status": "not fetched", ...} when unavailable. Unsigned metadata: a hint, not proof."""
     if not (isinstance(commit, str) and _COMMIT.fullmatch(commit)):
         return {"status": "not fetched", "reason": "not a commit id"}
     path = Path(cdir) / f"commit-{commit}.json"
-    data: Optional[dict] = None
+    data: dict | None = None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -423,9 +425,9 @@ def commit_meta(cdir: Path, commit: str, *, repo: Optional[str] = None, fetch: O
             return {"status": "not fetched", "reason": f"fetch failed ({type(exc).__name__})"}
     if not isinstance(data, dict):
         return {"status": "not fetched", "reason": "no cached copy and fetching is off"}
-    c = data.get("commit") if isinstance(data.get("commit"), Mapping) else {}
-    a = c.get("author") if isinstance(c.get("author"), Mapping) else {}
-    m = c.get("committer") if isinstance(c.get("committer"), Mapping) else {}
+    c = cast(Mapping, data.get("commit")) if isinstance(data.get("commit"), Mapping) else {}
+    a = cast(Mapping, c.get("author")) if isinstance(c.get("author"), Mapping) else {}
+    m = cast(Mapping, c.get("committer")) if isinstance(c.get("committer"), Mapping) else {}
     return {"status": "fetched", "author": a.get("name"), "date": a.get("date"), "committer": m.get("name"),
             "committed": m.get("date"), "message": str(c.get("message") or "").splitlines()[:1],
             "url": data.get("html_url"),
@@ -443,7 +445,7 @@ def _baseline(entry: Any, approved: list) -> Any:
     return same[-1] if same else None
 
 
-def _services_diff(old: Optional[Mapping], new: Optional[Mapping]) -> dict:
+def _services_diff(old: Mapping | None, new: Mapping | None) -> dict:
     out: dict = {"old": dict(old) if isinstance(old, Mapping) else None,
                  "new": dict(new) if isinstance(new, Mapping) else None}
     if isinstance(old, Mapping) and isinstance(new, Mapping):
@@ -453,9 +455,9 @@ def _services_diff(old: Optional[Mapping], new: Optional[Mapping]) -> dict:
     return out
 
 
-def _inner_files(services: Optional[Mapping], old_services: Optional[Mapping], cdir: Path, *,
-                 fetch: Optional[Fetcher], allow_fetch: bool, repo: Optional[str] = None,
-                 old_repo: Optional[str] = None) -> list:
+def _inner_files(services: Mapping | None, old_services: Mapping | None, cdir: Path, *,
+                 fetch: Fetcher | None, allow_fetch: bool, repo: str | None = None,
+                 old_repo: str | None = None) -> list:
     files: dict[str, dict] = {}
     for v in (services or {}).values():
         if not isinstance(v, Mapping) or v.get("file_sha256") in files:
@@ -489,7 +491,7 @@ def _inner_files(services: Optional[Mapping], old_services: Optional[Mapping], c
                           if otext is not None and text is not None else TEXT_NOT_FETCHED})
         item["diffs_from_approved"] = diffs
         item["_text"] = text
-        files[sha] = item
+        files[sha] = item  # type: ignore[index]  # the log's file_sha256, kept as found
     if not old_services:
         # No baseline: the reviewer gets the text itself. For each file path, the commit most services run is
         # shown in full and every other commit of that path as a diff against it.
@@ -514,7 +516,7 @@ def _inner_files(services: Optional[Mapping], old_services: Optional[Mapping], c
     return list(files.values())
 
 
-def entry_review(entry: Any, approved: list, *, ledger: Any, cdir: Path, fetch: Optional[Fetcher] = None,
+def entry_review(entry: Any, approved: list, *, ledger: Any, cdir: Path, fetch: Fetcher | None = None,
                  allow_fetch: bool = True) -> dict:
     """Everything a reviewer needs for one pending entry. Never raises for missing pieces: each one it could
     not get is named, with the reason."""
@@ -599,7 +601,7 @@ def entry_review(entry: Any, approved: list, *, ledger: Any, cdir: Path, fetch: 
     return out
 
 
-def _blob(ledger: Any, blob_id: Any) -> Optional[str]:
+def _blob(ledger: Any, blob_id: Any) -> str | None:
     get = getattr(ledger, "blob", None)
     if not callable(get) or not isinstance(blob_id, str):
         return None
@@ -609,8 +611,8 @@ def _blob(ledger: Any, blob_id: Any) -> Optional[str]:
         return None
 
 
-def build_bundle(store: Any, ledger: Any, *, fetch: Optional[Fetcher] = None, allow_fetch: bool = True,
-                 now: Optional[str] = None) -> dict:
+def build_bundle(store: Any, ledger: Any, *, fetch: Fetcher | None = None, allow_fetch: bool = True,
+                 now: str | None = None) -> dict:
     """The review bundle for every pending batch. Fetching (inner compose texts, commit metadata) happens
     first; then the store refreshes its pending entries, so the services join the pinned components when
     every tag can be shown, and the bundle describes the refreshed batches."""
@@ -650,7 +652,7 @@ def build_bundle(store: Any, ledger: Any, *, fetch: Optional[Fetcher] = None, al
                       "approved": [{"cvm_role": a.cvm_role, "code_fingerprint": a.code_fingerprint,
                                     "enclave_fingerprint": a.enclave_fingerprint, "approved_at": a.approved_at,
                                     "approved_via": a.approved_via, "reviewed_by": a.reviewed_by,
-                                    "unseen_recently": bool(u)} for a, u in zip(approved, unseen)],
+                                    "unseen_recently": bool(u)} for a, u in zip(approved, unseen, strict=False)],
                       "entries": [entry_review(e, approved, ledger=ledger, cdir=cdir, fetch=fetch,
                                                allow_fetch=allow_fetch) for e in pend.entries]}
         if pend.vendor != "near":
@@ -661,8 +663,8 @@ def build_bundle(store: Any, ledger: Any, *, fetch: Optional[Fetcher] = None, al
                                "previous_platform": pend.previous_platform,
                                "code_changed": pend.code_changed, "platform_only": pend.platform_only}
         out.append(item)
-    from datetime import datetime, timezone
-    return {"schema": SCHEMA, "generated_at": now or datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    from datetime import datetime
+    return {"schema": SCHEMA, "generated_at": now or datetime.now(UTC).replace(microsecond=0).isoformat(),
             "brief": brief(b["vendor"] for b in out), "pending": out,
             "approve_with": "hermes confidential pins approve --reviewed-by <name> --note <verdict>, run by you in "
                             "a terminal you opened"}
@@ -724,7 +726,8 @@ def _entry_text(n: int, e: Mapping) -> list[str]:
     base = e.get("baseline")
     out.append("     baseline: " + ("none (no approved entry of this role; the full texts are shown below)"
                                     if base is None else
-                                    f"the approved entry code {_r(base['code_fingerprint'])} ({_r(base.get('note') or 'per-CVM')})"))
+                                    f"the approved entry code {_r(base['code_fingerprint'])} "
+                                    f"({_r(base.get('note') or 'per-CVM')})"))
     for c in e.get("components") or []:
         out.append(f"     component {_r(c['name'])}{' (pinned)' if c['pinned'] is True else ' (shown only)'}: old "
                    f"{_r(c['old'])} new {_r(c['new'])}{'  CHANGED' if c['changed'] is True else ''}")
@@ -779,7 +782,8 @@ def _entry_text(n: int, e: Mapping) -> list[str]:
                     out.append(f"       diff from the approved entry's commit {_r(d['old_commit'])}: {_r(d['diff'])}")
             ref = f.get("diff_from_reference")
             if isinstance(ref, Mapping):
-                out += _text_lines(f"diff from the full text of commit {_r(ref['reference_commit'])}", ref["diff"] or [])
+                out += _text_lines(f"diff from the full text of commit {_r(ref['reference_commit'])}",
+                                   ref["diff"] or [])
             elif ref is not None:
                 out.append(f"       diff from the full text: {_r(ref)}")
             if f.get("full_text"):
@@ -837,7 +841,8 @@ BUNDLE_SCHEMA = {
         "schema": {"enum": [SCHEMA]},
         "brief": {"type": "object", "required": ["rules", "questions", "output_format"],
                   "properties": {"rules": {"type": "array", "items": {"type": "string"}},
-                                 "questions": {"type": "array", "items": {"type": "object", "required": ["id", "text"]}},
+                                 "questions": {"type": "array",
+                                               "items": {"type": "object", "required": ["id", "text"]}},
                                  "output_format": {"type": "array", "items": {"type": "string"}}}},
         "pending": {"type": "array", "items": {
             "type": "object", "required": ["vendor", "identity", "staged_at", "code_fingerprint",

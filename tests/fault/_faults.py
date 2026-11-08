@@ -15,8 +15,8 @@ import errno
 import os
 import sqlite3
 import stat
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 ENOSPC = errno.ENOSPC
 EACCES = errno.EACCES

@@ -21,7 +21,6 @@ from confidential_mode import provider as provider_mod
 from confidential_mode.ledger import Ledger
 from confidential_mode.pins import PinStore
 from confidential_mode.receipts import _send_coverage
-from confidential_mode.verify import near
 from confidential_mode.verify.base import VerifyError
 
 from ..near_world import BASE, HOST, JWKS_URL, MODEL, NOW, NearWorld, tls_cert

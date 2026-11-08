@@ -12,10 +12,10 @@ import threading
 import httpx
 import pytest
 
+from ..near_world import BASE, MODEL
+from ._harness import no_lazy_installs  # noqa: F401  (fixture)
 from .test_near_seam import _approve, _sub, near  # noqa: F401  (fixture)
 from .test_register import plugin  # noqa: F401  (fixture)
-from ._harness import no_lazy_installs  # noqa: F401  (fixture)
-from ..near_world import BASE, MODEL
 
 P = "attested-near"
 

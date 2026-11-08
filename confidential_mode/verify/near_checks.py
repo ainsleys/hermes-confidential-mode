@@ -35,8 +35,9 @@ import hmac
 import json
 import re
 import struct
-from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC, datetime
+from typing import Any, cast
 
 SIGNING_ALGO = "ed25519"
 SIGNATURE_KINDS = ("provider_tee", "gateway")
@@ -208,7 +209,7 @@ def check_report(report: Mapping, *, nonce: str, app_composes: Mapping[str, str]
 
 # ── JWS / JWKS (Intel Trust Authority) ─────────────────────────────────────────────────────────
 
-def _cert_chain_ok(x5c: list, roots: Mapping[str, str], at: datetime):
+def _cert_chain_ok(x5c: Any, roots: Mapping[str, str], at: datetime):
     from cryptography import x509
     if not isinstance(x5c, list) or len(x5c) < 2:
         raise CheckError("JWKS key has no x5c chain")
@@ -271,7 +272,8 @@ def verify_jwt(token: str, keys: Mapping, *, at: float, issuers: Iterable[str] =
         raise CheckError("token kid/alg not in the JWKS")
     pub, _root = entry
     hash_cls = {"256": hashes.SHA256, "384": hashes.SHA384}[alg[2:]]
-    pad = (padding.PSS(mgf=padding.MGF1(hash_cls()), salt_length=hash_cls.digest_size) if alg.startswith("PS")
+    pad = (padding.PSS(mgf=padding.MGF1(hash_cls()), salt_length=hash_cls.digest_size)  # type: ignore[arg-type]  # a class attribute, an int
+           if alg.startswith("PS")
            else padding.PKCS1v15())
     try:
         pub.verify(sig, f"{h64}.{p64}".encode("ascii"), pad, hash_cls())
@@ -353,11 +355,12 @@ def check_signature(sig: Mapping | None, *, model: str | None, request_sha256: s
         out["reason"] = "signed text does not equal the expected payload for this kind and these digests"
         return out
     address = sig.get("signing_address")
-    out["signature_valid"] = isinstance(address, str) and ed25519_ok(address, str(sig.get("signature") or ""), text)
+    out["signature_valid"] = isinstance(address, str) and ed25519_ok(address, str(sig.get("signature") or ""),
+                                                                         cast(str, text))
     if not out["signature_valid"]:
         out["reason"] = "ed25519 signature does not verify under signing_address"
         return out
-    addr = address.lower().removeprefix("0x")
+    addr = cast(str, address).lower().removeprefix("0x")   # signature_valid holds only for a str
     if kind == "provider_tee":
         # Instances of one model share one key (NEAR's documentation), so equal keys are one signer, not an
         # ambiguity; which instance answered is listed as not established.
@@ -386,7 +389,7 @@ def check_signature(sig: Mapping | None, *, model: str | None, request_sha256: s
 
 
 def utc(ts: float) -> datetime:
-    return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    return datetime.fromtimestamp(float(ts), tz=UTC)
 
 
 # ── RTMR3-recorded identity (dstack boot events) ───────────────────────────────────────────────
@@ -707,7 +710,7 @@ def check_compose_manager(cm: Any, *, nonce: str, model_quote: Mapping, quote_ve
     if cm.get("report_data") not in (None, "") and hexbytes(cm["report_data"], "report_data") != ah + cn:
         raise CmCheckError("cm_report_data", "echoed report_data differs from the verified quote")
     # 4. the actions log hashes to the bound actions_hash (mandatory; no construction is guessed)
-    actions = cm.get("actions")
+    actions = cast(list, cm.get("actions"))   # actions_hash refuses anything but a non-empty list
     if actions_hash(actions) != ah.hex():
         raise CmCheckError("cm_actions_hash", "the actions log does not hash to the bound actions_hash")
     # 5. replay the log; 6. order it for display (the component is the whole map)
