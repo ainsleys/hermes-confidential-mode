@@ -88,6 +88,7 @@ class _Entry:
     refresh_lead_seconds: float = DEFAULT_REFRESH_LEAD_SECONDS
     refresher: Any = None           # the entry's BackgroundRefresh, when one was started
     used_mono: float = float("-inf")  # the last time ensure() accepted the cached result
+    generation: Any = None          # the lock generation the result was accepted under (set_lock_generation)
 
 
 class VerificationCache:
@@ -100,6 +101,9 @@ class VerificationCache:
         # Whether the background refresh may run (the plugin passes "the profile is locked"). None defers
         # to the module's set_background_gate(); with neither, the refresh never runs.
         self.active: Callable[[], bool] | None = None
+        # The lock generation (the plugin passes "the lock the persisted state holds now"). None defers to
+        # the module's set_lock_generation(); with neither, only the TTL bounds a result.
+        self.generation: Callable[[], object] | None = None
         self.refresh_poll_seconds = REFRESH_POLL_SECONDS
 
     def _wire_adapter_sink(self, provider: str, e: _Entry) -> None:
@@ -161,8 +165,30 @@ class VerificationCache:
         return e.last_error if e else None
 
     def fresh(self, provider: str) -> bool:
+        """A result vouches only inside its TTL and under the lock generation it was accepted under: a lock
+        or unlock made since, in this process or another (the CLI against a running gateway), makes the
+        next call verify again."""
         e = self._entries.get(provider)
-        return bool(e and e.result is not None and self._now() - e.verified_mono < e.ttl_seconds)
+        return bool(e and e.result is not None and self._now() - e.verified_mono < e.ttl_seconds
+                    and e.generation == self._generation())
+
+    def _generation(self) -> object:
+        """The lock generation now (self.generation, else the module's set_lock_generation(); None with
+        neither). Never raises."""
+        try:
+            fn = self.generation if self.generation is not None else _LOCK_GENERATION
+            return fn() if fn is not None else None
+        except Exception:
+            return None
+
+    def adopt_generation(self) -> None:
+        """Stamp every cached result with the lock generation now. The lock calls this right after it writes
+        the lock flag, so the verification the lock was taken on belongs to that lock and is not repeated."""
+        gen = self._generation()
+        for e in list(self._entries.values()):
+            with e.lock:
+                if e.result is not None:
+                    e.generation = gen
 
     def invalidate(self, provider: str) -> None:
         """Drop the cached verification (unlock, an HTTP 421, a TLS pin mismatch) and stop the entry's
@@ -243,6 +269,7 @@ class VerificationCache:
                 raise VerifyError(reason)
             with e.lock:
                 e.result, e.verified_mono, e.last_error, e.failed_mono = result, self._now(), None, None
+                e.generation = self._generation()
             return result
 
     def _start_refresh(self, provider: str, e: _Entry) -> threading.Event:
@@ -311,6 +338,7 @@ class VerificationCache:
             e.result, e.failed_mono, e.last_error = None, self._now(), REASON_VERIFY_ROW_LOST
             return False
         e.result, e.verified_mono, e.last_error, e.failed_mono = res, float(at), None, None
+        e.generation = self._generation()
         return True
 
     def ensure(self, provider: str, *,
@@ -416,6 +444,18 @@ def set_background_gate(fn: Callable[[], bool] | None) -> None:
     profile is locked"). None, the default, keeps the refresh off."""
     global _BACKGROUND_GATE
     _BACKGROUND_GATE = fn
+
+
+_LOCK_GENERATION: Callable[[], object] | None = None
+
+
+def set_lock_generation(fn: Callable[[], object] | None) -> None:
+    """Register the function that names the lock the persisted state holds now (the plugin passes the lock's
+    tier and start time, None while unlocked). A cached verification is fresh only under the generation it
+    was accepted under, so a lock or unlock from another process is seen before the next model call. None,
+    the default, bounds results by the TTL alone."""
+    global _LOCK_GENERATION
+    _LOCK_GENERATION = fn
 
 
 def _stop_entry(e: _Entry | None) -> None:
@@ -563,6 +603,7 @@ class BackgroundRefresh:
                     self.stop()
                     return "failed"
                 e.result, e.verified_mono, e.last_error, e.failed_mono = new, cache._now(), None, None
+                e.generation = cache._generation()
                 self.failed_mono, self.done_for = None, None
                 return "accepted"
         finally:

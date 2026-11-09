@@ -265,6 +265,16 @@ def _default_verification(provider: str):
         return None
 
 
+def _adopt_lock_generation() -> None:
+    """The verification this lock was taken on belongs to this lock (provider.VerificationCache.adopt_generation);
+    without this the first call after a lock made from chat would verify a second time."""
+    try:
+        from .provider import verification_cache
+        verification_cache.adopt_generation()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 #: Who runs the model on the attested tier, by profile (the one-line lock confirmation names the vendor).
 VENDOR_NAMES = {PROFILE_NAME: "Tinfoil", NEAR_PROFILE_NAME: "NEAR AI Cloud"}
 #: The lock reply's second line, and plain status's "Limits:" line: the four disclosures every lock states
@@ -598,6 +608,7 @@ def _lock_held(tier: Tier, base: dict, *, state, ledger, config, registry, plugi
         return LockResult(False, f"Not locked: the lock state could not be written ({type(exc).__name__}). "
                           "Check that the Hermes plugin data directory is writable, then lock again.",
                           tier=tier, report=report)
+    _adopt_lock_generation()
     verification_result = (verification or _default_verification)(attested_profile_for(config)) \
         if tier is Tier.ATTESTED else None
     message = lock_message(tier, config, verification=verification_result, clock=clock)

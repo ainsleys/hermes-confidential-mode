@@ -326,6 +326,20 @@ class _ChangedConfigPredicate:
 
 # ── registration steps ───────────────────────────────────────────────────────────────────────────
 
+def _lock_generation(rt: Runtime) -> object:
+    """The lock the persisted state holds now, as a value that changes on every lock and unlock: (tier, start
+    time) while locked, None while unlocked. A verification cached in this process vouches only under the
+    generation it was accepted under, so an unlock or lock made from the CLI against a running gateway makes the
+    gateway verify again before its next model call. Never raises (unreadable state is its own generation)."""
+    try:
+        locked, tier = rt.is_locked()
+        if locked is not True:
+            return None
+        return (getattr(tier, "value", tier), rt.state.locked_since())
+    except Exception:  # noqa: BLE001
+        return "unreadable"
+
+
 def _locked_now(rt: Runtime) -> bool:
     """True only when the persisted state reads locked on the attested tier. Never raises (unreadable counts
     as not locked, which stops the background refresh; the gates fail closed on their own)."""
@@ -477,6 +491,7 @@ def _register(rt: Runtime) -> None:
         # Amendment 9: the background re-verification runs only while this profile is locked on the attested
         # tier. Its own step, so a failed Tinfoil or NEAR registration does not leave it unset.
         _cm("provider").set_background_gate(lambda: _locked_now(rt))
+        _cm("provider").set_lock_generation(lambda: _lock_generation(rt))
     _step(rt, "background_refresh_gate", background_gate)
     if rt.pins is None:
         def fallback_pins():
