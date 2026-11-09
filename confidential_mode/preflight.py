@@ -739,6 +739,29 @@ def run_preflight(tier: Tier, predicate: TierPredicate, config: Mapping, *, plug
             add(t_key, f"{t:g}s" if t > 0 else f"{t:g} (hooks run synchronously)",
                 ctx.pass_verdict if ok else OFF_TIER, t_fix)
 
+    # The remaining _PLUGIN_EXECUTION_KEYS are fingerprinted with the two rows above, so a post-lock edit
+    # to any of them ends the lock without a row naming it. One pass row each, with the value shown, so
+    # `status` and `check` name every plugins.* key the fingerprint covers. load_timeout_seconds defaults
+    # to 10 (hermes_cli/config_defaults.py:1706) and 0 loads the plugin inline (plugins_loader.py);
+    # enabled and disabled are lists of plugin names, absent when no constraint is set.
+    lt_key = "plugins.load_timeout_seconds"
+    raw_lt = pcfg.get("load_timeout_seconds", _ABSENT)
+    if raw_lt is _ABSENT or raw_lt is None:
+        add(lt_key, "(default 10s)", ctx.pass_verdict)
+    elif isinstance(raw_lt, (int, float)) and not isinstance(raw_lt, bool):
+        add(lt_key, f"{raw_lt:g}s" if raw_lt > 0 else f"{raw_lt:g} (loads inline)", ctx.pass_verdict)
+    else:
+        add(lt_key, repr(raw_lt), ctx.pass_verdict)   # not a number: Hermes warns and uses its default
+    for list_key in ("enabled", "disabled"):
+        raw_l = pcfg.get(list_key, _ABSENT)
+        if raw_l is _ABSENT or raw_l is None:
+            value = "(absent)"
+        elif isinstance(raw_l, (list, tuple)):
+            value = ", ".join(str(entry) for entry in raw_l) or "[]"
+        else:
+            value = repr(raw_l)
+        add(f"plugins.{list_key}", value, ctx.pass_verdict)
+
     # terminal backend (review finding 2): the "on-host" terminal and file tools are on-host only on the
     # local backend. The config key and the backend Hermes resolves (config, environment variable or the
     # profile's terminal scope) must both say local.

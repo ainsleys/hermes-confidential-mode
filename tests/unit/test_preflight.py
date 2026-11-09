@@ -296,6 +296,31 @@ def test_plugins_isolation_read_from_config_when_not_passed():
     assert item(go(base_config(plugins="in_process")), "plugins.isolation").verdict == "off_tier"
 
 
+def test_fingerprinted_plugin_keys_have_pass_rows_with_the_value():
+    """The fingerprint covers load_timeout_seconds, enabled and disabled, so a post-lock edit to any of
+    them ends the lock; each gets a pass row showing the value, so `status` and `check` can name it."""
+    r = run(base_config(plugins={"isolation": "in_process", "load_timeout_seconds": 0,
+                                 "enabled": ["confidential-mode"], "disabled": ["other", "two"]}))
+    assert r.ok, format_report(r)
+    assert item(r, "plugins.load_timeout_seconds").value_redacted == "0 (loads inline)"
+    assert item(r, "plugins.enabled").value_redacted == "confidential-mode"
+    assert item(r, "plugins.disabled").value_redacted == "other, two"
+    # Absent keys: the Hermes default (10s) and no constraint; an empty list is a value, not absence.
+    r = run(base_config())
+    assert item(r, "plugins.load_timeout_seconds").value_redacted == "(default 10s)"
+    assert item(r, "plugins.enabled").value_redacted == "(absent)"
+    assert item(r, "plugins.disabled").value_redacted == "(absent)"
+    r = run(base_config(plugins={"isolation": "in_process", "enabled": []}))
+    assert item(r, "plugins.enabled").value_redacted == "[]"
+    assert item(r, "plugins.enabled").verdict == "on_host"
+    # Junk values are shown as written and still pass: Hermes warns and uses its default.
+    r = run(base_config(plugins={"isolation": "in_process", "load_timeout_seconds": "soon",
+                                 "enabled": "all", "disabled": None}))
+    assert item(r, "plugins.load_timeout_seconds").value_redacted == "'soon'"
+    assert item(r, "plugins.enabled").value_redacted == "'all'"
+    assert item(r, "plugins.disabled").value_redacted == "(absent)"
+
+
 def attested_config(**over):
     cfg = base_config(model={"provider": "attested-tinfoil", "default": "llama"},
                       auxiliary={"vision": {"provider": "attested-tinfoil"}})

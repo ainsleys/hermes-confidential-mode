@@ -277,8 +277,10 @@ The rows:
 - **Plugins.** `plugins.isolation` absent resolves to Hermes' default `in_process` and passes; an
   explicit "", `host` or an unknown value fails. `plugins.hook_callback_timeout` below
   `HOOK_TIMEOUT_FLOOR_SECONDS` (5) is off-tier with a fix; a value of 0 or less passes, and an absent key
-  shows "(default 30s)". The other hook-execution keys (`load_timeout_seconds`, `enabled`, `disabled`)
-  are in the fingerprint but have no row.
+  shows "(default 30s)". The other hook-execution keys get one pass row each, with the value shown, so
+  `status` and `check` name every `plugins.*` key the fingerprint covers: `plugins.load_timeout_seconds`
+  (an absent key shows "(default 10s)", `0` shows "0 (loads inline)"), `plugins.enabled` and
+  `plugins.disabled` (a list shows its names, an absent key shows "(absent)").
 - **Terminal backend.** `terminal.backend` and `terminal backend (resolved)`, the backend Hermes
   resolves for the profile (`preflight.py:resolved_terminal_backend`: Hermes'
   `tools.terminal_tool._get_env_config()["env_type"]`, which bridges config.yaml first and reads the
