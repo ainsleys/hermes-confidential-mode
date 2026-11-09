@@ -5,7 +5,7 @@
 
 ![Lock a profile to a verified enclave, have one turn, read the receipt, replay it offline, unlock](docs/images/demo.gif)
 
-*Lock to a NEAR AI Cloud enclave, one turn, the receipt, its offline replay, unlock. One take, no cuts.*
+*Lock to a NEAR AI Cloud enclave, one turn, the receipt, its offline replay, unlock.*
 
 Hermes cannot verify a confidential-compute provider on its own. Hermes Confidential Mode makes the provider checkable:
 it verifies the enclave, pins its build, keeps every model call and fallback inside the enclave, encrypts what
