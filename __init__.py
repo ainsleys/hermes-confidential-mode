@@ -29,8 +29,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-HOOKS = ("pre_tool_call", "post_approval_response", "pre_llm_call", "pre_api_request", "pre_auxiliary_call",
-         "post_auxiliary_call", "on_session_start", "on_session_end", "post_compaction", "pre_gateway_dispatch")
 # Gateway slash commands that switch the session's live model runtime (Amendment 4 F1(c)); refused while
 # locked. The CLI/TUI never fire pre_gateway_dispatch: there the per-turn live-runtime check ends the turn.
 RUNTIME_SWITCH_COMMANDS = frozenset({"model", "moa"})
