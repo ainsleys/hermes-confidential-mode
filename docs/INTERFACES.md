@@ -1905,10 +1905,11 @@ documented plugin surface: exactly `tools.registry`, `agent.secret_scope`, `prov
 - **No archives.** No archive, binary or bytecode file is tracked. Test fixtures are plain files, for
   example `tests/fixtures/near_inner_composes/<sha256>.yaml`, each named by its content's SHA-256, which
   `tests/unit/test_review.py` checks.
-- **Declared variables.** `plugin.yaml` declares `TINFOIL_API_KEY` under `requires_env` and
-  `NEAR_AI_API_KEY`, `OPENROUTER_API_KEY` and `NOUS_API_KEY` under `optional_env`, each with its reason;
-  the catalog entry's `capabilities` carries the same `requires_env`, with the optional list in a YAML
-  comment. The catalog description and `plugin.yaml` carry one identical description that states the
+- **Declared variables.** `plugin.yaml` declares an empty `requires_env` (no key is required at install:
+  the ledger and the on-host-only tier need none, and `hermes plugins install` prompts for every unset
+  entry) and `TINFOIL_API_KEY`, `NEAR_AI_API_KEY`, `OPENROUTER_API_KEY` and `NOUS_API_KEY` under
+  `optional_env`, each with its reason; the catalog entry's `capabilities` carries the same empty
+  `requires_env`, with the optional list in a YAML comment. The catalog description and `plugin.yaml` carry one identical description that states the
   network hosts, the files written, the variables read and the thread kinds, as
   [DISCLOSURE.md](DISCLOSURE.md) states them.
 - **Documentation checks.** `tests/unit/test_docs_code_references.py` checks that every `file:name` and

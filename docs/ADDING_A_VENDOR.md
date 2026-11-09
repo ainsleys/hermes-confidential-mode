@@ -284,8 +284,8 @@ The suite runs from a Hermes checkout as [RUNNING_TESTS.md](RUNNING_TESTS.md) de
   threads"), the credential ("Credentials", "Environment variables"), and the private core import
   count, which `tests/seam/test_disclosure_imports.py` compares with `hermes plugins validate`.
 - `plugin.yaml` and `catalog/confidential-mode.yaml`: the `description` (hosts contacted, the key
-  variable, threads), `requires_env` (`TINFOIL_API_KEY` only, in both files) and `optional_env` in
-  `plugin.yaml`, and `known_issues` in the catalog entry.
+  variable, threads), `requires_env` (empty in both files: no key is required at install) and `optional_env` in
+  `plugin.yaml`, where the vendor's key goes, and `known_issues` in the catalog entry.
 - `pyproject.toml`: the vendor's dependencies, each with an upper bound.
 - [GUIDE.md](GUIDE.md): a chapter like "The attested tier with NEAR AI", and the tiers chapter.
 - [CLAIMS.md](CLAIMS.md): every entry that names "both vendors" or a vendor's mechanism (P7, P8, P10,

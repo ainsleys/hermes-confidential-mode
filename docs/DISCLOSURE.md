@@ -257,11 +257,12 @@ The plugin uses two secrets, one for each attested vendor. `TINFOIL_API_KEY` is 
 `attested-tinfoil` provider. `NEAR_AI_API_KEY` is for the `attested-near` provider. You need only the
 key of the vendor you use. The `on-host-only` tier needs neither.
 
-`plugin.yaml` declares `TINFOIL_API_KEY` in `requires_env` and `NEAR_AI_API_KEY`, `OPENROUTER_API_KEY`
-and `NOUS_API_KEY` in `optional_env` (the last two for a presence check only, under "Environment
-variables").
-NEAR's key is optional because most installs use one vendor, and an install-time prompt for an unused
-key serves no purpose. Each key is also in `env_vars` on its provider profile. Hermes therefore
+`plugin.yaml` declares no `requires_env` and lists `TINFOIL_API_KEY`, `NEAR_AI_API_KEY`,
+`OPENROUTER_API_KEY` and `NOUS_API_KEY` in `optional_env` (the last two for a presence check only, under
+"Environment variables"). Both vendor keys are optional because the ledger and the `on-host-only` tier need
+no key, most installs use one vendor, and `hermes plugins install` prompts for every `requires_env` entry
+that is not set, a prompt that serves no purpose for the vendor you do not use. The lock and `check` name
+the missing key instead. Each key is also in `env_vars` on its provider profile. Hermes therefore
 resolves each key like any provider key and passes it to `create_client`.
 
 When Hermes passes no key, the client and `hermes confidential setup` read it through

@@ -6,13 +6,16 @@ author: ainsleys
 license: MIT
 kind: standalone
 requires_hermes: ">=0.22.7"
-requires_env:
-  - TINFOIL_API_KEY
-# NEAR_AI_API_KEY is needed only for the attested-near provider; most installs use one vendor. The other two
-# are never used to send anything: the lock and `check` look only at whether each is set (through
-# agent.secret_scope.get_secret), to report whether Hermes' side-call fall-through to OpenRouter or Nous
-# would have a credential (docs/DISCLOSURE.md, Environment variables).
+requires_env: []
+# No key is required at install: the ledger and the on-host-only tier need none, and the attested tier needs
+# one vendor key, TINFOIL_API_KEY or NEAR_AI_API_KEY, which the lock and `check` name when it is missing
+# (`hermes plugins install` prompts for every unset requires_env entry, a prompt that serves no purpose for
+# the vendor you do not use). The other two are never used to send anything: the lock and `check` look only
+# at whether each is set (through agent.secret_scope.get_secret), to report whether Hermes' side-call
+# fall-through to OpenRouter or Nous would have a credential (docs/DISCLOSURE.md, Environment variables).
 optional_env:
+  - name: TINFOIL_API_KEY
+    description: "Tinfoil API key, for the attested-tinfoil provider only"
   - name: NEAR_AI_API_KEY
     description: "NEAR AI Cloud API key, for the attested-near provider only"
   - name: OPENROUTER_API_KEY

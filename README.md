@@ -3,9 +3,32 @@
 
 [![tests](https://github.com/ainsleys/hermes-confidential-mode/actions/workflows/tests.yml/badge.svg)](https://github.com/ainsleys/hermes-confidential-mode/actions/workflows/tests.yml)
 
+![Lock a profile to a verified enclave, have one turn, read the receipt, replay it offline, unlock](docs/images/demo.gif)
+
+*Lock to a NEAR AI Cloud enclave, one turn, the receipt, its offline replay, unlock. One take, no cuts.*
+
 Hermes cannot verify a confidential-compute provider on its own. Hermes Confidential Mode makes the provider checkable:
 it verifies the enclave, pins its build, keeps every model call and fallback inside the enclave, encrypts what
 leaves, and writes a receipt anyone can replay.
+
+Install, then watch where every model call goes, locked or not:
+
+```
+hermes plugins install https://github.com/ainsleys/hermes-confidential-mode
+hermes plugins enable confidential-mode
+hermes confidential watch
+```
+
+Lock to your own machine with no vendor key (a local model server such as Ollama), or to a verified
+enclave with a Tinfoil or NEAR AI Cloud key, then read the session's receipt:
+
+```
+hermes confidential on on-host-only     # or: hermes confidential on attested
+hermes confidential receipts
+```
+
+The [quick start](#quick-start) has the config for each tier. The sections below say what the lock
+covers and what the lock cannot cover.
 
 **What Hermes does today.** Point Hermes at Tinfoil or NEAR AI Cloud and you get an ordinary HTTPS
 connection to a URL and the vendor's word. Hermes checks no hardware report, pins no build, does not
@@ -294,6 +317,26 @@ except where noted.
 | `receipts <session> [--json]` | A session receipt. |
 | `replay <receipt.json>` | Terminal only: replay a receipt's attestation evidence offline. |
 | `watch` | The latest ledger rows (live in a terminal: `hermes confidential watch`). |
+
+## What the plugin touches
+
+The short form of [docs/DISCLOSURE.md](docs/DISCLOSURE.md), which the catalog's rule 13 asks for.
+
+- **Network.** The vendor you configure (atc.tinfoil.sh, the Tinfoil router and the `*.tinfoil.sh`
+  collateral proxies, or cloud-api.near.ai), Intel Trust Authority, Sigstore's TUF CDN, and GitHub for
+  NEAR's compose files, some of these in background threads. The plugin sends no telemetry.
+- **Files.** Writes under `<HERMES_HOME>/plugin-data/` (ledger, evidence, pins, tool grants, state and SDK
+  caches), Hermes' tool-discovery cache on a terminal lock, and `config.yaml` on a revoke only, removing
+  the plugin's own `command_allowlist` entries through Hermes' `save_config`. Reads `config.yaml` and the
+  script files a locked tool call runs.
+- **Credentials.** `TINFOIL_API_KEY` and `NEAR_AI_API_KEY` through Hermes' secret scope only; a presence
+  check on `OPENROUTER_API_KEY` and `NOUS_API_KEY`. The plugin stores no credential.
+- **Processes.** Daemon threads of five kinds (an attestation, a pins match record, a NEAR compose fetch,
+  the own-host-name DNS lookup, and one re-verification thread per attested provider while locked). No
+  shell command, no subprocess. During a Tinfoil attestation only, the plugin wraps the SDK's fetch
+  functions and `requests.Session.request` process-wide and puts the originals back afterwards.
+- **Hermes internals.** 31 private core import sites, all in `confidential_mode/hermes_compat.py` and
+  listed in [docs/DISCLOSURE.md](docs/DISCLOSURE.md).
 
 ## Documentation
 
