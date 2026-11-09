@@ -665,6 +665,18 @@ def test_cli_on_refusal_and_receipts_exit_codes(plugin):
     proc = _hermes(plugin, "receipts", "sess-cli", "--json")
     assert proc.returncode == 0, proc.stderr
     assert _sub(plugin, "receipts").verify_chain(json.loads(proc.stdout))
+    # A row whose text names the chat command form. The CLI rewrites "/confidential" to "hermes confidential"
+    # in every reply it prints, and the JSON receipt must be exempt: its rows were hashed with the text as
+    # stored, so the rewrite would break the chain on replay (seen on a real receipt, 9 Nov 2026).
+    plugin.rt.ledger.append({"kind": "tool_refused", "session_id": "sess-cli", "purpose": "tool:web_search",
+                             "detail": {"reason": "blocked; run /confidential allow web_search"}})
+    proc = _hermes(plugin, "receipts", "sess-cli", "--json")
+    assert proc.returncode == 0, proc.stderr
+    assert "run /confidential allow web_search" in proc.stdout
+    assert "hermes confidential allow" not in proc.stdout
+    assert _sub(plugin, "receipts").verify_chain(json.loads(proc.stdout))
+    text = _hermes(plugin, "receipts", "sess-cli")
+    assert text.returncode == 0 and "hermes confidential allow web_search" in text.stdout   # text form still rewrites
 
 
 def test_cli_pins_and_allow_use_the_exact_terminal_asker(plugin):

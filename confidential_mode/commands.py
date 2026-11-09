@@ -316,7 +316,13 @@ def cli_verb(rt: Any, action: str, args: Any, out=None, asker: Any = None) -> in
                             show_report=(action == "on"), terminal=True)
     finally:
         rt.progress = previous
-    out.write(terminal_text(text).rstrip() + "\n")
+    if action == "receipts" and getattr(args, "json", False) and text.lstrip().startswith("{"):
+        # The JSON receipt is hash-chained over its rows: rewriting "/confidential" to "hermes confidential"
+        # inside it (as terminal_text does for every other reply) changes row text after the rows were
+        # hashed, and `hermes confidential replay` then reports the chain broken. Write it byte for byte.
+        out.write(text.rstrip() + "\n")
+    else:
+        out.write(terminal_text(text).rstrip() + "\n")
     if action == "allow":
         allowed = text.endswith("added to the allowlist for this lock.") or text.endswith("is already allowed.")
         return 0 if allowed else 1
