@@ -293,7 +293,7 @@ list and the change that would close each limit.
 
 A side call that goes off-tier mid-turn (after a runtime model switch, say) is recorded as a breach,
 not stopped. Locked mode doesn't apply in Hermes' safe-worker mode, which loads no plugins. If Hermes
-runs on someone else's machine, its operator sees every prompt before any of this applies. See the
+runs on someone else's machine, its operator sees every prompt before any of the plugin's protections apply. See the
 guide's [threat model](docs/GUIDE.md#threat-model).
 
 ## Commands
