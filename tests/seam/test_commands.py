@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import importlib
 import json
+import re
 import sys
 import time
 import types
@@ -241,7 +242,10 @@ def test_attested_lock_message_and_refusal_reason_without_network(plugin, monkey
     entry.result, entry.verified_mono = _result(plugin), time.monotonic()
     monkeypatch.setenv("TINFOIL_API_KEY", "test-key")
     out = plugin.slash("on attested")
-    assert out == ("Locked to Tinfoil, llama3-3-70b at router.tinfoil.invalid; verified 42 s ago.\n"
+    # The age is measured on the wall clock between _result() and the lock message, so a slow run reads 43.
+    age = re.search(r"; verified (\d+) s ago\.", out)
+    assert age and age.group(1) in ("42", "43"), out
+    assert out == (f"Locked to Tinfoil, llama3-3-70b at router.tinfoil.invalid; verified {age.group(1)} s ago.\n"
                    "Off-host tools ask the first time per lock in each conversation. Shell and code execution are not inspected. Auxiliary calls are "
                    "recorded, not refused. Not active in safe-worker mode.\n"
                    "Details: hermes confidential status --verbose; docs/LIMITATIONS.md"), out
