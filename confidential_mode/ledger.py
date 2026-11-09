@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -609,6 +610,21 @@ class Ledger:
             row = self._db().execute("SELECT MAX(id) FROM events WHERE kind = ? AND id < ?",
                                      (kind, int(before_id))).fetchone()
         return int(row[0]) if row and row[0] is not None else None
+
+    def verification_by_nonce(self, nonce: str, before_id: int) -> LedgerEvent | None:
+        """The latest verify_ok or verify_fail row with id < ``before_id`` whose evidence carries ``nonce``,
+        or None. A receipt pulls in the verification a send vouches by when it lies before the receipt's
+        window (a verification made in a long-lived process, still inside its TTL across an unlock)."""
+        if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-fA-F]{16,128}", nonce):
+            return None
+        rows = self._rows(f"SELECT {', '.join(_COLUMNS)} FROM events WHERE kind IN ('verify_ok', 'verify_fail') "
+                          "AND id < ? AND detail LIKE '%' || ? || '%' ORDER BY id DESC LIMIT 8",
+                          (int(before_id), nonce))
+        for r in rows:
+            ev = r.detail.get("evidence") if isinstance(r.detail, dict) else None
+            if isinstance(ev, dict) and ev.get("nonce") == nonce:
+                return r
+        return None
 
     def session(self, session_id: str) -> list[LedgerEvent]:
         """Every event for one session, oldest first (receipts)."""

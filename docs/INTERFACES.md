@@ -1659,7 +1659,9 @@ replaying offline.
 `receipts.py:build_receipt` renders one session's receipt from ledger rows; `render` prints text or JSON
 (`--json`). The read starts at the last unlock before the session's first row
 (`Ledger.last_id_before`), or at the first row when there is none, and ends at the lock or unlock that
-closes the period. Rows of `PROFILE_KINDS` (`lock`, `unlock`, `verify_ok`, `verify_fail`, `pin_staged`,
+closes the period; a verification row that a `send_signed` row in the window vouches by (its
+`attestation_nonce`) and that lies before the window is pulled in (`Ledger.verification_by_nonce`), so the
+receipt always carries the evidence its sends reference. Rows of `PROFILE_KINDS` (`lock`, `unlock`, `verify_ok`, `verify_fail`, `pin_staged`,
 `pin_applied`, `pin_denied`, `pin_retired`, `preflight_fail`, `grant_revoked`) from other sessions are
 included; a locked period opens only at a `lock` row, never at a session marker. Trust roots are taken
 per locked period. `receipts <id>` with no ledger rows for the id is an error (exit 1).

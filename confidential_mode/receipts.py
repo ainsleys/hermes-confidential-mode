@@ -11,7 +11,10 @@ Which rows a session's receipt covers:
     session_id, from the end of the locked period before the session's first row (the last unlock
     before it) up to the session's last row, plus the unlock that closes the period. Lock is
     profile-wide in the MVP and verification has no session context, so these rows are usually
-    written with another session id or none.
+    written with another session id or none;
+  * the verification row a ``send_signed`` row vouches by (its ``attestation_nonce``) when that row lies
+    before the window: a long-lived process keeps a verification inside its TTL across an unlock made
+    elsewhere, so a later session's sends can reference it.
 
 The text form lists, in order: header, trust roots, verification events, sends, refusals, asks and
 answers, breaches, compactions, and CLOSING_PARAGRAPH, a module constant that is never templated.
@@ -181,7 +184,8 @@ def collect_rows(ledger, session_id: str, *, include_profile_rows: bool = True) 
     first, last = own[0].id, own[-1].id
     # Profile-wide rows count from the end of the previous locked period: the lock in force, and the
     # preflight failures and verifications that led up to it, are part of this session's story.
-    if hasattr(ledger, "last_id_before"):
+    bounded = hasattr(ledger, "last_id_before")
+    if bounded:
         unlock_id = ledger.last_id_before("unlock", first)
         start = unlock_id + 1 if unlock_id is not None else 0
         rows = _rows_from(ledger, start, stop_after=last)
@@ -193,11 +197,50 @@ def collect_rows(ledger, session_id: str, *, include_profile_rows: bool = True) 
         after = [r for r in rows if r.id > last]
     picked = [r for r in rows if start <= r.id <= last
               and (r.session_id == session_id or (r.kind in PROFILE_KINDS and not is_session_marker(r)))]
+    picked = _with_referenced_verifications(ledger, picked, before_id=start, everything=None if bounded else rows)
     # The unlock that closes the period, if it came after the session's last row.
     after = [r for r in after if r.kind == "unlock" or _is_lock(r)]
     if after and after[0].kind == "unlock":
         picked.append(after[0])
     return picked
+
+
+def _with_referenced_verifications(ledger, picked: list, *, before_id: int, everything: list | None) -> list:
+    """``picked`` plus every verification row a ``send_signed`` row in it vouches by (``attestation_nonce``)
+    that the window left out. A send is vouched by the verification in use in the sending process, which
+    can predate the window: the gateway verified, the profile was unlocked and locked again from another
+    process, and the same verification (inside its TTL) covered the next session's sends. Without its row
+    the receipt has no evidence for those sends and ``replay`` fails them."""
+    def nonce_of(r) -> str | None:
+        d = r.detail if isinstance(r.detail, Mapping) else {}
+        ev = d.get("evidence")
+        return ev.get("nonce") if isinstance(ev, Mapping) and isinstance(ev.get("nonce"), str) else None
+    present = {nonce_of(r) for r in picked if r.kind in ("verify_ok", "verify_fail")} - {None}
+    wanted: list[str] = []
+    for r in picked:
+        if r.kind != "send_signed":
+            continue
+        d = r.detail if isinstance(r.detail, Mapping) else {}
+        n = d.get("attestation_nonce")
+        if isinstance(n, str) and n and n not in present and n not in wanted:
+            wanted.append(n)
+    if not wanted:
+        return picked
+    ids = {r.id for r in picked}
+    extra = []
+    for n in wanted:
+        found = None
+        if everything is None and hasattr(ledger, "verification_by_nonce"):
+            found = ledger.verification_by_nonce(n, before_id)
+        else:
+            pool = everything if everything is not None else _all_rows(ledger)
+            cands = [r for r in pool
+                     if r.kind in ("verify_ok", "verify_fail") and r.id < before_id and nonce_of(r) == n]
+            found = cands[-1] if cands else None
+        if found is not None and found.id not in ids:
+            extra.append(found)
+            ids.add(found.id)
+    return sorted(picked + extra, key=lambda r: r.id) if extra else picked
 
 
 # ── redaction ───────────────────────────────────────────────────────────────────────────────────

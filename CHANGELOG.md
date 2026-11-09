@@ -10,6 +10,7 @@ The first release, for Hermes Agent 0.22.7 or later, verified against Hermes com
 
 ### Fixed
 
+- A session receipt left out the verification row its sends vouched by when that verification was made before the window's opening unlock (a long-lived gateway keeps a verification inside its TTL across an unlock and lock made from the CLI), so `hermes confidential replay` reported "no NEAR evidence in this receipt with this row's attestation nonce" and the session as not fully attested. The receipt now pulls in the referenced verification row and its evidence. See [Receipts and replay](docs/GUIDE.md#receipts-and-replay).
 - `hermes confidential receipts <session> --json` wrote the JSON receipt through the terminal rewrite of `/confidential <verb>` to `hermes confidential <verb>`, so rows naming a chat command changed after they were hashed and `hermes confidential replay` reported the hash chain broken. The JSON form is now written as rendered. See [Receipts and replay](docs/GUIDE.md#receipts-and-replay).
 
 ### Added

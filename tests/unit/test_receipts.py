@@ -794,3 +794,39 @@ def test_a_session_without_usage_counts_shows_no_token_line(ledger, tmp_path):
     sends = len(doc["sections"]["sends"])
     assert doc["sections"]["usage_total"] == {"sends_with_counts": 0, "sends": sends, "counts": {},
                                               "source": "router-reported", "header": "X-Tinfoil-Usage-Metrics"}
+
+
+def test_a_verification_a_send_vouches_by_is_pulled_into_the_receipt_window(ledger):
+    """Seen live on 9 Nov 2026: the gateway verified NEAR (nonce N), the profile was unlocked and locked
+    again from the CLI, and the next session's sends were vouched by N (inside its TTL). The receipt's
+    window starts at that unlock, so N's row was left out and `replay` found no evidence for the sends."""
+    led = ledger
+    n_old, n_new = "ab" * 32, "cd" * 32
+    old_ev = {"schema": "near-attestation-evidence/1", "nonce": n_old, "capture_complete": True, "vendor": "near"}
+    new_ev = {"schema": "near-attestation-evidence/1", "nonce": n_new, "capture_complete": True, "vendor": "near"}
+    v_old = led.append(_ev("verify_ok", session_id="", purpose="verify", provider="attested-near",
+                           host="cloud-api.near.ai", detail={"vendor": "near", "evidence": old_ev}))
+    led.append(_ev("lock", session_id="", tier="attested", decision="locked"))
+    led.append(_ev("unlock", session_id="", decision="unlocked"))
+    led.append(_ev("verify_ok", session_id="", purpose="verify", provider="attested-near",
+                   host="cloud-api.near.ai", detail={"vendor": "near", "evidence": new_ev}))
+    led.append(_ev("lock", session_id="", tier="attested", decision="locked"))
+    led.append(_ev("session_start", session_id="s2", decision="session_start", detail={"platform": "cli"}))
+    led.append(_ev("send_observed", session_id="s2", purpose="main", provider="attested-near",
+                   host="cloud-api.near.ai", model="m", bytes=10, tier="attested", verdict="allowed"))
+    led.append(_ev("send_signed", session_id="s2", purpose="main", provider="attested-near",
+                   host="cloud-api.near.ai", model="m", bytes=10, verdict="verified", decision="fetched",
+                   detail={"vendor": "near", "attestation_nonce": n_old, "fully_attested": True,
+                           "signature": {"status": "fetched", "signature_kind": "provider_tee"}}))
+    doc = receipts.build_receipt(led, "s2")
+    ids = [r["id"] for r in doc["rows"]]
+    assert v_old in ids and ids == sorted(ids), ids
+    assert {e["row_id"] for e in doc["evidence"]} >= {v_old}
+    assert receipts.verify_chain(doc)
+    # A nonce no row carries changes nothing.
+    led.append(_ev("send_signed", session_id="s2", purpose="main", provider="attested-near",
+                   host="cloud-api.near.ai", model="m", bytes=10, verdict="verified", decision="fetched",
+                   detail={"vendor": "near", "attestation_nonce": "ef" * 32,
+                           "signature": {"status": "fetched", "signature_kind": "provider_tee"}}))
+    doc2 = receipts.build_receipt(led, "s2")
+    assert v_old in [r["id"] for r in doc2["rows"]] and receipts.verify_chain(doc2)
