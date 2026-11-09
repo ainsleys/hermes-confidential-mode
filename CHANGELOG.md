@@ -8,6 +8,10 @@ All notable changes to Hermes Confidential Mode are listed here. The format foll
 
 The first release, for Hermes Agent 0.22.7 or later, verified against Hermes commit 84a0301.
 
+### Fixed
+
+- `hermes confidential receipts <session> --json` wrote the JSON receipt through the terminal rewrite of `/confidential <verb>` to `hermes confidential <verb>`, so rows naming a chat command changed after they were hashed and `hermes confidential replay` reported the hash chain broken. The JSON form is now written as rendered. See [Receipts and replay](docs/GUIDE.md#receipts-and-replay).
+
 ### Added
 
 - Two tiers to lock a profile to: `attested` (a verified Tinfoil or NEAR AI Cloud enclave) and `on-host-only` (loopback and the hosts you list). See [README](README.md).
