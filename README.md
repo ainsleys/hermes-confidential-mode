@@ -45,9 +45,9 @@ approved; `on-host-only` allows only your machine. While locked:
 - Every model call, main or side, goes only to the tier (a side call that strays mid-turn is recorded,
   not stopped). The plugin checks every configured route before locking and before each turn, and
   refuses main-call fallbacks before any bytes leave.
-- The enclave is re-verified whenever its last verification is more than five minutes old, and a
-  changed enclave build is refused on every turn until you approve the new build. On both vendors
-  every inference connection is pinned to the TLS key of the verified report the plugin accepted,
+- The plugin re-verifies the enclave whenever its last verification is more than five minutes old,
+  and refuses a changed enclave build on every turn until you approve the new build. On both vendors
+  the plugin pins every inference connection to the TLS key of the verified report it accepted,
   inside the handshake and before any byte of the request (headers and API key included) leaves. A
   connection with another certificate is refused and recorded, and triggers a re-verification. The
   attestation fetch itself is not pinned; the plugin verifies the signatures on the attestation the
@@ -66,27 +66,27 @@ approved; `on-host-only` allows only your machine. While locked:
   Hermes' source (docs/TOOL_CLASSES.md). An
   allow lasts until you unlock, in that conversation only, so another chat, user or subagent is
   asked again (`confidential.tools.ask: each_call` asks on every call instead). When nobody can
-  answer (yolo, approvals off, cron, one-shot runs), the tool is blocked. Tool servers on
-  off-tier remote hosts, scheduled jobs and routed delegation are blocked.
-- Every model call is logged with its host and size, never its text, from the moment the plugin is
-  enabled. `hermes confidential status` shows the configured route, the live runtime, breaches and
+  answer (yolo, approvals off, cron, one-shot runs), the plugin blocks the tool. The plugin blocks tool
+  servers on off-tier remote hosts, scheduled jobs and routed delegation.
+- The plugin logs every model call with its host and size, never its text, from the moment the
+  plugin is enabled. `hermes confidential status` shows the configured route, the live runtime, breaches and
   this lock's refusal, ask and allow counts; `receipts` shows where each call went, and `watch`
   streams the calls live.
 
-**The receipt.** When you want, you render a receipt for the current session or any past one. It is
+**The receipt.** When you want, you render a receipt for the current session or any past one. The receipt is
 built from the plugin's ledger: every model call, the lock period, the enclave build that was verified,
 and the raw hardware evidence captured at each verification. The receipt comes as readable text or as
 JSON that carries the evidence. The enclave's hardware and the vendor sign the evidence, and on NEAR
 each reply carries the enclave's signature over the exact bytes, so anyone can re-check the JSON form
 offline with `hermes confidential replay`.
 
-**Four limits before you rely on this.** The attested tier admits only models the two vendors serve
+**Four limits before you rely on the plugin.** The attested tier admits only models the two vendors serve
 inside enclaves; those are open-weight models such as the Qwen, DeepSeek, Llama and gpt-oss families,
 so a hosted frontier model cannot be in the tier. Because fallbacks are refused while locked, a vendor
 outage ends the turn instead of routing elsewhere. The agent can still run shell commands and code, and the plugin
 does not look inside them, so a command such as `curl` could send text anywhere; every receipt says
-so. The receipt itself is written by the plugin on your machine, so someone else can trust only
-its signed evidence.
+so. The plugin writes the receipt on your machine, so someone else can trust only the receipt's
+signed evidence.
 
 ![Figure 1: one attested send in six steps](docs/images/attested-send.svg)
 
@@ -120,9 +120,9 @@ hermes plugins enable confidential-mode
 hermes confidential status | grep '^Plugin:'
 ```
 
-- **Enable is required.** Without it, every `hermes confidential` command fails with
+- **Enable is required.** Without the enable step, every `hermes confidential` command fails with
   "'confidential' is not a hermes command".
-- **Enable can take a few minutes.** It downloads `tinfoil`, `pynacl`, `sigstore` and the packages
+- **Enable can take a few minutes.** The enable step downloads `tinfoil`, `pynacl`, `sigstore` and the packages
   they need into Hermes' environment, and meanwhile Hermes prints only "Resolving Python
   dependencies" and "Installing Python dependencies". A quiet terminal doesn't mean the enable step has
   hung. Set `HERMES_VERBOSE=1` to watch the installer.
@@ -138,7 +138,7 @@ hermes confidential status | grep '^Plugin:'
 - **Data files.** The plugin keeps the ledger in `<hermes home>/plugin-data/confidential-mode/` and the
   lock, pins and tool grants in `<hermes home>/plugin-data/agent-plugin-confidential-mode-<hash>/`,
   each file mode 0600. `hermes confidential status` prints both paths.
-- Leave `plugins.isolation` at its default, `in_process`; under host isolation the lock is refused.
+- Leave `plugins.isolation` at its default, `in_process`; under host isolation the plugin refuses the lock.
 - If you run Hermes from a source checkout with `uv run --no-sync`, the enable step doesn't run, so
   install `pynacl` yourself ([docs/RUNNING_TESTS.md](docs/RUNNING_TESTS.md)).
 
@@ -182,7 +182,7 @@ $ hermes                       # ask one question, then, in the chat:
 `hermes confidential off` unlocks. The steps below set up the `attested` tier with Tinfoil.
 
 **3. Verify the vendor and approve the first pin.** Setup verifies the enclave, shows its
-fingerprints, asks you to approve them, and prints a config block to merge into `config.yaml`. It
+fingerprints, asks you to approve them, and prints a config block to merge into `config.yaml`. Setup
 never writes your config.
 
 ```
@@ -201,8 +201,8 @@ setup could not ask you.
 
 For NEAR AI Cloud, use `--vendor near --model Qwen/Qwen3.8-27B`.
 
-**4. Lock.** The preflight checks every route in your config first. If any would leave the tier, the
-lock is refused with a table naming each key to change. Once locked, each tool outside the
+**4. Lock.** The preflight checks every route in your config first. If any route would leave the tier, the
+plugin refuses the lock with a table naming each key to change. Once locked, each tool outside the
 on-host class asks you the first time that tool runs, on both tiers.
 
 ```
@@ -230,11 +230,11 @@ Pick one of four answers:
   <tool>`.
 - **Deny** refuses the call.
 
-Under yolo, approvals off, cron jobs and one-shot runs nobody can answer, so the tool is blocked, even
+Under yolo, approvals off, cron jobs and one-shot runs nobody can answer, so the plugin blocks the tool, even
 after an Allow once. Hermes titles this panel "Dangerous Command" for every plugin approval, and the
 plugin can't change that title.
 
-**6. Read the receipt.** Receipts are rendered on demand, for the current session or any past one. In
+**6. Read the receipt.** The plugin renders receipts on demand, for the current session or any past one. In
 the chat, `/confidential receipts` renders the current session; from a terminal, pass any session id:
 
 ```
@@ -264,7 +264,7 @@ list and the change that would close each limit.
   on this host while locked, and the plugin does not look inside shell commands or code, so a command
   such as `curl` could send text anywhere. Every receipt names them as unproven.
   ([section 3](docs/LIMITATIONS.md#3-shell-and-code-execution-tools-are-not-inspected))
-- **NEAR's gateway sees part of each request.** Image parts reach it in plaintext, and it reads the
+- **NEAR's gateway sees part of each request.** Image parts reach the gateway in plaintext, and it reads the
   model id, plaintext parameters, headers, sizes and timing. Message text, tool definitions and tool
   calls are encrypted to the verified model key, which every instance of that model shares.
   ([section 14](docs/LIMITATIONS.md#14-near-ai-cloud-what-the-signatures-and-the-evidence-leave-open))
@@ -272,8 +272,8 @@ list and the change that would close each limit.
   as a nested chat the agent starts, stay open. The ledger records every approval with its surface,
   so treat a pin approved during an agent session as the agent's unless you remember answering.
   ([section 15](docs/LIMITATIONS.md#15-an-agent-with-a-terminal-can-reach-the-approval-prompt))
-- **A receipt is a self-report.** It's the plugin's record, from a file on your machine that you or
-  another plugin could edit. Only the attached enclave evidence can be checked by someone else.
+- **A receipt is a self-report.** The receipt is the plugin's record, from a file on your machine that you or
+  another plugin could edit. Someone else can check only the attached enclave evidence.
   ([section 6](docs/LIMITATIONS.md#6-the-trust-boundary-is-the-whole-hermes-process))
 - **Tools ask once per lock in each conversation, then run without asking.** The plugin asks you the first time each tool
   not classed as on-host runs during a lock; after Allow once, later calls to that tool in the
@@ -284,7 +284,7 @@ list and the change that would close each limit.
 - **A locked session has no fallback.** If the provider errors, or can't be verified within 20
   seconds, the turn ends and you resend; nothing is rerouted.
   ([docs/LIMITATIONS.md](docs/LIMITATIONS.md), [docs/COSTS.md](docs/COSTS.md))
-- **Hermes' own approval prompt grants on any answer except `deny`.** This is a Hermes core issue,
+- **Hermes' own approval prompt grants on any answer except `deny`.** This behaviour is a Hermes core issue,
   not one a plugin can fix: the approve path treats no answer, an empty answer, a typo and `yes` alike
   as a grant, and a plugin cannot veto after the prompt. For the tools this plugin gates, the plugin
   runs the tool only when the recorded answer is exactly `once`, `session` or `always`, and refuses
@@ -320,20 +320,20 @@ except where noted.
 
 ## What the plugin touches
 
-The short form of [docs/DISCLOSURE.md](docs/DISCLOSURE.md), which the catalog's rule 13 asks for.
+This section is the short form of [docs/DISCLOSURE.md](docs/DISCLOSURE.md), which the catalog's rule 13 asks for.
 
 - **Network.** The vendor you configure (atc.tinfoil.sh, the Tinfoil router and the `*.tinfoil.sh`
   collateral proxies, or cloud-api.near.ai), Intel Trust Authority, Sigstore's TUF CDN, and GitHub for
   NEAR's compose files, some of these in background threads. The plugin sends no telemetry.
-- **Files.** Writes under `<HERMES_HOME>/plugin-data/` (ledger, evidence, pins, tool grants, state and SDK
+- **Files.** The plugin writes under `<HERMES_HOME>/plugin-data/` (ledger, evidence, pins, tool grants, state and SDK
   caches), Hermes' tool-discovery cache on a terminal lock, and `config.yaml` on a revoke only, removing
-  the plugin's own `command_allowlist` entries through Hermes' `save_config`. Reads `config.yaml` and the
-  script files a locked tool call runs.
+  the plugin's own `command_allowlist` entries through Hermes' `save_config`. The plugin reads `config.yaml` and
+  the script files a locked tool call runs.
 - **Credentials.** `TINFOIL_API_KEY` and `NEAR_AI_API_KEY` through Hermes' secret scope only; a presence
   check on `OPENROUTER_API_KEY` and `NOUS_API_KEY`. The plugin stores no credential.
 - **Processes.** Daemon threads of five kinds (an attestation, a pins match record, a NEAR compose fetch,
-  the own-host-name DNS lookup, and one re-verification thread per attested provider while locked). No
-  shell command, no subprocess. During a Tinfoil attestation only, the plugin wraps the SDK's fetch
+  the own-host-name DNS lookup, and one re-verification thread per attested provider while locked). The plugin runs no
+  shell command and no subprocess. During a Tinfoil attestation only, the plugin wraps the SDK's fetch
   functions and `requests.Session.request` process-wide and puts the originals back afterwards.
 - **Hermes internals.** 31 private core import sites, all in `confidential_mode/hermes_compat.py` and
   listed in [docs/DISCLOSURE.md](docs/DISCLOSURE.md).
@@ -380,6 +380,6 @@ plugin does now.
 
 ## Status
 
-Experimental. Built for the Nous Research Hermes plugin hackathon, November 2026.
+The plugin is experimental and was built for the Nous Research Hermes plugin hackathon, November 2026.
 
 Support: open an issue at https://github.com/ainsleys/hermes-confidential-mode/issues.
