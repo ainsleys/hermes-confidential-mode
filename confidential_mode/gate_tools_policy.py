@@ -89,8 +89,8 @@ class _Policy:
         if info.name in STATE_FILE_TOOLS and names_state_file(args):
             return CallDecision("refuse", "self_approval",
                                 f"confidential mode: {info.name} was blocked because it targets one of the plugin's "
-                                "state files (pins.yaml, ledger.sqlite, allowlist.yaml or its state.json), which no "
-                                "tool may write while locked.")
+                                "state files (pins.yaml, ledger.sqlite, allowlist.yaml, grants_revoked.json or its "
+                                "state.json), which no tool may write while locked.")
         if info.name in TERMINAL_BACKEND_TOOLS:
             try:
                 backend = self.terminal_backend(task_id)
