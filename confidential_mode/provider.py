@@ -336,6 +336,7 @@ class VerificationCache:
             return False  # never resurrect a result older than the cache's last attempt (e.g. a failed refresh)
         if not self._emit_verify_ok(provider, e, res):
             e.result, e.failed_mono, e.last_error = None, self._now(), REASON_VERIFY_ROW_LOST
+            self._emit_verify_fail(provider, e, VerifyError(REASON_VERIFY_ROW_LOST))
             return False
         e.result, e.verified_mono, e.last_error, e.failed_mono = res, float(at), None, None
         e.generation = self._generation()
