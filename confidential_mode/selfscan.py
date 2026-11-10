@@ -67,8 +67,8 @@ from pathlib import Path
 
 PLUGIN_SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
-CLI_VERBS = frozenset({"pins", "allow", "off", "on", "lock", "unlock", "setup", "approve", "retire", "status",
-                       "check", "receipts", "replay"})
+CLI_VERBS = frozenset({"pins", "allow", "revoke", "off", "on", "lock", "unlock", "setup", "approve",
+                       "retire", "status", "check", "receipts", "replay"})
 # Commands that print or search text. Their arguments are data, so the CLI rules and the state-file
 # rule do not apply to them (a redirection still does). sed is here only without -i or a w command.
 TEXT_COMMANDS = frozenset({"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "bat", "less",

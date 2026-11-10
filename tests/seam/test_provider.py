@@ -557,6 +557,31 @@ def test_a_verify_ok_row_the_ledger_refuses_is_loud(env):
     assert events[0]["detail"]["error"] == provider_mod.REASON_VERIFY_ROW_LOST
 
 
+def test_a_lost_verify_ok_row_on_the_adopt_path_is_ledgered_as_verify_fail(env):
+    # Amendment 5.2 on the adopt path too: a fresh adapter verification whose verify_ok row
+    # cannot be written is refused AND leaves a verify_fail row naming the lost write,
+    # the same ledger behaviour as the attest and background-refresh paths (#61).
+    events = []
+    profile = env["register"](on_event=events.append)
+    ad = profile._confidential_adapter
+    ad.verify()  # cold cache attests once; the adapter result equals the cached one
+    assert provider_mod.attested_ok(PROFILE).in_tier is True
+    ad.verify()  # a newer adapter-side verification, newer than the cache's last attempt
+
+    def picky(ev):
+        if ev["kind"] == "verify_ok":
+            raise RuntimeError("ledger disk full")
+        events.append(ev)
+    provider_mod.verification_cache.entry(PROFILE).on_event = picky
+
+    v = provider_mod.attested_ok(PROFILE)
+    assert v.in_tier is False and v.reason == provider_mod.REASON_VERIFY_ROW_LOST
+    fails = [e for e in events if e["kind"] == "verify_fail"]
+    assert fails, "the adopt path must ledger the lost write"
+    assert fails[-1]["detail"]["error"] == provider_mod.REASON_VERIFY_ROW_LOST
+    assert fails[-1]["detail"]["reason"] == provider_mod.REASON_VERIFY_ROW_LOST
+
+
 def test_ledger_kwarg_is_a_shortcut_for_on_event(env, tmp_path):
     from confidential_mode.ledger import Ledger
     led = Ledger(tmp_path / "l.sqlite")

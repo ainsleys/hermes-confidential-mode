@@ -151,3 +151,17 @@ def test_revoke_from_a_tool_is_refused_while_locked():
     # README (Amendment 10): revoke runs from a terminal the person opened, or from chat.
     assert s.shell_reason("hermes confidential revoke web_search")
     assert s.shell_reason("hermes confidential revoke --all")
+
+
+def test_revoke_through_the_short_alias_is_refused_while_locked():
+    # Issue #63: the alias form is decided by CLI_VERBS, which had no ``revoke``, so ``h confidential
+    # revoke`` was not refused while ``hermes confidential revoke`` was.
+    assert s.shell_reason("h confidential revoke web_search")
+    assert s.shell_reason("h confidential revoke --all")
+    assert s.shell_reason("/opt/hermes/bin/h confidential revoke web_search")      # an alias by any path
+
+
+@pytest.mark.parametrize("verb", sorted(s.CLI_VERBS))
+def test_every_cli_verb_through_the_short_alias_is_refused(verb):
+    # The alias form keys on this set, so every verb it may be called with must be in it (issue #63).
+    assert s.shell_reason(f"h confidential {verb}")

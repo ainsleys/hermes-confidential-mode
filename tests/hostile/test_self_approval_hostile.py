@@ -60,6 +60,9 @@ ATTACKS = [
     ("terminal", {"command": "python -m hermes_cli.main confidential pins approve", "pty": True}),
     ("terminal", {"command": "'her'\"mes\" conf\\idential allow web_search", "pty": True}),
     ("terminal", {"command": "h confidential pins approve", "pty": True}),
+    # Issue #63: revoke through the short alias (selfscan.CLI_VERBS had no revoke).
+    ("terminal", {"command": "h confidential revoke web_search", "pty": True}),
+    ("terminal", {"command": "h confidential revoke --all", "pty": True}),
     ("process_manage", {"action": "submit", "session_id": "p1", "data": "hermes confidential pins approve"}),
     ("execute_code", {"code": "import subprocess\nsubprocess.run(['hermes', 'confidential', 'pins', 'approve'])"}),
     ("execute_code", {"code": "from confidential_mode.pins import PinStore"}),
@@ -197,6 +200,14 @@ def test_a_python_script_that_imports_the_package_is_refused_and_one_that_does_n
 def test_read_file_is_not_a_self_approval_tool():
     pre, _, _ = _hooks()
     assert pre(tool_name="read_file", args={"path": "pins.yaml"}, session_id="s", tool_call_id="c1") is None
+
+
+def test_state_file_refusal_names_the_revoke_state_file():
+    # Issue #63: the refusal text names every file the state-file scan matches, grants_revoked.json included.
+    pre, _, _ = _hooks()
+    d = pre(tool_name="write_file", args={"path": "~/.hermes/plugin-data/c/grants_revoked.json", "content": "{}"},
+            session_id="s", tool_call_id="c1")
+    assert d and d["action"] == "block" and "grants_revoked.json" in d["message"], d
 
 
 _CHILD = textwrap.dedent("""
