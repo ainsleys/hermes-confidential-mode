@@ -82,7 +82,7 @@ def composes_dir(data_dir: Path | str) -> Path:
 def github_repo(url: Any) -> str | None:
     """"owner/repo" from a GITHUB_REPO value such as https://github.com/nearai/cvm-compose-files, or None."""
     m = _GITHUB_REPO_URL.fullmatch(str(url or "").strip())
-    return m.group(1) if m and ".." not in m.group(1) else None
+    return m.group(1) if m and all(not segment.startswith(".") for segment in m.group(1).split("/")) else None
 
 
 def repo_of_app_compose(app_compose: str | None) -> str | None:
