@@ -12,7 +12,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from confidential_mode.ledger import KINDS, MISSING_SESSION_ID, Ledger, LedgerError, LedgerEvent  # noqa: E402
+from confidential_mode.ledger import KINDS, Ledger, LedgerError, LedgerEvent, MISSING_SESSION_ID  # noqa: E402
 from confidential_mode.state import ConfidentialState, InMemoryState, StateError  # noqa: E402
 from confidential_mode.tiers import Tier  # noqa: E402
 
