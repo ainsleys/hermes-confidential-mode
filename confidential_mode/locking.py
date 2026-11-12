@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import preflight as _pf
-from .ledger import LedgerEvent
+from .ledger import LedgerEvent, MISSING_SESSION_ID
 from .tiers import AttestedPredicate, OnHostPredicate, Tier, TierPredicate, Verdict, ZdrPredicate, host_of
 
 PROFILE_NAME = "attested-tinfoil"   # provider.PROFILE_NAME; repeated so this module imports no SDK code
@@ -743,7 +743,7 @@ def recheck(*, state, ledger, config: Mapping | None = None, session_id: str = "
     if same and report.ok:
         return None
     changed = not same
-    sid = session_id or ""
+    sid = session_id or MISSING_SESSION_ID
     try:
         already = state.is_breached(sid)
     except Exception:

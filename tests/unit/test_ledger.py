@@ -12,7 +12,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from confidential_mode.ledger import KINDS, Ledger, LedgerError, LedgerEvent  # noqa: E402
+from confidential_mode.ledger import KINDS, Ledger, LedgerError, LedgerEvent, MISSING_SESSION_ID  # noqa: E402
 from confidential_mode.state import ConfidentialState, InMemoryState, StateError  # noqa: E402
 from confidential_mode.tiers import Tier  # noqa: E402
 
@@ -284,3 +284,11 @@ def test_bad_dicts_rejected(ledger, bad):
     with pytest.raises(LedgerError):
         ledger.append(bad)
     assert ledger.tail(0) == []
+
+
+@pytest.mark.parametrize("missing", ["", None, MISSING_SESSION_ID])
+def test_breach_missing_session_uses_one_key(ledger, missing):
+    """Every breach without a session is grouped under the same ledger key."""
+    ledger.append(LedgerEvent(kind="breach", session_id=missing))
+    assert len(ledger.session(MISSING_SESSION_ID)) == 1
+    assert ledger.tail(0)[-1].session_id == MISSING_SESSION_ID
