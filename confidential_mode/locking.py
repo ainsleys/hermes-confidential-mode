@@ -25,8 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import preflight as _pf
-from .ledger import MISSING_SESSION_ID
-from .ledger import LedgerEvent
+from .ledger import LedgerEvent, MISSING_SESSION_ID
 from .tiers import AttestedPredicate, OnHostPredicate, Tier, TierPredicate, Verdict, ZdrPredicate, host_of
 
 PROFILE_NAME = "attested-tinfoil"   # provider.PROFILE_NAME; repeated so this module imports no SDK code
