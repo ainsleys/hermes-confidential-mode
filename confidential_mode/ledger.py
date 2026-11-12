@@ -496,7 +496,8 @@ class Ledger:
             raise LedgerError("bytes must be an int or None")
         row = (
             float(event.ts if event.ts is not None else self._clock()),
-            (event.session_id or MISSING_SESSION_ID) if event.kind == "breach" else (event.session_id or ""),
+            (event.session_id or MISSING_SESSION_ID)
+            if event.kind == "breach" else (event.session_id or ""),
             event.kind, clip_text(event.purpose or ""), event.provider or "", event.host or "", event.model or "",
             event.bytes, event.tier, event.verdict, event.decision, event.surface, encoded,
         )
