@@ -247,6 +247,7 @@ def pin_question(pending: Any, *, observers: list | None = None, now: float | No
 # review, not pinned, not measurements.
 REPORTED_PREFIX = "reported: "
 REPORTED_OTHER_PREFIX = "reported-other: "
+OTHER_SERVICES_HINT = "other services (listed in full by the command hermes confidential pins)"
 MAX_REPORTED_LINES = 40   # longer service lists fold into a count; `hermes confidential pins` prints them all
 PINNED_HEADING = ("Pinned (a change in any of these asks again): each CVM's docker-compose (MRCONFIGID is "
                   "SHA-256 of it), its firmware and kernel measurements (MRTD, RTMR0-2: the enclave "
@@ -369,6 +370,8 @@ def _near_pin_question(pending: Any, *, observers: list | None = None, approved:
     reported = [c for c in comps if c.startswith((REPORTED_PREFIX, REPORTED_OTHER_PREFIX))]
     if len(reported) > MAX_REPORTED_LINES:
         reported = [c for c in reported if not c.startswith(REPORTED_OTHER_PREFIX)]
+        # the count line's colon pointed at the lines we just dropped
+        reported = [c[:-1] if c.endswith(":") and OTHER_SERVICES_HINT in c else c for c in reported]
     reported = [c.split(": ", 1)[1] for c in reported]
     entries = list(_value(pending, "entries") or ())
     lines = [

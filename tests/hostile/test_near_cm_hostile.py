@@ -312,6 +312,33 @@ def test_the_pin_prompt_escapes_and_tags_component_lines():
     assert text.count(nc.CONTROL_TAG) == 2
 
 
+def test_a_folded_service_list_drops_the_count_line_colon():
+    from types import SimpleNamespace
+
+    from confidential_mode.consent import MAX_REPORTED_LINES, _near_pin_question
+
+    count = ("reported: model m instance i: 99 other services (listed in full by the command hermes "
+             "confidential pins):")
+    other = [f"reported-other:   svc-{n} commit c file sha256:{n}" for n in range(MAX_REPORTED_LINES + 5)]
+
+    def ask(components):
+        pending = SimpleNamespace(components=components, router_repo="h#m", platform="tdx", previous=None,
+                                  code_fingerprint="c", previous_enclave_fingerprint=None, enclave_fingerprint="e",
+                                  code_changed=True, release_tag=None)
+        return _near_pin_question(pending)
+
+    def count_line(text):
+        return next(ln for ln in text.splitlines() if "other services" in ln)
+
+    folded = ask((count, *other))
+    assert not count_line(folded).rstrip("`").endswith(":")
+    assert "reported-other:" not in folded and "svc-0" not in folded
+
+    short = ask((count, *other[:3]))
+    assert count_line(short).rstrip("`").endswith(":")
+    assert "svc-0" in short
+
+
 # ── RTMR3 identity events: dstack's boot events only, once each ─────────────────────────────────
 
 def _with_events(monkeypatch, edit):
